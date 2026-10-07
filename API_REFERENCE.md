@@ -855,6 +855,51 @@ Response do POST:
 |--------|------|-----------|
 | GET | `/api/bulk-operations/[id]` | Status de uma operação em massa (polling). Retorna `{ id, status, total, processed, succeeded, failed, progressPercent, errors[] }`. |
 
+### 11.6. Painel (Dashboard)
+
+Rotas: `GET /api/painel/service` (atendimentos), `GET /api/painel/team` (equipe, só gestor/admin), `GET /api/painel/deals` (negócios) e `GET /api/analytics/tabulations` (log de tabulações, só gestor/admin). Todas aceitam `?section=a,b,c` (CSV) para pedir só alguns blocos; sem `section`, todos os blocos.
+
+Período (`/painel/*`): `?period=today|yesterday|last_7|last_30|this_month|last_month|custom` (+ `startDate`/`endDate` `YYYY-MM-DD` em `custom`) e `?clock=elapsed|business`. `/analytics/tabulations` usa `?from=ISO&to=ISO`.
+
+#### Formato de bloco
+
+Cada seção volta como um bloco independente; uma seção que falha não derruba as outras:
+
+```json
+{ "ok": true,  "data": { } }
+{ "ok": false, "error": "omitido" }
+{ "ok": false, "error": "Indisponível sem réplica de leitura", "reason": "no_replica" }
+{ "ok": false, "error": "Falha ao carregar este bloco." }
+```
+
+`reason` é aditivo e só existe quando há um motivo estruturado. O front deve ramificar por `reason`, nunca pelo texto de `error`.
+
+| `error` | `reason` | Significado |
+|---------|----------|-------------|
+| `omitido` | (ausente) | Seção **não pedida** em `?section=`. |
+| `Indisponível sem réplica de leitura` | `no_replica` | Seção **pedida**, mas pulada: ela só roda na réplica de leitura e a réplica está ausente (`DATABASE_URL_REPLICA` não definida) ou derrubada (circuito aberto após erro de conexão). |
+| `Falha ao carregar este bloco.` | (ausente) | A consulta falhou. O erro do banco não vai ao cliente: fica no log estruturado (`painel-service`, campo `block`). |
+
+#### `GET /api/painel/service` — seções
+
+| Seção | Roda em | Exige réplica | Conteúdo |
+|-------|---------|---------------|----------|
+| `agora` | réplica se ativa, senão primário | não | Estado atual da fila. |
+| `volume` | réplica se ativa, senão primário | não | Iniciados/finalizados/abertos do período (ver partição abaixo). |
+| `exceptions` | réplica se ativa, senão primário | não | Contadores de exceção (sem resposta, abertas há 24 h, sem dono, falha de envio). |
+| `tempo` | réplica | **sim** | Primeira resposta e tempos de atendimento. |
+| `heatmap` | réplica | **sim** | Mapa de calor dia da semana x hora. |
+| `byDepartment` | réplica | **sim** | Volume e tempos por departamento. |
+| `connections` | réplica | **sim** | Volume por conexão (canal) e por plataforma. |
+| `attendants` | réplica | **sim** | Carga e tempos por atendente. |
+| `channels` | réplica | **sim** | Canais e motivos (tabulações). |
+
+As seções que exigem réplica são consultas pesadas de período (até 90 dias); por decisão de projeto **não rodam no banco primário**, para não competir com as escritas: sem réplica ativa voltam com `reason: "no_replica"`. Com réplica ativa e saudável, rodam normalmente.
+
+Tetos: as métricas de resposta usam no máximo os últimos 90 dias do período (mantém o fim, recua o início); respostas subsequentes, no máximo 14 dias. O bloco `volume` conta o período inteiro pedido.
+
+Cache: `/api/painel/service` **não** tem cache de servidor (cada chamada recalcula). `/api/painel/team` e `/api/analytics/tabulations` usam `cachedReport`: por organização + parâmetros, fresco por 60 s e servido vencido por mais 120 s enquanto recalcula (sem invalidação por escrita; defasagem máxima 180 s). Teto de período: `/painel/team` 90 dias, `/analytics/tabulations` 366 dias (mantém o fim; a resposta traz `rangeClamped: true` quando cortou).
+
 ---
 
 ## 12. Settings (org & user)

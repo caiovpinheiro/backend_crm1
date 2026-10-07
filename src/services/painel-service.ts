@@ -38,7 +38,22 @@ import { getLogger } from "@/lib/logger";
 
 const log = getLogger("painel-service");
 
-export type PainelBlock<T> = { ok: true; data: T } | { ok: false; error: string };
+/**
+ * Motivo (aditivo) de um bloco `ok:false`. Ausente = bloco não pedido
+ * (`error: "omitido"`) ou falha de execução (`error` genérico, detalhe no log).
+ *  - `no_replica`: bloco pedido, mas pulado porque este bloco só roda na réplica
+ *    de leitura (`DATABASE_URL_REPLICA`) e ela está ausente ou derrubada.
+ */
+export type PainelBlockReason = "no_replica";
+
+export type PainelBlock<T> =
+  | { ok: true; data: T }
+  | { ok: false; error: string; reason?: PainelBlockReason };
+
+/** Mensagem do bloco `no_replica` (o front pode ramificar por `reason`, não por texto). */
+export const PAINEL_NO_REPLICA_MESSAGE = "Indisponível sem réplica de leitura";
+/** Mensagem do bloco que falhou: o erro do banco fica só no log estruturado. */
+export const PAINEL_BLOCK_ERROR = "Falha ao carregar este bloco.";
 
 export type PainelTimeStat = {
   medianMs: number | null;
@@ -249,7 +264,7 @@ function fillDailyPoints(
   });
 }
 
-async function wrap<T>(fn: () => Promise<T>): Promise<PainelBlock<T>> {
+async function wrap<T>(block: string, fn: () => Promise<T>): Promise<PainelBlock<T>> {
   try {
     return { ok: true, data: await fn() };
   } catch (e) {
@@ -258,20 +273,15 @@ async function wrap<T>(fn: () => Promise<T>): Promise<PainelBlock<T>> {
       try {
         return { ok: true, data: await fn() };
       } catch (retryErr) {
-        log.error({ err: retryErr }, "[painel/service] falhou");
-        return {
-          ok: false,
-          error: retryErr instanceof Error ? retryErr.message : "Falha ao carregar este bloco.",
-        };
+        log.error({ err: retryErr, block }, "[painel/service] bloco falhou");
+        return { ok: false, error: PAINEL_BLOCK_ERROR };
       }
     }
-    log.error({ err: e }, "[painel/service] falhou");
-    return {
-      ok: false,
-      error: e instanceof Error ? e.message : "Falha ao carregar este bloco.",
-    };
+    log.error({ err: e, block }, "[painel/service] bloco falhou");
+    return { ok: false, error: PAINEL_BLOCK_ERROR };
   }
 }
+
 
 type ReplyPair = {
   conversationId: string;
@@ -1416,9 +1426,13 @@ export async function getPainelService(
   sections: PainelServiceSection[] = [...SERVICE_SECTIONS],
 ): Promise<PainelServiceResult> {
   const want = new Set(sections);
-  const omit = <T,>(msg = "omitido"): PainelBlock<T> => ({
+  // Seção NÃO pedida: sempre "omitido", sem `reason`.
+  const omit = <T,>(): PainelBlock<T> => ({ ok: false, error: "omitido" });
+  // Seção pedida, mas que só roda na réplica de leitura e ela não está disponível.
+  const noReplica = <T,>(): PainelBlock<T> => ({
     ok: false,
-    error: msg,
+    error: PAINEL_NO_REPLICA_MESSAGE,
+    reason: "no_replica",
   });
 
   const replicaOk = isReplicaActive() && !isReplicaTripped();
@@ -1433,45 +1447,49 @@ export async function getPainelService(
     : Promise.resolve(null);
 
   const withShared = <T,>(
-    needed: boolean,
+    block: PainelServiceSection,
     fn: (shared: SharedServiceMetrics) => Promise<T>,
   ): Promise<PainelBlock<T>> => {
-    if (!needed) return Promise.resolve(omit<T>());
+    if (!want.has(block)) return Promise.resolve(omit<T>());
     return sharedPromise.then(
-      (shared) => (shared ? wrap(() => fn(shared)) : Promise.resolve(omit<T>())),
-      (e) => {
-        log.error({ err: e }, "[painel/service] falhou");
-        return omit<T>(e instanceof Error ? e.message : "Falha ao carregar este bloco.");
+      (shared) => (shared ? wrap(block, () => fn(shared)) : Promise.resolve(noReplica<T>())),
+      (e): PainelBlock<T> => {
+        log.error({ err: e, block }, "[painel/service] bloco falhou");
+        return { ok: false, error: PAINEL_BLOCK_ERROR };
       },
     );
   };
 
   const agora = want.has("agora")
-    ? await wrap(() => getPainelAgora(clock))
+    ? await wrap("agora", () => getPainelAgora(clock))
     : omit<PainelAgora>();
   const volume = want.has("volume")
-    ? await wrap(() => getPainelVolume(range, clock))
+    ? await wrap("volume", () => getPainelVolume(range, clock))
     : omit<PainelVolume>();
   const [tempo, heatmap, byDepartment, connections, attendants, channels, exceptions] =
     await Promise.all([
-      withShared(want.has("tempo"), (shared) => getPainelTempo(range, clock, shared)),
-      want.has("heatmap") && replicaOk
-        ? wrap(() => getPainelHeatmap(range))
-        : Promise.resolve(omit<PainelHeatmap>()),
-      withShared(want.has("byDepartment"), (shared) =>
+      withShared("tempo", (shared) => getPainelTempo(range, clock, shared)),
+      !want.has("heatmap")
+        ? Promise.resolve(omit<PainelHeatmap>())
+        : replicaOk
+          ? wrap("heatmap", () => getPainelHeatmap(range))
+          : Promise.resolve(noReplica<PainelHeatmap>()),
+      withShared("byDepartment", (shared) =>
         getPainelByDepartment(range, clock, shared),
       ),
-      want.has("connections") && replicaOk
-        ? wrap(() => getPainelConnections(range))
-        : Promise.resolve(omit<PainelConnections>()),
-      withShared(want.has("attendants"), (shared) =>
+      !want.has("connections")
+        ? Promise.resolve(omit<PainelConnections>())
+        : replicaOk
+          ? wrap("connections", () => getPainelConnections(range))
+          : Promise.resolve(noReplica<PainelConnections>()),
+      withShared("attendants", (shared) =>
         getPainelAttendants(range, clock, shared),
       ),
-      withShared(want.has("channels"), (shared) =>
+      withShared("channels", (shared) =>
         getPainelChannels(range, clock, shared),
       ),
       want.has("exceptions")
-        ? wrap(() => getPainelServiceExceptions(clock))
+        ? wrap("exceptions", () => getPainelServiceExceptions(clock))
         : Promise.resolve(omit<PainelServiceException[]>()),
     ]);
 
