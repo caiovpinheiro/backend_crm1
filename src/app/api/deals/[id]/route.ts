@@ -4,8 +4,9 @@ import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { canViewStage, loadAuthzContext } from "@/lib/authz";
 import { canEditFieldForUser, requirePermissionForUser, requirePipelineScope, requireStageScope } from "@/lib/authz/resource-policy";
 import { prisma } from "@/lib/prisma";
-import { getVisibilityFilter } from "@/lib/visibility";
+import { canSeeDealByOwner, getVisibilityFilter } from "@/lib/visibility";
 import { fireTrigger } from "@/services/automation-triggers";
+import { moveDealForUser } from "@/services/deal-move-flow";
 import { createDealEvent, deleteDeal, getDealById, isValidDealStatus, updateDeal } from "@/services/deals";
 import { getDealPanelFieldsForDeal } from "@/services/contacts";
 import { logEvent } from "@/services/activity-log";
@@ -84,10 +85,7 @@ export async function GET(request: Request, context: RouteContext) {
 
     // Deal sem dono acompanha o eixo "sem responsável": quem enxerga o pool no
     // board precisa conseguir abrir o card, senão o clique devolve 403.
-    const ownsOrCanClaim =
-      deal.ownerId === user.id ||
-      (deal.ownerId === null && visibility.includeUnassigned);
-    if (!visibility.canSeeAll && !ownsOrCanClaim) {
+    if (!canSeeDealByOwner(visibility, user.id, deal.ownerId ?? null)) {
       return NextResponse.json({ message: "Acesso negado." }, { status: 403 });
     }
 
@@ -312,29 +310,36 @@ export async function PUT(request: Request, context: RouteContext) {
     }
 
     try {
-      if (payload.stageId) {
+      // Mudar de etapa passa pelo MESMO caminho do POST /move: posse do
+      // negócio (403), escopo de etapa/funil, campos obrigatórios da etapa
+      // (400 STAGE_FIELDS_REQUIRED), motivo de perda, cache do board,
+      // `deal_moved` e a timeline (STAGE_CHANGED/STATUS_CHANGED + triggers).
+      // Sem `position` o negócio entra no fim da coluna destino.
+      let remaining = payload;
+      let movedDeal: Awaited<ReturnType<typeof updateDeal>> | null = null;
+      if (stageChanging && typeof payload.stageId === "string") {
+        const moved = await moveDealForUser({
+          actor: authResult.user,
+          existing,
+          stageId: payload.stageId,
+          position: payload.position ?? Number.MAX_SAFE_INTEGER,
+          lostReason:
+            typeof payload.lostReason === "string" ? payload.lostReason.trim() : undefined,
+        });
+        if (!moved.ok) return moved.response;
+        movedDeal = moved.deal as unknown as Awaited<ReturnType<typeof updateDeal>>;
+        // `stageId` e `position` já foram aplicados pelo move.
+        const { stageId: _stageId, position: _position, ...rest } = payload;
+        remaining = rest;
+      } else if (payload.stageId) {
+        // Mesma etapa (sem mudança): só confere o escopo, como antes.
         const moveDenied = await requireStageScope(authResult.user, "move", payload.stageId);
         if (moveDenied) return moveDenied;
-        // Cross-pipeline: quando o novo estágio pertence a outro funil,
-        // exige acesso ao pipeline destino também.
-        const targetStageMeta = await prisma.stage.findUnique({
-          where: { id: payload.stageId },
-          select: { pipelineId: true },
-        });
-        if (!targetStageMeta) {
-          return NextResponse.json({ message: "Estágio não encontrado." }, { status: 400 });
-        }
-        const fromPipelineId = (existing.stage as { pipelineId?: string }).pipelineId ?? null;
-        if (fromPipelineId && targetStageMeta.pipelineId !== fromPipelineId) {
-          const pipeDenied = await requirePipelineScope(
-            authResult.user,
-            "view",
-            targetStageMeta.pipelineId,
-          );
-          if (pipeDenied) return pipeDenied;
-        }
       }
-      const deal = await updateDeal(dealId, payload);
+      const deal =
+        movedDeal && Object.keys(remaining).length === 0
+          ? movedDeal
+          : await updateDeal(dealId, remaining);
 
       const uid = authResult.user.id;
       if (payload.title !== undefined && payload.title !== existing.title) {
@@ -346,46 +351,8 @@ export async function PUT(request: Request, context: RouteContext) {
       if (payload.expectedClose !== undefined) {
         createDealEvent(dealId, uid, "FIELD_UPDATED", { field: "expectedClose", from: existing.expectedClose, to: payload.expectedClose }).catch(() => {});
       }
-      if (payload.stageId !== undefined && payload.stageId !== existing.stage.id) {
-        const toStage = await prisma.stage.findUnique({
-          where: { id: payload.stageId },
-          select: {
-            name: true,
-            pipelineId: true,
-            pipeline: { select: { id: true, name: true } },
-          },
-        });
-        const fromPipelineId = (existing.stage as { pipelineId?: string }).pipelineId ?? null;
-        const toPipelineId = toStage?.pipelineId ?? null;
-        const pipelineChanged =
-          !!fromPipelineId && !!toPipelineId && fromPipelineId !== toPipelineId;
-        createDealEvent(dealId, uid, "STAGE_CHANGED", {
-          from: {
-            id: existing.stage.id,
-            name: existing.stage.name,
-            pipelineId: fromPipelineId,
-            pipelineName:
-              (existing.stage as { pipeline?: { name?: string } }).pipeline?.name ?? null,
-          },
-          to: {
-            id: payload.stageId,
-            name: toStage?.name ?? payload.stageId,
-            pipelineId: toPipelineId,
-            pipelineName: toStage?.pipeline?.name ?? null,
-          },
-          ...(pipelineChanged ? { pipelineChanged: true } : {}),
-        }).catch(() => {});
-        fireTrigger("stage_changed", {
-          dealId,
-          contactId: existing.contactId ?? undefined,
-          data: {
-            fromStageId: existing.stage.id,
-            toStageId: payload.stageId,
-            fromPipelineId,
-            toPipelineId,
-          },
-        }).catch(() => {});
-      }
+      // STAGE_CHANGED / STATUS_CHANGED e os triggers de etapa saem do
+      // `moveDealForUser` (acima), igual ao POST /move.
       if (payload.ownerId !== undefined && payload.ownerId !== existing.owner?.id) {
         const toUser = payload.ownerId ? await prisma.user.findUnique({ where: { id: payload.ownerId }, select: { name: true } }) : null;
         createDealEvent(dealId, uid, "OWNER_CHANGED", { from: existing.owner ? { id: existing.owner.id, name: existing.owner.name } : null, to: payload.ownerId ? { id: payload.ownerId, name: toUser?.name ?? payload.ownerId } : null }).catch(() => {});
