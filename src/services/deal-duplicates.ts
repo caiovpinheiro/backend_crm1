@@ -249,6 +249,22 @@ export async function unifyDuplicateOpenDealsInPipeline(
       )
   `);
   await run(`
+    DELETE FROM deal_custom_field_values
+    WHERE id IN (
+      SELECT id FROM (
+        SELECT
+          v2.id,
+          row_number() OVER (
+            PARTITION BY p.keeper_id, v2."customFieldId"
+            ORDER BY (CASE WHEN btrim(v2.value) = '' THEN 1 ELSE 0 END), v2.id
+          ) AS rn
+        FROM deal_custom_field_values v2
+        JOIN _dup_pairs p ON p.loser_id = v2."dealId"
+      ) ranked
+      WHERE ranked.rn > 1
+    )
+  `);
+  await run(`
     UPDATE deal_custom_field_values v
     SET "dealId" = p.keeper_id
     FROM _dup_pairs p
@@ -270,6 +286,22 @@ export async function unifyDuplicateOpenDealsInPipeline(
         SELECT 1 FROM deal_quotas k
         WHERE k."dealId" = p.keeper_id AND k."quotaId" = q."quotaId"
       )
+  `);
+  await run(`
+    DELETE FROM deal_quotas
+    WHERE id IN (
+      SELECT id FROM (
+        SELECT
+          q2.id,
+          row_number() OVER (
+            PARTITION BY p.keeper_id, q2."quotaId"
+            ORDER BY q2.id
+          ) AS rn
+        FROM deal_quotas q2
+        JOIN _dup_pairs p ON p.loser_id = q2."dealId"
+      ) ranked
+      WHERE ranked.rn > 1
+    )
   `);
   await run(`
     UPDATE deal_quotas q

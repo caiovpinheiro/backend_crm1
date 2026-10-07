@@ -19,6 +19,7 @@ import {
   readStepRef,
   shouldPersistDelay,
   decideInteractiveMenuInbound,
+  interactiveMenuOnNonText,
   readAwaitingFlow,
   shouldResumePausedMenuDespiteHumanAttendance,
   conversationResolvedBeforePause,
@@ -778,6 +779,30 @@ describe("decideInteractiveMenuInbound — botão retoma goto", () => {
       messageType: "text",
     });
     expect(d.action).toBe("no_match");
+  });
+
+  it("botões WhatsApp com Outra resposta mandam mídia para o else", () => {
+    expect(
+      interactiveMenuOnNonText({
+        stepType: "send_whatsapp_interactive",
+        elseGotoStepId: "outra",
+        configured: "stay",
+      }),
+    ).toBe("else");
+    expect(
+      interactiveMenuOnNonText({
+        stepType: "send_whatsapp_interactive",
+        elseGotoStepId: null,
+        configured: "stay",
+      }),
+    ).toBe("stay");
+    expect(
+      interactiveMenuOnNonText({
+        stepType: "send_whatsapp_list",
+        elseGotoStepId: "outra",
+        configured: "stay",
+      }),
+    ).toBe("stay");
   });
 
   it("onNonText=else trata mídia como no_match", () => {

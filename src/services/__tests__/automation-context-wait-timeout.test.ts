@@ -28,7 +28,10 @@ const h = vi.hoisted(() => {
       update: vi.fn(),
     },
     step: { findUnique: vi.fn() },
-    message: { findFirst: vi.fn().mockResolvedValue(null as { createdAt: Date } | null) },
+    message: {
+      findFirst: vi.fn().mockResolvedValue(null as { createdAt: Date } | null),
+      findMany: vi.fn().mockResolvedValue([] as unknown[]),
+    },
     conversation: {
       findFirst: vi.fn(),
       findMany: vi.fn().mockResolvedValue([] as unknown[]),
@@ -68,7 +71,10 @@ vi.mock("@/services/automation-executor", () => ({
   continueFromStep: h.continueFromStep,
 }));
 vi.mock("@/lib/ai-agents/tabulation-classify-policy", () => ({
-  messageHasMedia: () => false,
+  messageHasMedia: (msg: { messageType?: string | null } | null | undefined) => {
+    const type = (msg?.messageType ?? "").toLowerCase();
+    return type === "image" || type === "document" || type === "audio" || type === "video" || type === "sticker";
+  },
   isIdleClosingText: () => false,
 }));
 
@@ -165,6 +171,7 @@ beforeEach(() => {
     hasHumanReply: false,
   });
   h.message.findFirst.mockResolvedValue(null);
+  h.message.findMany.mockResolvedValue([]);
   h.conversation.findFirst.mockResolvedValue({
     status: "OPEN",
     lastInboundAt: null,
@@ -488,6 +495,61 @@ describe("processTimeout / sweepExpiredTimeouts", () => {
     expect(h.conversation.findFirst).toHaveBeenCalledWith(
       expect.objectContaining({ where: { id: "conv-1" } }),
     );
+    expect(updateData()).toMatchObject({ status: "COMPLETED", currentStepId: null });
+    expect(h.continueFromStep).not.toHaveBeenCalled();
+  });
+
+  it("mídia ignorada pelo menu não aborta a aresta de timeout", async () => {
+    const steps = withSteps({
+      "step-wait": {
+        type: "send_whatsapp_interactive",
+        config: {
+          buttons: [{ id: "btn_0", title: "CLT", gotoStepId: "step-next" }],
+          timeoutGotoStepId: "step-timeout",
+          onNonText: "stay",
+        },
+      },
+    });
+    h.ctx.findUnique.mockResolvedValueOnce(ctxRow({ currentStepId: "step-wait" }, steps));
+    h.conversation.findFirst.mockResolvedValueOnce({
+      status: "OPEN",
+      lastInboundAt: new Date(PAUSED_AT.getTime() + 5_000),
+      assignedToId: null,
+      assignedTo: null,
+      closedAt: null,
+    });
+    h.message.findMany.mockResolvedValueOnce([
+      { content: "curriculo.pdf", messageType: "document" },
+    ]);
+    await withOrg(ORG, () => processTimeout("ctx-1"));
+    expect(updateData().currentStepId).toBe("step-timeout");
+    expect(h.continueFromStep).toHaveBeenCalledWith("auto-1", "contact-1", "step-timeout", {
+      conversationId: "conv-1",
+    });
+  });
+
+  it("texto livre depois da pausa ainda aborta o timeout do menu", async () => {
+    const steps = withSteps({
+      "step-wait": {
+        type: "send_whatsapp_interactive",
+        config: {
+          buttons: [{ id: "btn_0", title: "CLT", gotoStepId: "step-next" }],
+          timeoutGotoStepId: "step-timeout",
+        },
+      },
+    });
+    h.ctx.findUnique.mockResolvedValueOnce(ctxRow({ currentStepId: "step-wait" }, steps));
+    h.conversation.findFirst.mockResolvedValueOnce({
+      status: "OPEN",
+      lastInboundAt: new Date(PAUSED_AT.getTime() + 5_000),
+      assignedToId: null,
+      assignedTo: null,
+      closedAt: null,
+    });
+    h.message.findMany.mockResolvedValueOnce([
+      { content: "quero falar com alguém", messageType: "text" },
+    ]);
+    await withOrg(ORG, () => processTimeout("ctx-1"));
     expect(updateData()).toMatchObject({ status: "COMPLETED", currentStepId: null });
     expect(h.continueFromStep).not.toHaveBeenCalled();
   });

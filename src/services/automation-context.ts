@@ -305,9 +305,25 @@ export function isNonTextMenuInbound(input: {
 }
 
 /**
+ * Botões WhatsApp com a aresta "Outra resposta" desenhada: qualquer inbound
+ * que não seja um dos botões (texto, imagem, PDF, áudio, sticker) segue
+ * essa saída. Sem a aresta, mídia continua no passo (`stay`).
+ */
+export function interactiveMenuOnNonText(input: {
+  stepType: string;
+  elseGotoStepId: string | null;
+  configured?: string | null;
+}): InteractiveOnNonText {
+  if (input.stepType === "send_whatsapp_interactive" && input.elseGotoStepId) {
+    return "else";
+  }
+  return String(input.configured ?? "stay").trim().toLowerCase() === "else" ? "else" : "stay";
+}
+
+/**
  * Decide o que fazer com um inbound enquanto o passo espera botões/lista.
  * nfm_reply não pode cair em "Outra resposta" se já houver um Flow aberto.
- * Mídia/unsupported ficam no passo (`stay`) por padrão — não reenviam o menu.
+ * Mídia/unsupported ficam no passo (`stay`) só quando `onNonText` não é `else`.
  */
 export function decideInteractiveMenuInbound(input: {
   buttons: InteractiveOption[];
@@ -1107,7 +1123,6 @@ export async function processIncomingMessage(
         const elseGoto = readStepRef(config, "elseGotoStepId");
         const defaultOut = readStepRef(config, "nextStepId");
         const awaitingFlow = readAwaitingFlow(variables);
-        const onNonTextRaw = String(config.onNonText ?? "stay").trim().toLowerCase();
         const decision = decideInteractiveMenuInbound({
           buttons,
           messageContent,
@@ -1116,7 +1131,11 @@ export async function processIncomingMessage(
           flowToken: opts?.flowToken,
           awaitingFlow,
           messageType: opts?.messageType,
-          onNonText: onNonTextRaw === "else" ? "else" : "stay",
+          onNonText: interactiveMenuOnNonText({
+            stepType: currentStep.type,
+            elseGotoStepId: elseGoto,
+            configured: typeof config.onNonText === "string" ? config.onNonText : null,
+          }),
         });
 
         const gotoFromButton = (matchedBtn: InteractiveOption, label: string) => {
@@ -1714,7 +1733,7 @@ export async function processTimeout(contextId: string) {
     );
   }
 
-  const abort = await abortTimeoutIfAttendanceStarted(
+  let abort = await abortTimeoutIfAttendanceStarted(
     ctx.contactId,
     ctx.updatedAt,
     nextStepId
@@ -1722,6 +1741,25 @@ export async function processTimeout(contextId: string) {
       : undefined,
     typeof variables.conversationId === "string" ? variables.conversationId : null,
   );
+  // Mídia/unsupported no menu fica no passo (`stay`) — não é resposta.
+  // `lastInboundAt` mesmo assim avança e o abort `stale_inbound` fechava
+  // o contexto sem seguir a aresta de timeout (DNAWORK: currículo em PDF
+  // no lugar do clique, lembrete "Ainda está por aí?" nunca saía).
+  if (abort === "stale_inbound" && menuStepStaysOnNonText(step)) {
+    const convId =
+      typeof variables.conversationId === "string"
+        ? variables.conversationId.trim()
+        : "";
+    if (
+      convId &&
+      (await inboundSincePauseIsOnlyIgnoredMenuMedia(convId, ctx.updatedAt))
+    ) {
+      log.info(
+        `question/interactive timeout: inbound desde a pausa é só mídia ignorada pelo menu — segue aresta — auto=${ctx.automation.name} contato=${ctx.contactId}`,
+      );
+      abort = null;
+    }
+  }
   if (abort) {
     log.warn(
       `question/interactive timeout abortado (${abort}) — auto=${ctx.automation.name} contato=${ctx.contactId} — não segue finish`,
@@ -1734,6 +1772,49 @@ export async function processTimeout(contextId: string) {
     `question/interactive timeout — auto=${ctx.automation.name} action=${action} → step=${nextStepId ?? "(fim)"}`,
   );
   await dispatchToNextStep(ctxForDispatch, nextStepId, variables, `${step.type} timeout`);
+}
+
+const MENU_STAY_ON_MEDIA_TYPES = new Set([
+  "question",
+  "send_whatsapp_interactive",
+  "send_whatsapp_list",
+  "send_whatsapp_template",
+]);
+
+/** Menu com botões/lista e `onNonText` stay: arquivo não escolhe opção. */
+function menuStepStaysOnNonText(step: { type: string; config: unknown }): boolean {
+  if (!MENU_STAY_ON_MEDIA_TYPES.has(step.type)) return false;
+  const config =
+    step.config && typeof step.config === "object"
+      ? (step.config as Record<string, unknown>)
+      : {};
+  if (String(config.onNonText ?? "stay").trim().toLowerCase() === "else") return false;
+  const buttons = Array.isArray(config.buttons) ? config.buttons : [];
+  const rows = Array.isArray(config.rows) ? config.rows : [];
+  return buttons.length > 0 || rows.length > 0;
+}
+
+async function inboundSincePauseIsOnlyIgnoredMenuMedia(
+  conversationId: string,
+  pausedAt: Date,
+): Promise<boolean> {
+  const rows = await prisma.message.findMany({
+    where: {
+      conversationId,
+      direction: "in",
+      createdAt: { gt: pausedAt },
+    },
+    select: { content: true, messageType: true },
+    orderBy: { createdAt: "asc" },
+    take: 30,
+  });
+  if (rows.length === 0) return false;
+  return rows.every((m) =>
+    isNonTextMenuInbound({
+      messageContent: m.content ?? "",
+      messageType: m.messageType,
+    }),
+  );
 }
 
 function applyVariableTransform(raw: unknown, transform?: string): string {
