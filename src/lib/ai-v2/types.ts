@@ -570,6 +570,8 @@ export interface V2AgentConfig {
    * modelo para cada afirmação, além das regras; "rules" só as regras fixas.
    */
   groundingCheck?: "model" | "rules";
+  /** Lê o texto do último disparo no chat e atende a partir dele. */
+  useDispatchText?: boolean;
   /** Inatividade do cliente. */
   inactivity?: V2InactivityConfig;
   /** Tabulação ao encerrar/transferir. */

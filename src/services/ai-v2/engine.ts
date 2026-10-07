@@ -46,6 +46,7 @@ import { MESSAGE_MODEL_MIN_COVERAGE, MESSAGE_MODEL_REPEATED, announcesSending, i
 import { attachmentsBlockedByResend } from "./material-attachments";
 import { buildV2Interactive, matchPendingOption, type V2InteractivePayload } from "./interactive";
 import { simpleHandoff } from "./handoff";
+import { formatCampaignDispatchBlock, hydrateOutboundTemplateContent, loadLastCampaignDispatchContext } from "@/services/ai/campaign-context";
 import { pickQueueNotice, queuedMessageFor } from "./queue-notice";
 import {
   currentV2OnboardingStep,
@@ -1419,12 +1420,18 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       return { handoff: false, closed: false, sentReply: confirmMsg };
     } else if (stage === "idle") {
       stage = "active";
+      const dispatchReply = config.useDispatchText
+        ? await loadLastCampaignDispatchContext(input.conversationId, contactId, { chatOnly: true })
+        : null;
       // Boas-vindas sem confirmação: antes só saíam junto da confirmação ou
       // da identificação — com "Confirmar" desligado, nunca, e o modelo
       // improvisava o cumprimento. Saem quando a primeira mensagem é só
       // cumprimento; se já traz o pedido, ele responde direto (perguntar
       // "como posso ajudar?" a quem já disse parece que não leu).
-      if (config.entry.openingEnabled && config.entry.openingMessage?.trim()) {
+      // Resposta a um disparo não recomeça: o texto do modelo entra no prompt.
+      if (dispatchReply?.body) {
+        traceStep("entrada", "Resposta a um disparo → segue sem boas-vindas");
+      } else if (config.entry.openingEnabled && config.entry.openingMessage?.trim()) {
         if (!isGreetingOnlyMessage(input.userMessage)) {
           traceStep("entrada", "Primeira mensagem já traz o pedido → responde direto, sem as boas-vindas");
         } else {
@@ -2367,22 +2374,27 @@ async function callLLMWithTheme(
   historyLength?: number;
 }> {
   const theme = getV2ThemeById(config, themeId);
-  const themeInstructions = theme
+  let themeInstructions = theme
     ? themePromptText(theme)
     : undefined;
+  if (config.useDispatchText) {
+    const dispatch = await loadLastCampaignDispatchContext(input.conversationId, null, { chatOnly: true }).catch(() => null);
+    const block = formatCampaignDispatchBlock(dispatch);
+    if (block) themeInstructions = [themeInstructions, block].filter(Boolean).join("\n");
+  }
 
   const previousMessages: Array<{ role: "user" | "assistant"; content: string }> = [];
   // Carrega últimas mensagens do histórico
   try {
     const rows = await (prisma as unknown as {
       message: {
-        findMany: (args: { where: Record<string, unknown>; orderBy: { createdAt: "desc" }; take: number; select: { id: boolean; direction: boolean; content: boolean; authorType: boolean; messageType: boolean; organizationId: boolean } }) => Promise<Array<{ id: string; direction: string; content: string; authorType: string; messageType: string; organizationId: string }>>;
+        findMany: (args: { where: Record<string, unknown>; orderBy: { createdAt: "desc" }; take: number; select: Record<string, boolean> }) => Promise<Array<{ id: string; direction: string; content: string; authorType: string; messageType: string; organizationId: string; templateConfigId: string | null; senderName: string | null }>>;
       };
     }).message.findMany({
       where: { conversationId: input.conversationId, messageType: { not: "note" }, isPrivate: false },
       orderBy: { createdAt: "desc" },
       take: 10,
-      select: { id: true, direction: true, content: true, authorType: true, messageType: true, organizationId: true },
+      select: { id: true, direction: true, content: true, authorType: true, messageType: true, organizationId: true, templateConfigId: true, senderName: true },
     });
     // Áudio/imagem já entendidos entram com o conteúdo, não com "[Áudio]".
     const mediaRows = rows.filter((m) => m.direction === "in" && understoodKindOf(m.messageType));
@@ -2391,7 +2403,16 @@ async function callLLMWithTheme(
       const role = m.direction === "out" || m.authorType === "bot" ? "assistant" : "user";
       const kind = understoodKindOf(m.messageType);
       const understood = kind ? mediaTexts.get(m.id) : undefined;
-      previousMessages.push({ role, content: understood && kind ? mediaTextLine(kind, understood, m.content) : m.content ?? "" });
+      let content = understood && kind ? mediaTextLine(kind, understood, m.content) : m.content ?? "";
+      if (config.useDispatchText && role === "assistant") {
+        content = await hydrateOutboundTemplateContent({
+          content,
+          messageType: m.messageType,
+          templateConfigId: m.templateConfigId,
+          senderName: m.senderName,
+        });
+      }
+      previousMessages.push({ role, content });
     }
     // Tira do histórico só as bolhas do turno atual (já vão agregadas em
     // `userMessage`). Mensagem do cliente que ficou sem resposta num turno
