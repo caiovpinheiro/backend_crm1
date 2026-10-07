@@ -73,6 +73,7 @@ import {
 } from "@/services/deals";
 import { triggerAgentOpeningForContact } from "@/services/ai/piloting-actions";
 import { fireTrigger, notifyDealStageChanged } from "@/services/automation-triggers";
+import { loadIntentionalStageClusterIds } from "@/services/intentional-stage-cluster";
 import { updateContactScore } from "@/services/lead-scoring";
 import { executeDistribution } from "@/services/distribution";
 import { executeLeadsDistribution } from "@/services/distribution/leads/engine";
@@ -1557,16 +1558,45 @@ type RuntimeContext = {
   nextStepType?: string | null;
 };
 
-/** Negócios que um passo de automação pode alterar.
- *  Com filtro, o conjunto casado. Sem filtro, um OPEN só se houver exatamente um. */
-async function resolveAutomationDealIds(rt: RuntimeContext): Promise<string[]> {
-  const matched = Array.isArray(rt.data.stageMatchedDealIds)
-    ? rt.data.stageMatchedDealIds.filter(
+function matchedStageDealIds(data: Record<string, unknown>): string[] {
+  return Array.isArray(data.stageMatchedDealIds)
+    ? data.stageMatchedDealIds.filter(
         (id): id is string => typeof id === "string" && id.trim() !== "",
       )
     : [];
-  if (matched.length > 0) return matched;
-  if (rt.dealId) return [rt.dealId];
+}
+
+/** Etapa do conjunto de duplicata de propósito, se este fluxo é de `stage_changed`. */
+function intentionalClusterStageId(rt: RuntimeContext): string | null {
+  const marked = readString(rt.data, "intentionalStageClusterStageId");
+  if (marked) return marked;
+  if (rt.event !== "stage_changed") return null;
+  return readString(rt.data, "toStageId") ?? readString(rt.data, "stageId");
+}
+
+/** Negócios que um passo de automação pode alterar.
+ *  Fora de `stage_changed`, um só: o `dealId` do gatilho.
+ *  No gatilho de etapa, duplicatas de propósito na etapa seguem juntas.
+ *  Card comum no gatilho de etapa continua o conjunto casado. */
+async function resolveAutomationDealIds(rt: RuntimeContext): Promise<string[]> {
+  const clusterStageId = intentionalClusterStageId(rt);
+  if (clusterStageId && rt.contactId) {
+    const cluster = await loadIntentionalStageClusterIds(rt.contactId, clusterStageId);
+    const marked = Boolean(readString(rt.data, "intentionalStageClusterStageId"));
+    const inCluster = Boolean(rt.dealId && cluster.includes(rt.dealId));
+    if (cluster.length > 0 && (marked || inCluster)) return cluster;
+  }
+
+  const matched = matchedStageDealIds(rt.data);
+  if (rt.event !== "stage_changed") {
+    if (rt.dealId) return [rt.dealId];
+    if (matched.length > 0) return [matched[0]!];
+  } else if (matched.length > 0) {
+    return matched;
+  } else if (rt.dealId) {
+    return [rt.dealId];
+  }
+
   if (!rt.contactId) return [];
   const open = await prisma.deal.findMany({
     where: { contactId: rt.contactId, status: "OPEN" },
@@ -2098,21 +2128,11 @@ export async function executeStep(
     case "move_to_stage": {
       const stageId = readString(cfg, "stageId") ?? readString(cfg, "value");
       if (!stageId) throw new Error("move_stage: stageId obrigatório");
-      const matchedIds = Array.isArray(rt.data.stageMatchedDealIds)
-        ? rt.data.stageMatchedDealIds.filter(
-            (id): id is string => typeof id === "string" && id.trim() !== "",
-          )
-        : [];
-      let targetDealId = rt.dealId ?? readString(cfg, "dealId");
-      if (!targetDealId && matchedIds.length === 0 && rt.contactId) {
-        const openDeals = await prisma.deal.findMany({
-          where: { contactId: rt.contactId, status: "OPEN" },
-          select: { id: true },
-          take: 2,
-        });
-        if (openDeals.length === 1) targetDealId = openDeals[0]!.id;
+      const dealIds = [...new Set(await resolveAutomationDealIds(rt))];
+      if (dealIds.length === 0) {
+        const cfgDealId = readString(cfg, "dealId");
+        if (cfgDealId) dealIds.push(cfgDealId);
       }
-      const dealIds = [...new Set(matchedIds.length > 0 ? matchedIds : targetDealId ? [targetDealId] : [])];
       if (dealIds.length === 0) {
         // Opt-in: sem negócio aberto, seguir o fluxo em vez de abortar.
         // Padrão continua sendo throw (ex.: Dna Work não pode mudar).
@@ -2223,24 +2243,11 @@ export async function executeStep(
         throw new Error("mark_deal_lost: lostReason obrigatório");
       }
 
-      const wonMatched = Array.isArray(rt.data.stageMatchedDealIds)
-        ? rt.data.stageMatchedDealIds.filter(
-            (id): id is string => typeof id === "string" && id.trim() !== "",
-          )
-        : [];
-      let targetDealId = rt.dealId ?? readString(cfg, "dealId");
-      if (!targetDealId && wonMatched.length === 1) targetDealId = wonMatched[0];
-      if (!targetDealId && wonMatched.length === 0 && rt.contactId) {
-        const openDeals = await prisma.deal.findMany({
-          where: { contactId: rt.contactId, status: "OPEN" },
-          select: { id: true },
-          take: 2,
-        });
-        if (openDeals.length === 1) targetDealId = openDeals[0]!.id;
+      const wonDealIds = [...new Set(await resolveAutomationDealIds(rt))];
+      if (wonDealIds.length === 0) {
+        const cfgDealId = readString(cfg, "dealId");
+        if (cfgDealId) wonDealIds.push(cfgDealId);
       }
-      const wonDealIds = [
-        ...new Set(wonMatched.length > 0 ? wonMatched : targetDealId ? [targetDealId] : []),
-      ];
       if (wonDealIds.length === 0) {
         if (cfg.continueIfNoDeal === true) {
           return { note: "ignorado (contato sem negócio aberto)" };
@@ -2786,8 +2793,8 @@ export async function executeStep(
         update: {},
       });
 
-      // Espelha a tag nos negócios do conjunto (filtro) ou no único OPEN.
-      // Vários OPEN sem filtro não escolhem um card pelo updatedAt.
+      // Fora do gatilho de etapa, um card. No stage_changed de duplicata
+      // de propósito, o conjunto que ainda está na etapa.
       for (const targetDealId of await resolveAutomationDealIds(rt)) {
         try {
           await prisma.tagOnDeal.upsert({
@@ -5358,9 +5365,21 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
   const MAX_ITER = automation.steps.length * 2 + 10;
 
   let current: typeof automation.steps[0] | undefined = automation.steps[0];
+  if (rt.contactId && rt.event === "stage_changed") {
+    const stageId = readString(rt.data, "toStageId") ?? readString(rt.data, "stageId");
+    if (stageId) {
+      const cluster = await loadIntentionalStageClusterIds(rt.contactId, stageId);
+      if (cluster.length > 0 && rt.dealId && cluster.includes(rt.dealId)) {
+        rt.data.intentionalStageClusterStageId = stageId;
+      }
+    }
+  }
   if (rt.contactId && current) {
     await ensureExecutionContext(automationId, rt.contactId, current.id, {
       conversationId: rt.conversation?.id ?? contextData.conversationId ?? null,
+      ...(typeof rt.data.intentionalStageClusterStageId === "string"
+        ? { intentionalStageClusterStageId: rt.data.intentionalStageClusterStageId }
+        : {}),
     });
   }
   let iterations = 0;
