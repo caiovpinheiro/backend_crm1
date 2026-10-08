@@ -23,6 +23,7 @@ export async function GET() {
       users,
       aiAgents,
       messageTemplates,
+      publishedFlowRows,
       knowledgeDocs,
       channels,
       pipelines,
@@ -32,7 +33,6 @@ export async function GET() {
       contacts,
       tags,
       tabulationRows,
-      publishedFlows,
     ] = await Promise.all([
       p.department.findMany({ where: { organizationId }, select: { id: true, name: true } }),
       p.distributionRule.findMany({ where: { organizationId }, select: { id: true, name: true } }),
@@ -49,6 +49,13 @@ export async function GET() {
       p.messageTemplate.findMany({
         where: { organizationId },
         select: { id: true, name: true },
+        orderBy: { name: "asc" },
+      }),
+      // Mesma consulta das mensagens prontas, no contexto da request.
+      // Um import() solto perdia a org e o erro virava lista vazia.
+      p.whatsappFlowDefinition.findMany({
+        where: { organizationId, status: "PUBLISHED" },
+        select: { id: true, name: true, metaFlowId: true },
         orderBy: { name: "asc" },
       }),
       p.aIAgentKnowledgeDoc.findMany({
@@ -101,10 +108,6 @@ export async function GET() {
       import("@/services/tabulations")
         .then(({ listActiveTabulationLeaves }) => runInSessionContext(r.session, () => listActiveTabulationLeaves({ organizationId })))
         .catch(() => []),
-      // Flows publicados (aba Flows das mensagens). Extra: falha não derruba o catálogo.
-      import("@/services/whatsapp-flow-definitions")
-        .then(({ listPublishedFlowDefinitions }) => listPublishedFlowDefinitions())
-        .catch(() => []),
     ]);
 
     const tabulations = (tabulationRows as Array<{ id: string; path: string; departmentName: string }>).map((t) => ({
@@ -140,10 +143,9 @@ export async function GET() {
       ),
       products,
       whatsappTemplates: whatsappTemplateCatalog,
-      messageFlows: (publishedFlows as Array<{ id: string; name: string }>).map((f) => ({
-        id: f.id,
-        name: f.name,
-      })),
+      messageFlows: (publishedFlowRows as Array<{ id: string; name: string; metaFlowId: string | null }>)
+        .filter((f) => Boolean(f.metaFlowId?.trim()))
+        .map((f) => ({ id: f.id, name: f.name })),
       models: V2_MODELS.map((m) => ({
         id: m.id,
         name: m.label,
