@@ -3317,6 +3317,8 @@ model Message {
   /// Referral de anúncio Meta desta mensagem (criativo + ids). O contato
   /// guarda só o primeiro anúncio; o card do chat lê daqui.
   referral         Json?                   @map("referral")
+  /// Contatos compartilhados nesta mensagem (Meta ou Baileys). Não cria Contact.
+  sharedContacts   Json?                   @map("shared_contacts")
   /// Token do botão Flow (Cloud API) por envio — correlaciona com webhook de retorno.
   flowToken        String?                 @map("flow_token")
   /// Template config usado no envio outbound (FK). Permite ao webhook
