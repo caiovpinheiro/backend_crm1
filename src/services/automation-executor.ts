@@ -1572,7 +1572,7 @@ function intentionalClusterStageId(rt: RuntimeContext): string | null {
   const marked = readString(rt.data, "intentionalStageClusterStageId");
   if (marked) return marked;
   if (rt.event !== "stage_changed") return null;
-  return readString(rt.data, "toStageId") ?? readString(rt.data, "stageId");
+  return readString(rt.data, "toStageId") ?? readString(rt.data, "stageId") ?? null;
 }
 
 /** Negócios que um passo de automação pode alterar.
