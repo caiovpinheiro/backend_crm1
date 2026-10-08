@@ -13,7 +13,8 @@ import {
 import { withSystemContext } from "@/lib/webhook-context";
 import { processStoredMetaWebhookEvent } from "@/lib/meta-webhook/handler";
 import { flushStatusWrites } from "@/lib/status-write-buffer";
-import { startAiTurnSweeper } from "@/services/ai/turn-sweeper";
+import { drainInFlightTurns } from "@/services/ai/turn-manager";
+import { startAiTurnSweeper, stopAiTurnSweeper } from "@/services/ai/turn-sweeper";
 import { startListenSweeper } from "@/services/ai-v2/listen";
 
 const log = getLogger("worker.meta-webhook");
@@ -98,10 +99,12 @@ export function startMetaWebhookWorker() {
     log.error({ err: err?.message ?? String(err) }, "Erro no worker meta-webhook");
   });
 
-  // Turn Manager (AI_TURN_MANAGER=1): tick que promove turnos vencidos e
-  // recupera PROCESSING travado. No-op com a flag desligada. É aqui porque
-  // este worker é quem ingere o inbound Meta — o turno nasce neste processo.
-  startAiTurnSweeper();
+  // Tick que promove turnos vencidos e recupera PROCESSING travado. Este
+  // worker ingere o inbound Meta, então o turno nasce aqui. Sobe já no boot
+  // (o motor v2 usa turnos com ou sem AI_TURN_MANAGER): sem isso, depois de
+  // um deploy os turnos órfãos esperavam o primeiro inbound para ter quem os
+  // recuperasse.
+  startAiTurnSweeper({ force: true });
   // Escutar a equipe: lê em lote as conversas das escutas ligadas.
   startListenSweeper();
 
@@ -111,10 +114,20 @@ export function startMetaWebhookWorker() {
 
 async function shutdown(worker: Worker): Promise<void> {
   log.info("Encerrando worker-meta-webhook...");
-  // Flush dos status bufferizados ANTES de fechar — o handler já respondeu 200
-  // ("accepted") e a Meta não reenvia, então um status pendente se perderia.
-  await flushStatusWrites().catch(() => {});
-  await worker.close().catch(() => {});
+  // Para de pegar turnos novos; os que estão rodando têm até
+  // AI_TURN_SHUTDOWN_DRAIN_MS para terminar (abaixo do stopGrace do
+  // serviço) e os que não terminam voltam para READY, para o próximo
+  // processo retomar em vez de ficarem presos em PROCESSING.
+  stopAiTurnSweeper();
+  await Promise.all([
+    // Flush dos status bufferizados ANTES de fechar — o handler já respondeu
+    // 200 ("accepted") e a Meta não reenvia, então um status pendente se perderia.
+    flushStatusWrites().catch(() => {}),
+    worker.close().catch(() => {}),
+    drainInFlightTurns(envInt("AI_TURN_SHUTDOWN_DRAIN_MS", 7000)).catch((err) => {
+      log.error({ err: err instanceof Error ? err.message : String(err) }, "drenagem de turnos falhou");
+    }),
+  ]);
   await prismaBase.$disconnect().catch(() => {});
   process.exit(0);
 }

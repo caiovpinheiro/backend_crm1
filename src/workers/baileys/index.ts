@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
-import { startAiTurnSweeper } from "@/services/ai/turn-sweeper";
+import { drainInFlightTurns } from "@/services/ai/turn-manager";
+import { startAiTurnSweeper, stopAiTurnSweeper } from "@/services/ai/turn-sweeper";
 import { startListenSweeper } from "@/services/ai-v2/listen";
 import { BaileysManager } from "./baileys-manager";
 import { startOutboundConsumer } from "./outbound-consumer";
@@ -17,10 +18,10 @@ const controlWorker = startControlConsumer(manager, redisUrl);
 
 async function startup() {
   log.info("[baileys-worker] Iniciando...");
-  // Turn Manager (AI_TURN_MANAGER=1): este processo ingere o inbound
-  // Baileys, então o turno nasce aqui e precisa de quem o promova.
-  // No-op com a flag desligada.
-  startAiTurnSweeper();
+  // Este processo ingere o inbound Baileys, então o turno nasce aqui e
+  // precisa de quem o promova — já no boot, para recuperar os órfãos do
+  // deploy anterior sem esperar o primeiro inbound.
+  startAiTurnSweeper({ force: true });
   startListenSweeper();
   await manager.startAll();
   log.info("[baileys-worker] Pronto — aguardando mensagens e comandos");
@@ -28,6 +29,11 @@ async function startup() {
 
 async function shutdown() {
   log.info("[baileys-worker] Encerrando...");
+  stopAiTurnSweeper();
+  const drainMs = Number.parseInt(process.env.AI_TURN_SHUTDOWN_DRAIN_MS ?? "", 10);
+  await drainInFlightTurns(Number.isFinite(drainMs) && drainMs > 0 ? drainMs : 7000).catch((err) => {
+    log.error({ err: err instanceof Error ? err.message : String(err) }, "[baileys-worker] drenagem de turnos falhou");
+  });
   await manager.shutdownAll();
   await outboundWorker.close();
   await controlWorker.close();

@@ -3643,6 +3643,19 @@ export async function processMetaWebhookPayload(
                 userMessage: parsed.text,
                 channel: "meta",
               });
+            } else {
+              // Sem isto a mensagem ficava sem resposta e sem nenhum rastro
+              // de por que a IA não foi chamada.
+              log.info(
+                {
+                  event: "skip_ai_inbound",
+                  conversationId: conversation.id,
+                  messageId: msgCreated.id,
+                  reason: isSystemMessage ? "system_message" : !parsed.text ? "no_text" : "automation_replied",
+                  messageType: inboundMsgType,
+                },
+                "[ai-turn] skip_ai_inbound",
+              );
             }
 
             log.info(`Mensagem de ${contact.name}: ${parsed.text.substring(0, 60)}`);
