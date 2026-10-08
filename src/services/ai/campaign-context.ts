@@ -221,6 +221,7 @@ async function resolveFromContactTags(
 export async function loadLastCampaignDispatchContext(
   conversationId: string | null,
   contactId?: string | null,
+  opts?: { chatOnly?: boolean },
 ): Promise<CampaignDispatchContext | null> {
   if (!conversationId && !contactId) return null;
   if (conversationId) {
@@ -258,6 +259,7 @@ export async function loadLastCampaignDispatchContext(
     };
   }
   }
+  if (opts?.chatOnly) return null;
   if (contactId) {
     const fromCampaign = await resolveFromCampaignRecipient(contactId);
     if (fromCampaign) return fromCampaign;

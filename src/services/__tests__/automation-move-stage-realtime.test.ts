@@ -16,6 +16,7 @@ const h = vi.hoisted(() => {
     stageFindUnique: vi.fn(),
     dealFindUnique: vi.fn(),
     dealFindFirst: vi.fn(),
+    dealFindMany: vi.fn(async () => []),
     dealUpdate: vi.fn(),
     assertStageEntryFields: vi.fn(),
     createDealEvent: vi.fn(),
@@ -32,6 +33,7 @@ vi.mock("@/lib/prisma", () => ({
     deal: {
       findUnique: h.dealFindUnique,
       findFirst: h.dealFindFirst,
+      findMany: h.dealFindMany,
       update: h.dealUpdate,
     },
   },
@@ -115,6 +117,7 @@ function syncArg(call = 0) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  h.dealFindMany.mockResolvedValue([]);
   h.assertStageEntryFields.mockResolvedValue(undefined);
   h.createDealEvent.mockResolvedValue(undefined);
   h.syncBoardsAfterDealChanges.mockResolvedValue({ invalidatedPipelines: [], published: 0 });
@@ -214,7 +217,7 @@ describe("automação move_stage", () => {
     );
   });
 
-  it("passo que move vários negócios avisa o board UMA vez, com todos (o helper aplica o teto do lote)", async () => {
+  it("fora de stage_changed, dois cards casados movem só o negócio do gatilho", async () => {
     h.dealFindUnique.mockImplementation(async () => ({
       status: "OPEN",
       stageId: "stage-qualificado",
@@ -235,15 +238,69 @@ describe("automação move_stage", () => {
       { stageId: "stage-novo" },
       {
         ...rt,
+        dealId: "deal-caio",
         event: "message_received",
         data: { stageMatchedDealIds: ["deal-caio", "deal-outro"] },
       },
     );
 
-    expect(h.dealUpdate).toHaveBeenCalledTimes(2);
+    expect(h.dealUpdate).toHaveBeenCalledTimes(1);
+    expect(h.dealUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: "deal-caio" } }),
+    );
     expect(h.syncBoardsAfterDealChanges).toHaveBeenCalledTimes(1);
-    expect(syncArg().changes.map((c) => c.dealId)).toEqual(["deal-caio", "deal-outro"]);
-    expect([...syncArg().rows.keys()]).toEqual(["deal-caio", "deal-outro"]);
+    expect(syncArg().changes.map((c) => c.dealId)).toEqual(["deal-caio"]);
+  });
+
+  it("stage_changed move o conjunto de duplicata de propósito e deixa o card sem vínculo", async () => {
+    h.dealFindMany.mockResolvedValue([
+      {
+        id: "origin",
+        intentionalDuplicate: false,
+        duplicatedFromDealId: null,
+        createdAt: new Date("2026-01-01T00:00:00.000Z"),
+      },
+      {
+        id: "copy",
+        intentionalDuplicate: true,
+        duplicatedFromDealId: "origin",
+        createdAt: new Date("2026-02-01T00:00:00.000Z"),
+      },
+      {
+        id: "other",
+        intentionalDuplicate: false,
+        duplicatedFromDealId: null,
+        createdAt: new Date("2026-03-01T00:00:00.000Z"),
+      },
+    ] as never);
+    h.dealFindUnique.mockImplementation(async () => ({
+      status: "OPEN",
+      stageId: "stage-qualificado",
+      contactId: "c1",
+      stage: { name: "Qualificado", pipelineId: "pipe-1", isWon: false, isLost: false },
+    }));
+    h.dealUpdate.mockImplementation(async (args: { where: { id: string } }) => ({
+      id: args.where.id,
+      title: args.where.id,
+      status: "OPEN",
+      stageId: "stage-novo",
+      position: 1,
+      stage: { pipelineId: "pipe-1", isWon: false, isLost: false },
+    }));
+
+    await executeStep(
+      "move_stage",
+      { stageId: "stage-novo" },
+      {
+        ...rt,
+        dealId: "origin",
+        event: "stage_changed",
+        data: { toStageId: "stage-qualificado", stageMatchedDealIds: ["origin", "copy", "other"] },
+      },
+    );
+
+    expect(h.dealUpdate).toHaveBeenCalledTimes(2);
+    expect(syncArg().changes.map((c) => c.dealId)).toEqual(["origin", "copy"]);
   });
 
   it("não avisa o board se a etapa destino recusa o deal", async () => {

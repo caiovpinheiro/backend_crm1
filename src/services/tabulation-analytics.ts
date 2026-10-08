@@ -32,6 +32,21 @@ function uniqueIds(...groups: Array<string | string[] | null | undefined>): stri
   return out;
 }
 
+/**
+ * Quem tabulou. Aditivo: `actorUserId`/`actorName` continuam com o significado
+ * antigo (só o usuário gravado no evento); `actor` diz de fato quem agiu.
+ *  - `user`: pessoa (id = usuário; name = nome do usuário).
+ *  - `ai_agent`: agente de IA (id = id do agente em `AIAgentConfig`, quando
+ *    gravado; name = nome do agente).
+ *  - `automation`: passo de automação (id = id da automação; name = nome dela).
+ *  - `system`: o resto (encerramento em massa, integração, evento sem ator).
+ */
+export type TabulationActor = {
+  kind: "user" | "automation" | "ai_agent" | "system";
+  id: string | null;
+  name: string | null;
+};
+
 export type TabulationAnalyticsRow = {
   id: string;
   occurredAt: string;
@@ -40,6 +55,7 @@ export type TabulationAnalyticsRow = {
   contactName: string | null;
   actorUserId: string | null;
   actorName: string | null;
+  actor: TabulationActor;
   tabulationId: string | null;
   tabulationName: string | null;
   tabulationNumber: number | null;
@@ -116,6 +132,58 @@ function metaNumber(
   if (typeof v === "number" && Number.isFinite(v)) return v;
   if (typeof v === "string" && /^\d+$/.test(v)) return Number(v);
   return null;
+}
+
+export type TabulationActorSource = {
+  actorType: string | null;
+  actorUserId: string | null;
+  actorLabel: string | null;
+  actorRef: string | null;
+  actorUser: { name: string | null; type: string } | null;
+  meta: Prisma.JsonValue | null | undefined;
+};
+
+/**
+ * Deduz o ator de um evento `CONVERSATION_TABULATED`. O tipo gravado
+ * (`actorType`) manda sobre o `actorUserId`: dentro de uma automação ou de um
+ * turno de IA o `actorUserId` é só o usuário do contexto (pode ser o humano que
+ * mandou a mensagem, ou nulo), não quem tabulou. Origens:
+ *  - humano (outbox de `/conversations/[id]/actions`): HUMAN + actorUserId;
+ *  - IA (`tabulation-classify`, `close-ai-conversation`): AI + actorLabel (nome
+ *    do agente) + actorRef (id do agente) pelo `runWithActor` do runner; sem
+ *    contexto cai em `meta.source = "AI_AGENT"`;
+ *  - automação (`automation-executor`): AUTOMATION + actorLabel (nome) +
+ *    actorRef (id), ou `meta.source = "automation"`;
+ *  - o resto (`bulk-sync`, integração, sem ator): sistema.
+ * `agentNames` completa o nome do agente quando o evento não guardou o rótulo.
+ */
+export function resolveTabulationActor(
+  ev: TabulationActorSource,
+  agentNames: ReadonlyMap<string, string> = new Map(),
+): TabulationActor {
+  const type = (ev.actorType ?? "").toUpperCase();
+  const source = (metaString(ev.meta, "source") ?? "").toLowerCase();
+  const label = ev.actorLabel?.trim() || null;
+
+  if (type === "AUTOMATION" || (type !== "AI" && type !== "HUMAN" && source === "automation")) {
+    return { kind: "automation", id: ev.actorRef, name: label };
+  }
+  if (type === "AI" || ev.actorUser?.type === "AI" || (type !== "HUMAN" && source === "ai_agent")) {
+    const aiUserId = ev.actorUser?.type === "AI" ? ev.actorUserId : null;
+    const id = ev.actorRef ?? aiUserId;
+    return {
+      kind: "ai_agent",
+      id,
+      name: label ?? (ev.actorRef ? agentNames.get(ev.actorRef) : null) ?? ev.actorUser?.name ?? null,
+    };
+  }
+  if (type === "HUMAN" && ev.actorUserId) {
+    return { kind: "user", id: ev.actorUserId, name: ev.actorUser?.name ?? label };
+  }
+  if (!type && ev.actorUserId) {
+    return { kind: "user", id: ev.actorUserId, name: ev.actorUser?.name ?? label };
+  }
+  return { kind: "system", id: null, name: label ?? "Sistema" };
 }
 
 async function buildPathMap(
@@ -335,8 +403,11 @@ export async function getTabulationAnalytics(
         conversationId: true,
         contactId: true,
         actorUserId: true,
+        actorType: true,
+        actorLabel: true,
+        actorRef: true,
         meta: true,
-        actorUser: { select: { id: true, name: true } },
+        actorUser: { select: { id: true, name: true, type: true } },
         contact: { select: { id: true, name: true } },
       },
     }),
@@ -354,6 +425,23 @@ export async function getTabulationAnalytics(
       select: { id: true, name: true },
     });
     for (const u of users) userNames.set(u.id, u.name ?? "Usuário");
+  }
+
+  // Nome do agente de IA quando o evento só guardou o id (`actorRef`).
+  const agentRefs = [
+    ...new Set(
+      pageItems
+        .filter((e) => (e.actorType === "AI" || e.actorUser?.type === "AI") && e.actorRef && !e.actorLabel)
+        .map((e) => e.actorRef as string),
+    ),
+  ];
+  const agentNames = new Map<string, string>();
+  if (agentRefs.length > 0) {
+    const agents = await analyticsClient().aIAgentConfig.findMany({
+      where: { organizationId: orgId, id: { in: agentRefs } },
+      select: { id: true, user: { select: { name: true } } },
+    });
+    for (const a of agents) if (a.user?.name) agentNames.set(a.id, a.user.name);
   }
 
   // O ranking é top 20, mas a página do log pode citar tabulações fora dele —
@@ -420,6 +508,17 @@ export async function getTabulationAnalytics(
       contactName: e.contact?.name ?? null,
       actorUserId: e.actorUserId,
       actorName: e.actorUser?.name ?? null,
+      actor: resolveTabulationActor(
+        {
+          actorType: e.actorType,
+          actorUserId: e.actorUserId,
+          actorLabel: e.actorLabel,
+          actorRef: e.actorRef,
+          actorUser: e.actorUser,
+          meta: e.meta,
+        },
+        agentNames,
+      ),
       tabulationId,
       tabulationName:
         info?.name ?? metaString(e.meta, "tabulationName") ?? null,

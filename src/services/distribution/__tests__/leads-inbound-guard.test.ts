@@ -17,18 +17,19 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const executeDistribution = vi.fn(async () => ({
+const executeDistribution = vi.fn(async (..._a: unknown[]) => ({
   success: true,
   reason: "ASSIGNED",
   selectedUserId: "uSmart",
   selectedUserName: "Smart",
   evaluated: [],
 }));
-const keepHumanAfterAutomationClose = vi.fn(async () => null);
-const tryAssignFirstAttendanceAi = vi.fn(async () => null);
-const humanWasAssignedInThisConversation = vi.fn(async () => false);
-const isDistributionAutoOnInbound = vi.fn(async () => true);
-const hasOrganizationWidget = vi.fn(async () => true);
+const keepHumanAfterAutomationClose = vi.fn(async (..._a: unknown[]) => null);
+const tryAssignFirstAttendanceAi = vi.fn(async (..._a: unknown[]) => null);
+const humanWasAssignedInThisConversation = vi.fn(async (..._a: unknown[]) => false);
+const isDistributionAutoOnInbound = vi.fn(async (..._a: unknown[]) => true);
+const hasOrganizationWidget = vi.fn(async (..._a: unknown[]) => true);
+const isDistributionEnabled = vi.fn(async (..._a: unknown[]) => true);
 
 vi.mock("@/lib/debug-log", () => ({
   debugInfo: vi.fn(),
@@ -74,7 +75,7 @@ vi.mock("@/services/distribution/engine", () => ({
   executeDistribution: (...a: unknown[]) => executeDistribution(...a),
 }));
 vi.mock("@/services/distribution/enabled", () => ({
-  isDistributionEnabled: vi.fn(async () => true),
+  isDistributionEnabled: (...a: unknown[]) => isDistributionEnabled(...a),
 }));
 vi.mock("@/services/distribution/pending-shared", () => ({
   ensureConversationInWaitingQueue: vi.fn(async () => {}),
@@ -136,6 +137,7 @@ describe("maybeDistributeNewInboundTicket — guardas do modo leads", () => {
     vi.clearAllMocks();
     isDistributionAutoOnInbound.mockResolvedValue(true);
     hasOrganizationWidget.mockResolvedValue(true);
+    isDistributionEnabled.mockResolvedValue(true);
   });
 
   it("conversa NOVA sem departamento: smart distribui (limitação registrada — leads não troca esse dono depois)", async () => {
@@ -296,6 +298,44 @@ describe("maybeDistributeNewInboundTicket — guardas do modo leads", () => {
 
     const { clearOwnershipForRedistribution, isAssigneeCurrentlyEligible } =
       await import("@/services/distribution/assignee-eligibility");
+    expect(clearOwnershipForRedistribution).not.toHaveBeenCalled();
+    expect(isAssigneeCurrentlyEligible).not.toHaveBeenCalled();
+    expect(tryAssignFirstAttendanceAi).not.toHaveBeenCalled();
+    expect(executeDistribution).not.toHaveBeenCalled();
+  });
+
+  it("distribuição desligada não lê a conversa nem tira o responsável, mesmo com o widget instalado", async () => {
+    isDistributionEnabled.mockResolvedValue(false);
+    const { isAssigneeCurrentlyEligible, shouldClearOwnershipOnIneligible } =
+      await import("@/services/distribution/assignee-eligibility");
+    vi.mocked(isAssigneeCurrentlyEligible).mockResolvedValue({
+      eligible: false,
+      isAi: false,
+      reason: "OUTSIDE_WORKING_HOURS",
+      blockedReasons: ["OUTSIDE_WORKING_HOURS"],
+    });
+    vi.mocked(shouldClearOwnershipOnIneligible).mockReturnValue(true);
+    conversations.set("c1", {
+      id: "c1",
+      contactId: "ct1",
+      assignedToId: "uEmanuel",
+      assignedVia: null,
+      routeMode: null,
+      departmentId: null,
+      assigneeType: "HUMAN",
+    });
+
+    await maybeDistributeNewInboundTicket({
+      conversationId: "c1",
+      contactId: "ct1",
+      assignedToId: "uEmanuel",
+    });
+
+    const { prisma } = await import("@/lib/prisma");
+    const { clearOwnershipForRedistribution } = await import(
+      "@/services/distribution/assignee-eligibility"
+    );
+    expect(prisma.conversation.findUnique).not.toHaveBeenCalled();
     expect(clearOwnershipForRedistribution).not.toHaveBeenCalled();
     expect(isAssigneeCurrentlyEligible).not.toHaveBeenCalled();
     expect(tryAssignFirstAttendanceAi).not.toHaveBeenCalled();

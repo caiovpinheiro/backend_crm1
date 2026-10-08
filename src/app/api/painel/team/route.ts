@@ -4,6 +4,8 @@ import { isManagerOrAdmin, isSuperAdmin, withOrgContext } from "@/lib/auth-helpe
 import { computePainelRange, parseClockMode } from "@/services/painel-period";
 import { getPainelTeam, parseTeamSections } from "@/services/painel-team";
 import { getLogger } from "@/lib/logger";
+import { ServerTiming } from "@/lib/server-timing";
+import { timedJson } from "@/lib/server-timing-response";
 
 const log = getLogger("api/painel/team");
 
@@ -19,7 +21,12 @@ function csv(value: string | null): string[] {
 }
 
 export async function GET(request: Request) {
+  // `Server-Timing`: auth, q-<bloco> (só quando o bloco foi calculado, não veio do
+  // cache), cache (espera pelo cache; desc = hit | miss | stale, ou por bloco
+  // quando diferem), serialize, total. Blocos rodam em paralelo.
+  const timing = new ServerTiming();
   return withOrgContext(async (session) => {
+    timing.add("auth", timing.totalMs());
     // Só gestores: mesma condição do ManagerHome no frontend (`isManagerUp` =
     // ADMIN, MANAGER ou super-admin). O painel do operador usa /api/painel/service.
     if (!isManagerOrAdmin(session) && !isSuperAdmin(session)) {
@@ -43,8 +50,9 @@ export async function GET(request: Request) {
           userIds: csv(searchParams.get("userIds")),
         },
         parseTeamSections(searchParams.get("section")),
+        timing,
       );
-      return NextResponse.json(data);
+      return timedJson(timing, data);
     } catch (e) {
       log.error({ err: e }, "[api/painel/team] falhou");
       return NextResponse.json(

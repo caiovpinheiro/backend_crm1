@@ -49,4 +49,43 @@ describe("cachedReport", () => {
     await expect(cachedReport("t3", "org-1", {}, loader)).resolves.toEqual({ ok: true });
     expect(loader).toHaveBeenCalledTimes(2);
   });
+
+  it("informa hit, miss e stale por onStatus", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(new Date("2026-10-06T12:00:00Z"));
+      const statuses: string[] = [];
+      const onStatus = (s: string) => statuses.push(s);
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((r) => (release = r));
+      let calls = 0;
+      const loader = vi.fn(async () => {
+        calls++;
+        if (calls === 2) await gate; // a revalidação em segundo plano demora
+        return { n: calls };
+      });
+
+      await cachedReport("t4", "org-1", {}, loader, { onStatus });
+      await cachedReport("t4", "org-1", {}, loader, { onStatus });
+      expect(statuses).toEqual(["miss", "hit"]);
+      expect(loader).toHaveBeenCalledTimes(1);
+
+      // Passou do fresco (60 s) e ainda cabe no vencido (120 s): serve o vencido.
+      vi.setSystemTime(new Date("2026-10-06T12:01:10Z"));
+      const stale = await cachedReport("t4", "org-1", {}, loader, { onStatus });
+      expect(stale).toEqual({ n: 1 });
+      expect(statuses.at(-1)).toBe("stale");
+      release();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("onStatus não é chamado quando o loader falha", async () => {
+    const onStatus = vi.fn();
+    await expect(
+      cachedReport("t5", "org-1", {}, async () => Promise.reject(new Error("boom")), { onStatus }),
+    ).rejects.toThrow("boom");
+    expect(onStatus).not.toHaveBeenCalled();
+  });
 });
