@@ -26,6 +26,7 @@ export type V2ExportNames = {
   stages: Record<string, string>;
   tags: Record<string, string>;
   channels?: Record<string, string>;
+  messageFlows?: Record<string, string>;
 };
 
 export const EMPTY_EXPORT_NAMES: V2ExportNames = {
@@ -667,6 +668,7 @@ export function buildAgentRulesMarkdown(args: {
     `- Trechos que ele lê: ${({ all: "todos", related: "só os relacionados", close: "só os muito parecidos" } as Record<string, string>)[c.knowledgeSearch?.preset ?? "all"]}`,
     `- Conferência das respostas: ${(c.groundingCheck ?? "model") === "model" ? "afirmação por afirmação" : "só números, datas e nomes"}`,
     `- Mensagens prontas gerais: ${list((c.allowedMessageModelIds ?? []).map((id) => names.messageModels[id] ?? `(não encontrada: ${id})`))} · adaptar à conversa: ${yesNo(c.messageModelAdapt)}`,
+    `- Flows que ele pode enviar: ${list((c.allowedFlowIds ?? []).map((id) => names.messageFlows?.[id] ?? `(não encontrado: ${id})`))}`,
     `- Negócio usado: ${c.dealSelection === "ask" ? "pergunta quando há mais de um" : "o mais recente"}`,
     ...(c.includeLostDeals ? ["- Negócio perdido: usa o mais recente quando o cliente não tem outro negócio"] : []),
     ...(c.productPolicy?.enabled ? [`- Catálogo: até ${c.productPolicy.maxItems} produto(s) · preço: ${yesNo(c.productPolicy.showPrice)} · link: ${yesNo(c.productPolicy.showLink)}${c.productPolicy.allowedProductIds?.length ? ` · ${c.productPolicy.allowedProductIds.length} produto(s) liberado(s)` : ""}`] : []),

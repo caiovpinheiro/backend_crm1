@@ -389,6 +389,8 @@ export const v2AgentConfigSchema = z.object({
     .default({ maxCallsPerTurn: 6, maxRepeatsPerTool: 2 } as any),
   allowedKnowledgeDocIds: z.array(z.string()).optional().default([]),
   allowedMessageModelIds: z.array(z.string()).optional().default([]),
+  /** Flows publicados que o agente pode enviar. Vazio = nenhum. */
+  allowedFlowIds: z.array(z.string()).optional().default([]),
   allowedPhoneNumbers: z.array(z.string()).optional().default([]),
   responseLength: z.enum(["short", "medium", "long"]).optional().default("medium"),
   emojis: z.enum(["none", "light", "moderate"]).optional().default("none"),

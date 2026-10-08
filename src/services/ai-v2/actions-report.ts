@@ -25,6 +25,7 @@ export const ACTION_EVENT_TYPES = [
   "send_message",
   "send_product",
   "send_whatsapp_template",
+  "send_whatsapp_flow",
   "create_deal",
   "update_field",
   "tabulate_conversation",
@@ -48,6 +49,7 @@ export const ACTION_EVENT_LABEL: Record<ActionEventType, string> = {
   send_message: "Enviou mensagem",
   send_product: "Enviou produto",
   send_whatsapp_template: "Enviou modelo do WhatsApp",
+  send_whatsapp_flow: "Enviou flow",
   create_deal: "Criou negócio",
   update_field: "Atualizou campo",
   tabulate_conversation: "Tabulou",
@@ -242,6 +244,8 @@ function actionDetail(a: Record<string, unknown>, names: { stages: Map<string, s
       return clip(s(a.content), 200);
     case "send_message_model":
       return names.models.get(s(a.modelId)) ?? s(a.modelId);
+    case "send_whatsapp_flow":
+      return s(a.flowId);
     case "send_message":
       return clip(s(a.message) || s(a.text), 200);
     case "ask_with_options":

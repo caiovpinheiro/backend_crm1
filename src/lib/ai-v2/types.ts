@@ -540,6 +540,8 @@ export interface V2AgentConfig {
   allowedKnowledgeDocIds?: string[];
   /** IDs globais dos modelos de mensagem permitidos. */
   allowedMessageModelIds?: string[];
+  /** Flows publicados (WhatsappFlowDefinition) que o agente pode enviar. */
+  allowedFlowIds?: string[];
   /** Telefones permitidos para resposta em modo de teste. Vazio = responde qualquer número. */
   allowedPhoneNumbers?: string[];
   /** Tamanho preferido das respostas. */
@@ -598,6 +600,7 @@ export type V2ActionType =
   | "send_message_model"
   | "send_product"
   | "send_whatsapp_template"
+  | "send_whatsapp_flow"
   | "send_material_attachment"
   | "ask_with_options"
   | "close_conversation"
@@ -623,6 +626,8 @@ export interface V2LLMOutput {
     adapt?: boolean;
     variables?: Record<string, string>;
   };
+  /** Flow publicado que o modelo pediu para enviar neste turno. */
+  flow?: { id: string };
   /** Ids de anexos dos materiais lidos no turno, para enviar depois da reply. */
   attachments?: string[];
   handoff: boolean;

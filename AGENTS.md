@@ -141,6 +141,7 @@ Medição por conversa: `node dist/workers/audit-attendance.js --org <slug>`.
 
 ## Decisões técnicas
 
+- 2026-10-08 — Grok 4.7 — **Agente envia o flow que estiver ligado**: em O que ele sabe → Mensagens prontas e catálogo, `allowedFlowIds` lista os flows publicados (`WhatsappFlowDefinition` status `PUBLISHED`). O modelo devolve `flow: { id }` e o motor manda o formulário na conversa de WhatsApp (API oficial, janela de 24h) só se o id está nessa lista e o agente responde sozinho. Fora da lista, o envio é descartado.
 - 2026-10-08 — Grok 4.7 — **Contato compartilhado**: `Message.sharedContacts` (`shared_contacts`) guarda o array normalizado do WhatsApp (Meta e Baileys). `content` fica com o texto curto e `messageType` é `contact`. Não cria Contact nem mexe no contato da conversa. Migration `20261008120000_message_shared_contacts`.
 - 2026-10-08 — Grok 4.7 — **Lista, última interação é a conversa**: `GET /api/deals?sort=lastInteraction&direction=asc|desc` ordena o recorte inteiro por `MAX(conversations.updatedAt)` do contato e só então pagina. A coluna mostra o mesmo instante. Sem conversa, cai no `updatedAt` do negócio. Etapa, campo ou dono não escondem a conversa mais antiga. Sem `sort`, a lista segue `updatedAt` desc.
 - 2026-10-07 — Grok 4.7 — **Tag do negócio entra no contato**: `POST /api/deals/:id/tags` grava `TagOnDeal` e a mesma tag em `TagOnContact` do contato do card. No pipeline só existe tag de negócio; campanha, inbox e ficha leem a do contato. Ao tirar, sai do contato se nenhum outro negócio dele ainda tiver essa tag.

@@ -35,6 +35,11 @@ export function allowedMessageModelIdsFor(config: V2AgentConfig, theme: Theme): 
   return config.allowedMessageModelIds ?? [];
 }
 
+/** Flows publicados liberados no agente. Lista vazia = nenhum. */
+export function allowedFlowIdsFor(config: V2AgentConfig): string[] {
+  return config.allowedFlowIds ?? [];
+}
+
 function editDistance(a: string, b: string): number {
   const prev = Array.from({ length: b.length + 1 }, (_, j) => j);
   for (let i = 1; i <= a.length; i += 1) {
@@ -73,6 +78,7 @@ export function allowedActionTypes(config: V2AgentConfig, theme: Theme): Set<str
   // A lista de mensagens prontas liberadas é a permissão: com ela, enviar
   // uma mensagem pronta vale mesmo que o assunto não liste a ação.
   if (allowedMessageModelIdsFor(config, theme).length > 0) allowed.add("send_message_model");
+  if (allowedFlowIdsFor(config).length > 0) allowed.add("send_whatsapp_flow");
   // Anexo de material: só chega aqui o que veio dos materiais liberados e
   // lidos no turno (o motor monta a ação; o modelo não a devolve em actions).
   allowed.add("send_material_attachment");
