@@ -17,19 +17,19 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const executeDistribution = vi.fn(async () => ({
+const executeDistribution = vi.fn(async (..._a: unknown[]) => ({
   success: true,
   reason: "ASSIGNED",
   selectedUserId: "uSmart",
   selectedUserName: "Smart",
   evaluated: [],
 }));
-const keepHumanAfterAutomationClose = vi.fn(async () => null);
-const tryAssignFirstAttendanceAi = vi.fn(async () => null);
-const humanWasAssignedInThisConversation = vi.fn(async () => false);
-const isDistributionAutoOnInbound = vi.fn(async () => true);
-const hasOrganizationWidget = vi.fn(async () => true);
-const isDistributionEnabled = vi.fn(async () => true);
+const keepHumanAfterAutomationClose = vi.fn(async (..._a: unknown[]) => null);
+const tryAssignFirstAttendanceAi = vi.fn(async (..._a: unknown[]) => null);
+const humanWasAssignedInThisConversation = vi.fn(async (..._a: unknown[]) => false);
+const isDistributionAutoOnInbound = vi.fn(async (..._a: unknown[]) => true);
+const hasOrganizationWidget = vi.fn(async (..._a: unknown[]) => true);
+const isDistributionEnabled = vi.fn(async (..._a: unknown[]) => true);
 
 vi.mock("@/lib/debug-log", () => ({
   debugInfo: vi.fn(),

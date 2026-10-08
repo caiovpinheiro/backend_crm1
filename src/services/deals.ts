@@ -623,7 +623,7 @@ export async function getDeals(params: GetDealsParams = {}) {
     items.map((d) => d.contact).filter((c): c is NonNullable<typeof c> => c !== null),
   );
 
-  const itemsWithInteraction = await attachLastInteractionAt(items);
+  const itemsWithInteraction = await attachLastInteractionAt([...items]);
 
   return {
     items: itemsWithInteraction,
