@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { drainInFlightTurns } from "@/services/ai/turn-manager";
 import { startAiTurnSweeper, stopAiTurnSweeper } from "@/services/ai/turn-sweeper";
 import { startListenSweeper, stopListenSweeper } from "@/services/ai-v2/listen";
 import { installGracefulShutdown } from "@/workers/graceful-shutdown";
@@ -18,10 +19,10 @@ const controlWorker = startControlConsumer(manager, redisUrl);
 
 async function startup() {
   log.info("[baileys-worker] Iniciando...");
-  // Turn Manager (AI_TURN_MANAGER=1): este processo ingere o inbound
-  // Baileys, então o turno nasce aqui e precisa de quem o promova.
-  // No-op com a flag desligada.
-  startAiTurnSweeper();
+  // Este processo ingere o inbound Baileys, então o turno nasce aqui e
+  // precisa de quem o promova — já no boot, para recuperar os órfãos do
+  // deploy anterior sem esperar o primeiro inbound.
+  startAiTurnSweeper({ force: true });
   startListenSweeper();
   await manager.startAll();
   log.info("[baileys-worker] Pronto — aguardando mensagens e comandos");
@@ -39,6 +40,16 @@ installGracefulShutdown({
       run: () => {
         stopAiTurnSweeper();
         stopListenSweeper();
+      },
+    },
+    // Turnos da IA em execução: esperam até AI_TURN_SHUTDOWN_DRAIN_MS e os
+    // que não terminam voltam para READY, para o próximo processo retomar
+    // no 1º tick em vez de ficarem presos em PROCESSING.
+    {
+      name: "turnos",
+      run: () => {
+        const ms = Number.parseInt(process.env.AI_TURN_SHUTDOWN_DRAIN_MS ?? "", 10);
+        return drainInFlightTurns(Number.isFinite(ms) && ms > 0 ? ms : 7000);
       },
     },
     {

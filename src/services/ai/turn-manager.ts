@@ -105,6 +105,23 @@ export function turnMaxAttempts(): number {
   return envInt("AI_TURN_MAX_ATTEMPTS", 3);
 }
 
+/**
+ * Idade máxima da última mensagem do cliente para um turno recuperado (queda
+ * do processo, deploy) ainda ser respondido pela IA. Passado disso a resposta
+ * chegaria fora de contexto: o turno é descartado e a conversa fica para a
+ * equipe; se o cliente escrever de novo, a IA responde normalmente. Padrão 2 h.
+ */
+export function turnMaxAgeMs(): number {
+  return envInt("AI_TURN_MAX_AGE_MS", 2 * 60 * 60 * 1000);
+}
+
+export function isTurnExpired(
+  turn: { lastMessageAt: Date },
+  now = Date.now(),
+): boolean {
+  return now - turn.lastMessageAt.getTime() > turnMaxAgeMs();
+}
+
 /** Identidade do processo que faz o claim (diagnóstico de turno travado). */
 export function workerIdentity(): string {
   return `${os.hostname()}:${process.pid}`;
@@ -303,6 +320,74 @@ export async function appendToOpenTurn(
   return null;
 }
 
+type RequeueableStatus = "RECEIVING" | "STABILIZING" | "READY" | "PROCESSING";
+
+/**
+ * PROCESSING → READY. Volta a ser o turno acumulando da conversa (sentinela
+ * `openKey`) para juntar a próxima bolha do cliente — a menos que o cliente
+ * já tenha aberto um turno novo enquanto este estava parado. A sentinela é
+ * dele (UNIQUE organizationId+openKey): este fica READY sem ela e roda antes
+ * do novo, um por vez, como em `requeueTurnForAssignee`. Antes o UPDATE
+ * sempre gravava a sentinela, estourava a constraint e a exceção derrubava o
+ * tick inteiro do sweeper — nenhum turno preso era recuperado.
+ */
+export async function requeueProcessingTurn(args: {
+  where: Prisma.ConversationTurnWhereInput;
+  conversationId: string;
+  data?: Prisma.ConversationTurnUpdateManyMutationInput;
+}): Promise<boolean> {
+  const where = { ...args.where, status: "PROCESSING" as const };
+  const data = {
+    ...args.data,
+    status: "READY" as const,
+    claimedBy: null,
+    claimedAt: null,
+  };
+  try {
+    const res = await prismaBase.conversationTurn.updateMany({
+      where,
+      data: { ...data, openKey: args.conversationId },
+    });
+    return res.count === 1;
+  } catch (err) {
+    if (!isUniqueViolation(err)) throw err;
+    const res = await prismaBase.conversationTurn.updateMany({
+      where,
+      data: { ...data, openKey: null },
+    });
+    if (res.count === 1) {
+      logTurn("requeued_behind_open_turn", { conversationId: args.conversationId });
+    }
+    return res.count === 1;
+  }
+}
+
+/**
+ * Descarta um turno velho demais para a IA responder (`turnMaxAgeMs`). Só o
+ * sweeper chama: o caminho normal (fast path) nunca tem turno antigo.
+ */
+export async function expireTurn(
+  turn: { id: string; conversationId: string; lastMessageAt: Date },
+  fromStatuses: readonly RequeueableStatus[],
+): Promise<boolean> {
+  const ageMin = Math.round((Date.now() - turn.lastMessageAt.getTime()) / 60_000);
+  const res = await prismaBase.conversationTurn.updateMany({
+    where: { id: turn.id, status: { in: [...fromStatuses] } },
+    data: {
+      status: "INVALIDATED",
+      completedAt: new Date(),
+      openKey: null,
+      claimedBy: null,
+      claimedAt: null,
+      lastError: `expired: última mensagem do cliente há ${ageMin} min (teto ${Math.round(turnMaxAgeMs() / 60_000)} min)`,
+    },
+  });
+  if (res.count === 1) {
+    logTurn("expired", { turnId: turn.id, conversationId: turn.conversationId, ageMin });
+  }
+  return res.count === 1;
+}
+
 function isUniqueViolation(err: unknown): boolean {
   return (
     typeof err === "object" &&
@@ -382,8 +467,14 @@ export async function onInboundMessageForAi(
     }
   }
 
-  if (input.eligible === false) return;
-  if (!input.userMessage?.trim() && !input.messageId) return;
+  if (input.eligible === false) {
+    logTurn("skip_ineligible", { conversationId: input.conversationId, messageId: input.messageId ?? null });
+    return;
+  }
+  if (!input.userMessage?.trim() && !input.messageId) {
+    logTurn("skip_empty", { conversationId: input.conversationId });
+    return;
+  }
 
   // Allowlist ANTES de resolver o agente v2: o resolver atribui a conversa
   // à IA, e um contato fora da allowlist ficava preso num agente que nunca
@@ -679,9 +770,9 @@ export async function claimTurn(
   if (turn) {
     const rivals = await otherLiveTurns(turn.conversationId, turnId);
     if (rivals.some((r) => r.createdAt.getTime() < turn.createdAt.getTime() || (r.createdAt.getTime() === turn.createdAt.getTime() && r.id < turn.id))) {
-      await prismaBase.conversationTurn.updateMany({
-        where: { id: turnId, organizationId, status: "PROCESSING", claimedBy },
-        data: { status: "READY", claimedBy: null, claimedAt: null, openKey: turn.conversationId },
+      await requeueProcessingTurn({
+        where: { id: turnId, organizationId, claimedBy },
+        conversationId: turn.conversationId,
       });
       logTurn("claim_deferred", { turnId, conversationId: turn.conversationId });
       return null;
@@ -761,12 +852,7 @@ export async function dispatchReadyTurn(
   return true;
 }
 
-/**
- * Executa `maybeReplyAsAIAgent` com o texto agregado. NÃO reescreve o
- * inbox-handler: só passa `userMessage` já concatenado + `turnId` para
- * rastreabilidade no `AIAgentRun`.
- */
-export async function runTurn(turn: {
+type RunnableTurn = {
   id: string;
   organizationId: string;
   conversationId: string;
@@ -777,7 +863,87 @@ export async function runTurn(turn: {
   attempts: number;
   /** Momento do claim: o motor confere que ainda é o dono antes de cada envio. */
   claimedAt?: Date | null;
-}): Promise<void> {
+  claimedBy?: string | null;
+};
+
+/** Turnos que este processo está executando agora (para drenar no shutdown). */
+const inFlightTurns = new Map<
+  string,
+  { promise: Promise<void>; conversationId: string; organizationId: string; claimedBy: string | null; attempts: number }
+>();
+
+/**
+ * Executa `maybeReplyAsAIAgent` com o texto agregado. NÃO reescreve o
+ * inbox-handler: só passa `userMessage` já concatenado + `turnId` para
+ * rastreabilidade no `AIAgentRun`.
+ */
+export async function runTurn(turn: RunnableTurn): Promise<void> {
+  const promise = runTurnInner(turn);
+  inFlightTurns.set(turn.id, {
+    promise,
+    conversationId: turn.conversationId,
+    organizationId: turn.organizationId,
+    claimedBy: turn.claimedBy ?? null,
+    attempts: turn.attempts,
+  });
+  try {
+    await promise;
+  } finally {
+    inFlightTurns.delete(turn.id);
+  }
+}
+
+/**
+ * Shutdown do processo: espera os turnos em execução terminarem (até
+ * `timeoutMs`) e devolve para READY os que não terminaram, para o próximo
+ * processo retomar no primeiro tick em vez de esperar o teto de PROCESSING.
+ * `attempts` sobe: na nova tentativa o motor confere se a anterior já tinha
+ * respondido e não responde duas vezes.
+ */
+export async function drainInFlightTurns(
+  timeoutMs: number,
+): Promise<{ inFlight: number; released: number }> {
+  clearFastPathTimers();
+  const pending = [...inFlightTurns.values()].map((t) => t.promise);
+  if (pending.length === 0) return { inFlight: 0, released: 0 };
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    Promise.allSettled(pending),
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, timeoutMs);
+      timer.unref?.();
+    }),
+  ]);
+  if (timer) clearTimeout(timer);
+
+  let released = 0;
+  for (const [turnId, t] of [...inFlightTurns.entries()]) {
+    try {
+      const ok = await requeueProcessingTurn({
+        where: {
+          id: turnId,
+          organizationId: t.organizationId,
+          ...(t.claimedBy ? { claimedBy: t.claimedBy } : {}),
+        },
+        conversationId: t.conversationId,
+        data: {
+          attempts: t.attempts + 1,
+          lastError: "shutdown: processo encerrado no meio do turno",
+        },
+      });
+      if (ok) released += 1;
+    } catch (err) {
+      log.error(
+        { turnId, err: err instanceof Error ? err.message : String(err) },
+        "[ai-turn] devolver turno no shutdown falhou",
+      );
+    }
+  }
+  logTurn("drained", { inFlight: pending.length, released });
+  return { inFlight: pending.length, released };
+}
+
+async function runTurnInner(turn: RunnableTurn): Promise<void> {
   const startedAt = Date.now();
   const messageIds = readMessageIds(turn.messageIds);
 
@@ -903,18 +1069,13 @@ export async function failOrRetryTurn(
     return "FAILED";
   }
 
-  await prismaBase.conversationTurn.updateMany({
-    where: { id: turnId, organizationId, status: "PROCESSING" },
-    data: {
-      status: "READY",
-      attempts,
-      lastError: error.slice(0, 2000),
-      claimedBy: null,
-      claimedAt: null,
-      // Volta a ser um turno acumulando: se o cliente escrever de novo
-      // antes do retry, a mensagem entra neste turno em vez de abrir outro.
-      openKey: turn.conversationId,
-    },
+  // Volta a ser um turno acumulando: se o cliente escrever de novo antes do
+  // retry, a mensagem entra neste turno em vez de abrir outro (salvo se ele
+  // já abriu um — ver `requeueProcessingTurn`).
+  await requeueProcessingTurn({
+    where: { id: turnId, organizationId },
+    conversationId: turn.conversationId,
+    data: { attempts, lastError: error.slice(0, 2000) },
   });
   logTurn("requeued", { turnId, attempts, error });
   return "READY";

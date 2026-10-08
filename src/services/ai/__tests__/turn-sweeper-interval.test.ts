@@ -15,6 +15,9 @@ vi.mock("@/lib/prisma-base", () => ({
 }));
 vi.mock("@/services/ai/turn-manager", () => ({
   claimTurn: vi.fn(),
+  expireTurn: vi.fn(),
+  isTurnExpired: () => false,
+  requeueProcessingTurn: vi.fn(),
   isTurnManagerEnabled: () => true,
   isTurnDue: () => true,
   promoteTurnToReady: vi.fn(),

@@ -371,7 +371,9 @@ import {
   buildAggregatedText,
   claimTurn,
   completeTurn,
+  drainInFlightTurns,
   invalidateOpenTurns,
+  runTurn,
   isTurnDue,
   onInboundMessageForAi,
   promoteTurnToReady,
@@ -774,6 +776,162 @@ describe("resiliência", () => {
     await sweepConversationTurns();
     expect(turns.get(turnId)!.status).toBe("COMPLETED");
     expect(maybeReplyAsAIAgent).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("recuperação depois de deploy (turnos órfãos)", () => {
+  it("órfão em PROCESSING com turno novo já aberto na conversa: volta sem a sentinela e os dois rodam, um por vez", async () => {
+    await ingest("m1", "Oi");
+    const orphan = firstTurn().id;
+    vi.advanceTimersByTime(1500);
+    await promoteTurnToReady(orphan, ORG);
+    await claimTurn(orphan, ORG, "worker-morto");
+
+    // O cliente escreve de novo enquanto o processo dono do órfão já morreu.
+    vi.advanceTimersByTime(1000);
+    await ingest("m2", "alguém aí?");
+    const sibling = [...turns.values()].find((t) => t.id !== orphan)!.id;
+    expect(turns.get(sibling)!.openKey).toBe(CONV);
+
+    vi.advanceTimersByTime(250_000);
+    // Antes: o UPDATE do órfão gravava a sentinela, estourava o UNIQUE e o
+    // tick inteiro caía sem recuperar nada.
+    const res = await sweepConversationTurns({ limit: 10 });
+    expect(res.errors).toBe(0);
+    expect(res.reclaimed).toBe(1);
+
+    // O turno seguinte é despachado em segundo plano quando o órfão termina.
+    await vi.waitFor(() => {
+      expect(turns.get(orphan)!.status).toBe("COMPLETED");
+      expect(turns.get(sibling)!.status).toBe("COMPLETED");
+    });
+    const texts = maybeReplyAsAIAgent.mock.calls.map((c) => c[0].userMessage);
+    expect(texts).toEqual(["Oi", "alguém aí?"]);
+  });
+
+  it("um turno com erro não impede o tick de recuperar os outros", async () => {
+    await ingest("m1", "Oi");
+    const broken = firstTurn().id;
+    addMessage("m2", "boa tarde");
+    await appendToOpenTurn({
+      conversationId: "conv-2",
+      contactId: "contact-2",
+      messageId: "m2",
+      userMessage: "boa tarde",
+      channel: "meta",
+    });
+    const healthy = [...turns.values()].find((t) => t.id !== broken)!.id;
+    vi.advanceTimersByTime(1500);
+    vi.spyOn(db.message, "findMany").mockRejectedValueOnce(new Error("conexão perdida"));
+
+    const res = await sweepConversationTurns({ limit: 10 });
+
+    expect(res.errors).toBe(1);
+    expect(turns.get(healthy)!.status).toBe("COMPLETED");
+    // O que falhou continua acumulando e entra no próximo tick.
+    expect(["RECEIVING", "STABILIZING"]).toContain(turns.get(broken)!.status);
+    await sweepConversationTurns({ limit: 10 });
+    expect(turns.get(broken)!.status).toBe("COMPLETED");
+  });
+
+  it("falha do agente com turno novo já aberto: o retry volta sem a sentinela, sem estourar o UNIQUE", async () => {
+    maybeReplyAsAIAgent.mockImplementationOnce(async () => {
+      await ingest("m2", "?");
+      throw new Error("modelo fora do ar");
+    });
+    await ingest("m1", "Oi");
+    const first = firstTurn().id;
+    vi.advanceTimersByTime(1500);
+
+    const res = await sweepConversationTurns({ limit: 10 });
+
+    expect(res.errors).toBe(0);
+    const row = turns.get(first)!;
+    expect(row.status).toBe("READY");
+    expect(row.attempts).toBe(1);
+    expect(row.openKey).toBeNull();
+    const novo = [...turns.values()].find((t) => t.id !== first)!;
+    expect(novo.openKey).toBe(CONV);
+  });
+
+  it("órfão com a última mensagem mais velha que o teto é descartado, não respondido", async () => {
+    await ingest("m1", "Oi");
+    const orphan = firstTurn().id;
+    vi.advanceTimersByTime(1500);
+    await promoteTurnToReady(orphan, ORG);
+    await claimTurn(orphan, ORG, "worker-morto");
+
+    vi.advanceTimersByTime(3 * 60 * 60 * 1000);
+    const res = await sweepConversationTurns({ limit: 10 });
+
+    expect(res.expired).toBe(1);
+    const row = turns.get(orphan)!;
+    expect(row.status).toBe("INVALIDATED");
+    expect(row.openKey).toBeNull();
+    expect(row.lastError).toContain("expired");
+    expect(maybeReplyAsAIAgent).not.toHaveBeenCalled();
+  });
+
+  it("turno acumulando que ninguém promoveu por horas também é descartado", async () => {
+    await ingest("m1", "Oi");
+    const id = firstTurn().id;
+
+    vi.advanceTimersByTime(3 * 60 * 60 * 1000);
+    const res = await sweepConversationTurns({ limit: 10 });
+
+    expect(res.expired).toBe(1);
+    expect(turns.get(id)!.status).toBe("INVALIDATED");
+    expect(maybeReplyAsAIAgent).not.toHaveBeenCalled();
+  });
+
+  it("teto de idade configurável (AI_TURN_MAX_AGE_MS)", async () => {
+    process.env.AI_TURN_MAX_AGE_MS = String(10 * 60 * 1000);
+    try {
+      await ingest("m1", "Oi");
+      const id = firstTurn().id;
+      vi.advanceTimersByTime(11 * 60 * 1000);
+      const res = await sweepConversationTurns({ limit: 10 });
+      expect(res.expired).toBe(1);
+      expect(turns.get(id)!.status).toBe("INVALIDATED");
+    } finally {
+      delete process.env.AI_TURN_MAX_AGE_MS;
+    }
+  });
+
+  it("shutdown: turno que não termina a tempo volta para READY e o próximo processo retoma", async () => {
+    let release: () => void = () => {};
+    maybeReplyAsAIAgent.mockImplementationOnce(
+      () => new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+    );
+    await ingest("m1", "Oi");
+    const id = firstTurn().id;
+    vi.advanceTimersByTime(1500);
+    await promoteTurnToReady(id, ORG);
+    const claimed = await claimTurn(id, ORG, "este-processo");
+    const running = runTurn(claimed!);
+
+    const drain = drainInFlightTurns(100);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(await drain).toEqual({ inFlight: 1, released: 1 });
+
+    const row = turns.get(id)!;
+    expect(row.status).toBe("READY");
+    expect(row.attempts).toBe(1);
+    expect(row.claimedBy).toBeNull();
+    expect(row.lastError).toContain("shutdown");
+
+    release();
+    await running;
+    // O processo novo pega o turno no primeiro tick.
+    const res = await sweepConversationTurns({ limit: 10 });
+    expect(res.dispatched).toBe(1);
+    expect(turns.get(id)!.status).toBe("COMPLETED");
+  });
+
+  it("shutdown sem turno em execução não espera", async () => {
+    expect(await drainInFlightTurns(60_000)).toEqual({ inFlight: 0, released: 0 });
   });
 });
 

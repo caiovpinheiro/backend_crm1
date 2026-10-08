@@ -13,6 +13,7 @@ import {
 import { withSystemContext } from "@/lib/webhook-context";
 import { processStoredMetaWebhookEvent } from "@/lib/meta-webhook/handler";
 import { flushStatusWrites } from "@/lib/status-write-buffer";
+import { drainInFlightTurns } from "@/services/ai/turn-manager";
 import { startAiTurnSweeper, stopAiTurnSweeper } from "@/services/ai/turn-sweeper";
 import { startListenSweeper, stopListenSweeper } from "@/services/ai-v2/listen";
 import {
@@ -103,10 +104,12 @@ export function startMetaWebhookWorker() {
     log.error({ err: err?.message ?? String(err) }, "Erro no worker meta-webhook");
   });
 
-  // Turn Manager (AI_TURN_MANAGER=1): tick que promove turnos vencidos e
-  // recupera PROCESSING travado. No-op com a flag desligada. É aqui porque
-  // este worker é quem ingere o inbound Meta — o turno nasce neste processo.
-  startAiTurnSweeper();
+  // Tick que promove turnos vencidos e recupera PROCESSING travado. Este
+  // worker ingere o inbound Meta, então o turno nasce aqui. Sobe já no boot
+  // (o motor v2 usa turnos com ou sem AI_TURN_MANAGER): sem isso, depois de
+  // um deploy os turnos órfãos esperavam o primeiro inbound para ter quem os
+  // recuperasse.
+  startAiTurnSweeper({ force: true });
   // Escutar a equipe: lê em lote as conversas das escutas ligadas.
   startListenSweeper();
   // Retenção diária de meta_webhook_events (só processados, janela por env).
@@ -127,6 +130,13 @@ function metaWebhookShutdownSteps(worker: Pick<Worker, "close">): ShutdownStep[]
         stopListenSweeper();
         stopDbRetentionSweeper();
       },
+    },
+    // Turnos da IA em execução: esperam até AI_TURN_SHUTDOWN_DRAIN_MS e os
+    // que não terminam voltam para READY, para o próximo processo retomar
+    // no 1º tick em vez de ficarem presos em PROCESSING.
+    {
+      name: "turnos",
+      run: () => drainInFlightTurns(envInt("AI_TURN_SHUTDOWN_DRAIN_MS", 7000)),
     },
     // Flush dos status bufferizados ANTES de fechar — o handler já respondeu 200
     // ("accepted") e a Meta não reenvia, então um status pendente se perderia.
