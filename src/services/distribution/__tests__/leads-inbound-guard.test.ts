@@ -75,7 +75,8 @@ vi.mock("@/services/distribution/engine", () => ({
   executeDistribution: (...a: unknown[]) => executeDistribution(...a),
 }));
 vi.mock("@/services/distribution/enabled", () => ({
-  isDistributionEnabled: (...a: unknown[]) => isDistributionEnabled(...a),
+  isDistributionEnabled: (...a: unknown[]) =>
+    (isDistributionEnabled as (...args: unknown[]) => unknown)(...a),
 }));
 vi.mock("@/services/distribution/pending-shared", () => ({
   ensureConversationInWaitingQueue: vi.fn(async () => {}),

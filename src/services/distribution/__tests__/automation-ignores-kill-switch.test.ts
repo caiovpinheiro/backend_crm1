@@ -52,7 +52,7 @@ vi.mock("../enabled", () => ({
 
 vi.mock("../responsibles", () => ({
   getDistributionResponsibles: (...a: unknown[]) =>
-    getDistributionResponsibles(...a),
+    (getDistributionResponsibles as (...args: unknown[]) => unknown)(...a),
 }));
 
 vi.mock("@/services/activity-log", () => ({

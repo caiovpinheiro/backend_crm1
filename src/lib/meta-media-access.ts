@@ -39,7 +39,9 @@ export const defaultMetaMediaLookup: MetaMediaLookup = {
         },
       },
     });
-    const ch = msg?.conversation?.channel;
+    const ch = (
+      msg as { conversation?: { channel?: MetaMediaChannel | null } | null } | null
+    )?.conversation?.channel;
     return ch ?? null;
   },
   async findContactAvatar(orgId, mediaUrl) {
