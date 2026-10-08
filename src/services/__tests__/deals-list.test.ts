@@ -78,11 +78,40 @@ function withOrg<T>(fn: () => Promise<T>): Promise<T> {
   ) as Promise<T>;
 }
 
+function isSql(value: unknown): value is Prisma.Sql {
+  return (
+    !!value &&
+    typeof value === "object" &&
+    Array.isArray((value as Prisma.Sql).strings) &&
+    Array.isArray((value as Prisma.Sql).values)
+  );
+}
+
+/** Junta o SQL do jeito que o Prisma expande `Prisma.sql` aninhado. */
+function flattenParts(parts: readonly string[], vals: readonly unknown[]): { text: string; values: unknown[] } {
+  let text = "";
+  const values: unknown[] = [];
+  parts.forEach((part, i) => {
+    text += part;
+    if (i >= vals.length) return;
+    const v = vals[i];
+    if (isSql(v)) {
+      const nested = flattenParts(v.strings, v.values);
+      text += nested.text;
+      values.push(...nested.values);
+      return;
+    }
+    text += "?";
+    values.push(v);
+  });
+  return { text, values };
+}
+
 function sqlOf(call: unknown[]): { text: string; values: unknown[] } {
   const [first, ...rest] = call as [TemplateStringsArray | Prisma.Sql, ...unknown[]];
-  if (Array.isArray(first)) return { text: first.join("?"), values: rest };
+  if (Array.isArray(first)) return flattenParts(first, rest);
   const sql = first as Prisma.Sql;
-  return { text: sql.strings.join("?"), values: [...sql.values] };
+  return flattenParts(sql.strings, sql.values);
 }
 
 let rows: Row[] = [];
@@ -90,9 +119,15 @@ let rows: Row[] = [];
 beforeEach(() => {
   rows = [];
   h.queryRaw.mockReset().mockResolvedValue([]);
-  h.dealFindMany.mockReset().mockImplementation(async (args: { skip?: number; take?: number }) =>
-    rows.slice(args.skip ?? 0, (args.skip ?? 0) + (args.take ?? rows.length)),
-  );
+  h.dealFindMany.mockReset().mockImplementation(async (args: {
+    skip?: number;
+    take?: number;
+    where?: { id?: { in?: string[] } };
+  }) => {
+    const only = args.where?.id?.in;
+    const base = only ? rows.filter((r) => only.includes(r.id)) : rows;
+    return base.slice(args.skip ?? 0, (args.skip ?? 0) + (args.take ?? base.length));
+  });
   h.dealCount.mockReset().mockImplementation(async () => rows.length);
 });
 
@@ -109,14 +144,14 @@ describe("lista de negócios — lastInteractionAt em coluna pronta (K1)", () =>
   it("contatos preenchidos: nenhuma consulta a `conversations`", async () => {
     rows = [
       row("d1", 10, "c1", 50), // mensagem depois do deal → vale a mensagem
-      row("d2", 90, "c2", 20), // deal mexido depois → vale o deal
+      row("d2", 90, "c2", 20), // deal mexido depois → continua a mensagem
       row("d3", 30, null, null), // sem contato → o deal
     ];
     const res = await withOrg(() => getDeals({}));
     expect(h.queryRaw).not.toHaveBeenCalled();
     expect(res.items.map((d) => d.lastInteractionAt)).toEqual([
       at(50).toISOString(),
-      at(90).toISOString(),
+      at(20).toISOString(),
       at(30).toISOString(),
     ]);
   });
@@ -231,5 +266,42 @@ describe("lista de negócios — paginação sem COUNT obrigatório (K5)", () =>
       { stage: { pipelineId: { in: ["p1"] } } },
     ]);
     expect((h.dealCount.mock.calls[0]![0] as { where: unknown }).where).toEqual(where);
+  });
+});
+
+describe("lista de negócios — sort lastInteraction no recorte inteiro", () => {
+  it("mais antiga ordena pela mensagem, não pelo updatedAt do card, e a coluna mostra a mesma hora", async () => {
+    // d-new: card tocado agora, mensagem antiga. d-old: card parado, mensagem de hoje.
+    rows = [
+      row("d-new", 500, "c-new", 10),
+      row("d-old", 20, "c-old", 400),
+      row("d-silent", 30, null, null),
+    ];
+    h.queryRaw.mockResolvedValueOnce([{ id: "d-new" }, { id: "d-silent" }, { id: "d-old" }]);
+    const res = await withOrg(() =>
+      getDeals({ sort: "lastInteraction", direction: "asc", perPage: 20 }),
+    );
+    const { text, values } = sqlOf(h.queryRaw.mock.calls[0]!);
+    expect(text).toContain('COALESCE(\n      ct."lastMessageAt",\n      fb.last_at,\n      d."updatedAt"\n    ) ASC');
+    expect(text).not.toContain("GREATEST");
+    expect(text).toContain("OFFSET ?");
+    expect(text).toContain("LIMIT ?");
+    expect(values).toContain(0);
+    expect(values).toContain(21);
+    expect(res.items.map((d) => d.id)).toEqual(["d-new", "d-silent", "d-old"]);
+    expect(res.items.map((d) => d.lastInteractionAt)).toEqual([
+      at(10).toISOString(),
+      at(30).toISOString(),
+      at(400).toISOString(),
+    ]);
+  });
+
+  it("mais nova pede DESC na mesma expressão", async () => {
+    rows = [row("d1", 10, "c1", 50)];
+    h.queryRaw.mockResolvedValueOnce([{ id: "d1" }]);
+    await withOrg(() => getDeals({ sort: "lastInteraction", direction: "desc" }));
+    const { text } = sqlOf(h.queryRaw.mock.calls[0]!);
+    expect(text).toContain(") DESC");
+    expect(text).not.toContain("GREATEST");
   });
 });

@@ -333,18 +333,20 @@ export type GetDealsParams = {
   updatedSince?: Date;
   /**
    * `lastInteraction` ordena o recorte inteiro (não a página) pelo mesmo
-   * instante que a coluna da lista mostra, e só então aplica skip/take.
-   * Ausente = `updatedAt` desc, como sempre.
+   * instante que a coluna da lista mostra — a última mensagem de chat do
+   * contato; sem mensagem, o `updatedAt` do negócio — e só então aplica
+   * skip/take. Ausente = `updatedAt` desc, como sempre.
    */
   sort?: "lastInteraction";
   direction?: "asc" | "desc";
 };
 
 /**
- * Página de ids já na ordem da coluna "Última interação":
- * `GREATEST(deal.updatedAt, última mensagem do contato)`. A mensagem é
- * `contacts.lastMessageAt` e, só se estiver NULL, o fallback de
- * `conversations` — o mesmo de `attachLastInteractionAt`. O `ORDER BY`
+ * Página de ids já na ordem da coluna "Última interação": última mensagem
+ * de chat do contato (`contacts.lastMessageAt` e, só se estiver NULL, o
+ * fallback de `conversations`). Sem mensagem, cai no `updatedAt` do deal.
+ * O `updatedAt` não entra quando já existe mensagem: etapa, campo ou dono
+ * mexidos ontem não podem esconder a conversa mais antiga. O `ORDER BY`
  * roda antes do LIMIT, então a página 1 no sentido antigo é o mais
  * antigo do filtro, não o mais antigo dos que já estavam na tela.
  */
@@ -360,9 +362,10 @@ async function pageIdsByLastInteraction(
   const orgId = getOrgIdOrThrow();
   const dir = direction === "asc" ? Prisma.raw("ASC") : Prisma.raw("DESC");
   const orderByMessage = Prisma.sql`
-    ORDER BY GREATEST(
-      d."updatedAt",
-      COALESCE(ct."lastMessageAt", fb.last_at, d."updatedAt")
+    ORDER BY COALESCE(
+      ct."lastMessageAt",
+      fb.last_at,
+      d."updatedAt"
     ) ${dir}, d.id ASC
     OFFSET ${skip}
     LIMIT ${take}
@@ -670,10 +673,12 @@ async function loadConversationLastAtFallback(
 }
 
 /**
- * Última interação do negócio na lista: o mais recente entre a última
- * alteração do próprio deal (movimentação de etapa, edição) e a última
- * MENSAGEM de chat do contato (`contacts.lastMessageAt`, o mesmo sinal do
- * sort `lastInteraction` do board). Sem mensagem, fica o `updatedAt` do deal.
+ * Última interação do negócio na lista: a última MENSAGEM de chat do
+ * contato (`contacts.lastMessageAt`, o mesmo sinal do sort
+ * `lastInteraction` do board). Sem mensagem, fica o `updatedAt` do deal.
+ * Alterar o card não substitui a mensagem — senão "mais antiga" só
+ * reordena a hora do último toque e a página continua parecendo a lista
+ * sem ordenação.
  *
  * O contato já vem no `include` da lista, então a página não consulta
  * `conversations`. Antes: um `GROUP BY "contactId"` com
@@ -712,7 +717,7 @@ async function attachLastInteractionAt<
   return items.map((deal) => {
     const dealAt = deal.updatedAt.getTime();
     const convAt = deal.contactId ? lastByContact.get(deal.contactId) : undefined;
-    const last = convAt != null && convAt > dealAt ? convAt : dealAt;
+    const last = convAt != null ? convAt : dealAt;
     return { ...deal, lastInteractionAt: new Date(last).toISOString() };
   });
 }
