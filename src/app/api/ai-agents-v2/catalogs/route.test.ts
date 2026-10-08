@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   userFindMany: vi.fn().mockResolvedValue([]),
   aIAgentConfigFindMany: vi.fn().mockResolvedValue([]),
   messageTemplateFindMany: vi.fn().mockResolvedValue([]),
+  whatsappFlowDefinitionFindMany: vi.fn().mockResolvedValue([]),
   aIAgentKnowledgeDocFindMany: vi.fn().mockResolvedValue([]),
   channelFindMany: vi.fn().mockResolvedValue([]),
   pipelineFindMany: vi.fn().mockResolvedValue([]),
@@ -29,6 +30,7 @@ vi.mock("@/lib/prisma", () => ({
     user: { findMany: mocks.userFindMany },
     aIAgentConfig: { findMany: mocks.aIAgentConfigFindMany },
     messageTemplate: { findMany: mocks.messageTemplateFindMany },
+    whatsappFlowDefinition: { findMany: mocks.whatsappFlowDefinitionFindMany },
     aIAgentKnowledgeDoc: { findMany: mocks.aIAgentKnowledgeDocFindMany },
     channel: { findMany: mocks.channelFindMany },
     pipeline: { findMany: mocks.pipelineFindMany },
@@ -81,5 +83,23 @@ describe("GET /api/ai-agents-v2/catalogs", () => {
       { id: "cf-deal", name: "Plano", entity: "deal" },
       { id: "cf-upper", name: "Segmento", entity: "DEAL" },
     ]);
+  });
+
+  it("lista flows publicados com metaFlowId e ignora os sem id da Meta", async () => {
+    mocks.whatsappFlowDefinitionFindMany.mockResolvedValue([
+      { id: "f1", name: "Cadastro", metaFlowId: "2431" },
+      { id: "f2", name: "Sem meta", metaFlowId: "  " },
+      { id: "f3", name: "Outro", metaFlowId: null },
+    ]);
+    const { GET } = await import("./route");
+    const res = await GET();
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { messageFlows: Array<{ id: string; name: string }> };
+    expect(body.messageFlows).toEqual([{ id: "f1", name: "Cadastro" }]);
+    expect(mocks.whatsappFlowDefinitionFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { organizationId: "org-1", status: "PUBLISHED" },
+      }),
+    );
   });
 });
