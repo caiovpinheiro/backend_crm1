@@ -918,6 +918,96 @@ describe("board: SQL gerado", () => {
     expect(sql.values).toEqual(["OPEN", "in"]);
   });
 
+  it("filtro de direção com backfill em andamento: tudo vira SQL da própria consulta, sem pré-resolver ids (L8)", () => {
+    const where = {
+      AND: [
+        { status: "OPEN" },
+        {
+          OR: [
+            { contact: { is: { lastMessageDirection: "in" } } },
+            {
+              contact: {
+                is: {
+                  AND: [
+                    { lastMessageAt: null },
+                    {
+                      conversations: {
+                        some: { status: { not: "RESOLVED" }, lastMessageDirection: "in" },
+                      },
+                    },
+                    {
+                      conversations: {
+                        none: { status: { not: "RESOLVED" }, lastMessageDirection: "out" },
+                      },
+                    },
+                  ],
+                },
+              },
+            },
+            { contactId: { in: ["c-closed-1", "c-closed-2"] } },
+          ],
+        },
+      ],
+    } as Prisma.DealWhereInput;
+    const sql = translateDealWhereToSql(where);
+    // Antes: `conversations` e `lastMessageAt` fora do tradutor → null → o board
+    // pré-resolvia ids numa consulta à parte (`deal.findMany(select)`).
+    expect(sql).not.toBeNull();
+    const exists =
+      'EXISTS (SELECT 1 FROM contacts ct WHERE ct.id = d."contactId" AND ct."organizationId" = d."organizationId" AND ';
+    expect((sql as Prisma.Sql).strings.join("?")).toBe(
+      '(d."status" = ?::"DealStatus" AND (' +
+        `${exists}ct."lastMessageDirection" = ?)` +
+        ` OR ${exists}(ct."lastMessageAt" IS NULL` +
+        ' AND EXISTS (SELECT 1 FROM conversations cv WHERE cv."contactId" = ct.id AND (cv.status <> \'RESOLVED\' AND cv."lastMessageDirection" = ?))' +
+        ' AND NOT EXISTS (SELECT 1 FROM conversations cv WHERE cv."contactId" = ct.id AND (cv.status <> \'RESOLVED\' AND cv."lastMessageDirection" = ?))))' +
+        ' OR d."contactId" = ANY(?)))',
+    );
+    expect((sql as Prisma.Sql).values).toEqual([
+      "OPEN",
+      "in",
+      "in",
+      "out",
+      ["c-closed-1", "c-closed-2"],
+    ]);
+  });
+
+  it("filtro de direção, caminho antigo puro (coluna indisponível) também vira SQL", () => {
+    const sql = translateDealWhereToSql({
+      OR: [
+        {
+          contact: {
+            is: {
+              AND: [
+                { conversations: { some: { status: { not: "RESOLVED" }, lastMessageDirection: "out" } } },
+                { conversations: { none: { status: { not: "RESOLVED" }, lastMessageDirection: "in" } } },
+              ],
+            },
+          },
+        },
+        { contactId: { in: [] } },
+      ],
+    } as Prisma.DealWhereInput);
+    expect(sql).not.toBeNull();
+    expect((sql as Prisma.Sql).strings.join("?")).toContain("OR FALSE)");
+    expect((sql as Prisma.Sql).values).toEqual(["out", "in"]);
+  });
+
+  it("conversas do contato: só status RESOLVED/não-RESOLVED e direção in/out traduzem (resto → fallback)", () => {
+    const t = (c: unknown) =>
+      translateDealWhereToSql({ contact: { is: { conversations: c } } } as Prisma.DealWhereInput);
+    expect(t({ some: { status: "RESOLVED" } })).not.toBeNull();
+    expect(t({ some: { status: "RESOLVED", lastMessageDirection: "in" } })).not.toBeNull();
+    expect(t({ some: { status: "OPEN" } })).toBeNull();
+    expect(t({ some: { status: { not: "OPEN" } } })).toBeNull();
+    expect(t({ some: { lastMessageDirection: "sideways" } })).toBeNull();
+    expect(t({ some: { lastInboundAt: { gte: new Date() } } })).toBeNull();
+    expect(t({ every: { status: "RESOLVED" } })).toBeNull();
+    expect(
+      translateDealWhereToSql({ contact: { is: { lastMessageAt: { gte: new Date(0) } } } }),
+    ).not.toBeNull();
+  });
+
   it("consulta ranqueada: ROW_NUMBER por etapa, org/etapas/limite como parâmetros", () => {
     const sql = buildRankedBoardDealsSql({
       orgId: "org-x",

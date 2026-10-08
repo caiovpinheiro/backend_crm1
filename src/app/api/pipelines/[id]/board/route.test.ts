@@ -53,6 +53,8 @@ const h = vi.hoisted(() => {
       down: false,
     },
     pg: [] as string[],
+    /** Backfill de `contacts.lastMessageAt` em andamento (a sonda de prontidão diz "pendente"). */
+    contactsPending: false,
     /** Ids pedidos em cada `deal.findMany` com include (hidratação dos cards). */
     includeIds: [] as string[][],
     /** Linhas devolvidas pelo "banco" na requisição corrente. */
@@ -455,7 +457,9 @@ function emulateRaw(text: string, values: unknown[]): Row[] {
   }
   if (text.includes("FROM deal_products")) return [];
   // Organização já com `contacts.lastMessageDirection` preenchida.
-  if (text.includes("AS pending")) return [{ pending: false }];
+  if (text.includes("AS pending")) return [{ pending: h.contactsPending }];
+  // Contatos "só com conversas encerradas" do caminho antigo da direção: nenhum na fixture.
+  if (text.includes("JOIN LATERAL") && text.includes("last.d")) return [];
   if (text.includes("per_contact AS")) {
     // Prévia do card numa consulta: não lidas/canal repetidos em cada linha.
     return (values[0] as string[]).flatMap(previewRowsFor);
@@ -518,6 +522,7 @@ vi.mock("@/lib/prisma", () => ({
 }));
 
 import { GET, POST } from "@/app/api/pipelines/[id]/board/route";
+import { resetContactLastMessageReadyForTests } from "@/services/kanban-filters";
 
 type Measure = {
   scenario: string;
@@ -711,6 +716,61 @@ describe("board sintético 7×200 (benchmark local)", () => {
     // contagem à parte.
     expect(m.pgLabels["deal.findMany(select)"]).toBeUndefined();
     expect(m.pgLabels["deal.groupBy"]).toBeUndefined();
+  }, 60_000);
+
+  it("POST 200/etapa com filtro 'Mensagem recebida' e backfill em andamento — erro de cache (L8)", async () => {
+    // Org com contatos por preencher: coluna onde existe + caminho antigo só
+    // para a coluna NULL. Antes (tudo-ou-nada) o where saía do tradutor e o
+    // board pré-resolvia ids numa consulta à parte.
+    resetContactLastMessageReadyForTests();
+    h.contactsPending = true;
+    try {
+      const where = {
+        AND: [
+          OPEN,
+          {
+            OR: [
+              { contact: { is: { lastMessageDirection: "in" } } },
+              {
+                contact: {
+                  is: {
+                    AND: [
+                      { lastMessageAt: null },
+                      {
+                        conversations: {
+                          some: { status: { not: "RESOLVED" }, lastMessageDirection: "in" },
+                        },
+                      },
+                      {
+                        conversations: {
+                          none: { status: { not: "RESOLVED" }, lastMessageDirection: "out" },
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+              { contactId: { in: [] } },
+            ],
+          },
+        ],
+      };
+      const m = await measure("POST direção=in 200/etapa, backfill em andamento (miss)", where, () =>
+        POST(postReq({ perStage: PER_STAGE, filters: { lastMessageDirection: "in" } }), params()), {
+        warm: false,
+      });
+      expect(m.cards).toBeGreaterThan(0);
+      // Tudo na consulta ranqueada: sem pré-resolver ids, sem contagem à parte.
+      expect(m.pgLabels["deal.findMany(select)"]).toBeUndefined();
+      expect(m.pgLabels["deal.groupBy"]).toBeUndefined();
+      expect(m.pgLabels["raw:ranked"]).toBe(1);
+      // Etapas + janela + hidratação + produtos + prévia + avatar + a lista dos
+      // "só encerradas" (a sonda fica em memória por 1 min).
+      expect(m.pgCalls).toBe(7);
+    } finally {
+      h.contactsPending = false;
+      resetContactLastMessageReadyForTests();
+    }
   }, 60_000);
 
   it("GET 10/etapa (Kanban) — erro e acerto", async () => {

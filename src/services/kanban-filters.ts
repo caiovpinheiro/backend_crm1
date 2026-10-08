@@ -61,36 +61,45 @@ export async function findContactIdsByPhoneDigits(
 }
 
 /**
- * A organização já tem `contacts.lastMessageAt` / `lastMessageDirection`
- * preenchidas (backfill `scripts/backfill-contacts-last-message.mjs`)?
+ * Estado do preenchimento de `contacts.lastMessageAt` / `lastMessageDirection`
+ * (backfill `scripts/backfill-contacts-last-message.mjs`) numa organização:
  *
- * "Pronta" = nenhuma conversa COM mensagem de chat cujo contato ainda esteja
- * com a coluna NULL. "Com mensagem de chat" = `conversations.lastMessageAt`
- * preenchido OU, enquanto o backfill da própria conversa não passou, uma
- * mensagem do recorte em `messages` — sem isso, logo depois do deploy (as
- * duas colunas ainda vazias no histórico) a organização pareceria pronta e o
- * filtro só acharia quem escreveu depois do deploy.
+ *   - `ready`: nenhuma conversa COM mensagem de chat tem contato com a coluna
+ *     NULL. O filtro de direção é um predicado na PK do contato, dentro da
+ *     consulta do board (sem pré-consulta, sem lista de ids).
+ *   - `partial`: ainda existe contato por preencher. O filtro usa a coluna
+ *     onde ela existe e o caminho antigo SÓ para os contatos com a coluna
+ *     NULL (ver `buildLastDirectionConditions`). Um contato retardatário não
+ *     põe mais a organização inteira no caminho caro.
+ *   - `unavailable`: a sonda falhou (migration pendente, banco fora). A coluna
+ *     pode nem existir: caminho antigo puro, sem tocar nela.
+ *
+ * "Com mensagem de chat" = `conversations.lastMessageAt` preenchido OU,
+ * enquanto o backfill da própria conversa não passou, uma mensagem do recorte
+ * em `messages` — sem isso, logo depois do deploy (as duas colunas ainda
+ * vazias no histórico) a organização pareceria pronta e o filtro só acharia
+ * quem escreveu depois do deploy.
  *
  * Depois de pronta o código mantém as colunas a cada mensagem
- * (`touchContactLastMessage`), então o estado não volta: guardamos `true`
- * pela vida do processo. Enquanto não está pronta, reconsulta no máximo uma
- * vez por minuto por organização — o filtro de direção fica no caminho antigo
- * (correto, só mais caro) e troca sozinho quando o backfill termina.
+ * (`touchContactLastMessage`), então o estado não volta: guardamos `ready`
+ * pela vida do processo. Fora disso reconsulta no máximo uma vez por minuto
+ * por organização, e requisições simultâneas dividem a mesma sonda.
  *
  * A sonda para na primeira linha pendente; com tudo preenchido percorre as
  * conversas da organização uma vez por processo (e só olha `messages` das
  * conversas cujo contato segue NULL, que são as sem mensagem de chat).
  */
-const CONTACT_LAST_MESSAGE_RECHECK_MS = 60_000;
-const contactLastMessageReady = new Map<string, true | number>();
+export type ContactLastMessageState = "ready" | "partial" | "unavailable";
 
-export async function isContactLastMessageReady(orgId: string): Promise<boolean> {
-  const known = contactLastMessageReady.get(orgId);
-  if (known === true) return true;
-  if (typeof known === "number" && Date.now() - known < CONTACT_LAST_MESSAGE_RECHECK_MS) {
-    return false;
-  }
-  let pending = true;
+const CONTACT_LAST_MESSAGE_RECHECK_MS = 60_000;
+const contactLastMessageStates = new Map<
+  string,
+  "ready" | { state: Exclude<ContactLastMessageState, "ready">; at: number }
+>();
+const contactLastMessageProbes = new Map<string, Promise<ContactLastMessageState>>();
+
+async function probeContactLastMessage(orgId: string): Promise<ContactLastMessageState> {
+  let state: ContactLastMessageState;
   try {
     const rows = await prisma.$queryRaw<{ pending: boolean }[]>`
       SELECT EXISTS (
@@ -109,24 +118,47 @@ export async function isContactLastMessageReady(orgId: string): Promise<boolean>
           )
       ) AS pending
     `;
-    pending = rows[0]?.pending !== false;
+    state = rows[0]?.pending === false ? "ready" : "partial";
   } catch {
     // Coluna ainda não existe (migration pendente) ou banco fora: caminho antigo.
-    pending = true;
+    state = "unavailable";
   }
-  contactLastMessageReady.set(orgId, pending ? Date.now() : true);
-  return !pending;
+  contactLastMessageStates.set(
+    orgId,
+    state === "ready" ? "ready" : { state, at: Date.now() },
+  );
+  return state;
+}
+
+export async function getContactLastMessageState(
+  orgId: string,
+): Promise<ContactLastMessageState> {
+  const known = contactLastMessageStates.get(orgId);
+  if (known === "ready") return "ready";
+  if (known && Date.now() - known.at < CONTACT_LAST_MESSAGE_RECHECK_MS) return known.state;
+  let probe = contactLastMessageProbes.get(orgId);
+  if (!probe) {
+    probe = probeContactLastMessage(orgId).finally(() => {
+      contactLastMessageProbes.delete(orgId);
+    });
+    contactLastMessageProbes.set(orgId, probe);
+  }
+  return probe;
+}
+
+/** A organização inteira já tem a coluna do contato preenchida? */
+export async function isContactLastMessageReady(orgId: string): Promise<boolean> {
+  return (await getContactLastMessageState(orgId)) === "ready";
 }
 
 /** Só para testes: esquece o que já foi sondado. */
 export function resetContactLastMessageReadyForTests(): void {
-  contactLastMessageReady.clear();
+  contactLastMessageStates.clear();
+  contactLastMessageProbes.clear();
 }
 
 /**
- * CAMINHO ANTIGO do filtro de direção (organização ainda sem
- * `contacts.lastMessageDirection` preenchida — ver
- * `isContactLastMessageReady`).
+ * CAMINHO ANTIGO do filtro de direção.
  *
  * Contatos SEM conversa ativa cuja conversa mais recente terminou com
  * mensagem na direção pedida ("in" = do cliente). Complementa o filtro
@@ -134,15 +166,23 @@ export function resetContactLastMessageReadyForTests(): void {
  * ativa é resolvido no próprio where. Só contatos com negócio entram.
  * Teto de 20 mil ids para o IN não estourar o limite de parâmetros.
  *
+ * `onlyColumnNull`: só contatos com `contacts.lastMessageAt` NULL (os demais
+ * já respondem pela coluna). Com o backfill avançando a lista encolhe até
+ * ficar vazia.
+ *
  * Custo em produção (05/10): 989 ms por chamada (LATERAL por contato da
  * organização inteira) e até 20 mil ids devolvidos ao Node.
  */
 const CLOSED_ONLY_DIRECTION_CAP = 20000;
 export async function findClosedOnlyContactIdsByLastDirection(
   dir: "in" | "out",
+  opts: { onlyColumnNull?: boolean } = {},
 ): Promise<string[]> {
   const orgId = getRequestContext()?.organizationId;
   if (!orgId) return [];
+  const columnNull = opts.onlyColumnNull
+    ? Prisma.sql`AND c."lastMessageAt" IS NULL`
+    : Prisma.empty;
   const rows = await prisma.$queryRaw<{ id: string }[]>`
     SELECT c.id
     FROM contacts c
@@ -154,6 +194,7 @@ export async function findClosedOnlyContactIdsByLastDirection(
       LIMIT 1
     ) last ON true
     WHERE c."organizationId" = ${orgId}
+      ${columnNull}
       AND last.d = ${dir}
       AND EXISTS (
         SELECT 1 FROM deals x
@@ -169,6 +210,92 @@ export async function findClosedOnlyContactIdsByLastDirection(
     LIMIT ${CLOSED_ONLY_DIRECTION_CAP}
   `;
   return rows.map((r) => r.id);
+}
+
+/**
+ * Condições da direção da última mensagem (sem `conversationStatus`), por
+ * estado da coluna do contato. Cada elemento entra em AND no where do board.
+ */
+async function buildLastDirectionConditions(
+  dir: "in" | "out",
+  orgId: string | null | undefined,
+): Promise<Prisma.DealWhereInput[]> {
+  const state = orgId ? await getContactLastMessageState(orgId) : "unavailable";
+
+  if (state === "ready") {
+    // Direção da ÚLTIMA mensagem de chat do contato, em coluna pronta
+    // (`contacts.lastMessageDirection`, gravada junto de
+    // `conversations.lastMessageAt`). Um predicado na PK do contato: o
+    // board traduz para EXISTS no SQL (`translateContactFilter`), sem
+    // pré-consulta nem lista de ids.
+    //
+    // Diferença para o caminho antigo: vale a última mensagem de chat do
+    // contato em QUALQUER conversa. Antes: com conversa ativa, "tem uma ativa
+    // na direção pedida e nenhuma ativa na oposta" (contato com duas
+    // conversas ativas em direções opostas não casava com nenhum dos dois
+    // filtros; agora casa com a mais recente); só com encerradas, a conversa
+    // de `updatedAt` mais recente (que muda com atribuição e encerramento,
+    // não só com mensagem). Ligação (`whatsapp_call`) e evento não contam
+    // como mensagem.
+    return [{ contact: { is: { lastMessageDirection: dir } } }];
+  }
+
+  // Direção da ÚLTIMA mensagem do contato. Antes bastava "alguma conversa"
+  // com a direção pedida: contato com conversa antiga em que o cliente falou
+  // por último aparecia em "Mensagem recebida" mesmo com a conversa atual
+  // respondida — o filtro mostrava recebidas E enviadas.
+  //
+  // Com conversa ativa: só as não encerradas contam (tem uma com a direção
+  // pedida e nenhuma com a oposta).
+  // Só com conversas encerradas: vale a mais recente.
+  const activeOnly: Prisma.ContactWhereInput[] = [
+    {
+      conversations: {
+        some: { status: { not: "RESOLVED" }, lastMessageDirection: dir },
+      },
+    },
+    {
+      conversations: {
+        none: {
+          status: { not: "RESOLVED" },
+          lastMessageDirection: dir === "in" ? "out" : "in",
+        },
+      },
+    },
+  ];
+
+  if (state === "partial") {
+    // Backfill em andamento: a coluna responde por quem já está preenchido e
+    // o caminho antigo só vale para o contato com a coluna NULL. Todos os
+    // ramos viram SQL no board (`translateContactWhere`); só a lista de
+    // contatos "só encerradas" ainda é pré-consulta, e ela encolhe com o
+    // backfill.
+    return [
+      {
+        OR: [
+          { contact: { is: { lastMessageDirection: dir } } },
+          { contact: { is: { AND: [{ lastMessageAt: null }, ...activeOnly] } } },
+          {
+            contactId: {
+              in: await findClosedOnlyContactIdsByLastDirection(dir, {
+                onlyColumnNull: true,
+              }),
+            },
+          },
+        ],
+      },
+    ];
+  }
+
+  // `unavailable`: a coluna pode nem existir — caminho antigo puro.
+  return [
+    {
+      OR: [
+        { contact: { is: { AND: activeOnly } } },
+        { contactId: { in: await findClosedOnlyContactIdsByLastDirection(dir) } },
+      ],
+    },
+  ];
 }
 
 /**
@@ -1253,63 +1380,10 @@ export async function buildDealWhereFromFilters(
     if (filters.conversationStatus === "open") convSome.status = { not: "RESOLVED" };
     else if (filters.conversationStatus === "closed") convSome.status = "RESOLVED";
     const dir = filters.lastMessageDirection;
-    const orgIdForDir = getRequestContext()?.organizationId;
-    if (
-      (dir === "in" || dir === "out") &&
-      !filters.conversationStatus &&
-      orgIdForDir &&
-      (await isContactLastMessageReady(orgIdForDir))
-    ) {
-      // Direção da ÚLTIMA mensagem de chat do contato, em coluna pronta
-      // (`contacts.lastMessageDirection`, gravada junto de
-      // `conversations.lastMessageAt`). Um predicado na PK do contato: o
-      // board traduz para EXISTS no SQL (`translateContactFilter`), sem
-      // pré-consulta nem lista de ids.
-      //
-      // Diferença para o caminho antigo (abaixo): vale a última mensagem de
-      // chat do contato em QUALQUER conversa. Antes: com conversa ativa, "tem
-      // uma ativa na direção pedida e nenhuma ativa na oposta" (contato com
-      // duas conversas ativas em direções opostas não casava com nenhum dos
-      // dois filtros; agora casa com a mais recente); só com encerradas, a
-      // conversa de `updatedAt` mais recente (que muda com atribuição e
-      // encerramento, não só com mensagem). Ligação (`whatsapp_call`) e
-      // evento não contam como mensagem.
-      conditions.push({ contact: { is: { lastMessageDirection: dir } } });
-    } else if ((dir === "in" || dir === "out") && !filters.conversationStatus) {
-      // Direção da ÚLTIMA mensagem do contato. Antes bastava "alguma
-      // conversa" com a direção pedida: contato com conversa antiga em que o
-      // cliente falou por último aparecia em "Mensagem recebida" mesmo com a
-      // conversa atual respondida — o filtro mostrava recebidas E enviadas.
-      //
-      // Com conversa ativa: só as não encerradas contam (tem uma com a
-      // direção pedida e nenhuma com a oposta).
-      // Só com conversas encerradas: vale a mais recente.
-      conditions.push({
-        OR: [
-          {
-            contact: {
-              is: {
-                AND: [
-                  {
-                    conversations: {
-                      some: { status: { not: "RESOLVED" }, lastMessageDirection: dir },
-                    },
-                  },
-                  {
-                    conversations: {
-                      none: {
-                        status: { not: "RESOLVED" },
-                        lastMessageDirection: dir === "in" ? "out" : "in",
-                      },
-                    },
-                  },
-                ],
-              },
-            },
-          },
-          { contactId: { in: await findClosedOnlyContactIdsByLastDirection(dir) } },
-        ],
-      });
+    if ((dir === "in" || dir === "out") && !filters.conversationStatus) {
+      conditions.push(
+        ...(await buildLastDirectionConditions(dir, getRequestContext()?.organizationId)),
+      );
     } else {
       if (dir === "in" || dir === "out") convSome.lastMessageDirection = dir;
       if (Object.keys(convSome).length > 0) {
