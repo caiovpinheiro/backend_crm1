@@ -973,9 +973,17 @@ async function openCommercialCreateScope(data: CreateDealInput): Promise<{
 }
 
 async function insertNewDeal(
-  db: Pick<typeof prisma, "contact" | "deal">,
+  db: Pick<typeof prisma, "contact" | "deal" | "stage">,
   data: CreateDealInput,
 ) {
+  // Etapa Ganho/Perdido decide status/closedAt do card novo (ver
+  // `buildNewDealStatusPatch`). Lookup por PK — barato mesmo na importação
+  // em massa, que já evita o MAX(position) por linha.
+  const stageFlags = await db.stage.findUnique({
+    where: { id: data.stageId },
+    select: { isWon: true, isLost: true },
+  });
+  const statusPatch = buildNewDealStatusPatch(stageFlags, data);
   // Título opcional. Prioridade:
   //  1. título informado
   //  2. "Negócio {Nome do Contato}" quando há contactId
@@ -1017,9 +1025,10 @@ async function insertNewDeal(
       title,
       externalId: data.externalId === undefined ? undefined : data.externalId,
       value: data.value !== undefined ? data.value : undefined,
-      status: data.status,
+      status: statusPatch.status,
+      closedAt: statusPatch.closedAt,
       expectedClose: data.expectedClose === undefined ? undefined : data.expectedClose,
-      lostReason: data.lostReason === undefined ? undefined : data.lostReason,
+      lostReason: statusPatch.lostReason,
       position,
       contactId: data.contactId === undefined ? undefined : data.contactId,
       stageId: data.stageId,
@@ -1253,6 +1262,27 @@ export async function updateDeal(id: string, data: UpdateDealInput) {
   let chatAssigneeChanges: ConversationAssigneeChange[] = [];
   let siblingPipelineIds: Array<string | null> = [];
   const updated = await prisma.$transaction(async (tx) => {
+    // Troca de etapa fora do `moveDeal` (importação em modo update, ferramentas
+    // de IA, closure do agente v2): mesma sincronização de status do move.
+    // Etapa Ganho/Perdido manda sobre o status pedido; em etapa comum a
+    // reabertura só vale quando o caller não fixou `status`. Mesma etapa
+    // (sem mudança) não mexe no status, como antes.
+    if (data.stageId !== undefined) {
+      const [current, target] = await Promise.all([
+        tx.deal.findUnique({ where: { id }, select: { stageId: true, status: true } }),
+        tx.stage.findUnique({
+          where: { id: data.stageId },
+          select: { isWon: true, isLost: true },
+        }),
+      ]);
+      if (current && target && current.stageId !== data.stageId) {
+        const sync = buildStatusSyncPatch(current.status, target, data.lostReason);
+        if (target.isWon || target.isLost || data.status === undefined) {
+          Object.assign(payload, sync);
+        }
+      }
+    }
+
     const row = await tx.deal.update({
       where: { id },
       data: payload,
@@ -1826,6 +1856,9 @@ function addDays(d: Date, days: number): Date {
   return out;
 }
 
+/** Flags de etapa terminal (Ganho/Perdido) que decidem o status do negócio. */
+export type StageTerminalFlags = { isWon: boolean; isLost: boolean };
+
 /**
  * Sincroniza `Deal.status` com o estágio de destino (modelo Kommo):
  *   - estágio `isWon`  → status WON  + closedAt
@@ -1833,10 +1866,16 @@ function addDays(d: Date, days: number): Date {
  *   - estágio comum    → status OPEN (reabre se estava fechado)
  * Retorna o patch a aplicar junto com a mudança de stage (vazio se o
  * status já está coerente).
+ *
+ * Fonte única da regra: `moveDeal`, `updateDeal` com `stageId` e o
+ * `update_field` de etapa da automação passam por aqui. Sem isso o card
+ * ficava na coluna Perdido com `status = OPEN` e `closedAt` nulo — o Kanban
+ * (conta por etapa) mostrava o negócio como perdido e o painel (conta por
+ * `status` + `closedAt`) não.
  */
-function buildStatusSyncPatch(
+export function buildStatusSyncPatch(
   currentStatus: DealStatus,
-  targetStage: { isWon: boolean; isLost: boolean },
+  targetStage: StageTerminalFlags,
   lostReason?: string | null,
 ): Prisma.DealUncheckedUpdateInput {
   if (targetStage.isWon) {
@@ -1855,6 +1894,34 @@ function buildStatusSyncPatch(
   return currentStatus === "OPEN"
     ? {}
     : { status: "OPEN", closedAt: null, lostReason: null };
+}
+
+/**
+ * Status com que um negócio NASCE numa etapa. Etapa Ganho/Perdido manda:
+ * o card criado direto na coluna Perdido (importação, API, automação, IA)
+ * já nasce LOST com `closedAt`, igual a um card movido pra lá. Em etapa
+ * comum nada muda: vale o status pedido pelo caller (o schema dá OPEN).
+ *
+ * `stage` nulo (etapa não encontrada) deixa o INSERT falhar na FK, como antes.
+ */
+export function buildNewDealStatusPatch(
+  stage: StageTerminalFlags | null | undefined,
+  requested: { status?: DealStatus; lostReason?: string | null },
+): { status?: DealStatus; closedAt?: Date; lostReason?: string | null } {
+  if (stage?.isWon) {
+    return { status: "WON", closedAt: new Date(), lostReason: null };
+  }
+  if (stage?.isLost) {
+    return {
+      status: "LOST",
+      closedAt: new Date(),
+      lostReason: requested.lostReason?.trim() || null,
+    };
+  }
+  return {
+    status: requested.status,
+    lostReason: requested.lostReason === undefined ? undefined : requested.lostReason,
+  };
 }
 
 export type MoveDealOptions = {

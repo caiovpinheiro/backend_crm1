@@ -41,6 +41,23 @@ vi.mock("@/lib/prisma", () => ({
 vi.mock("@/services/deals", () => ({
   assertStageEntryFields: h.assertStageEntryFields,
   assignDealOwner: vi.fn(),
+  // Mesma regra do original (deals.ts); a versão real tem teste próprio em
+  // `deal-terminal-stage-status.test.ts`.
+  buildStatusSyncPatch: (
+    status: string,
+    stage: { isWon: boolean; isLost: boolean },
+    lostReason?: string | null,
+  ) => {
+    if (stage.isWon) {
+      return status === "WON" ? {} : { status: "WON", closedAt: new Date(), lostReason: null };
+    }
+    if (stage.isLost) {
+      const reason = lostReason?.trim() || null;
+      if (status === "LOST") return reason ? { lostReason: reason } : {};
+      return { status: "LOST", closedAt: new Date(), lostReason: reason };
+    }
+    return status === "OPEN" ? {} : { status: "OPEN", closedAt: null, lostReason: null };
+  },
   createDealEvent: h.createDealEvent,
   markDealLost: h.markDealLost,
   markDealWon: h.markDealWon,
@@ -427,6 +444,43 @@ describe("automação move_stage", () => {
     });
     await executeStep("update_field", { entity: "deal", field: "stageId", value: "stage-won" }, rt);
     expect(h.syncBoardsAfterDealChanges).toHaveBeenCalledTimes(1);
+  });
+
+  it("update_field de stageId para Perdido grava LOST + closedAt (antes só trocava a etapa)", async () => {
+    h.dealFindUnique.mockResolvedValue({
+      stageId: "stage-a",
+      contactId: "c1",
+      status: "OPEN",
+      stage: { pipelineId: "pipe-1", isWon: false, isLost: false },
+    });
+    h.stageFindUnique.mockResolvedValue({ isWon: false, isLost: true });
+    await executeStep("update_field", { entity: "deal", field: "stageId", value: "stage-lost" }, rt);
+    expect(h.dealUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "deal-1" },
+        data: expect.objectContaining({
+          stageId: "stage-lost",
+          status: "LOST",
+          closedAt: expect.any(Date),
+        }),
+      }),
+    );
+  });
+
+  it("update_field de stageId para etapa comum reabre o negócio fechado", async () => {
+    h.dealFindUnique.mockResolvedValue({
+      stageId: "stage-lost",
+      contactId: "c1",
+      status: "LOST",
+      stage: { pipelineId: "pipe-1", isWon: false, isLost: true },
+    });
+    h.stageFindUnique.mockResolvedValue({ isWon: false, isLost: false });
+    await executeStep("update_field", { entity: "deal", field: "stageId", value: "stage-b" }, rt);
+    expect(h.dealUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: { stageId: "stage-b", status: "OPEN", closedAt: null, lostReason: null },
+      }),
+    );
   });
 });
 

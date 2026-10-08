@@ -62,6 +62,7 @@ import {
 import {
   assertStageEntryFields,
   assignDealOwner,
+  buildStatusSyncPatch,
   createDeal,
   activeDealMovedSelect,
   createDealEvent,
@@ -2913,6 +2914,18 @@ export async function executeStep(
             prevStageId = cur?.stageId ?? null;
             moveContactId = cur?.contactId ?? null;
             fromPipelineId = cur?.stage?.pipelineId ?? null;
+            // Etapa Ganho/Perdido sincroniza Deal.status — mesma regra do
+            // `move_stage` acima e do move manual. Antes este caminho só
+            // trocava `stageId` e o card ficava OPEN na coluna Perdido.
+            if (cur && typeof value === "string" && prevStageId !== value) {
+              const targetFlags = await prisma.stage.findUnique({
+                where: { id: value },
+                select: { isWon: true, isLost: true },
+              });
+              if (targetFlags) {
+                Object.assign(data, buildStatusSyncPatch(cur.status, targetFlags));
+              }
+            }
           }
           const updated = isStageMove
             ? await prisma.deal.update({
