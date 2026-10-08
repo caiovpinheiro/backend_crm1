@@ -116,6 +116,11 @@ import {
   parseReferral,
   type ReferralInfo,
 } from "@/lib/meta-referral";
+import {
+  formatSharedContactsText,
+  parseMetaSharedContacts,
+  type SharedContact,
+} from "@/lib/shared-contact";
 
 // Token de verificação do webhook Meta. Sem fallback hardcoded — se não
 // estiver configurado em produção, o GET de verificação responde 503 e o
@@ -1223,6 +1228,8 @@ type ParsedMessage = {
   flowToken: string | null;
   /** Pedido do catálogo (`type=order`). Preço é o do payload, ainda sem nome do CRM. */
   catalogOrder: WhatsappOrderSnapshot | null;
+  /** Contatos do payload `type=contacts`. Não cria Contact no CRM. */
+  sharedContacts: SharedContact[] | null;
 };
 
 function fallbackUnknownInteractive(
@@ -1489,6 +1496,7 @@ function parseMessage(message: Record<string, unknown>): ParsedMessage | null {
   let flowMetaName: string | null = null;
   let flowToken: string | null = null;
   let catalogOrder: WhatsappOrderSnapshot | null = null;
+  let sharedContacts: SharedContact[] | null = null;
 
   switch (type) {
     case "text": {
@@ -1537,7 +1545,8 @@ function parseMessage(message: Record<string, unknown>): ParsedMessage | null {
       break;
     }
     case "contacts": {
-      text = "[Contato compartilhado]";
+      sharedContacts = parseMetaSharedContacts(message.contacts);
+      text = formatSharedContactsText(sharedContacts ?? []);
       break;
     }
     case "reaction": {
@@ -1573,6 +1582,7 @@ function parseMessage(message: Record<string, unknown>): ParsedMessage | null {
         flowMetaName: null,
         flowToken: null,
         catalogOrder: null,
+        sharedContacts: null,
       };
     }
     case "interactive": {
@@ -1657,6 +1667,7 @@ function parseMessage(message: Record<string, unknown>): ParsedMessage | null {
     flowMetaName,
     flowToken,
     catalogOrder,
+    sharedContacts,
   };
 }
 
@@ -3177,7 +3188,9 @@ export async function processMetaWebhookPayload(
                 ? "unsupported"
                 : parsed.type === "order"
                   ? "order"
-                : parsed.mediaId
+                  : parsed.type === "contacts"
+                    ? "contact"
+                    : parsed.mediaId
                   ? parsed.type
                   : parsed.type === "interactive" || parsed.type === "button"
                     ? "interactive"
@@ -3239,6 +3252,9 @@ export async function processMetaWebhookPayload(
                 createdAt: parsed.timestamp,
                 ...(parsed.catalogOrder ? { catalogOrder: parsed.catalogOrder } : {}),
                 ...(referralJson ? { referral: referralJson } : {}),
+                ...(parsed.sharedContacts?.length
+                  ? { sharedContacts: parsed.sharedContacts }
+                  : {}),
                 ...(replyLink
                   ? {
                       replyToId: replyLink.messageId,
@@ -3272,6 +3288,9 @@ export async function processMetaWebhookPayload(
                   content: parsed.text,
                   messageType: inboundMsgType,
                   timestamp: parsed.timestamp,
+                  ...(parsed.sharedContacts?.length
+                    ? { sharedContacts: parsed.sharedContacts }
+                    : {}),
                 });
               } catch (err) {
                 log.warn("Falha ao publicar eco outbound (não-fatal):", err);
@@ -3521,6 +3540,9 @@ export async function processMetaWebhookPayload(
                 timestamp: parsed.timestamp,
                 ...(parsed.catalogOrder ? { catalogOrder: parsed.catalogOrder } : {}),
                 ...(referralJson ? { referral: referralJson } : {}),
+                ...(parsed.sharedContacts?.length
+                  ? { sharedContacts: parsed.sharedContacts }
+                  : {}),
               });
             } catch (err) {
               log.warn("Falha ao publicar SSE (não-fatal):", err);

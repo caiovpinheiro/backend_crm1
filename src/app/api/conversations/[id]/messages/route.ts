@@ -39,6 +39,7 @@ import { cancelPendingForConversation } from "@/services/scheduled-messages";
 import { cancelAiReplyDebounce } from "@/services/ai/inbound-debounce";
 import { isWhatsappOrderSnapshot } from "@/lib/whatsapp-catalog-order";
 import { referralFromJson } from "@/lib/meta-referral";
+import { sharedContactsFromJson, type SharedContact } from "@/lib/shared-contact";
 import {
   enrichEventMessageActors,
   resolveLifecycleEventActor,
@@ -197,6 +198,8 @@ export type InboxMessageDto = {
       imageUrl: string | null;
     }>;
   } | null;
+  /** Contatos compartilhados nesta mensagem. Ausente quando não houve. */
+  sharedContacts?: SharedContact[] | null;
 };
 
 /** Resumo de uma conexão (Channel) para exibir o canal na UI do inbox/contato. */
@@ -264,6 +267,7 @@ const MSG_SELECT = {
   sendStatus: true, sendError: true, channelId: true,
   catalogOrder: true,
   referral: true,
+  sharedContacts: true,
 } satisfies Prisma.MessageSelect;
 
 type MsgRow = Prisma.MessageGetPayload<{ select: typeof MSG_SELECT }>;
@@ -291,6 +295,7 @@ async function findMessagesSafe(args: {
           "triggeredByName" in r ? (r.triggeredByName as string | null) : null,
         catalogOrder: "catalogOrder" in r ? r.catalogOrder : null,
         referral: "referral" in r ? r.referral : null,
+        sharedContacts: "sharedContacts" in r ? r.sharedContacts : null,
       })) as MsgRow[];
     } catch (e) {
       const code = (e as { code?: string })?.code;
@@ -300,6 +305,10 @@ async function findMessagesSafe(args: {
       if (!missing) throw e;
       if (/\breferral\b/i.test(message) && select.referral) {
         delete select.referral;
+        continue;
+      }
+      if (/sharedContacts|shared_contacts/i.test(message) && select.sharedContacts) {
+        delete select.sharedContacts;
         continue;
       }
       if (/catalogOrder|catalog_order/i.test(message) && select.catalogOrder) {
@@ -797,6 +806,7 @@ export async function GET(request: Request, context: RouteContext) {
       favoritedByMe: favoritedIds.has(r.id) || undefined,
       catalogOrder: isWhatsappOrderSnapshot(r.catalogOrder) ? r.catalogOrder : null,
       referral: referralFromJson(r.referral),
+      sharedContacts: sharedContactsFromJson(r.sharedContacts),
     };
     });
 
@@ -838,6 +848,7 @@ export async function GET(request: Request, context: RouteContext) {
           channelId: r.channelId ?? null,
           catalogOrder: isWhatsappOrderSnapshot(r.catalogOrder) ? r.catalogOrder : null,
           referral: referralFromJson(r.referral),
+          sharedContacts: sharedContactsFromJson(r.sharedContacts),
         }));
 
       const createdByConv = new Map<string, (typeof lifeEvents)[number]>();
