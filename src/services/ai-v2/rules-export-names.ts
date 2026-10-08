@@ -22,12 +22,13 @@ export async function loadExportNames(organizationId: string, agentId: string, c
     ...config.themes.flatMap((t) => [...(t.allowedKnowledgeDocIds ?? []), ...(t.knowledgeDocIds ?? [])]),
   ])];
   const safe = <T,>(promise: Promise<T>, fallback: T) => promise.catch(() => fallback);
-  const [departments, users, distributionRules, agents, models, docs, customFields, pipelines, tags, tabulations, attachments, channels] = await Promise.all([
+  const [departments, users, distributionRules, agents, models, flows, docs, customFields, pipelines, tags, tabulations, attachments, channels] = await Promise.all([
     safe(p.department.findMany({ where: { organizationId }, select: { id: true, name: true } }), []),
     safe(p.user.findMany({ where: { organizationId }, select: { id: true, name: true } }), []),
     safe(p.distributionRule.findMany({ where: { organizationId }, select: { id: true, name: true } }), []),
     safe(p.aIAgentConfig.findMany({ where: { organizationId }, select: { id: true, engine: true, active: true, user: { select: { name: true } } } }), []),
     safe(p.messageTemplate.findMany({ where: { organizationId }, select: { id: true, name: true } }), []),
+    safe(p.whatsappFlowDefinition.findMany({ where: { organizationId, status: "PUBLISHED" }, select: { id: true, name: true } }), []),
     safe(p.aIAgentKnowledgeDoc.findMany({ where: { organizationId, agentId, id: { in: docIds } }, select: { id: true, title: true, status: true, validUntil: true } }), []),
     safe(p.customField.findMany({ where: { organizationId }, select: { id: true, name: true, label: true } }), []),
     safe(p.pipeline.findMany({ where: { organizationId }, select: { name: true, stages: { select: { id: true, name: true } } } }), []),
@@ -51,6 +52,7 @@ export async function loadExportNames(organizationId: string, agentId: string, c
     distributionRules: byId(distributionRules),
     aiAgents: Object.fromEntries((agents as Array<{ id: string; engine: string; active: boolean; user?: { name?: string } }>).map((a) => [a.id, { name: a.user?.name ?? a.id, engine: a.engine, active: a.active }])),
     messageModels: byId(models),
+    messageFlows: byId(flows),
     docs: Object.fromEntries((docs as Array<{ id: string; title: string; status: string; validUntil: Date | null }>).map((d) => [d.id, {
       title: d.title,
       status: d.status,

@@ -16,6 +16,8 @@ import { MESSAGE_MODEL_REPEATED, lastV2ResetAt } from "./sent-materials";
 import { applyExistingTagToContact } from "@/services/tags";
 import { createDeal, updateDeal } from "@/services/deals";
 import { createActivity } from "@/services/activities";
+import { randomUUID } from "node:crypto";
+
 import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import { enrichTemplateComponentsForFlowSend } from "@/lib/meta-whatsapp/enrich-template-flow";
 import { buildOutboundTemplateMessageContent } from "@/lib/whatsapp-outbound-template-label";
@@ -520,6 +522,94 @@ async function executeSendMaterialAttachment(action: V2Action, ctx: V2ActionCont
   }
 }
 
+async function executeSendWhatsappFlow(action: V2Action, ctx: V2ActionContext): Promise<V2ActionResult> {
+  const flowId = typeof action.flowId === "string" ? action.flowId.trim() : "";
+  if (!flowId) return { action, ok: false, error: "Missing flowId" };
+  if (!ctx.contactId || !ctx.conversationId) return { action, ok: false, error: "No contact/conversation" };
+  if (ctx.autonomyMode !== "AUTONOMOUS") {
+    return { action, ok: false, error: "Modo sugestão: o flow só sai quando o agente responde sozinho." };
+  }
+  const allowed = ctx.config.allowedFlowIds ?? [];
+  if (!allowed.includes(flowId)) return { action, ok: false, error: "Flow não liberado para este agente." };
+  try {
+    const { getPublishedFlowForSend } = await import("@/services/whatsapp-flow-definitions");
+    const { getContactWhatsAppTargets } = await import("@/lib/contact-whatsapp-target");
+    const flow = await getPublishedFlowForSend(flowId);
+    if (!flow) return { action, ok: false, error: "Flow não encontrado ou ainda não publicado." };
+
+    const conv = await prisma.conversation.findUnique({
+      where: { id: ctx.conversationId },
+      select: {
+        organizationId: true,
+        channel: true,
+        contactId: true,
+        channelRef: { select: { config: true, provider: true } },
+      },
+    });
+    if (!conv) return { action, ok: false, error: "Conversation not found" };
+    if (conv.channel !== "whatsapp") return { action, ok: false, error: "Flow só sai em conversa de WhatsApp." };
+    if (conv.channelRef?.provider === "BAILEYS_MD") {
+      return { action, ok: false, error: "Flow não sai em WhatsApp QR. Use um canal da API oficial." };
+    }
+
+    const channelConfig = (conv.channelRef?.config as Record<string, unknown> | null) ?? {};
+    const metaClient = metaClientFromConfig(channelConfig);
+    if (!metaClient.configured) return { action, ok: false, error: "Meta channel not configured" };
+
+    const target = await getContactWhatsAppTargets(ctx.contactId);
+    if (!target) return { action, ok: false, error: "Contact without phone" };
+
+    const body = `Preencha o formulário: ${flow.name}`.slice(0, 1024);
+    const flowCta = "Abrir formulário";
+    const flowToken = randomUUID();
+    const displayContent = `${body}\n[Flow: ${flowCta}]`;
+
+    const saved = await prisma.message.create({
+      data: withOrgFromCtx({
+        conversationId: ctx.conversationId,
+        content: displayContent,
+        direction: "out",
+        messageType: "interactive",
+        senderName: "Agente IA",
+        flowToken,
+        aiAgentUserId: ctx.agentUserId,
+      }),
+    });
+
+    let externalId: string | null = null;
+    try {
+      const res = await metaClient.sendInteractiveFlow(
+        target.to,
+        body,
+        { flowId: flow.metaFlowId, flowCta, flowToken, flowAction: "navigate" },
+        undefined,
+        undefined,
+        target.recipient,
+      );
+      externalId = res?.messages?.[0]?.id ?? null;
+      if (externalId) {
+        await prisma.message.update({ where: { id: saved.id }, data: { externalId, sendStatus: "sent" } }).catch(() => {});
+      }
+    } catch (err) {
+      await prisma.message.update({ where: { id: saved.id }, data: { sendStatus: "failed" } }).catch(() => {});
+      return { action, ok: false, error: err instanceof Error ? err.message : String(err), flowId };
+    }
+
+    const { publishNewMessage } = await import("@/lib/realtime-events");
+    publishNewMessage({
+      organizationId: conv.organizationId,
+      conversationId: ctx.conversationId,
+      contactId: ctx.contactId,
+      direction: "out",
+      content: saved.content,
+      timestamp: saved.createdAt,
+    });
+    return { action, ok: true, flowId, externalId };
+  } catch (err) {
+    return { action, ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 async function executeSendProduct(action: V2Action, ctx: V2ActionContext): Promise<V2ActionResult> {
   const productId = typeof action.productId === "string" ? action.productId : "";
   if (!productId) return { action, ok: false, error: "Missing productId" };
@@ -674,6 +764,7 @@ const EXECUTORS: Partial<Record<V2ActionType, (action: V2Action, ctx: V2ActionCo
   send_message_model: executeSendMessageModel,
   send_product: executeSendProduct,
   send_whatsapp_template: executeSendWhatsappTemplate,
+  send_whatsapp_flow: executeSendWhatsappFlow,
   send_material_attachment: executeSendMaterialAttachment,
 };
 

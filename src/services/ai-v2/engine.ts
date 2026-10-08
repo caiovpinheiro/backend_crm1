@@ -23,7 +23,7 @@ import { isMediaPlaceholderText } from "@/lib/ai-agents/media-placeholder";
 import { getMediaTexts, mediaTextLine, understoodKindOf } from "./media-understanding";
 import { callV2LLM } from "./llm";
 import { themePromptText } from "./theme-prompt";
-import { actionValueAllowed, allowedActionTypes, allowedMessageModelIdsFor, humanRequestSubject, mentionsHumanRequest, normalizeAskOptions } from "./action-policy";
+import { actionValueAllowed, allowedActionTypes, allowedFlowIdsFor, allowedMessageModelIdsFor, humanRequestSubject, mentionsHumanRequest, normalizeAskOptions } from "./action-policy";
 
 export { mentionsHumanRequest };
 import { guardV2Output } from "./output-guard";
@@ -1717,6 +1717,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // `messageModel` do próprio LLM era descartado sem aviso).
   const activeTheme = getV2ThemeById(config, themeId);
   const allowedModelIds = allowedMessageModelIdsFor(config, activeTheme);
+  const allowedFlowIds = allowedFlowIdsFor(config);
   const allowedTools = allowedActionTypes(config, activeTheme);
 
   // Handoff não passa pelo executor: vira sinal e roda uma vez só, depois
@@ -1742,6 +1743,10 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     // Modelo fora da lista liberada = o LLM inventou/escolheu um modelo que
     // o operador não autorizou para este agente/assunto.
     if (a.type === "send_message_model" && !allowedModelIds.includes(String((a as { modelId?: unknown }).modelId ?? ""))) {
+      discardedActions.push(a);
+      continue;
+    }
+    if (a.type === "send_whatsapp_flow" && !allowedFlowIds.includes(String((a as { flowId?: unknown }).flowId ?? ""))) {
       discardedActions.push(a);
       continue;
     }
@@ -1857,7 +1862,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // Ações que mandam mensagem ao cliente saem DEPOIS da reply (a reply
   // apresenta, a mensagem pronta/produto/modelo vem em seguida). As demais
   // (tag, campo, nota…) rodam agora.
-  const OUTBOUND_ACTIONS = new Set(["send_message_model", "send_product", "send_whatsapp_template", "send_message", "send_material_attachment"]);
+  const OUTBOUND_ACTIONS = new Set(["send_message_model", "send_product", "send_whatsapp_template", "send_whatsapp_flow", "send_message", "send_material_attachment"]);
   let outboundActions = allowedActions.filter((a) => OUTBOUND_ACTIONS.has(a.type));
   // Resposta trocada pela mensagem "sem material": anexo de material não cabe.
   if (noSourceApplied) outboundActions = outboundActions.filter((a) => a.type !== "send_material_attachment");

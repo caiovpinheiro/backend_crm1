@@ -53,7 +53,7 @@ import { checkClaimsWithModel, sameClaim, worthClaimCheck } from "./claim-check"
 import { isMutilated, onlyKeptSentences, trimUnsupportedSentences } from "./reply-trim";
 import { MATERIAL_ATTACHMENT_LIMITS, attachmentsForDocs, attachmentsPromptSection } from "./material-attachments";
 import { humanRequestTerms } from "@/lib/ai-v2/config";
-import { actionsGuide, allowedActionTypes, allowedMessageModelIdsFor, queryToolRestriction, repairMessageModelId, themeToolRestriction } from "./action-policy";
+import { actionsGuide, allowedActionTypes, allowedFlowIdsFor, allowedMessageModelIdsFor, queryToolRestriction, repairMessageModelId, themeToolRestriction } from "./action-policy";
 import { getLogger } from "@/lib/logger";
 
 const log = getLogger("ai-v2.llm");
@@ -366,6 +366,7 @@ const v2ActionSchema: z.ZodType<V2Action> = z.object({
     "send_message_model",
     "send_product",
     "send_whatsapp_template",
+    "send_whatsapp_flow",
     "ask_with_options",
     "close_conversation",
     "tabulate_conversation",
@@ -631,6 +632,20 @@ const v2LLMOutputSchema: z.ZodType<V2LLMOutput> = z.object({
         adapt: (v as { adapt?: boolean }).adapt ?? false,
         variables: (v as { variables?: Record<string, string> }).variables ?? {},
       };
+    }),
+  flow: z
+    .union([
+      z.object({
+        id: z.unknown().transform((v) => (typeof v === "string" && v.trim() ? v.trim() : null)),
+      }),
+      z.null(),
+    ])
+    .optional()
+    .transform((v) => {
+      if (!v || typeof v !== "object" || v === null) return undefined;
+      const id = (v as { id?: string | null }).id;
+      if (!id || typeof id !== "string") return undefined;
+      return { id };
     }),
   attachments: z
     .unknown()
@@ -1009,6 +1024,7 @@ function buildV2SystemPrompt(
   nothingRelevant = false,
   attachmentsSection = "",
   humanRequestWithQuestion = false,
+  flows: Array<{ id: string; name: string }> = [],
 ): string {
   const timezone = config.businessHours?.timezone || "America/Sao_Paulo";
   const lines: string[] = [];
@@ -1129,6 +1145,11 @@ function buildV2SystemPrompt(
       if (m.content?.trim()) lines.push(`  Texto: ${m.content.trim().replace(/\s*\n\s*/g, " / ")}`);
     }
   }
+  if (flows.length > 0) {
+    lines.push("# Formulários (Flows) que você pode enviar");
+    lines.push("São flows publicados no WhatsApp. Envie só quando o cliente precisar preencher esse formulário. Devolva flow: { \"id\": \"<id>\" }. A reply é uma frase curta avisando que o formulário vem em seguida; não peça no texto os dados que o formulário já coleta.");
+    for (const f of flows) lines.push(`- ${f.id}: ${f.name}`);
+  }
   if (attachmentsSection) lines.push(attachmentsSection);
 
   const availableTools = QUERY_TOOL_NAMES.filter((t) => (allowedToolNames ?? []).includes(t));
@@ -1164,6 +1185,7 @@ function buildV2SystemPrompt(
     reply: "texto para o cliente",
     ...(offerTheme ? { theme: null } : {}),
     messageModel: null,
+    ...(flows.length > 0 ? { flow: null } : {}),
     handoff: false,
     concluded: false,
     confirmed: null,
@@ -1176,6 +1198,7 @@ function buildV2SystemPrompt(
     "- handoff: true só quando precisa de uma pessoa (ver Fontes).",
     "- actions: ações deste turno; vazia quando não há.",
     "- messageModel: null ou { id: string, adapt?: boolean, variables?: {chave: valor} }. Nunca um objeto vazio.",
+    ...(flows.length > 0 ? ["- flow: null ou { id: string } com o id de um formulário da lista. Nunca um objeto vazio."] : []),
     ...(attachmentsSection ? ["- attachments: ids de \"Anexos dos materiais\" para enviar, ou []."] : []),
     "- collected: dados que o cliente informou neste turno; vazio se nenhum.",
     "- concluded: true só quando o cliente indicou que terminou (agradeceu, se despediu ou disse que era só isso) e não fez pedido novo nesta mensagem. Se ele perguntou algo, responda e deixe concluded=false.",
@@ -1206,6 +1229,15 @@ async function actionStageNames(config: V2AgentConfig, theme: ReturnType<typeof 
   }
 }
 
+async function describeAllowedFlows(ids: string[]): Promise<Array<{ id: string; name: string }>> {
+  const wanted = [...new Set(ids.map((id) => id.trim()).filter(Boolean))].slice(0, 50);
+  if (wanted.length === 0) return [];
+  const { listPublishedFlowDefinitions } = await import("@/services/whatsapp-flow-definitions");
+  const rows = await listPublishedFlowDefinitions();
+  const allow = new Set(wanted);
+  return rows.filter((r) => allow.has(r.id)).map((r) => ({ id: r.id, name: r.name }));
+}
+
 export async function callV2LLM(args: {
   agentId: string;
   config: V2AgentConfig;
@@ -1233,11 +1265,12 @@ export async function callV2LLM(args: {
   const promptTheme = activeTheme(args.config, args.themeId);
   const promptDocIds = knowledgeDocIdsFor(args.config, promptTheme);
   const modelIds = allowedMessageModelIdsFor(args.config, promptTheme);
+  const flowIds = allowedFlowIdsFor(args.config);
   // Chave do fornecedor da resposta (Claude → Anthropic; a busca nos
   // materiais continua com a chave OpenAI), títulos dos materiais, mensagens
   // prontas e etapas: leituras independentes, em paralelo — em série cada
   // uma somava sua ida ao banco à espera do cliente.
-  const [chatKey, docTitleMap, messageModels, actionStages] = await Promise.all([
+  const [chatKey, docTitleMap, messageModels, actionStages, flows] = await Promise.all([
     getAgentChatKey(args.agentId, args.config.model, apiKey),
     // Títulos dos materiais permitidos: ajudam o modelo a decidir quando
     // chamar knowledge_search e a contextualizar a resposta.
@@ -1259,6 +1292,13 @@ export async function callV2LLM(args: {
       return [] as V2MessageModelSummary[];
     }),
     actionStageNames(args.config, promptTheme),
+    describeAllowedFlows(flowIds).catch((err) => {
+      log.warn(
+        { err: err instanceof Error ? err.message : err },
+        "[ai-v2] Erro ao carregar flows",
+      );
+      return [] as Array<{ id: string; name: string }>;
+    }),
   ]);
   const knowledgeDocTitles = promptDocIds.map((id) => docTitleMap.get(id)).filter((t): t is string => Boolean(t));
   // Texto das mensagens prontas só no modo "combinar" e só das 3 mais ligadas à
@@ -1339,6 +1379,7 @@ export async function callV2LLM(args: {
     prefetch.searched && (prefetch.chunks.length === 0 || (prefetch.best ?? 0) < WEAK_MATCH_SIMILARITY),
     attachmentsPromptSection(offeredAttachments),
     args.humanRequestWithQuestion === true,
+    flows,
   );
 
   const messages: Array<{ role: "user" | "assistant"; content: string }> = [
@@ -1500,6 +1541,17 @@ export async function callV2LLM(args: {
       traceStep("mensagem pronta", `Id "${a.modelId}" corrigido para "${fixed}" (erro de cópia do modelo)`);
       return { ...a, modelId: fixed };
     });
+
+    if (output.flow?.id) {
+      const shownFlowIds = flows.map((f) => f.id);
+      const flowId = repairMessageModelId(output.flow.id, shownFlowIds);
+      if (flowId !== output.flow.id) {
+        traceStep("flow", `Id "${output.flow.id}" corrigido para "${flowId}" (erro de cópia do modelo)`);
+        output.flow = { id: flowId };
+      }
+      const already = output.actions.some((a) => a.type === "send_whatsapp_flow" && a.flowId === flowId);
+      if (!already) output.actions = [{ type: "send_whatsapp_flow", flowId }, ...output.actions];
+    }
 
     // Anexos pedidos: só os oferecidos neste turno; viram a ação de envio.
     const offeredIds = new Set(offeredAttachments.map((a) => a.id));
