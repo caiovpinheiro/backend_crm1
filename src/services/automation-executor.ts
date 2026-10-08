@@ -1178,6 +1178,11 @@ function interpolateContextVariables(
   const root: Record<string, unknown> = {
     ...buildWebhookRoot(rt),
     ...(flowVars ?? {}),
+    // O snapshot recarregado do banco vence uma variável de fluxo com o
+    // mesmo nome. Sem isso, `dealCustomFields` grudado na pausa substitui
+    // o reload e a mensagem repete preço/modalidade da consulta anterior.
+    contactCustomFields: rt.contactCustomFields ?? {},
+    dealCustomFields: rt.dealCustomFields ?? {},
   };
   return template.replace(
     /\{\{\s*([\w.]+)(?:\s*\|\s*([a-zA-Z0-9_]+))?\s*\}\}/g,
@@ -1553,7 +1558,10 @@ type RuntimeContext = {
  * etc. via construtor visual.
  *
  * Recarregamos depois de `update_field` (no loop principal) pra evitar
- * que um webhook subsequente envie a versão antiga.
+ * que um webhook subsequente envie a versão antiga, e depois de um
+ * `delay` inline: o n8n grava os campos durante a espera, e sem reload
+ * a condição/mensagem seguintes reutilizam o snapshot da passagem
+ * anterior (ex.: "ver outros cursos" manda preço e modalidade velhos).
  */
 async function loadAutomationCustomFieldsSnapshot(
   contactId: string | undefined,
@@ -5432,7 +5440,16 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
       // que use `{{contactCustomFields.<x>}}` precisa enxergar o valor
       // atualizado. Recarregamos só os custom fields (tags não mudam
       // aqui) pra evitar query desnecessária.
-      if (step.type === "update_field") {
+      // Delay inline (≤30s) e webhook também: o n8n grava o deal na
+      // resposta ou durante a espera, e a condição/mensagem seguinte
+      // precisa ler o valor novo. Delay persistido só agenda e sai
+      // (`skipRemaining`) — o reload acontece no `continueFromStep`
+      // quando a espera acaba.
+      if (
+        step.type === "update_field" ||
+        step.type === "webhook" ||
+        (step.type === "delay" && !result.skipRemaining)
+      ) {
         const snap = await loadAutomationCustomFieldsSnapshot(
           rt.contactId,
           rt.dealId,
@@ -5812,7 +5829,11 @@ export async function continueFromStep(
         rt.dealTagIds = snap.dealTagIds;
         rt.dealTagNames = snap.dealTagNames;
       }
-      if (step.type === "update_field") {
+      if (
+        step.type === "update_field" ||
+        step.type === "webhook" ||
+        (step.type === "delay" && !result.skipRemaining)
+      ) {
         const snap = await loadAutomationCustomFieldsSnapshot(
           rt.contactId,
           rt.dealId,
