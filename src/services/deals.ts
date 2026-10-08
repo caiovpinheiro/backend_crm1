@@ -310,7 +310,49 @@ export type GetDealsParams = {
    * paginar isto em vez de N× GET /api/deals/:id.
    */
   updatedSince?: Date;
+  /**
+   * `lastInteraction` ordena o recorte inteiro (não a página) pelo mesmo
+   * instante da coluna da lista, e só então aplica skip/take.
+   * Ausente = `updatedAt` desc, como sempre.
+   */
+  sort?: "lastInteraction";
+  direction?: "asc" | "desc";
 };
+
+/**
+ * Página de ids na ordem da coluna "Última interação":
+ * o mais recente entre `deals.updatedAt` e `MAX(conversations.updatedAt)`
+ * do contato — o mesmo de `attachLastInteractionAt`. O ORDER BY roda
+ * antes do LIMIT.
+ */
+async function pageIdsByLastInteraction(
+  where: Prisma.DealWhereInput,
+  direction: "asc" | "desc",
+  skip: number,
+  take: number,
+): Promise<string[]> {
+  const idRows = await prisma.deal.findMany({ where, select: { id: true } });
+  if (idRows.length === 0 || take <= 0) return [];
+  const ids = idRows.map((row) => row.id);
+  const orgId = getOrgIdOrThrow();
+  const dir = direction === "asc" ? Prisma.raw("ASC") : Prisma.raw("DESC");
+  const ranked = await prisma.$queryRaw<{ id: string }[]>`
+    SELECT d.id
+    FROM deals d
+    LEFT JOIN LATERAL (
+      SELECT MAX(cv."updatedAt") AS last_at
+      FROM conversations cv
+      WHERE cv."organizationId" = ${orgId}
+        AND cv."contactId" = d."contactId"
+    ) li ON TRUE
+    WHERE d."organizationId" = ${orgId}
+      AND d.id = ANY(${ids})
+    ORDER BY GREATEST(d."updatedAt", COALESCE(li.last_at, d."updatedAt")) ${dir}, d.id ASC
+    OFFSET ${skip}
+    LIMIT ${take}
+  `;
+  return ranked.map((row) => row.id);
+}
 
 const listInclude = {
   contact: {
@@ -422,16 +464,33 @@ export async function getDeals(params: GetDealsParams = {}) {
   const where: Prisma.DealWhereInput =
     conditions.length > 0 ? { AND: conditions } : {};
 
-  const [items, total] = await Promise.all([
-    prisma.deal.findMany({
-      where,
-      skip,
-      take: perPage,
-      orderBy: [{ updatedAt: "desc" }],
-      include: listInclude,
-    }),
-    prisma.deal.count({ where }),
-  ]);
+  const totalPromise = prisma.deal.count({ where });
+  const itemsPromise =
+    params.sort === "lastInteraction"
+      ? (async () => {
+          const ids = await pageIdsByLastInteraction(
+            where,
+            params.direction === "asc" ? "asc" : "desc",
+            skip,
+            perPage,
+          );
+          if (ids.length === 0) return [];
+          const rows = await prisma.deal.findMany({
+            where: { id: { in: ids } },
+            include: listInclude,
+          });
+          const order = new Map(ids.map((id, index) => [id, index]));
+          rows.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
+          return rows;
+        })()
+      : prisma.deal.findMany({
+          where,
+          skip,
+          take: perPage,
+          orderBy: [{ updatedAt: "desc" }],
+          include: listInclude,
+        });
+  const [items, total] = await Promise.all([itemsPromise, totalPromise]);
 
   await enrichContactsWithUserAvatarFallback(
     items.map((d) => d.contact).filter((c): c is NonNullable<typeof c> => c !== null),
