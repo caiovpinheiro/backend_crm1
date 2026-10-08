@@ -40,6 +40,7 @@ const h = vi.hoisted(() => {
     ssePublish: vi.fn(),
     attendance: vi.fn(),
     continueFromStep: vi.fn().mockResolvedValue(undefined),
+    automationLogCreate: vi.fn().mockResolvedValue({ id: "log-1" }),
     updateOrgSeen: [] as Array<{ id: string; org: string | null }>,
   };
 });
@@ -58,6 +59,7 @@ vi.mock("@/lib/prisma", () => ({
     automationStep: h.step,
     message: h.message,
     conversation: h.conversation,
+    automationLog: { create: h.automationLogCreate },
   },
 }));
 vi.mock("@/lib/prisma-base", () => ({
@@ -471,6 +473,97 @@ describe("processTimeout / sweepExpiredTimeouts", () => {
       timeoutAt: null,
     });
     expect(h.continueFromStep).not.toHaveBeenCalled();
+  });
+
+  it("lista sem resposta: falha na retomada regrava a espera e registra o erro", async () => {
+    const steps = withSteps({
+      "step-wait": {
+        type: "send_whatsapp_list",
+        config: {
+          rows: [{ id: "r1", title: "Vaga", gotoStepId: "step-next" }],
+          timeoutMs: 3_600_000,
+          timeoutAction: "goto",
+          timeoutGotoStepId: "step-timeout",
+        },
+      },
+      "step-timeout": {
+        type: "remove_tag",
+        config: { tagName: "varias vagas enviadas", nextStepId: "step-next" },
+      },
+    });
+    h.ctx.findUnique.mockResolvedValueOnce(ctxRow({ currentStepId: "step-wait" }, steps));
+    h.continueFromStep.mockRejectedValueOnce(new Error("db down"));
+
+    await withOrg(ORG, () => processTimeout("ctx-1"));
+
+    expect(h.continueFromStep).toHaveBeenCalledWith("auto-1", "contact-1", "step-timeout", {
+      conversationId: "conv-1",
+    });
+    expect(updateData(1)).toMatchObject({
+      currentStepId: "step-wait",
+      timeoutAt: new Date(NOW.getTime() + 60_000),
+      variables: {
+        conversationId: "conv-1",
+        __timeoutResumeRetries: { stepId: "step-wait", n: 1 },
+      },
+    });
+    expect(updateData(1)).not.toHaveProperty("status");
+    expect(h.automationLogCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        organizationId: ORG,
+        automationId: "auto-1",
+        contactId: "contact-1",
+        stepId: "step-wait",
+        stepType: "send_whatsapp_list",
+        status: "FAILED",
+        message: expect.stringContaining("Nova tentativa em 1 min"),
+      }),
+    });
+  });
+
+  it("lista sem resposta: depois de 5 falhas encerra o fluxo e registra", async () => {
+    const steps = withSteps({
+      "step-wait": {
+        type: "send_whatsapp_list",
+        config: {
+          rows: [{ id: "r1", title: "Vaga", gotoStepId: "step-next" }],
+          timeoutMs: 3_600_000,
+          timeoutAction: "goto",
+          timeoutGotoStepId: "step-timeout",
+        },
+      },
+      "step-timeout": {
+        type: "remove_tag",
+        config: { tagName: "varias vagas enviadas" },
+      },
+    });
+    h.ctx.findUnique.mockResolvedValueOnce(
+      ctxRow(
+        {
+          currentStepId: "step-wait",
+          variables: {
+            conversationId: "conv-1",
+            __timeoutResumeRetries: { stepId: "step-wait", n: 5 },
+          },
+        },
+        steps,
+      ),
+    );
+    h.continueFromStep.mockRejectedValueOnce(new Error("db down"));
+
+    await withOrg(ORG, () => processTimeout("ctx-1"));
+
+    expect(updateData(1)).toMatchObject({
+      status: "COMPLETED",
+      currentStepId: null,
+      timeoutAt: null,
+    });
+    expect(h.automationLogCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        status: "FAILED",
+        message: expect.stringContaining("Fluxo encerrado"),
+      }),
+    });
   });
 
   it("wait_for_reply sem timeoutGotoStepId fecha o contexto", async () => {
