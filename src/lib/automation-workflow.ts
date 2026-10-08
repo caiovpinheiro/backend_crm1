@@ -852,7 +852,7 @@ export function defaultStepConfig(stepType: string): Record<string, unknown> {
       };
     case "wait_for_reply":
       return {
-        timeoutMs: 60_000, receivedGotoStepId: "", timeoutGotoStepId: "", saveToVariable: "",
+        timeoutMs: 60_000, receivedGotoStepId: "", timeoutGotoStepId: "", saveToVariable: "lastResponse",
       };
     case "closing_protocol":
       return {

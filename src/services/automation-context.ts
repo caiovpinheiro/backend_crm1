@@ -153,6 +153,17 @@ export function linearFallbackStepId(
   return steps[idx + 1]?.id ?? null;
 }
 
+/**
+ * Variável da resposta recebida. O canvas grava `saveToVariable: ""`
+ * quando o campo fica em branco; isso não pode descartar o texto
+ * (CEP `{{lastResponse}}` gravava string vazia e o passo seguia OK).
+ */
+export function replyVariableName(config: Record<string, unknown>): string {
+  const raw = config.saveToVariable;
+  const name = typeof raw === "string" ? raw.trim() : "";
+  return name || "lastResponse";
+}
+
 /** Lê uma referência de step do config, tratando `""`/`__none__` como ausente. */
 export function readStepRef(config: unknown, key: string): string | null {
   if (config === null || typeof config !== "object") return null;
@@ -1055,10 +1066,8 @@ export async function processIncomingMessage(
         );
       }
     } else if (currentStep.type === "wait_for_reply") {
-      const varName = String(config.saveToVariable ?? "lastResponse").trim();
-      if (varName) {
-        variables = { ...variables, [varName]: messageContent };
-      }
+      const varName = replyVariableName(config);
+      variables = { ...variables, [varName]: messageContent };
       const receivedGoto = readStepRef(config, "receivedGotoStepId");
       if (receivedGoto) {
         nextStepId = receivedGoto;
@@ -1393,11 +1402,58 @@ export async function processIncomingMessage(
   return { handled: false, replied: false };
 }
 
+/** Tentativas da retomada quando o timeout vence e a continuação quebra. */
+const TIMEOUT_RESUME_RETRY_VAR = "__timeoutResumeRetries";
+const TIMEOUT_RESUME_RETRY_DELAY_MS = 60_000;
+const TIMEOUT_RESUME_RETRY_MAX = 5;
+
+function timeoutResumeAttempt(variables: Record<string, unknown>, stepId: string): number {
+  const raw = variables[TIMEOUT_RESUME_RETRY_VAR];
+  if (!raw || typeof raw !== "object") return 0;
+  const rec = raw as { stepId?: unknown; n?: unknown };
+  if (rec.stepId !== stepId) return 0;
+  const n = typeof rec.n === "number" ? rec.n : 0;
+  return n > 0 ? n : 0;
+}
+
+async function recordTimeoutResumeFailure(args: {
+  automationId: string;
+  contactId: string | null;
+  stepId: string;
+  stepType: string;
+  attempt: number;
+  error: unknown;
+  gaveUp: boolean;
+}): Promise<void> {
+  const detail = args.error instanceof Error ? args.error.message : String(args.error);
+  const message = args.gaveUp
+    ? `Retomada da espera falhou (${args.attempt}/${TIMEOUT_RESUME_RETRY_MAX}) — ${detail}. Fluxo encerrado.`
+    : `Retomada da espera falhou (${args.attempt}/${TIMEOUT_RESUME_RETRY_MAX}) — ${detail}. Nova tentativa em 1 min.`;
+  try {
+    await prisma.automationLog.create({
+      data: withOrgFromCtx({
+        automationId: args.automationId,
+        contactId: args.contactId,
+        stepId: args.stepId,
+        stepType: args.stepType,
+        status: "FAILED",
+        message,
+      }),
+    });
+  } catch (err) {
+    log.error(
+      `falha ao gravar log da retomada — auto=${args.automationId} step=${args.stepId}:`,
+      err,
+    );
+  }
+}
+
 async function dispatchToNextStep(
   ctx: { id: string; automationId: string; contactId: string | null; automation: { name?: string; steps: { id: string; type: string; config: unknown }[] } },
   nextStepId: string | null,
   variables: Record<string, unknown>,
   reason: string,
+  pausedStep?: { id: string; type: string },
 ): Promise<void> {
   if (!nextStepId) {
     await advanceContext(ctx.id, null, variables);
@@ -1446,11 +1502,39 @@ async function dispatchToNextStep(
         `continueFromStep error (${reason}) — auto=${ctx.automation.name ?? ctx.automationId} step=${nextStepId}:`,
         err,
       );
-      // A continuação morreu no meio do ramo SEM re-pausar (um throw sai
-      // do loop antes de qualquer wait). Se não fecharmos aqui, o contexto
-      // fica RUNNING eternamente no step despachado e a trava de reentrada
-      // (getActiveContext no fireTrigger) bloqueia a automação pro contato
-      // pra sempre.
+      // A continuação quebrou antes de re-pausar (DNA Work, Talita #66719:
+      // a hora da lista venceu, o remove_tag não rodou e o catch encerrava
+      // o fluxo sem log). Rearma a espera para o próximo ciclo. Sem isso o
+      // contexto fica RUNNING no passo despachado, sem timer, e a trava de
+      // reentrada prende o contato.
+      const attempt = pausedStep ? timeoutResumeAttempt(variables, pausedStep.id) + 1 : 1;
+      const gaveUp = !pausedStep || attempt > TIMEOUT_RESUME_RETRY_MAX;
+      if (pausedStep) {
+        await recordTimeoutResumeFailure({
+          automationId: ctx.automationId,
+          contactId: ctx.contactId,
+          stepId: pausedStep.id,
+          stepType: pausedStep.type,
+          attempt: Math.min(attempt, TIMEOUT_RESUME_RETRY_MAX),
+          error: err,
+          gaveUp,
+        });
+      }
+      if (!gaveUp && pausedStep) {
+        await advanceContext(
+          ctx.id,
+          pausedStep.id,
+          {
+            ...variables,
+            [TIMEOUT_RESUME_RETRY_VAR]: { stepId: pausedStep.id, n: attempt },
+          },
+          TIMEOUT_RESUME_RETRY_DELAY_MS,
+        );
+        log.warn(
+          `retomada falhou, espera rearmada (${attempt}/${TIMEOUT_RESUME_RETRY_MAX}) — auto=${ctx.automation.name ?? ctx.automationId} step=${pausedStep.id}`,
+        );
+        return;
+      }
       await advanceContext(ctx.id, null, variables).catch(() => {});
     }
   } else if (PAUSING_STEP_TYPES.has(targetStep.type)) {
@@ -1592,6 +1676,7 @@ export async function processTimeout(contextId: string) {
       delayNext,
       delayVars,
       "delay concluído",
+      { id: step.id, type: step.type },
     );
     return;
   }
@@ -1663,6 +1748,7 @@ export async function processTimeout(contextId: string) {
       encerrar,
       variables,
       "closing_protocol encerrar (sem resposta)",
+      { id: step.id, type: step.type },
     );
     return;
   }
@@ -1692,7 +1778,13 @@ export async function processTimeout(contextId: string) {
     log.info(
       `wait_for_reply timeout — auto=${ctx.automation.name} contato=${ctx.contactId} → step=${timeoutGoto}`,
     );
-    await dispatchToNextStep(ctxForDispatch, timeoutGoto, variables, "wait_for_reply timeout");
+    await dispatchToNextStep(
+      ctxForDispatch,
+      timeoutGoto,
+      variables,
+      "wait_for_reply timeout",
+      { id: step.id, type: step.type },
+    );
     return;
   }
 
@@ -1771,7 +1863,13 @@ export async function processTimeout(contextId: string) {
   log.info(
     `question/interactive timeout — auto=${ctx.automation.name} action=${action} → step=${nextStepId ?? "(fim)"}`,
   );
-  await dispatchToNextStep(ctxForDispatch, nextStepId, variables, `${step.type} timeout`);
+  await dispatchToNextStep(
+    ctxForDispatch,
+    nextStepId,
+    variables,
+    `${step.type} timeout`,
+    { id: step.id, type: step.type },
+  );
 }
 
 const MENU_STAY_ON_MEDIA_TYPES = new Set([
