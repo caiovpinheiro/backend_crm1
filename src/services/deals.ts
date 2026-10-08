@@ -333,19 +333,22 @@ export type GetDealsParams = {
   updatedSince?: Date;
   /**
    * `lastInteraction` ordena o recorte inteiro (não a página) pelo mesmo
-   * instante da coluna: a última atividade da conversa do contato e, só
-   * sem conversa, o `updatedAt` do negócio. Ausente = `updatedAt` desc.
+   * instante que a coluna da lista mostra — a última mensagem de chat do
+   * contato; sem mensagem, o `updatedAt` do negócio — e só então aplica
+   * skip/take. Ausente = `updatedAt` desc, como sempre.
    */
   sort?: "lastInteraction";
   direction?: "asc" | "desc";
 };
 
 /**
- * Página de ids na ordem da coluna "Última interação":
- * `MAX(conversations.updatedAt)` do contato e, só sem conversa, o
- * `updatedAt` do deal. Um toque no card (etapa, campo, dono) não entra
- * nessa hora — senão "mais antiga" só reordena a janela do último toque.
- * O ORDER BY roda antes do LIMIT.
+ * Página de ids já na ordem da coluna "Última interação": última mensagem
+ * de chat do contato (`contacts.lastMessageAt` e, só se estiver NULL, o
+ * fallback de `conversations`). Sem mensagem, cai no `updatedAt` do deal.
+ * O `updatedAt` não entra quando já existe mensagem: etapa, campo ou dono
+ * mexidos ontem não podem esconder a conversa mais antiga. O `ORDER BY`
+ * roda antes do LIMIT, então a página 1 no sentido antigo é o mais
+ * antigo do filtro, não o mais antigo dos que já estavam na tela.
  */
 async function pageIdsByLastInteraction(
   where: Prisma.DealWhereInput,
@@ -358,22 +361,46 @@ async function pageIdsByLastInteraction(
   const ids = idRows.map((row) => row.id);
   const orgId = getOrgIdOrThrow();
   const dir = direction === "asc" ? Prisma.raw("ASC") : Prisma.raw("DESC");
-  const ranked = await prisma.$queryRaw<{ id: string }[]>`
-    SELECT d.id
-    FROM deals d
-    LEFT JOIN LATERAL (
-      SELECT MAX(cv."updatedAt") AS last_at
-      FROM conversations cv
-      WHERE cv."organizationId" = ${orgId}
-        AND cv."contactId" = d."contactId"
-    ) li ON TRUE
-    WHERE d."organizationId" = ${orgId}
-      AND d.id = ANY(${ids})
-    ORDER BY COALESCE(li.last_at, d."updatedAt") ${dir}, d.id ASC
+  const orderByMessage = Prisma.sql`
+    ORDER BY COALESCE(
+      ct."lastMessageAt",
+      fb.last_at,
+      d."updatedAt"
+    ) ${dir}, d.id ASC
     OFFSET ${skip}
     LIMIT ${take}
   `;
-  return ranked.map((row) => row.id);
+  try {
+    const ranked = await prisma.$queryRaw<{ id: string }[]>`
+      SELECT d.id
+      FROM deals d
+      LEFT JOIN contacts ct
+        ON ct.id = d."contactId" AND ct."organizationId" = ${orgId}
+      LEFT JOIN LATERAL (
+        SELECT MAX(COALESCE(cv."lastMessageAt", cv."updatedAt")) AS last_at
+        FROM conversations cv
+        WHERE ct."lastMessageAt" IS NULL
+          AND cv."organizationId" = ${orgId}
+          AND cv."contactId" = d."contactId"
+      ) fb ON TRUE
+      WHERE d."organizationId" = ${orgId}
+        AND d.id = ANY(${ids})
+      ${orderByMessage}
+    `;
+    return ranked.map((row) => row.id);
+  } catch (error) {
+    if (!missingLastMessageColumn(error)) throw error;
+    const ranked = await prisma.$queryRaw<{ id: string }[]>`
+      SELECT d.id
+      FROM deals d
+      WHERE d."organizationId" = ${orgId}
+        AND d.id = ANY(${ids})
+      ORDER BY d."updatedAt" ${dir}, d.id ASC
+      OFFSET ${skip}
+      LIMIT ${take}
+    `;
+    return ranked.map((row) => row.id);
+  }
 }
 
 const listInclude = {
@@ -646,10 +673,12 @@ async function loadConversationLastAtFallback(
 }
 
 /**
- * Última interação do negócio na lista: o mais recente entre a última
- * alteração do próprio deal (movimentação de etapa, edição) e a última
- * MENSAGEM de chat do contato (`contacts.lastMessageAt`, o mesmo sinal do
- * sort `lastInteraction` do board). Sem mensagem, fica o `updatedAt` do deal.
+ * Última interação do negócio na lista: a última MENSAGEM de chat do
+ * contato (`contacts.lastMessageAt`, o mesmo sinal do sort
+ * `lastInteraction` do board). Sem mensagem, fica o `updatedAt` do deal.
+ * Alterar o card não substitui a mensagem — senão "mais antiga" só
+ * reordena a hora do último toque e a página continua parecendo a lista
+ * sem ordenação.
  *
  * O contato já vem no `include` da lista, então a página não consulta
  * `conversations`. Antes: um `GROUP BY "contactId"` com
