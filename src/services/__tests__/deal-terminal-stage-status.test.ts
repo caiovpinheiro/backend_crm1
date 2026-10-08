@@ -316,3 +316,43 @@ describe("updateDeal com stageId (fora do moveDeal)", () => {
   });
 });
 
+describe("painel: perdidos do período (status + closedAt)", () => {
+  const range = {
+    from: new Date("2026-10-01T03:00:00.000Z"),
+    to: new Date("2026-10-31T02:59:59.999Z"),
+  };
+  const filters = { range, pipelineIds: ["pipe-a"], stalledDays: 7 };
+
+  it("negócio criado direto em Perdido entra na contagem do período", async () => {
+    vi.useFakeTimers({ now: new Date("2026-10-08T15:00:00.000Z"), toFake: ["Date"] });
+    try {
+      h.stageFindUnique.mockResolvedValue({ pipelineId: "pipe-a", ...LOST_STAGE });
+      const created = await withOrg(() =>
+        createDeal({ title: "TESTE MIGRACAO", stageId: "stage-lost", value: 100 }),
+      );
+      h.painelRows = [created as unknown as Record<string, unknown>];
+
+      const kpis = await withOrg(() => getPainelDealsKpis(filters));
+
+      // 0 ganhos / 1 perdido no período: há fechamento e a conversão é 0 %.
+      expect(kpis.hasClosedInPeriod).toBe(true);
+      expect(kpis.taxaConversao.value).toBe(0);
+      expect(painelAggregate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { AND: [{ status: "LOST", closedAt: { gte: range.from, lte: range.to } }] },
+        }),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("como era antes do patch (OPEN sem closedAt) o painel não via o perdido", async () => {
+    h.painelRows = [{ id: "legado", status: "OPEN", closedAt: null, value: 100 }];
+
+    const kpis = await withOrg(() => getPainelDealsKpis(filters));
+
+    expect(kpis.hasClosedInPeriod).toBe(false);
+    expect(kpis.taxaConversao.value).toBeNull();
+  });
+});
