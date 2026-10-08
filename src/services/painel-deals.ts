@@ -112,6 +112,16 @@ export type PainelFunnel = {
    * Contato novo com deal nesse funil conta 1. Só deal conta 1. Só contato conta 1.
    */
   novos: { count: number; value: number };
+  /**
+   * Etapas "Perdido" (isLost) do(s) funil(is) selecionado(s).
+   * count/value: negócios que estão HOJE nessas etapas, qualquer status (igual à coluna do Kanban,
+   * incluindo os já encerrados que o Kanban esconde por padrão), com os mesmos filtros estruturais do estoque
+   * (responsável, etiquetas, origem, etc. — reaproveite `structuralWhere(f)` sem o filtro de status).
+   * sentInPeriod: negócios distintos movidos para uma etapa isLost dentro do período
+   * (deal_events.type='STAGE_CHANGED' com meta->'to'->>'id' numa etapa isLost e createdAt no período),
+   * com os mesmos filtros do cálculo de entradas (`entered`).
+   */
+  lostStage: { count: number; value: number; sentInPeriod: number };
 };
 
 export type PainelCustomFieldCard = {
@@ -396,7 +406,14 @@ export async function getPainelFunnel(f: PainelDealFilters): Promise<PainelFunne
   const emptyNovos = { count: 0, value: 0 };
 
   if (stages.length === 0) {
-    return { definition: "cohort", tooltip, stages: [], empty: true, novos: emptyNovos };
+    return {
+      definition: "cohort",
+      tooltip,
+      stages: [],
+      empty: true,
+      novos: emptyNovos,
+      lostStage: { count: 0, value: 0, sentInPeriod: 0 },
+    };
   }
 
   const pipelineFilter = pipelineInSql(Prisma.sql`s."pipelineId"`, f.pipelineIds);
@@ -437,12 +454,24 @@ export async function getPainelFunnel(f: PainelDealFilters): Promise<PainelFunne
 
   const todayStart = parseDay(dayKeyFromDate(new Date()), false)!;
   const structural = await structuralWhere(f);
-  const stockRows = await db().deal.groupBy({
-    by: ["stageId", "ownerId"],
-    where: and(structural, { status: "OPEN" as DealStatus }),
-    _count: { _all: true },
-    _sum: { value: true },
-  });
+  const lostStageIds = new Set(stages.filter((s) => s.isLost).map((s) => s.id));
+  // Estoque da etapa Perdido: como a coluna do kanban, qualquer status (provisório
+  // até o backfill de status/closedAt dos importados).
+  const [stockRows, lostAgg] = await Promise.all([
+    db().deal.groupBy({
+      by: ["stageId", "ownerId"],
+      where: and(structural, { status: "OPEN" as DealStatus }),
+      _count: { _all: true },
+      _sum: { value: true },
+    }),
+    lostStageIds.size
+      ? db().deal.aggregate({
+          where: and(structural, { stageId: { in: [...lostStageIds] } }),
+          _count: { _all: true },
+          _sum: { value: true },
+        })
+      : Promise.resolve(null),
+  ]);
 
   const entered = await db().$queryRaw<
     {
@@ -549,6 +578,22 @@ export async function getPainelFunnel(f: PainelDealFilters): Promise<PainelFunne
     bucket.byUser.set(ownerKey, user);
   }
 
+  // Envios para Perdido no período: sai do `entered` (mesmos filtros), sem consulta
+  // extra. Só STAGE_CHANGED: negócio criado direto na etapa não conta como envio
+  // (o `entered` guarda a 1ª entrada por negócio+etapa; se ela for o CREATED, uma
+  // volta posterior a Perdido no mesmo período também não conta).
+  const sentToLost = new Set<string>();
+  for (const row of entered) {
+    if (row.eventType === "STAGE_CHANGED" && lostStageIds.has(row.stageId)) {
+      sentToLost.add(row.dealId);
+    }
+  }
+  const lostStage = {
+    count: lostAgg?._count._all ?? 0,
+    value: round2(toNumber(lostAgg?._sum.value)),
+    sentInPeriod: sentToLost.size,
+  };
+
   const laterEntries = await db().$queryRaw<
     { dealId: string; stageId: string; enteredAt: Date }[]
   >(Prisma.sql`
@@ -578,7 +623,6 @@ export async function getPainelFunnel(f: PainelDealFilters): Promise<PainelFunne
     laterByDeal.set(row.dealId, list);
   }
 
-  const lostStageIds = new Set(stages.filter((s) => s.isLost).map((s) => s.id));
   const ownerIds = new Set<string>();
   for (const bucket of byStage.values()) {
     for (const id of bucket.byUser.keys()) {
@@ -711,6 +755,7 @@ export async function getPainelFunnel(f: PainelDealFilters): Promise<PainelFunne
     stages: merged,
     empty: openStages.length === 0,
     novos,
+    lostStage,
   };
 }
 
