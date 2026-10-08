@@ -312,8 +312,8 @@ export type GetDealsParams = {
   updatedSince?: Date;
   /**
    * `lastInteraction` ordena o recorte inteiro (não a página) pelo mesmo
-   * instante da coluna da lista, e só então aplica skip/take.
-   * Ausente = `updatedAt` desc, como sempre.
+   * instante da coluna: a última atividade da conversa do contato e, só
+   * sem conversa, o `updatedAt` do negócio. Ausente = `updatedAt` desc.
    */
   sort?: "lastInteraction";
   direction?: "asc" | "desc";
@@ -321,9 +321,10 @@ export type GetDealsParams = {
 
 /**
  * Página de ids na ordem da coluna "Última interação":
- * o mais recente entre `deals.updatedAt` e `MAX(conversations.updatedAt)`
- * do contato — o mesmo de `attachLastInteractionAt`. O ORDER BY roda
- * antes do LIMIT.
+ * `MAX(conversations.updatedAt)` do contato e, só sem conversa, o
+ * `updatedAt` do deal. Um toque no card (etapa, campo, dono) não entra
+ * nessa hora — senão "mais antiga" só reordena a janela do último toque.
+ * O ORDER BY roda antes do LIMIT.
  */
 async function pageIdsByLastInteraction(
   where: Prisma.DealWhereInput,
@@ -347,7 +348,7 @@ async function pageIdsByLastInteraction(
     ) li ON TRUE
     WHERE d."organizationId" = ${orgId}
       AND d.id = ANY(${ids})
-    ORDER BY GREATEST(d."updatedAt", COALESCE(li.last_at, d."updatedAt")) ${dir}, d.id ASC
+    ORDER BY COALESCE(li.last_at, d."updatedAt") ${dir}, d.id ASC
     OFFSET ${skip}
     LIMIT ${take}
   `;
@@ -502,11 +503,11 @@ export async function getDeals(params: GetDealsParams = {}) {
 }
 
 /**
- * Última interação do negócio na lista: o mais recente entre a última
- * alteração do próprio deal (movimentação de etapa, edição) e a última
- * atividade da conversa do contato (mensagem enviada ou recebida —
- * `MAX(conversations.updatedAt)`, o mesmo sinal do sort `lastInteraction`
- * do board). Sem conversa, fica o `updatedAt` do deal.
+ * Última interação do negócio na lista: a última atividade da conversa
+ * do contato (`MAX(conversations.updatedAt)`, o mesmo sinal do sort
+ * `lastInteraction` do board). Sem conversa, fica o `updatedAt` do deal.
+ * Alterar o card não substitui a conversa — senão "mais antiga" só
+ * reordena a hora do último toque.
  */
 async function attachLastInteractionAt<
   T extends { contactId: string | null; updatedAt: Date },
@@ -538,7 +539,7 @@ async function attachLastInteractionAt<
   return items.map((deal) => {
     const dealAt = deal.updatedAt.getTime();
     const convAt = deal.contactId ? lastByContact.get(deal.contactId) : undefined;
-    const last = convAt != null && convAt > dealAt ? convAt : dealAt;
+    const last = convAt != null ? convAt : dealAt;
     return { ...deal, lastInteractionAt: new Date(last).toISOString() };
   });
 }
