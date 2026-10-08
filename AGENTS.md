@@ -141,6 +141,7 @@ Medição por conversa: `node dist/workers/audit-attendance.js --org <slug>`.
 
 ## Decisões técnicas
 
+- 2026-10-08 — Grok 4.7 — **Contato compartilhado**: `Message.sharedContacts` (`shared_contacts`) guarda o array normalizado do WhatsApp (Meta e Baileys). `content` fica com o texto curto e `messageType` é `contact`. Não cria Contact nem mexe no contato da conversa. Migration `20261008120000_message_shared_contacts`.
 - 2026-10-08 — Grok 4.7 — **Lista, última interação é a conversa**: `GET /api/deals?sort=lastInteraction&direction=asc|desc` ordena o recorte inteiro por `MAX(conversations.updatedAt)` do contato e só então pagina. A coluna mostra o mesmo instante. Sem conversa, cai no `updatedAt` do negócio. Etapa, campo ou dono não escondem a conversa mais antiga. Sem `sort`, a lista segue `updatedAt` desc.
 - 2026-10-07 — Grok 4.7 — **Tag do negócio entra no contato**: `POST /api/deals/:id/tags` grava `TagOnDeal` e a mesma tag em `TagOnContact` do contato do card. No pipeline só existe tag de negócio; campanha, inbox e ficha leem a do contato. Ao tirar, sai do contato se nenhum outro negócio dele ainda tiver essa tag.
 - 2026-10-07 — Grok 4.7 — **Usar o texto do disparo**: opção do agente (`useDispatchText`, padrão desligada), em Começo e fim → opções avançadas. Ligada, a resposta a um modelo não manda as boas-vindas de novo: o motor lê o texto da bolha e, se ela só tiver o nome, o corpo salvo do modelo, e o agente continua a partir da resposta. Não usa tag do contato para adivinhar o disparo.

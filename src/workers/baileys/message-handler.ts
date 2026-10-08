@@ -30,6 +30,11 @@ import {
   publishNewMessage,
 } from "@/lib/realtime-events";
 import { getOrgIdOrNull } from "@/lib/request-context";
+import {
+  formatSharedContactsText,
+  parseBaileysSharedContacts,
+  type SharedContact,
+} from "@/lib/shared-contact";
 import { isLidJid, resolveJid } from "./lid-resolver";
 import { noteContactActivity } from "./contact-typing";
 import {
@@ -390,6 +395,7 @@ type ParsedMsg = {
   messageType: string;
   mediaUrl: string | null;
   externalId: string;
+  sharedContacts?: SharedContact[] | null;
 };
 
 type AnyMsg = Record<string, any>;
@@ -511,11 +517,18 @@ async function parseMessage(
   }
 
   if (contentType === "contactMessage" || contentType === "contactsArrayMessage") {
-    const displayName =
-      (msgContent as AnyMsg).contactMessage?.displayName ??
-      (msgContent as AnyMsg).contactsArrayMessage?.displayName ??
-      "Contato";
-    return { text: `[contato] ${displayName}`, messageType: "text", mediaUrl: null, externalId };
+    const node =
+      contentType === "contactsArrayMessage"
+        ? (msgContent as AnyMsg).contactsArrayMessage
+        : (msgContent as AnyMsg).contactMessage;
+    const sharedContacts = parseBaileysSharedContacts(node);
+    return {
+      text: formatSharedContactsText(sharedContacts),
+      messageType: "contact",
+      mediaUrl: null,
+      externalId,
+      sharedContacts,
+    };
   }
 
   if (contentType === "locationMessage" || contentType === "liveLocationMessage") {
@@ -702,6 +715,9 @@ export async function handleBaileysMessage(
             externalId: parsed.externalId,
             senderName: msg.pushName ?? contact.name,
             mediaUrl: parsed.mediaUrl,
+            ...(parsed.sharedContacts?.length
+              ? { sharedContacts: parsed.sharedContacts }
+              : {}),
           }),
         });
       }),
@@ -752,6 +768,14 @@ export async function handleBaileysMessage(
       assignedToId: conversation.assignedToId ?? null,
       content: parsed.text,
       timestamp: new Date().toISOString(),
+      ...(parsed.messageType === "contact"
+        ? {
+            messageType: "contact",
+            ...(parsed.sharedContacts?.length
+              ? { sharedContacts: parsed.sharedContacts }
+              : {}),
+          }
+        : {}),
     });
 
     notifyInboundMessage({

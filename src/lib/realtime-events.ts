@@ -73,6 +73,8 @@ export type NewMessagePayload = {
   catalogOrder?: unknown;
   /** Referral do anúncio Meta desta mensagem inbound. */
   referral?: unknown;
+  /** Contatos compartilhados normalizados desta mensagem. */
+  sharedContacts?: unknown;
   /** Escopo do board — ver cabeçalho. Só com a lista completa do contato. */
   pipelineIds?: string[];
   dealIds?: string[];
