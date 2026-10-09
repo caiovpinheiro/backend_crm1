@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   loadContext: vi.fn(),
   sendText: vi.fn(),
   writeSummary: vi.fn(),
+  appliedRules: vi.fn(),
   loadPriorSummary: vi.fn(),
   updateRunningSummary: vi.fn(),
   executeActions: vi.fn(),
@@ -36,6 +37,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("../sent-materials", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../sent-materials")>()),
   recentlySentMessageModels: mocks.recentlySent,
+  recentlyAppliedRuleIds: mocks.appliedRules,
 }));
 
 vi.mock("@/lib/prisma", () => ({
@@ -190,6 +192,7 @@ describe("processV2Turn", () => {
     mocks.findInherited.mockResolvedValue(null);
     mocks.writeSummary.mockResolvedValue(null);
     mocks.loadPriorSummary.mockResolvedValue(null);
+    mocks.appliedRules.mockResolvedValue(new Set());
     mocks.updateRunningSummary.mockResolvedValue(null);
     mocks.messageFindMany.mockResolvedValue([]);
     mocks.resolveInline.mockResolvedValue({ updated: 1, missing: 0 });
@@ -979,6 +982,7 @@ describe("processV2Turn — correções do motor", () => {
     mocks.findInherited.mockResolvedValue(null);
     mocks.writeSummary.mockResolvedValue(null);
     mocks.loadPriorSummary.mockResolvedValue(null);
+    mocks.appliedRules.mockResolvedValue(new Set());
     mocks.updateRunningSummary.mockResolvedValue(null);
     mocks.resolveInline.mockResolvedValue({ updated: 1, missing: 0 });
     mocks.distributeNewInbound.mockResolvedValue(undefined);
@@ -2016,6 +2020,75 @@ describe("processV2Turn — correções do motor", () => {
       expect(sentTexts()).toEqual([]);
     });
 
+    it("atalho com mensagem fixa responde uma vez: na segunda vez a mensagem vai para o agente", async () => {
+      const config = baseConfig({
+        rules: [{ id: "r-fixo", name: "Assinatura", order: 1, conditions: [{ type: "keywords", values: ["assinatura"] }], actions: [{ type: "send_message", message: "A assinatura é feita no portal, com os dados de acesso." }] } as any],
+      });
+      mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+      mocks.getState.mockResolvedValue(makeState("active", "agente"));
+      mocks.executeActions.mockImplementation(async (actions: Array<{ type: string }>) => ({ results: actions.map((a) => ({ action: a, ok: true })), anyHandoff: false, anyClose: false }));
+      mocks.callLLM.mockResolvedValue(llmOut({ reply: "Entendi: seu e-mail de acesso não está sendo aceito. Me diga qual mensagem aparece." }));
+
+      // Primeira vez: o atalho responde e marca que uma orientação foi dada.
+      await run("Como faço a assinatura?");
+      expect(mocks.callLLM).not.toHaveBeenCalled();
+      const saved = mocks.upsertState.mock.calls.map((c) => c[0] as { counters?: { guidanceGiven?: boolean } }).filter((c) => c.counters);
+      expect(saved.at(-1)?.counters?.guidanceGiven).toBe(true);
+
+      // Segunda vez (mesma palavra-chave, dúvida diferente): o atalho já respondeu → agente responde.
+      vi.clearAllMocks();
+      mocks.sendText.mockResolvedValue({ sent: true });
+      mocks.upsertState.mockResolvedValue(undefined);
+      mocks.logTurn.mockResolvedValue(undefined);
+      mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+      mocks.getState.mockResolvedValue(makeState("active", "agente", { guidanceGiven: true }));
+      mocks.appliedRules.mockResolvedValue(new Set(["r-fixo"]));
+      mocks.loadPriorSummary.mockResolvedValue(null);
+      mocks.callLLM.mockResolvedValue(llmOut({ reply: "Entendi: seu e-mail de acesso não está sendo aceito. Me diga qual mensagem aparece." }));
+
+      await run("A assinatura não aceita meu e-mail");
+
+      expect(mocks.callLLM).toHaveBeenCalled();
+      expect(sentTexts()).toEqual(["Entendi: seu e-mail de acesso não está sendo aceito. Me diga qual mensagem aparece."]);
+    });
+
+    it("resposta com conteúdo sai mesmo que o cliente escreva no meio; só a pergunta de triagem espera", async () => {
+      const config = baseConfig({ replyEnding: { info: { enabled: true, phrases: ["Posso te ajudar em mais alguma coisa?"], buttons: ["Não", "Preciso de ajuda"] } } } as Partial<V2AgentConfig>);
+      mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+      mocks.getState.mockResolvedValue(makeState("active", "agente"));
+      mocks.callLLM.mockResolvedValue(llmOut({ reply: "Nas atividades não aparece qual questão você acertou. A nota fica em Resultados." }));
+      mocks.messageFindMany.mockImplementation(async (args: { where?: { id?: { in?: string[] } } }) =>
+        args.where?.id?.in ? [{ createdAt: new Date("2026-01-01T10:00:00Z") }] : [],
+      );
+      mocks.messageFindFirst.mockResolvedValue({ id: "m-newer" });
+
+      await run("Não consigo ver o que errei", { messageIds: ["m-cur"] });
+
+      expect(sentTexts()).toHaveLength(1);
+      expect(sentTexts()[0]).toContain("Nas atividades não aparece");
+      expect(sentTexts()[0]).toContain("Posso te ajudar em mais alguma coisa?");
+    });
+
+    it("turno copiado de outro agente: atalho não responde em cima da resposta que o anterior já deu", async () => {
+      const config = baseConfig({
+        rules: [{ id: "r-kw", name: "Palavra", order: 1, conditions: [{ type: "keywords", values: ["assinatura"] }], actions: [{ type: "send_message", message: "Texto fixo." }] } as any],
+      });
+      mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+      mocks.getState.mockResolvedValue({ ...makeState("active", "pessoa"), agentId: "agent-0" });
+      mocks.messageFindMany.mockImplementation(async (args: { where?: { id?: { in?: string[] } } }) =>
+        args.where?.id?.in ? [{ createdAt: new Date("2026-01-01T10:00:00Z") }] : [],
+      );
+      // Já existe resposta do agente anterior depois da mensagem.
+      mocks.messageFindFirst.mockResolvedValue({ id: "m-prev-reply" });
+      mocks.executeActions.mockImplementation(async (actions: Array<{ type: string }>) => ({ results: actions.map((a) => ({ action: a, ok: true })), anyHandoff: false, anyClose: false }));
+      mocks.callLLM.mockResolvedValue(llmOut({ reply: "Seu e-mail de acesso é o acadêmico; me diga qual mensagem aparece." }));
+
+      await run("A assinatura não aceita meu e-mail", { messageIds: ["m-cur"] });
+
+      expect(mocks.callLLM).toHaveBeenCalled();
+      expect(sentTexts().join(" ")).not.toContain("Texto fixo.");
+    });
+
     it("clique no botão de fecho encerra", async () => {
       mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: baseConfig(), active: true });
       mocks.getState.mockResolvedValue(makeState("active", "agente", { pendingOptions: ["Não, obrigado(a)!", "Preciso de ajuda"] }));
@@ -2062,6 +2135,7 @@ describe("processV2Turn — correções do motor", () => {
     mocks.findInherited.mockResolvedValue(null);
     mocks.writeSummary.mockResolvedValue(null);
     mocks.loadPriorSummary.mockResolvedValue(null);
+    mocks.appliedRules.mockResolvedValue(new Set());
     mocks.updateRunningSummary.mockResolvedValue(null);
     mocks.messageFindMany.mockResolvedValue([]);
     mocks.loadContext.mockResolvedValue(CONTEXT_WITH_DEAL);

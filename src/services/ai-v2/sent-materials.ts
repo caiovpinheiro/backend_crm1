@@ -140,6 +140,38 @@ export function resendWindowStart(now: number, lastReset: Date | null): Date {
   return new Date(lastReset ? Math.max(windowStart, lastReset.getTime()) : windowStart);
 }
 
+/** Ações de atalho que respondem ao cliente com texto fixo. */
+export const RULE_REPLY_ACTION_TYPES = new Set(["send_message", "send_message_model", "send_whatsapp_template"]);
+
+/** Ids dos atalhos cujos turnos registrados mandaram resposta fixa. */
+export function appliedRuleIdsFromRows(rows: Array<{ ruleId: string | null; executedActions: unknown }>): Set<string> {
+  const out = new Set<string>();
+  for (const row of rows) {
+    if (!row.ruleId || !Array.isArray(row.executedActions)) continue;
+    const replied = (row.executedActions as Array<Record<string, unknown>>).some((res) => {
+      const action = (res?.action ?? {}) as Record<string, unknown>;
+      return res?.ok === true && typeof action.type === "string" && RULE_REPLY_ACTION_TYPES.has(action.type);
+    });
+    if (replied) out.add(row.ruleId);
+  }
+  return out;
+}
+
+/**
+ * Atalhos com mensagem fixa que já responderam nesta conversa (desde o
+ * último reset de teste). Um atalho que casa pela palavra-chave casaria de
+ * novo em toda mensagem que a repete, mandando o mesmo texto várias vezes
+ * para dúvidas diferentes.
+ */
+export async function recentlyAppliedRuleIds(conversationId: string): Promise<Set<string>> {
+  const since = (await lastV2ResetAt(conversationId)) ?? new Date(0);
+  const rows = await db.$queryRawUnsafe<Array<{ ruleId: string | null; executedActions: unknown }>>(
+    `SELECT "contextSnapshot"->>'appliedRuleId' AS "ruleId", "executedActions" FROM "ai_simple_turn_logs" WHERE "conversationId"=$1 AND "createdAt" >= $2 AND "contextSnapshot"->>'appliedRuleId' IS NOT NULL ORDER BY "createdAt" DESC LIMIT 50`,
+    conversationId, since,
+  );
+  return appliedRuleIdsFromRows(rows);
+}
+
 /** Quais destas mensagens prontas já saíram na conversa dentro da janela. */
 export async function recentlySentMessageModels(conversationId: string, modelIds: string[]): Promise<Set<string>> {
   if (modelIds.length === 0) return new Set();
