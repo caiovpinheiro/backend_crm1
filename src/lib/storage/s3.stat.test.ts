@@ -51,7 +51,7 @@ process.env.S3_SECRET = "test-secret";
 import { GetObjectCommand, HeadObjectCommand } from "@aws-sdk/client-s3";
 import { probeStoredFile, statStoredFile } from "@/lib/storage/s3";
 
-const ORG = "cmrmbn2lh0uz2nm016beqgbwb";
+const ORG = "org_test_storage";
 
 function notFound(name = "NoSuchKey") {
   const err = new Error(name);

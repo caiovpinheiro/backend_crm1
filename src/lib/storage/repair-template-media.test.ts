@@ -5,7 +5,7 @@ import {
   collectTemplateMediaUrls,
 } from "@/lib/storage/repair-template-media";
 
-const ORG = "cmrmbn2lh0uz2nm016beqgbwb";
+const ORG = "org_test_storage";
 const OTHER = "clxxxxxxxxxxxxxxxxxxxxxxx";
 
 describe("classifyTemplateMediaUrl", () => {
