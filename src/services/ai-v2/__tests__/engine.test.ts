@@ -822,6 +822,23 @@ describe("processV2Turn", () => {
     expect(mocks.sendText.mock.calls.map((c) => (c[0] as { text: string }).text).join(" ")).toContain("Vou transferir");
   });
 
+  it("conversa recebida de outro agente no estado inicial: sem boas-vindas nem confirmação — responde direto", async () => {
+    const config = baseConfig({
+      entry: { ...baseConfig().entry, openingEnabled: true, openingMessage: "Olá! Sou seu assistente virtual.", confirmContact: true, confirmationMessage: "Confirmo que estou falando com você." },
+    } as any);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.getState.mockResolvedValue({ ...makeState("idle", "pessoa"), agentId: "agent-0" });
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "Para pausar o plano, abra Solicitações no portal e escolha Pausa." }));
+
+    const { processV2Turn } = await import("../engine");
+    await processV2Turn({ conversationId: "conv-1", channel: "meta", userMessage: "Como faço para pausar o plano?" });
+
+    const sent = mocks.sendText.mock.calls.map((c) => (c[0] as { text: string }).text);
+    expect(sent.join(" ")).toContain("Para pausar o plano");
+    expect(sent.join(" ")).not.toContain("Olá! Sou seu assistente");
+    expect(sent.join(" ")).not.toContain("Confirmo que estou falando");
+  });
+
   it("devolver a conversa para o agente que acabou de passá-la vai para o destino padrão (sem ping-pong)", async () => {
     mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: baseConfig(), active: true });
     mocks.getState.mockResolvedValue({ ...makeState("active", "pessoa"), agentId: "agent-0" });

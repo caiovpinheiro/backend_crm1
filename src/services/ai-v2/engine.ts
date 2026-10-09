@@ -796,6 +796,14 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     traceStep("agente", "Conversa recebida de outro agente de IA → este agente assume");
     // Quem passou a conversa: não devolver para ele (ping-pong entre agentes).
     counters.receivedFromAgentId = stateRow!.agentId;
+    // A conversa já está em atendimento: sem boas-vindas nem confirmação de
+    // cadastro de novo — o cliente já disse o que precisa ao agente anterior
+    // e a mensagem copiada é essa. Antes o agente novo mandava "Olá! Sou seu
+    // assistente… Confirmo que estou falando com…" e ignorava o pedido.
+    if (stage === "idle" || stage === "confirming") {
+      traceStep("entrada", "Recebida de outro agente: sem boas-vindas nem confirmação de cadastro — responde direto ao pedido");
+      stage = "active";
+    }
     // A transferência entre agentes copia o turno: o agente novo reprocessa
     // a MESMA mensagem. Com o contador herdado, uma mensagem que passou por
     // três agentes contava como três repetições, e o terceiro, em vez de
