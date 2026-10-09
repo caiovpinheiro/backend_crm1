@@ -120,6 +120,16 @@ function resolveHandoffDestination(
   // novo até o teto — duas respostas iguais, dois resumos, e só então a
   // equipe. Vale o destino padrão; se ele também for o próprio agente, o
   // departamento.
+  // Devolver para o agente que acabou de passar a conversa (A → B → A):
+  // ping-pong até o teto, com aviso e resumo a cada volta. Vale o destino
+  // padrão — ou o departamento, se o padrão for um dos dois.
+  if (destination.type === "ai_agent" && destination.id && counters.receivedFromAgentId && destination.id === counters.receivedFromAgentId) {
+    const fallback = config.handoff.defaultDestination;
+    const bounces = fallback.type === "ai_agent" && (fallback.id === counters.receivedFromAgentId || fallback.id === selfAgentId);
+    const next: V2Destination = bounces ? { type: "department" } : fallback;
+    traceStep("transferência", `Destino é o agente que acabou de passar a conversa → ${next.type}${next.id ? ` (${next.id})` : ""}`);
+    return next;
+  }
   if (destination.type === "ai_agent" && selfAgentId && destination.id === selfAgentId) {
     const fallback = config.handoff.defaultDestination;
     const next: V2Destination = fallback.type === "ai_agent" && fallback.id === selfAgentId ? { type: "department" } : fallback;
@@ -784,6 +794,8 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   const handedByAnotherAgent = !!stateRow && stateRow.agentId !== resolved.agentConfigId;
   if (handedByAnotherAgent) {
     traceStep("agente", "Conversa recebida de outro agente de IA → este agente assume");
+    // Quem passou a conversa: não devolver para ele (ping-pong entre agentes).
+    counters.receivedFromAgentId = stateRow!.agentId;
     // A transferência entre agentes copia o turno: o agente novo reprocessa
     // a MESMA mensagem. Com o contador herdado, uma mensagem que passou por
     // três agentes contava como três repetições, e o terceiro, em vez de
