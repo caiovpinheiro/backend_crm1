@@ -2439,8 +2439,29 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       const blocked = withoutReplyEndings(replyText, replyEndingPhrases(config));
       const basis = blocked.length > (lastAgentMessage ?? "").length ? blocked : lastAgentMessage;
       const fallback = repeatFallback(basis, config);
-      const alt = await sendReply(fallback);
-      if (alt.sent) sentReply = fallback;
+      const clientSaidSomething =
+        !chosenOption && !isFillerMessage(input.userMessage) && !isShortAckText(input.userMessage) && !isGreetingOnlyMessage(input.userMessage);
+      const nothingToSay = fallback === systemMessage(config, "stillHere");
+      if (clientSaidSomething && nothingToSay && !anyHandoff && !anyClose) {
+        // O cliente disse o que precisa e o agente só repetiria a pergunta:
+        // "Estou por aqui! Me conta o que você precisa" em cima disso é
+        // surdez. Sai pela saída do assunto (ou encerra), como no limite de
+        // trocas sem avanço, com o contexto. Explicação repetida continua
+        // com "ficou alguma dúvida sobre o que te passei?".
+        const stalledAction = config.limits.stalledExchangesAction;
+        traceStep("resposta", `Só repetiria a pergunta depois de o cliente dizer o que precisa → ${stalledAction === "close" ? "encerra" : "transfere pela saída do assunto, com o contexto"}`);
+        if (stalledAction === "close") {
+          anyClose = true;
+          llmOutput.concluded = true;
+        } else {
+          anyHandoff = true;
+          llmOutput.handoff = true;
+          noteV2Fact("handoffCause", "limit", { keepFirst: true });
+        }
+      } else {
+        const alt = await sendReply(fallback);
+        if (alt.sent) sentReply = fallback;
+      }
     }
     // Não enviada fica fora do log do turno: antes o log dizia que o agente
     // respondeu e o cliente não tinha recebido nada.
