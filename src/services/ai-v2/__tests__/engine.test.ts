@@ -2241,6 +2241,20 @@ describe("processV2Turn — correções do motor", () => {
       expect(transfer?.bypassDuplicateGuard).toBe(true);
     });
 
+    it("resposta repetida depois de o cliente dizer o que precisa: saída do assunto, não “Estou por aqui”", async () => {
+      const config = baseConfig({ themes: [PROBING_THEME as any] } as any);
+      mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+      mocks.getState.mockResolvedValue({ ...makeState("active", "agente"), themeId: "t-dec" });
+      mocks.callLLM.mockResolvedValue(llmOut({ reply: "Me conta, por favor, o que você precisa resolver?", theme: "t-dec" }));
+      mocks.sendText.mockResolvedValueOnce({ sent: false, reason: "near_duplicate" }).mockResolvedValue({ sent: true });
+
+      const result = await run("Reativar o plano");
+
+      expect(result.handoff).toBe(true);
+      expect(sentTexts().join(" ")).not.toContain("Estou por aqui");
+      expect(mocks.simpleHandoff).toHaveBeenCalledWith(expect.objectContaining({ destination: expect.objectContaining({ id: "dep-dec" }) }));
+    });
+
     it("clique no botão de fecho encerra", async () => {
       mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: baseConfig(), active: true });
       mocks.getState.mockResolvedValue(makeState("active", "agente", { pendingOptions: ["Não, obrigado(a)!", "Preciso de ajuda"] }));

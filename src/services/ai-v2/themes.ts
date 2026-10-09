@@ -37,6 +37,26 @@ export function sameWordStem(a: string, b: string): boolean {
   return i >= 5 && i >= shorter * 0.7;
 }
 
+const NEGATION_WORDS = new Set(["nao", "n", "nunca", "nem", "sem", "jamais", "tampouco"]);
+
+/** A palavra na posição `i` vem logo depois de uma negação ("que não é cancelar", "não quero cancelar"). */
+function negatedAt(words: string[], i: number): boolean {
+  return words.slice(Math.max(0, i - 3), i).some((w) => NEGATION_WORDS.has(w));
+}
+
+/**
+ * O gatilho aparece na mensagem só negado: "que não é cancelar", "não quero
+ * cancelar". A frase diz o contrário do assunto — o gatilho não casa e o
+ * sentido/modelo decidem. Com a palavra também afirmada em outro ponto,
+ * casa normalmente.
+ */
+export function triggerOnlyNegated(words: string[], phraseWords: string[]): boolean {
+  const anchor = phraseWords.find((w) => w.length > 2) ?? phraseWords[0];
+  if (!anchor) return false;
+  const positions = words.map((w, i) => (sameWordStem(w, anchor) ? i : -1)).filter((i) => i >= 0);
+  return positions.length > 0 && positions.every((i) => negatedAt(words, i));
+}
+
 /** Pontos do assunto para a mensagem e o que casou (palavras e exemplos). */
 export function matchV2Theme(theme: V2Theme, message: string): { score: number; matched: string[] } {
   const nm = normalize(message);
@@ -53,6 +73,7 @@ export function matchV2Theme(theme: V2Theme, message: string): { score: number; 
       ` ${words.join(" ")} `.includes(` ${phraseWords.join(" ")} `) ||
       (keyWords.length > 0 && keyWords.every((w) => words.some((hw) => sameWordStem(hw, w))))
     ) {
+      if (triggerOnlyNegated(words, phraseWords)) continue;
       score += 2 + phraseWords.length;
       matched.push(phrase);
     }

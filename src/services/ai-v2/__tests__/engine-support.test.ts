@@ -140,6 +140,15 @@ describe("selectV2Theme — flexões da mesma palavra", () => {
     expect(selectV2Theme(cfg, "estão pedindo um comprovante de que me cadastrei")?.id).toBe("comp");
   });
 
+  it("gatilho negado não casa ('que não é cancelar'); afirmado casa", () => {
+    const out = { themes: [{ id: "sai", name: "Saída", when: ["cancelar"], examples: [] }] } as unknown as V2AgentConfig;
+    expect(selectV2Theme(out, "Que não é cancelar")).toBeNull();
+    expect(selectV2Theme(out, "não quero cancelar")).toBeNull();
+    expect(selectV2Theme(out, "quero cancelar o plano")?.id).toBe("sai");
+    expect(selectV2Theme(out, "não consigo acessar para cancelar")?.id).toBe("sai");
+    expect(selectV2Theme(out, "não é cancelar, quero cancelar só o adicional")?.id).toBe("sai");
+  });
+
   it("palavra curta dentro do gatilho não casa ('um' em 'documento')", () => {
     const docs = { themes: [{ id: "d", name: "Docs", when: ["documento"], examples: [] }] } as unknown as V2AgentConfig;
     expect(selectV2Theme(docs, "estão pedindo um comprovante")).toBeNull();
