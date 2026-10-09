@@ -1933,6 +1933,18 @@ describe("processV2Turn — correções do motor", () => {
       expect(call?.config?.closure?.summary).toBeUndefined();
     });
 
+    it("confirmação curta não ganha o fecho com botões", async () => {
+      const config = baseConfig({ replyEnding: { info: { enabled: true, phrases: ["Posso te ajudar em mais alguma coisa?"], buttons: ["Não", "Preciso de ajuda"] } } } as Partial<V2AgentConfig>);
+      mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+      mocks.getState.mockResolvedValue(makeState("active", "agente"));
+      mocks.callLLM.mockResolvedValue(llmOut({ reply: "Combinado!" }));
+
+      await run("Ok, obrigado");
+
+      expect(sentTexts()).toEqual(["Combinado!"]);
+      expect(sentTexts().join(" ")).not.toContain("Posso te ajudar");
+    });
+
     it("clique no botão de fecho encerra", async () => {
       mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: baseConfig(), active: true });
       mocks.getState.mockResolvedValue(makeState("active", "agente", { pendingOptions: ["Não, obrigado(a)!", "Preciso de ajuda"] }));
