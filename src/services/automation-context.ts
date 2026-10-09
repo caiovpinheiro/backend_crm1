@@ -482,6 +482,39 @@ export function waitForReplyHijacksAiTurn(input: {
 }
 
 /**
+ * Configuração da org que devolve o comportamento anterior: com a IA
+ * atendendo, clique de botão/lista ainda retoma o fluxo parado.
+ */
+export const RESUME_FLOW_WHILE_AI_ATTENDS_KEY = "automations.resumeWhileAiAttends";
+
+/**
+ * Conversa atribuída a um agente de IA: a resposta é do agente. Um fluxo
+ * parado esperando o cliente (texto, menu, lista, template, protocolo de
+ * encerramento) não consome a mensagem — sai de cena e ela segue para o
+ * agente. Antes só o texto livre num `wait_for_reply` seguia; o clique nos
+ * botões que o próprio agente mandou retomava o fluxo, que terminava sem
+ * responder, e o `replied: true` calava a IA: o cliente ficava sem resposta
+ * e, como foi o último a falar, a inatividade também não encerrava.
+ *
+ * Fica com o fluxo só a resposta de formulário (WhatsApp Flow): é dado que o
+ * fluxo pediu.
+ */
+export function aiOwnsInboundOverFlow(input: {
+  stepType: string;
+  assigneeType?: string | null;
+  interactiveId?: string | null;
+  flowReply?: boolean;
+  /** `RESUME_FLOW_WHILE_AI_ATTENDS_KEY` ligada na org. */
+  resumeFlowWhileAiAttends?: boolean;
+}): boolean {
+  if (input.assigneeType !== "AI") return false;
+  if (!PAUSING_STEP_TYPES.has(input.stepType)) return false;
+  if (input.flowReply) return false;
+  if (input.resumeFlowWhileAiAttends) return waitForReplyHijacksAiTurn(input);
+  return true;
+}
+
+/**
  * Casa resposta de botão/lista com a opção do config.
  * O executor envia `b.id || btn_${i}` / `r.id || row_${i}` (0-based) — quando
  * o JSON salvo não tem `id`, o `list_reply.id`/`button_reply.id` ainda casa
@@ -918,6 +951,14 @@ export async function processIncomingMessage(
   }
 
   const activeContexts = await getContactActiveContexts(contactId);
+  // Lida uma vez e só quando a IA atende com fluxo parado.
+  let resumeFlowSetting: Promise<boolean> | null = null;
+  const resumeFlowWhileAiAttends = () =>
+    (resumeFlowSetting ??= import("@/lib/org-settings")
+      .then(({ getOrgSettingBool }) =>
+        getOrgSettingBool(RESUME_FLOW_WHILE_AI_ATTENDS_KEY, false),
+      )
+      .catch(() => false));
 
   log.debug(
     `processIncomingMessage contactId=${contactId} contexts=${activeContexts.length} msg="${messageContent.slice(0, 40)}"`,
@@ -988,17 +1029,19 @@ export async function processIncomingMessage(
       continue;
     }
     if (
-      waitForReplyHijacksAiTurn({
+      aiOwnsInboundOverFlow({
         stepType: currentStep.type,
         assigneeType,
         interactiveId: opts?.interactiveId,
         flowReply: opts?.flowReply,
+        resumeFlowWhileAiAttends:
+          assigneeType === "AI" ? await resumeFlowWhileAiAttends() : false,
       })
     ) {
-      // A conversa é da IA e o cliente escreveu texto livre. Consumir aqui
-      // roubava o turno do agente (ver `waitForReplyHijacksAiTurn`).
+      // A conversa é da IA: consumir aqui roubava o turno do agente
+      // (ver `aiOwnsInboundOverFlow`).
       log.info(
-        `processIncomingMessage handoff — ctx ${ctx.id} (auto=${ctx.automation.name}) wait_for_reply com IA atendendo; mensagem segue para o agente`,
+        `processIncomingMessage handoff — ctx ${ctx.id} (auto=${ctx.automation.name}) ${currentStep.type} com IA atendendo (${opts?.interactiveId ? "clique" : "texto"}); mensagem segue para o agente`,
       );
       await cancelContext(ctx.id);
       continue;

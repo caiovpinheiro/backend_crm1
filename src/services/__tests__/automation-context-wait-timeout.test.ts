@@ -42,8 +42,14 @@ const h = vi.hoisted(() => {
     continueFromStep: vi.fn().mockResolvedValue(undefined),
     automationLogCreate: vi.fn().mockResolvedValue({ id: "log-1" }),
     updateOrgSeen: [] as Array<{ id: string; org: string | null }>,
+    orgBool: vi.fn((_key: string, fallback: boolean) => Promise.resolve(fallback)),
   };
 });
+
+vi.mock("@/lib/org-settings", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/org-settings")>()),
+  getOrgSettingBool: (key: string, fallback: boolean) => h.orgBool(key, fallback),
+}));
 
 const { logError } = vi.hoisted(() => ({ logError: vi.fn() }));
 
@@ -310,7 +316,7 @@ describe("processIncomingMessage — wait_for_reply", () => {
     expect(h.continueFromStep).not.toHaveBeenCalled();
   });
 
-  it("IA atendendo + clique de botão: retoma o fluxo (o cliente respondeu ao robô de propósito)", async () => {
+  it("IA atendendo + clique nos botões do agente: o fluxo parado não consome — segue para o agente", async () => {
     h.attendance.mockResolvedValue({
       assignedToId: "ai-1",
       assigneeType: "AI",
@@ -320,10 +326,53 @@ describe("processIncomingMessage — wait_for_reply", () => {
     h.ctx.findMany.mockResolvedValueOnce([ctxRow()]);
 
     const out = await withOrg(ORG, () =>
-      processIncomingMessage("contact-1", "Sim", { interactiveId: "btn_0" }),
+      processIncomingMessage("contact-1", "Preciso de ajuda", { interactiveId: "v2opt_3" }),
+    );
+
+    // Antes: o fluxo andava, terminava sem responder e `replied: true`
+    // calava a IA.
+    expect(out).toEqual({ handled: false, replied: false });
+    expect(updateData()).toEqual({ status: "COMPLETED", currentStepId: null, timeoutAt: null });
+    expect(h.continueFromStep).not.toHaveBeenCalled();
+  });
+
+  it("IA atendendo + resposta de formulário: fica com o fluxo", async () => {
+    h.attendance.mockResolvedValue({
+      assignedToId: "ai-1",
+      assigneeType: "AI",
+      humanAttending: false,
+      hasHumanReply: false,
+    });
+    h.ctx.findMany.mockResolvedValueOnce([ctxRow()]);
+
+    const out = await withOrg(ORG, () =>
+      processIncomingMessage("contact-1", "[formulário]", { flowReply: true }),
     );
     expect(out.handled).toBe(true);
     expect(updateData().currentStepId).toBe("step-next");
+  });
+
+  it("org com o comportamento anterior ligado: clique retoma o fluxo", async () => {
+    h.orgBool.mockImplementation((key: string, fallback: boolean) =>
+      Promise.resolve(key === "automations.resumeWhileAiAttends" ? true : fallback),
+    );
+    h.attendance.mockResolvedValue({
+      assignedToId: "ai-1",
+      assigneeType: "AI",
+      humanAttending: false,
+      hasHumanReply: false,
+    });
+    h.ctx.findMany.mockResolvedValueOnce([ctxRow()]);
+
+    try {
+      const out = await withOrg(ORG, () =>
+        processIncomingMessage("contact-1", "Sim", { interactiveId: "btn_0" }),
+      );
+      expect(out.handled).toBe(true);
+      expect(updateData().currentStepId).toBe("step-next");
+    } finally {
+      h.orgBool.mockImplementation((_key: string, fallback: boolean) => Promise.resolve(fallback));
+    }
   });
 
   it("consultor falou DEPOIS da pausa cancela; reply humano anterior (flag sticky) não cancela", async () => {
