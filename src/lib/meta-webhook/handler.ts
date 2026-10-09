@@ -3525,7 +3525,7 @@ export async function processMetaWebhookPayload(
             await touchInbound({ conversationId: conversation.id, at: inboundAt }).catch((err) =>
               warnTouchInboundFailed(err, {
                 conversationId: conversation.id,
-                channel: conversation.channel ?? "whatsapp",
+                channel: "whatsapp",
               }),
             );
 
