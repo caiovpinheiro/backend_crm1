@@ -684,7 +684,8 @@ export function buildAgentRulesMarkdown(args: {
         const what = p.charset === "digits" || p.digitsOnly ? "dígitos de " : p.charset === "letters" ? "letras de " : "";
         const take = p.take && p.take !== "all" ? `${p.take === "first" ? "primeiros" : "últimos"} ${p.count ?? ""} ` : "";
         const kase = p.letterCase && p.letterCase !== "keep" ? ` (${({ upper: "maiúsculas", lower: "minúsculas", capitalize: "primeira maiúscula" } as Record<string, string>)[p.letterCase]})` : "";
-        return `${take}${what}${fieldName(p.key, names)} (${p.entity === "deal" ? "negócio" : "contato"})${kase}`;
+        const acc = p.accents === "strip" ? " (sem acentos)" : "";
+        return `${take}${what}${fieldName(p.key, names)} (${p.entity === "deal" ? "negócio" : "contato"})${kase}${acc}`;
       }).join(" + ")}${d.mask && d.mask !== "none" ? ` · ${MASK[d.mask]}` : ""}`)
       : ["_(nenhuma)_"]),
     "", "**Calendário**",
@@ -783,7 +784,7 @@ export function buildAgentRulesMarkdown(args: {
     `- Sem material: ${qd(c.fallback?.noSource?.message, "transfere com a mensagem de transferência")}`,
     `- Cliente não entendeu: ${c.fallback?.confusion?.action === "handoff" ? "o agente decide" : "refaz a pergunta"}`,
     `- Erro: ${qd(c.fallback?.error?.message, c.handoff?.message || "mensagem de transferência")}`,
-    `- Limites: respostas a agradecimento depois de encerrar ${c.limits?.maxCourtesyReplies ?? "—"} · mensagens fora do assunto seguidas ${c.limits?.nonsenseLimit ?? "—"} (${c.limits?.nonsenseAction === "handoff" ? "transfere" : "avisa e silencia"}) · mesma mensagem repetida ${c.limits?.maxLoopCount ?? "—"} · transferências entre agentes de IA ${c.limits?.maxAiTransfers ?? "—"}`,
+    `- Limites: respostas a agradecimento depois de encerrar ${c.limits?.maxCourtesyReplies ?? "—"} · mensagens fora do assunto seguidas ${c.limits?.nonsenseLimit ?? "—"} (${c.limits?.nonsenseAction === "handoff" ? "transfere" : "avisa e silencia"}) · mesma mensagem repetida ${c.limits?.maxLoopCount ?? "—"} · transferências entre agentes de IA ${c.limits?.maxAiTransfers ?? "—"} · perguntas seguidas sem resolver ${c.limits?.maxStalledExchanges ?? "—"} (${c.limits?.stalledExchangesAction === "close" ? "encerra" : "sai pela saída do assunto"})`,
   );
 
   return out.join("\n").replace(/\n{3,}/g, "\n\n") + "\n";

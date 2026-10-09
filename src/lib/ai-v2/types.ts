@@ -56,6 +56,8 @@ export interface V2DerivedPart {
   charset?: "all" | "digits" | "letters";
   /** Maiúsculas/minúsculas do pedaço. */
   letterCase?: "keep" | "upper" | "lower" | "capitalize";
+  /** Acentos do pedaço: manter ou tirar (É → E, ç → c). Padrão: manter. */
+  accents?: "keep" | "strip";
   text?: string;
 }
 

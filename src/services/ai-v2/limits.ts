@@ -73,6 +73,11 @@ export function shouldStopHelpOffer(config: V2AgentConfig, counters: V2Counters)
   return counters.helpOffers > 0 && counters.helpOffers >= config.limits.maxHelpOffers;
 }
 
+/**
+ * Trocas sem avanço: o agente só perguntou de novo (sem orientação, material,
+ * ação nem dado coletado) e o cliente respondeu. É decidido no fim do turno,
+ * olhando a resposta — no início bloquearia a resposta que resolveria.
+ */
 export function shouldStopStalled(config: V2AgentConfig, counters: V2Counters): boolean {
   return counters.stalledExchanges > 0 && counters.stalledExchanges >= config.limits.maxStalledExchanges;
 }
@@ -144,12 +149,7 @@ export function evaluateV2StopLimits(
       warn: config.limits.nonsenseAction !== "handoff" && counters.nonsenseMessages === config.limits.nonsenseLimit,
     };
   }
-  if (shouldStopStalled(config, counters)) {
-    return {
-      blocksReply: true,
-      action: config.limits.stalledExchangesAction,
-      reason: "limite de trocas sem avanço",
-    };
-  }
+  // Trocas sem avanço: avaliadas pelo motor depois da resposta do modelo
+  // (`shouldStopStalled`), não aqui.
   return { blocksReply: false, action: "none", reason: "" };
 }
