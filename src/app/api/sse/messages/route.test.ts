@@ -404,7 +404,7 @@ describe("GET /api/sse/messages — parada graciosa e gate fail-closed", () => {
     expect(mocks.buildInboxSseCardGate).toHaveBeenCalledTimes(2);
 
     // Os 30 s avançados também dispararam um heartbeat (25 s).
-    expect(await next()).toBe(": heartbeat\n\n");
+    expect(await next()).toBe(": heartbeat\n\nevent: heartbeat\ndata: {}\n\n");
     emit("new_message", envelope({ conversationId: "c2", card: {} }, "new_message"));
     expect(await next()).toContain('"conversationId":"c2"');
     const remounted = mocks.stripHiddenInboxSseCard.mock.calls[1][1] as (c: object) => boolean;
