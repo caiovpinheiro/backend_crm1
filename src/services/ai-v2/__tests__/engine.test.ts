@@ -1447,16 +1447,16 @@ describe("processV2Turn — correções do motor", () => {
   it("saudação que ficou para trás (o cliente já mandou o pedido) não sai", async () => {
     const config = baseConfig();
     mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
-    mocks.messageFindMany.mockImplementation(async (args: { where?: { id?: { in?: string[] } } }) =>
-      args?.where?.id?.in ? [{ createdAt: new Date("2026-09-26T12:08:00Z") }] : [],
+    let newer: Array<{ content: string; messageType: string }> = [{ content: "quero trocar de plano", messageType: "text" }];
+    mocks.messageFindMany.mockImplementation(async (args: { where?: { id?: { in?: string[] }; direction?: string } }) =>
+      args?.where?.id?.in ? [{ createdAt: new Date("2026-09-26T12:08:00Z") }] : args?.where?.direction === "in" ? newer : [],
     );
-    mocks.messageFindFirst.mockResolvedValueOnce({ id: "m-2" });
     mocks.callLLM.mockResolvedValue(llmOut({ reply: "Oi, Maria! Boa tarde 😊 Como posso ajudar você hoje?" }));
     await run("Oi, boa tarde!", { messageIds: ["m-1"] });
     expect(mocks.sendText).not.toHaveBeenCalled();
 
     // Sem mensagem nova, a saudação sai normalmente.
-    mocks.messageFindFirst.mockResolvedValueOnce(null);
+    newer = [];
     await run("Oi, boa tarde!", { messageIds: ["m-1"] });
     expect(mocks.sendText.mock.calls.map((c) => c[0].text as string).join("|")).toContain("Como posso ajudar");
   });
@@ -1500,7 +1500,11 @@ describe("processV2Turn — correções do motor", () => {
     expect(typeof hb.abortIf).toBe("function");
     expect(typeof hb.turnStartedAt).toBe("number");
     // O pedido chega durante o "digitando…": a saudação desiste.
-    mocks.messageFindFirst.mockResolvedValueOnce({ id: "m-2" });
+    mocks.messageFindMany.mockImplementation(async (args: { where?: { id?: { in?: string[] }; direction?: string } }) =>
+      args?.where?.id?.in
+        ? [{ createdAt: new Date("2026-09-26T12:08:00Z") }]
+        : args?.where?.direction === "in" ? [{ content: "Preciso da segunda via", messageType: "text" }] : [],
+    );
     await expect(hb.abortIf!()).resolves.toBe(true);
 
     mocks.sendText.mockClear();
@@ -1991,10 +1995,11 @@ describe("processV2Turn — correções do motor", () => {
       mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: baseConfig(), active: true });
       mocks.getState.mockResolvedValue(makeState("active", "agente"));
       mocks.callLLM.mockResolvedValue(llmOut({ reply: "O contrato é novo ou renovação?" }));
-      mocks.messageFindMany.mockImplementation(async (args: { where?: { id?: { in?: string[] } } }) =>
-        args.where?.id?.in ? [{ createdAt: new Date("2026-01-01T10:00:00Z") }] : [],
+      mocks.messageFindMany.mockImplementation(async (args: { where?: { id?: { in?: string[] }; direction?: string } }) =>
+        args.where?.id?.in
+          ? [{ createdAt: new Date("2026-01-01T10:00:00Z") }]
+          : args.where?.direction === "in" ? [{ content: "É renovação, e já tentei duas vezes", messageType: "text" }] : [],
       );
-      mocks.messageFindFirst.mockResolvedValue({ id: "m-newer" });
 
       await run("Não consigo concluir a solicitação", { messageIds: ["m-cur"] });
 
@@ -2057,10 +2062,11 @@ describe("processV2Turn — correções do motor", () => {
       mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
       mocks.getState.mockResolvedValue(makeState("active", "agente"));
       mocks.callLLM.mockResolvedValue(llmOut({ reply: "Nas atividades não aparece qual questão você acertou. A nota fica em Resultados." }));
-      mocks.messageFindMany.mockImplementation(async (args: { where?: { id?: { in?: string[] } } }) =>
-        args.where?.id?.in ? [{ createdAt: new Date("2026-01-01T10:00:00Z") }] : [],
+      mocks.messageFindMany.mockImplementation(async (args: { where?: { id?: { in?: string[] }; direction?: string } }) =>
+        args.where?.id?.in
+          ? [{ createdAt: new Date("2026-01-01T10:00:00Z") }]
+          : args.where?.direction === "in" ? [{ content: "e onde vejo a nota?", messageType: "text" }] : [],
       );
-      mocks.messageFindFirst.mockResolvedValue({ id: "m-newer" });
 
       await run("Não consigo ver o que errei", { messageIds: ["m-cur"] });
 
@@ -2087,6 +2093,23 @@ describe("processV2Turn — correções do motor", () => {
 
       expect(mocks.callLLM).toHaveBeenCalled();
       expect(sentTexts().join(" ")).not.toContain("Texto fixo.");
+    });
+
+    it("agradecimento à transferência não engole a pergunta do agente novo", async () => {
+      mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: baseConfig(), active: true });
+      mocks.getState.mockResolvedValue({ ...makeState("active", "agente"), agentId: "agent-0" });
+      mocks.callLLM.mockResolvedValue(llmOut({ reply: "A troca é feita pelo portal. Você já tem acesso ao portal?" }));
+      // Depois da pergunta (copiada do agente anterior) só chegou um "Obrigada".
+      mocks.messageFindMany.mockImplementation(async (args: { where?: { id?: { in?: string[] }; direction?: string } }) =>
+        args.where?.id?.in
+          ? [{ createdAt: new Date("2026-01-01T10:00:00Z") }]
+          : args.where?.direction === "in" ? [{ content: "Obrigada", messageType: "text" }] : [],
+      );
+
+      await run("Como troco o titular do plano?", { messageIds: ["m-cur"] });
+
+      expect(sentTexts()).toHaveLength(1);
+      expect(sentTexts()[0]).toContain("Você já tem acesso ao portal?");
     });
 
     it("clique no botão de fecho encerra", async () => {
