@@ -39,7 +39,7 @@ import { isConfusionMessage, rephraseAfterConfusion } from "./confusion";
 import { applyNoSourceGuard, conditionalHandoff, handoffExplanation, type V2PrefetchFact } from "./no-source";
 import { NONSENSE_LIMIT_REASON } from "./limits";
 import { applyV2Tabulation } from "./tabulation";
-import { applyReplyEnding, effectiveReplyEnding, isGreetingOnlyReply, replyEndingButtons } from "./reply-ending";
+import { applyReplyEnding, effectiveReplyEnding, isGreetingOnlyReply, replyEndingButtons, replyEndingPhrases, withoutReplyEndings } from "./reply-ending";
 import { knowledgeChunkTexts, repeatFallback } from "./ground-reply";
 import { applyBoldPolicy } from "./reply-format";
 import { MESSAGE_MODEL_MIN_COVERAGE, MESSAGE_MODEL_REPEATED, announcesSending, introBeforeMaterial, lastV2ResetAt, mediaResendPlan, messageModelCoverage, pickPromisedModelId, recentMediaDeliveries, recentlySentMessageModels, resendWindowStart, saysNotReceived } from "./sent-materials";
@@ -2116,7 +2116,13 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     } else if (res.reason === "near_duplicate") {
       // A trava anti-repetição do envio olha as últimas mensagens do agente;
       // a do motor, só a anterior. Barrada, o cliente ficava sem nada.
-      const fallback = repeatFallback(lastAgentMessage, config);
+      // A saída se mede também pela resposta barrada (sem o fecho): ela
+      // repetia uma explicação, mesmo quando a mensagem anterior era só uma
+      // pergunta curta — e "me conta o que você precisa" chegava logo depois
+      // de o cliente dizer o que precisava.
+      const blocked = withoutReplyEndings(replyText, replyEndingPhrases(config));
+      const basis = blocked.length > (lastAgentMessage ?? "").length ? blocked : lastAgentMessage;
+      const fallback = repeatFallback(basis, config);
       const alt = await sendReply(fallback);
       if (alt.sent) sentReply = fallback;
     }
@@ -2341,6 +2347,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       contactId: contactId!,
       agentUserId: resolved!.userId,
       text,
+      dedupeIgnore: replyEndingPhrases(config),
       channel: input.channel,
       autonomyMode: mapV2AutonomyToPrisma(config.autonomyMode),
       humanBehavior: opts?.dropIfSuperseded
