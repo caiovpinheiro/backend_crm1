@@ -822,6 +822,35 @@ describe("processV2Turn", () => {
     expect(mocks.sendText.mock.calls.map((c) => (c[0] as { text: string }).text).join(" ")).toContain("Vou transferir");
   });
 
+  it("devolver a conversa para o agente que acabou de passá-la vai para o destino padrão (sem ping-pong)", async () => {
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: baseConfig(), active: true });
+    mocks.getState.mockResolvedValue({ ...makeState("active", "pessoa"), agentId: "agent-0" });
+    mocks.callLLM.mockResolvedValue({
+      output: {
+        reply: "",
+        confirmed: null,
+        handoff: true,
+        concluded: false,
+        outOfScope: true,
+        sentiment: "neutral",
+        collected: {},
+        reason: "Assunto do outro agente",
+        actions: [{ type: "handoff", destination: { type: "ai_agent", id: "agent-0" } }],
+      } satisfies V2LLMOutput,
+      inputTokens: 10,
+      outputTokens: 5,
+      latencyMs: 100,
+    });
+
+    const { processV2Turn } = await import("../engine");
+    await processV2Turn({ conversationId: "conv-1", channel: "meta", userMessage: "Cancelei e quero ver a parte financeira" });
+
+    expect(mocks.simpleHandoff).toHaveBeenCalledTimes(1);
+    expect(mocks.simpleHandoff).toHaveBeenCalledWith(expect.objectContaining({ destination: { type: "department" } }));
+    const saved = mocks.upsertState.mock.calls.map((c) => c[0] as { counters?: { receivedFromAgentId?: string } }).find((c) => c.counters?.receivedFromAgentId);
+    expect(saved?.counters?.receivedFromAgentId).toBe("agent-0");
+  });
+
   it("destino de transferência igual ao próprio agente vai para o destino padrão, não para si mesmo", async () => {
     mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: baseConfig(), active: true });
     mocks.getState.mockResolvedValue(makeState("active", "agente"));
