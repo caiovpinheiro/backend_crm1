@@ -12,6 +12,16 @@ const items = {
   marcos: ["10:02 — pediu ajuda", "10:05 — orientação enviada"],
 };
 
+describe("resumo do atendimento — tabulação", () => {
+  it("a folha aplicada entra logo depois do resultado; no mínimo, entre parênteses", () => {
+    const withTab = { ...items, tabulacao: "Suporte › Acesso" };
+    expect(renderSummary(withTab, "standard").split("\n")[4]).toBe("Tabulação: Suporte › Acesso");
+    expect(renderSummary(withTab, "standard").split("\n")[3]).toBe("Resultado: Encerrado: resolvido");
+    expect(renderSummary(withTab, "minimal")).toBe("Não conseguia entrar no aplicativo. → Encerrado: resolvido (Suporte › Acesso)");
+    expect(renderSummary(items, "standard")).not.toContain("Tabulação");
+  });
+});
+
 describe("resumo do atendimento — texto", () => {
   it("mínimo: uma linha, sem pendência quando não há", () => {
     expect(renderSummary(items, "minimal")).toBe("Não conseguia entrar no aplicativo. → Encerrado: resolvido");

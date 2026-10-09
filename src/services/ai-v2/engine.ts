@@ -669,7 +669,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   };
   // Resumo para a equipe antes de transferir (quando ligado): quem recebe
   // a conversa — pessoa ou outro agente — lê o que já aconteceu.
-  const summarizeBeforeHandoff = (destination: { type: string }) =>
+  const summarizeBeforeHandoff = (destination: { type: string }, tabulation?: string | null) =>
     writeV2Summary({
       organizationId: orgId,
       conversationId: input.conversationId,
@@ -678,6 +678,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       config,
       moment: "transfer",
       reason: destination.type,
+      tabulation,
     });
 
   // Uma pessoa assumiu a conversa durante o turno: o agente para de enviar,
@@ -2679,7 +2680,8 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     }
     const destination = resolveHandoffDestination(config, requested ?? config.handoff.defaultDestination, counters, resolved!.agentConfigId);
     if (destination.type === "ai_agent") counters.aiTransferCount += 1;
-    await summarizeBeforeHandoff(destination);
+    const tabulation = await applyV2Tabulation({ config, theme: getV2ThemeById(config, themeId), moment: "transfer", organizationId: orgId, conversationId: input.conversationId, contactId, agentId: resolved!.agentConfigId });
+    await summarizeBeforeHandoff(destination, tabulation);
     await simpleHandoff({
       conversationId: input.conversationId,
       contactId,
@@ -2688,7 +2690,6 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       turnId: input.turnId,
     });
     traceStep("transferência", `Transferido para ${destination.type}${destination.id ? ` (${destination.id})` : ""}`);
-    await applyV2Tabulation({ config, theme: getV2ThemeById(config, themeId), moment: "transfer", organizationId: orgId, conversationId: input.conversationId, contactId, agentId: resolved!.agentConfigId });
     return sent;
   }
 
@@ -2877,7 +2878,8 @@ async function handoffAndReply(
   const fallbackDestination = resolveHandoffDestination(config, config.handoff.defaultDestination, counters, resolved.agentConfigId);
   if (fallbackDestination.type === "ai_agent") counters.aiTransferCount += 1;
   traceStep("transferência", `Transferido para ${fallbackDestination.type}${fallbackDestination.id ? ` (${fallbackDestination.id})` : ""}`);
-  await writeV2Summary({ organizationId: orgId, conversationId: input.conversationId, contactId, agentId: resolved.agentConfigId, config, moment: "transfer", reason: fallbackDestination.type });
+  const tabulation = await applyV2Tabulation({ config, theme: getV2ThemeById(config, themeId), moment: "transfer", organizationId: orgId, conversationId: input.conversationId, contactId, agentId: resolved!.agentConfigId });
+  await writeV2Summary({ organizationId: orgId, conversationId: input.conversationId, contactId, agentId: resolved.agentConfigId, config, moment: "transfer", reason: fallbackDestination.type, tabulation });
   await simpleHandoff({
     conversationId: input.conversationId,
     contactId,
@@ -2885,7 +2887,6 @@ async function handoffAndReply(
     destination: fallbackDestination,
     turnId: input.turnId,
   });
-  await applyV2Tabulation({ config, theme: getV2ThemeById(config, themeId), moment: "transfer", organizationId: orgId, conversationId: input.conversationId, contactId, agentId: resolved!.agentConfigId });
   await upsertV2ConversationState({
     organizationId: orgId,
     conversationId: input.conversationId,
@@ -2990,10 +2991,11 @@ export async function closeState(
   collectedVariables?: Record<string, unknown>,
   theme?: V2Theme | null,
 ): Promise<void> {
-  // Resumo para a equipe (quando ligado), com a conversa ainda inteira.
-  await writeV2Summary({ organizationId: orgId, conversationId, contactId, agentId: agentConfigId, config, moment: "close", reason });
   // Tabulação (se ligada) antes de resolver: o encerramento não sobrescreve.
-  await applyV2Tabulation({ config, theme, moment: "close", organizationId: orgId, conversationId, contactId, agentId: agentConfigId });
+  // E antes do resumo: a folha escolhida entra nele.
+  const tabulation = await applyV2Tabulation({ config, theme, moment: "close", organizationId: orgId, conversationId, contactId, agentId: agentConfigId });
+  // Resumo para a equipe (quando ligado), com a conversa ainda inteira.
+  await writeV2Summary({ organizationId: orgId, conversationId, contactId, agentId: agentConfigId, config, moment: "close", reason, tabulation });
   if (config.closure.fieldUpdates && config.closure.fieldUpdates.length > 0) {
     await applyV2ClosureFieldUpdates(config, contactId, dealId);
   }
