@@ -81,6 +81,8 @@ export function outcomeLabel(moment: V2SummaryMoment, reason: string): string {
       return "Encerrado: resolvido";
     case "inactivity":
       return "Encerrado por inatividade";
+    case "deferred":
+      return "Encerrado: cliente vai falar depois";
     case "transferred":
       return "Encerrado após transferência";
     default:

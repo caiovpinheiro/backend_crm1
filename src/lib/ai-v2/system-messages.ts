@@ -32,6 +32,7 @@ export const SYSTEM_MESSAGE_DEFAULTS = {
   confusionAsk: "Desculpa, acho que não fui claro. O que ficou confuso? Me conta que eu explico de outro jeito.",
   optionsPrompt: "Escolha uma opção:",
   optionsButton: "Ver opções",
+  deferralReply: "Combinado! Quando puder, é só me chamar por aqui. 😊",
 } as const;
 
 export type SystemMessageKey = keyof typeof SYSTEM_MESSAGE_DEFAULTS;

@@ -2216,6 +2216,31 @@ describe("processV2Turn — correções do motor", () => {
       expect(sentTexts().join(" ")).toContain("Qual é o seu?");
     });
 
+    it("“chamo depois” em atendimento: resposta curta, sem fecho nem botões, e encerra", async () => {
+      const config = baseConfig({ replyEnding: { info: { enabled: true, phrases: ["Posso te ajudar em mais alguma coisa?"], buttons: ["Não", "Preciso de ajuda"] } } } as Partial<V2AgentConfig>);
+      mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+      mocks.getState.mockResolvedValue(makeState("active", "agente"));
+
+      const result = await run("Estou no trabalho, chamo depois");
+
+      expect(result.closed).toBe(true);
+      expect(mocks.callLLM).not.toHaveBeenCalled();
+      expect(sentTexts()).toEqual(["Combinado! Quando puder, é só me chamar por aqui. 😊"]);
+      expect(mocks.resolveInline).toHaveBeenCalled();
+    });
+
+    it("aviso de transferência sai mesmo se um robô mandou o mesmo texto há pouco", async () => {
+      mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: baseConfig(), active: true });
+      mocks.getState.mockResolvedValue(makeState("active", "agente"));
+      mocks.callLLM.mockResolvedValue(llmOut({ reply: "Explico: o valor muda pela data de pagamento.", handoff: true }));
+
+      const result = await run("Quero falar com alguém sobre o valor");
+
+      expect(result.handoff).toBe(true);
+      const transfer = mocks.sendText.mock.calls.map((c) => c[0] as { text: string; bypassDuplicateGuard?: boolean }).find((a) => a.text.startsWith("Vou transferir"));
+      expect(transfer?.bypassDuplicateGuard).toBe(true);
+    });
+
     it("clique no botão de fecho encerra", async () => {
       mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: baseConfig(), active: true });
       mocks.getState.mockResolvedValue(makeState("active", "agente", { pendingOptions: ["Não, obrigado(a)!", "Preciso de ajuda"] }));
