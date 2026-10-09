@@ -12,7 +12,7 @@ import {
   reuseLocateProbePlan,
 } from "@/lib/storage/local";
 
-const ORG = "cmrmbn2lh0uz2nm016beqgbwb";
+const ORG = "org_test_storage";
 const OTHER = "clxxxxxxxxxxxxxxxxxxxxxxx";
 
 describe("resolveOrgOwnedReuseUrl", () => {
