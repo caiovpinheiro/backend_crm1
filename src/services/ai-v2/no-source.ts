@@ -106,7 +106,9 @@ export function conditionalHandoff(reply: string): boolean {
 
 /** A resposta já avisa a transferência (não vale mandar antes do aviso). */
 export function announcesTransfer(reply: string): boolean {
-  return /\b(?:transfer|encaminh|chamar (?:algu[eé]m|uma pessoa)|atendente|equipe)\w*/i.test(reply) ||
+  return /\b(?:transfer|encaminh|atendente|equipe)\w*/i.test(reply) ||
+    // "vou chamar o time de X", "acionar o setor", "chamar alguém" (e não "chamar a prova").
+    /\b(?:chamar|acionar|envolver|direcionar)\s+(?:(?:voc[eê]|te|lhe)\s+)?(?:para\s+|pra\s+)?(?:algu[eé]m|uma pessoa|um(?:a)? (?:colega|atendente|especialista|respons[áa]vel)|o time|a equipe|o setor|o pessoal|o departamento|a [áa]rea|o suporte|o respons[áa]vel|o especialista|o atendimento|o financeiro)(?![\p{L}])/iu.test(reply) ||
     // "vou te passar para o time…" (e não "vou te passar o link").
     /\b(?:vou|irei|vamos|posso)\s+(?:te\s+|lhe\s+)?passar\s+(?:voc[eê]\s+)?(?:para|pra)\b/i.test(reply);
 }
@@ -183,9 +185,9 @@ export function applyNoSourceGuard(args: {
   prefetch: V2PrefetchFact | undefined;
   /** Assunto do turno: as instruções dele contam como fonte fixa. */
   themeId?: string | null;
-}): { applied: boolean; handoff: boolean } {
+}): { applied: boolean; handoff: boolean; explanationDropped?: boolean } {
   const { config, output, context } = args;
-  if (output.handoff || output.concluded) return { applied: false, handoff: false };
+  if (output.concluded) return { applied: false, handoff: false };
   const hasClientData = !!context.contact || !!context.selectedDeal;
   const modelQueried = (args.toolCalls ?? []).some((c) => !(c.args as { prefetch?: boolean } | undefined)?.prefetch);
   const modelFound = modelQueried && !args.queriedEmpty;
@@ -197,6 +199,15 @@ export function applyNoSourceGuard(args: {
     // Data do calendário, valor das informações fixas, preço do catálogo:
     // não é invenção só porque os materiais não falam disso.
     !factsBackedBy(output.reply, fixedSources(config, args.themeId, args.toolCalls));
+  // O modelo já transfere: o que importa é a explicação que sai antes do
+  // aviso. Fato sem material nela ("o prazo é de 5 dias; vou te passar…")
+  // não vai — fica só o aviso configurado.
+  if (output.handoff) {
+    if (!invented) return { applied: false, handoff: false };
+    output.reply = config.handoff.message;
+    output.reason = [output.reason, "explicação antes da transferência afirmava fatos sem material — só o aviso sai"].filter(Boolean).join(" · ");
+    return { applied: true, handoff: true, explanationDropped: true };
+  }
   if (!legacy && !invented) return { applied: false, handoff: false };
   const noSourceMessage = config.fallback?.noSource?.message?.trim();
   if (noSourceMessage) {
