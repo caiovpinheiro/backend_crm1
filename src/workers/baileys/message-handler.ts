@@ -382,6 +382,8 @@ async function findOrCreateConversation(
       conversationId: created.id,
       contactId,
       assignedToId: inheritAssignee,
+      // Voltou de atendimento de pessoa: a fila humana, não a IA.
+      skipAiFirstAttendance: returnToHuman,
     });
     emitConversationCreated({
       contactId,
