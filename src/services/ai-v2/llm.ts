@@ -39,11 +39,11 @@ import {
 import { knowledgeDocTitleMapByIds } from "@/services/ai/knowledge-docs";
 import { describeV2MessageModels, type V2MessageModelSummary } from "./tools";
 import { knowledgeDocIdsFor } from "./themes";
-import { clientNamesBoundToFacts, hasSearchableQuestion, procedureAdmittedMissing, isNearDuplicateReply, repeatFallback, knowledgeChunkTexts, lookupResultTexts, unsupportedFacts, unsupportedFigures, unsupportedHedges, unsupportedMenuPaths, unsupportedQuotedTerms } from "./ground-reply";
+import { clientNamesBoundToFacts, hasSearchableQuestion, admittedMissingInstructions, isNearDuplicateReply, repeatFallback, knowledgeChunkTexts, lookupResultTexts, unsupportedFacts, unsupportedFigures, unsupportedHedges, unsupportedMenuPaths, unsupportedQuotedTerms } from "./ground-reply";
 import { noteV2Fact, traceStep } from "./trace";
 import { SensitiveVault } from "./sensitive";
 import { boldInstruction, breakInlineSteps } from "./reply-format";
-import { markPastDates } from "./dates";
+import { markPastDates, tenseMismatches } from "./dates";
 import { calendarPromptSection } from "./calendar";
 import { QUERY_TOOL_NAMES, themePromptText } from "./theme-prompt";
 import { REPLY_ENDING_PROMPT, effectiveReplyEnding, hasReplyEnding } from "./reply-ending";
@@ -933,7 +933,7 @@ export function currentDateLine(timezone: string | undefined, now: Date = new Da
   } catch {
     text = now.toISOString();
   }
-  return `Agora é ${text} (${tz}). Use esta data para interpretar "hoje", "próximo(a)", "este mês" e prazos. Datas marcadas "(já passou)", nos trechos ou no calendário, já aconteceram: não as apresente como próximas e só cite se o cliente perguntar por elas. Se a data pedida não está no calendário nem nos trechos, diga que não tem essa data; não deduza.`;
+  return `Agora é ${text} (${tz}). Use esta data para interpretar "hoje", "próximo(a)", "este mês" e prazos. Datas marcadas "(já passou)", nos trechos ou no calendário, já aconteceram: não as apresente como próximas e só cite se o cliente perguntar por elas. Data depois de hoje ainda vai acontecer: fale dela no futuro ("será", "acontece em"), nunca como já realizada. Se a data pedida não está no calendário nem nos trechos, diga que não tem essa data; não deduza.`;
 }
 
 /** Quanto emoji usar. Padrão "nenhum": era o comportamento antes do parâmetro. */
@@ -1673,8 +1673,15 @@ export async function callV2LLM(args: {
     // valor que só o cliente disse ("é R$ 30, né?" → "isso") fica com a
     // checagem por modelo, que distingue os dois casos.
     type Unsupported = { label: string; text: string };
+    const tz = args.config.businessHours?.timezone || "America/Sao_Paulo";
     const unsupportedOf = (reply: string, reason?: string): Unsupported[] => [
-      ...(procedureAdmittedMissing(reply, reason) ? [{ label: "um passo a passo que o material não traz (a própria decisão diz que a base não informa esse procedimento)", text: "" }] : []),
+      // Tempo verbal que a data desmente e que não se conserta só no verbo
+      // ("já passou" com data que ainda vem): a frase sai.
+      ...tenseMismatches(reply, new Date(), tz).filter((t) => !t.fixed).map((t) => ({ label: `"${t.sentence}" (${t.why})`, text: t.sentence })),
+      // Instrução que a própria decisão desautoriza ("a possibilidade de X
+      // não está especificada" + "acesse o portal e confira a opção de X"):
+      // sai só essa frase; o reconhecimento e o resto da resposta ficam.
+      ...admittedMissingInstructions(reply, reason).map((s) => ({ label: `"${s}" (instrução sobre o que a própria decisão admite não estar no material)`, text: s })),
       ...clientNamesBoundToFacts(reply, clientTexts, factSources).map((n) => ({ label: `"${n}" (nome citado pelo cliente que não está nas fontes, ligado a data ou valor)`, text: n })),
       ...unsupportedQuotedTerms(reply, sources, factSources).map((t) => ({ label: `"${t}"`, text: t })),
       ...unsupportedMenuPaths(reply, sources, factSources).map((t) => ({ label: `"${t}"`, text: t })),
@@ -1716,7 +1723,11 @@ export async function callV2LLM(args: {
     const modelClaims = async (output: V2LLMOutput): Promise<Unsupported[]> => {
       // Transferência só com o aviso não tem o que conferir; com orientação
       // (que agora chega ao cliente antes do aviso), confere.
-      if ((args.config.groundingCheck ?? "model") !== "model" || (output.handoff && !answersBeforeHandoff(output.reply)) || !worthClaimCheck(output.reply)) return [];
+      if ((output.handoff && !answersBeforeHandoff(output.reply)) || !worthClaimCheck(output.reply)) return [];
+      if ((args.config.groundingCheck ?? "model") !== "model") {
+        traceStep("verificação", "Checagem por modelo desligada na configuração — só as regras fixas conferiram a resposta");
+        return [];
+      }
       // Apresentação curta de mensagem pronta/anexo: o conteúdo vem do
       // material; a frase só anuncia o envio ("vou te orientar…"). Conferir
       // a frase barrava o envio e transferia o cliente.
@@ -1755,6 +1766,7 @@ export async function callV2LLM(args: {
         traceStep("verificação", "Checagem por modelo indisponível e a resposta traz passo a passo, caminho ou link não conferido");
         return [{ label: "um passo a passo, caminho ou link que não pôde ser conferido nos materiais", text: "" }];
       }
+      if (!res.ok) traceStep("verificação", "Checagem por modelo indisponível (erro ou tempo) — só as regras fixas conferiram a resposta");
       if (res.unsupported.length > 0) traceStep("verificação", `Checagem por modelo: ${res.unsupported.length} afirmação(ões) sem fonte — ${res.unsupported.map((c) => `"${c}"`).join(", ")}`);
       else if (res.ok) traceStep("verificação", "Checagem por modelo: tudo sustentado pelos materiais");
       return res.unsupported.map((c) => ({ label: `"${c}" (afirmação que não está nos materiais)`, text: c }));
@@ -1762,6 +1774,14 @@ export async function callV2LLM(args: {
     const labelsOf = (list: Unsupported[]) => list.map((u) => u.label);
     const textsOf = (list: Unsupported[]) => list.map((u) => u.text).filter(Boolean);
 
+    // Tempo verbal x data: "as provas foram realizadas de 06/11 a 09/11"
+    // com 06/11 ainda por vir. Quando é só o verbo, conserta; senão a frase
+    // sai (regra em `unsupportedOf`).
+    for (const t of tenseMismatches(r.output.reply, new Date(), tz)) {
+      if (!t.fixed) continue;
+      r.output = { ...r.output, reply: r.output.reply.replace(t.sentence, t.fixed) };
+      traceStep("verificação", `Tempo verbal corrigido: ${t.why}`);
+    }
     let output = r.output;
     let flags = unsupportedOf(output.reply, output.reason);
     // A checagem por modelo já leu as frases que sobram? Depois dela, o

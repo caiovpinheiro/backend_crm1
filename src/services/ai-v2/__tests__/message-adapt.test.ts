@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { adaptedKeepsContent } from "@/services/ai-v2/message-adapt";
-import { procedureAdmittedMissing, repeatFallback } from "@/services/ai-v2/ground-reply";
+import { admittedMissingInstructions, procedureAdmittedMissing, repeatFallback } from "@/services/ai-v2/ground-reply";
 import { applyReplyEnding, asksClient } from "@/services/ai-v2/reply-ending";
 
 describe("repeatFallback", () => {
@@ -46,6 +46,41 @@ describe("procedureAdmittedMissing", () => {
     expect(procedureAdmittedMissing("Selecione a opção Documentos e anexe o arquivo.", "O trecho descreve o envio.")).toBe(false);
     expect(procedureAdmittedMissing("Qual solicitação você está fazendo?", "A base não informa um procedimento geral.")).toBe(false);
     expect(procedureAdmittedMissing("Selecione a opção.", undefined)).toBe(false);
+  });
+
+  it("admissão em outras palavras: 'não está especificada', 'não há informação', 'o material não trata', 'sem orientação'", () => {
+    const reply = "Para verificar se há opção de parcelamento, acesse o portal e confira em Financeiro.";
+    expect(procedureAdmittedMissing(reply, "A possibilidade de parcelamento não está especificada e depende de análise do setor Financeiro.")).toBe(true);
+    expect(procedureAdmittedMissing(reply, "Não há informação sobre parcelamento nos materiais.")).toBe(true);
+    expect(procedureAdmittedMissing(reply, "O material não trata de parcelamento; encaminhei ao setor.")).toBe(true);
+    expect(procedureAdmittedMissing(reply, "Sem orientação sobre parcelamento na base.")).toBe(true);
+  });
+
+  it("fato da situação do cliente ou do material não é admissão ('não consta no cadastro', 'não foi encontrado no portal', 'não está previsto')", () => {
+    expect(procedureAdmittedMissing("Acesse o portal e atualize o cadastro.", "O e-mail não consta no cadastro do cliente.")).toBe(false);
+    expect(procedureAdmittedMissing("Acesse o portal e gere a segunda via.", "O documento não foi encontrado no portal pelo cliente.")).toBe(false);
+    expect(procedureAdmittedMissing("Acesse o portal e gere a segunda via.", "O reajuste não está previsto no contrato.")).toBe(false);
+  });
+});
+
+describe("admittedMissingInstructions", () => {
+  it("tira só a instrução sobre o assunto admitido; o reconhecimento fica", () => {
+    const reply =
+      "Boa tarde! Entendo que você queira regularizar a fatura. Para verificar se há opção de negociação ou parcelamento disponível, acesse o Portal do Cliente, na aba Financeiro, e confira as opções. O setor Financeiro precisa confirmar.";
+    expect(admittedMissingInstructions(reply, "A possibilidade de parcelamento não está especificada e depende de análise do setor Financeiro.")).toEqual([
+      "Para verificar se há opção de negociação ou parcelamento disponível, acesse o Portal do Cliente, na aba Financeiro, e confira as opções.",
+    ]);
+  });
+
+  it("instrução sobre outro assunto fica: o material pode cobrir esse", () => {
+    const reply = "Abra a solicitação em Portal > Solicitações e anexe o comprovante. O prazo de análise não está informado no material.";
+    expect(admittedMissingInstructions(reply, "O material não especifica o prazo de análise, mas orienta a abrir a solicitação pelo portal.")).toEqual([]);
+  });
+
+  it("admissão sem assunto ('não há informação sobre isso'): toda instrução sai", () => {
+    expect(admittedMissingInstructions("Acesse o portal e selecione a opção desejada. Depois me avise.", "Não há informação sobre isso nos materiais.")).toEqual([
+      "Acesse o portal e selecione a opção desejada.",
+    ]);
   });
 });
 

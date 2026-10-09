@@ -67,6 +67,16 @@ describe("guarda 'sem material'", () => {
     expect(applyNoSourceGuard({ config: cfg(), output: o, context: ctx({ Nome: "Ana" }), toolCalls: [], queriedEmpty: false, prefetch: nothing })).toEqual({ applied: true, handoff: true });
   });
 
+  it("modelo já transfere e a explicação afirma fato sem material → só o aviso configurado sai", () => {
+    const o = { ...out("O prazo de análise é de 5 dias úteis. Vou chamar alguém da equipe."), handoff: true };
+    const r = applyNoSourceGuard({ config: cfg(), output: o, context: ctx({ Nome: "Ana" }), toolCalls: [], queriedEmpty: false, prefetch: nothing });
+    expect(r).toEqual({ applied: true, handoff: true, explanationDropped: true });
+    expect(o.reply).toBe("Vou chamar alguém da equipe.");
+    const plain = { ...out("Entendi, vou chamar alguém da equipe para ver isso com você."), handoff: true };
+    expect(applyNoSourceGuard({ config: cfg(), output: plain, context: ctx({ Nome: "Ana" }), toolCalls: [], queriedEmpty: false, prefetch: nothing }).applied).toBe(false);
+    expect(plain.reply).toBe("Entendi, vou chamar alguém da equipe para ver isso com você.");
+  });
+
   it("cortesia, dado do próprio cliente ou material encontrado: não mexe", () => {
     const base = { config: cfg(), context: ctx({ Nome: "Ana", Plano: "Fibra 500 Mega" }), toolCalls: [], queriedEmpty: false };
     expect(applyNoSourceGuard({ ...base, output: out("Por nada, Ana!"), prefetch: nothing }).applied).toBe(false);

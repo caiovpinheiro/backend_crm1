@@ -1929,7 +1929,9 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       prefetch: peekV2Fact("prefetch") as V2PrefetchFact | undefined,
       themeId,
     });
-    if (guarded.applied) {
+    if (guarded.applied && guarded.explanationDropped) {
+      traceStep("verificação", "Nada nos materiais cobre a mensagem e a explicação antes da transferência afirmava fatos → só o aviso de transferência sai");
+    } else if (guarded.applied) {
       noSourceApplied = !guarded.handoff;
       if (guarded.handoff) noteV2Fact("handoffCause", "no_source", { keepFirst: true });
       traceStep("verificação", guarded.handoff
@@ -2704,11 +2706,15 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   ): Promise<string | undefined> {
     let sent: string | undefined;
     const planned = resolveHandoffDestination(config, requested ?? config.handoff.defaultDestination, counters, resolved!.agentConfigId);
-    // Agente de IA de destino em modo transparente: o cliente não percebe a
-    // troca — sem "vou te passar para…"; o outro agente responde direto.
-    if (!opts.skipMessage && planned.type === "ai_agent" && planned.id && (await aiAgentReceivesTransparently(planned.id))) {
-      traceStep("transferência", "Agente de destino em modo transparente → sem aviso de transferência");
-      opts = { ...opts, skipMessage: true };
+    // Transferência entre agentes de IA em modo transparente (opção em
+    // qualquer um dos dois): o cliente não percebe a troca — sem "vou te
+    // passar para…"; o outro agente responde direto.
+    if (!opts.skipMessage && planned.type === "ai_agent" && planned.id) {
+      const who = config.entry.onAiTransfer === "continue" ? "Este agente" : (await aiAgentReceivesTransparently(planned.id)) ? "Agente de destino" : null;
+      if (who) {
+        traceStep("transferência", `${who} em modo transparente → sem aviso de transferência`);
+        opts = { ...opts, skipMessage: true };
+      }
     }
     // Transferência em cadeia: recebeu de outro agente e transfere de novo
     // no primeiro turno sem ter respondido nada. O aviso do agente anterior

@@ -774,6 +774,39 @@ describe("processV2Turn", () => {
     expect(sent).not.toContain("Vou transferir");
   });
 
+  it("agente que transfere em modo transparente: também sem aviso, mesmo com o destino no padrão", async () => {
+    mocks.prismaAIAgentFindUnique.mockImplementation(async (args: { where?: { id?: string } }) =>
+      args?.where?.id === "agent-2"
+        ? { id: "agent-2", simpleConfig: { entry: { onAiTransfer: "present" } }, active: true }
+        : { id: "agent-1", simpleConfig: baseConfig({ entry: { ...baseConfig().entry, onAiTransfer: "continue" } } as any), active: true },
+    );
+    mocks.getState.mockResolvedValue(makeState("active", "agente"));
+    mocks.callLLM.mockResolvedValue({
+      output: {
+        reply: "",
+        confirmed: null,
+        handoff: true,
+        concluded: false,
+        outOfScope: false,
+        sentiment: "neutral",
+        collected: {},
+        reason: "Assunto de outro agente",
+        actions: [{ type: "handoff", destination: { type: "ai_agent", id: "agent-2" } }],
+      } satisfies V2LLMOutput,
+      inputTokens: 10,
+      outputTokens: 5,
+      latencyMs: 100,
+    });
+
+    const { processV2Turn } = await import("../engine");
+    const result = await processV2Turn({ conversationId: "conv-1", channel: "meta", userMessage: "Quero falar sobre o plano" });
+
+    expect(result.handoff).toBe(true);
+    expect(mocks.simpleHandoff).toHaveBeenCalledWith(expect.objectContaining({ destination: expect.objectContaining({ type: "ai_agent", id: "agent-2" }) }));
+    const sent = mocks.sendText.mock.calls.map((c) => (c[0] as { text: string }).text).join(" ");
+    expect(sent).not.toContain("Vou transferir");
+  });
+
   it("transferência em cadeia logo após receber: o aviso do agente anterior já cobriu; sem aviso anterior, avisa", async () => {
     const handoffOut = {
       reply: "",

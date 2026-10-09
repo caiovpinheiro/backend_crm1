@@ -1046,6 +1046,39 @@ describe("escopo e repetição", () => {
     expect(r.output.handoff).toBe(false);
   });
 
+  it("decisão admite que o material não cobre o pedido e a explicação antes de transferir manda fazer algo sobre ele: só essa frase sai", async () => {
+    const reply =
+      "Boa tarde! Você quer regularizar a fatura em aberto e saber as condições para isso. Para verificar se há opção de negociação ou parcelamento disponível, acesse o Portal do Cliente, na aba Financeiro, e confira as opções. O setor Financeiro precisa confirmar.";
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+      makeLLMResponse(JSON.stringify({ reply, handoff: true, reason: "A possibilidade de parcelamento não está especificada e depende de análise do setor Financeiro.", actions: [] })),
+    );
+    const r = await callV2LLM({
+      agentId: "agent-1", config: baseConfig(),
+      context: { contact: null, deals: [], selectedDeal: null, fields: baseConfig().contextFields },
+      userMessage: "quero saber se consigo parcelar a fatura em aberto", stage: "active",
+    });
+    expect((generateWithTools as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1);
+    expect(r.output.reply).toBe("Boa tarde! Você quer regularizar a fatura em aberto e saber as condições para isso. O setor Financeiro precisa confirmar.");
+    expect(r.output.handoff).toBe(true);
+  });
+
+  it("tempo verbal x data: período que ainda vem dito no passado sai com o verbo corrigido", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-10-09T18:00:00Z") });
+    try {
+      (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+        makeLLMResponse(JSON.stringify({ reply: "Vamos localizar essa avaliação. As provas da primeira etapa foram realizadas de 06/11 a 09/11/2026. Qual é a disciplina mencionada no e-mail?", actions: [] })),
+      );
+      const r = await callV2LLM({
+        agentId: "agent-1", config: baseConfig({ variables: [{ key: "Provas da primeira etapa", value: "06/11 a 09/11/2026" }] } as Partial<V2AgentConfig>),
+        context: { contact: null, deals: [], selectedDeal: null, fields: baseConfig().contextFields },
+        userMessage: "recebi um e-mail dizendo que não fiz uma prova", stage: "active",
+      });
+      expect(r.output.reply).toBe("Vamos localizar essa avaliação. As provas da primeira etapa serão realizadas de 06/11 a 09/11/2026. Qual é a disciplina mencionada no e-mail?");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("checagem por modelo marca uma frase e a segunda leitura confirma: ela é retirada sem reescrita", async () => {
     (generateWithTools as ReturnType<typeof vi.fn>)
       .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: "A troca é feita na loja com a nota fiscal. A garantia estendida cobre qualquer defeito de fábrica. Leve também o documento com foto.", actions: [] })))
