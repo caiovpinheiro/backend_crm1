@@ -231,6 +231,8 @@ const entryConfigSchema = z.object({
   confirmationMode: z.enum(["combined", "separate_turn"]).optional().default("combined"),
   automationVariablesMapping: z.record(z.string(), z.string()).optional().default({}),
   maxAttempts: z.number().int().min(1).optional().default(2),
+  /** Ao receber conversa de outro agente de IA: apresenta-se ou segue como se fosse o mesmo. */
+  onAiTransfer: z.enum(["present", "continue"]).optional().default("present"),
 });
 
 const summaryConfigSchema = z.object({

@@ -275,6 +275,12 @@ export interface V2Rule {
 }
 
 export interface V2EntryConfig {
+  /**
+   * Ao receber conversa de outro agente de IA: "present" (padrão) apresenta-se
+   * normalmente; "continue" é transparente — quem transfere não avisa e este
+   * segue o atendimento sem se apresentar, como se fosse o mesmo assistente.
+   */
+  onAiTransfer?: "present" | "continue";
   /** Se a mensagem de abertura está habilitada. */
   openingEnabled?: boolean;
   /** Mensagem de abertura na primeira mensagem do cliente. */
