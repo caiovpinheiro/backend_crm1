@@ -83,9 +83,22 @@ export function introBeforeMaterial(reply: string): string {
   return out.split(/\s+/).length >= 3 ? out : "";
 }
 
-/** A resposta anuncia um envio ("segue o vídeo", "vou te mandar", "abaixo"). */
+/**
+ * A resposta anuncia, em primeira pessoa, que o agente manda algo ("vou te
+ * enviar o passo a passo", "segue abaixo o tutorial", "estou te mandando").
+ * Palavra solta não vale: "envie um arquivo por vez" (ordem ao cliente),
+ * "abaixo de 1 MB", "a tela fica em 'Enviando…'" não são promessas — e
+ * disparavam uma mensagem pronta qualquer do assunto.
+ */
+const ANNOUNCES_SENDING: RegExp[] = [
+  /\b(?:vou|irei|posso) (?:te |lhe )?(?:enviar|mandar|encaminhar|passar|compartilhar)\b/i,
+  /\b(?:estou|tô|to) (?:te |lhe )?(?:enviando|mandando|encaminhando|passando)\b/i,
+  /\b(?:te|lhe) (?:envio|mando|encaminho|passo) (?:agora|abaixo|a seguir|em seguida|aqui|o|a|os|as|um|uma)\b/i,
+  /\bsegue(?:m)? (?:abaixo|em anexo|aqui|a seguir|o|a|os|as|um|uma)\b/i,
+  /\b(?:em anexo|anexei|segue anexo|enviei abaixo|mandei abaixo|logo abaixo|aqui embaixo)\b/i,
+];
 export function announcesSending(reply: string): boolean {
-  return /\b(?:segue|seguem|envio|enviei|enviando|mando|mandei|mandando|vou (?:te |lhe )?(?:enviar|mandar)|abaixo|anexo|anexei)\b/i.test(reply);
+  return ANNOUNCES_SENDING.some((re) => re.test(reply));
 }
 
 /**
@@ -99,14 +112,28 @@ export function pickPromisedModelId(
   models: Array<{ id: string; name: string; content?: string | null }>,
 ): string | null {
   if (!announcesSending(reply) || models.length === 0) return null;
-  if (models.length === 1) return models[0].id;
-  const hay = `${userMessage}\n${reply}`;
-  let best: { id: string; score: number } | null = null;
-  for (const model of models) {
-    const score = sharedContentWords(hay, `${model.name}\n${model.content ?? ""}`);
-    if (!best || score > best.score) best = { id: model.id, score };
-  }
-  return best && best.score > 0 ? best.id : null;
+  // O nome da mensagem pronta diz do que ela trata e tem que casar com o que
+  // a promessa anuncia ("vou te enviar o passo a passo das horas…") ou com
+  // o pedido — não com uma palavra qualquer da resposta ("atendimento"
+  // aparece em tudo e levava a mensagem de avaliação para o meio de um
+  // tutorial). O texto inteiro só conta com várias palavras em comum.
+  const promise = reply
+    .split(/(?<=[.!?\n])\s+/)
+    .filter((sentence) => ANNOUNCES_SENDING.some((re) => re.test(sentence)))
+    .join(" ") || reply;
+  const scored = models.map((model) => {
+    const name = sharedContentWords(`${userMessage}\n${promise}`, model.name);
+    const body = sharedContentWords(`${userMessage}\n${reply}`, model.content ?? "");
+    return { id: model.id, name, body, score: name * 3 + body };
+  });
+  scored.sort((a, b) => b.score - a.score);
+  const best = scored[0];
+  if (!best) return null;
+  const relevant = best.name >= 1 || best.body >= 3;
+  if (!relevant) return null;
+  // Empate entre duas: não chuta.
+  if (scored.length > 1 && scored[1].score === best.score) return null;
+  return best.id;
 }
 
 /** Erro do executor quando o texto da mensagem pronta foi barrado por repetir uma recente. */
