@@ -633,12 +633,28 @@ describe("processTimeout / sweepExpiredTimeouts", () => {
       assignedTo: null,
       closedAt: null,
     });
+    h.message.findFirst.mockResolvedValueOnce({ id: "in-1" });
     await withOrg(ORG, () => processTimeout("ctx-1"));
     expect(h.conversation.findFirst).toHaveBeenCalledWith(
       expect.objectContaining({ where: { id: "conv-1" } }),
     );
     expect(updateData()).toMatchObject({ status: "COMPLETED", currentStepId: null });
     expect(h.continueFromStep).not.toHaveBeenCalled();
+  });
+
+  it("lastInboundAt novo sem mensagem depois da pausa segue a aresta", async () => {
+    h.ctx.findUnique.mockResolvedValueOnce(ctxRow());
+    h.conversation.findFirst.mockResolvedValueOnce({
+      status: "OPEN",
+      lastInboundAt: new Date(PAUSED_AT.getTime() + 5_000),
+      assignedToId: null,
+      assignedTo: null,
+      closedAt: null,
+    });
+    h.message.findFirst.mockResolvedValueOnce(null);
+    await withOrg(ORG, () => processTimeout("ctx-1"));
+    expect(updateData().currentStepId).toBe("step-timeout");
+    expect(h.continueFromStep).toHaveBeenCalledTimes(1);
   });
 
   it("mídia ignorada pelo menu não aborta a aresta de timeout", async () => {
@@ -660,6 +676,7 @@ describe("processTimeout / sweepExpiredTimeouts", () => {
       assignedTo: null,
       closedAt: null,
     });
+    h.message.findFirst.mockResolvedValueOnce({ id: "in-media" });
     h.message.findMany.mockResolvedValueOnce([
       { content: "curriculo.pdf", messageType: "document" },
     ]);
@@ -688,6 +705,7 @@ describe("processTimeout / sweepExpiredTimeouts", () => {
       assignedTo: null,
       closedAt: null,
     });
+    h.message.findFirst.mockResolvedValueOnce({ id: "in-1" });
     h.message.findMany.mockResolvedValueOnce([
       { content: "quero falar com alguém", messageType: "text" },
     ]);
