@@ -77,6 +77,7 @@ vi.mock("../actions", () => ({
 vi.mock("../summary", () => ({
   writeV2Summary: mocks.writeSummary,
   loadPriorV2Summary: mocks.loadPriorSummary,
+  SUMMARY_MESSAGE_TYPE: "ai_summary",
   updateRunningSummary: mocks.updateRunningSummary,
   summaryEnabled: (config: { closure?: { summary?: { enabled?: boolean } } }) =>
     config.closure?.summary?.enabled ? config.closure.summary : null,
@@ -118,6 +119,11 @@ vi.mock("@/services/ai/attendance-gate", () => ({
 
 vi.mock("../ensure-schema", () => ({
   ensureV2AgentSchema: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock("@/lib/org-settings", () => ({
+  getOrgSetting: vi.fn(async () => null),
+  getOrgSettingBool: vi.fn(async (_k: string, d: boolean) => d),
 }));
 
 vi.mock("@/services/conversations", () => ({
@@ -2110,6 +2116,38 @@ describe("processV2Turn — correções do motor", () => {
 
       expect(sentTexts()).toHaveLength(1);
       expect(sentTexts()[0]).toContain("Você já tem acesso ao portal?");
+    });
+
+    it("turno de mensagem antiga, depois de a conversa seguir, não responde de novo", async () => {
+      mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: baseConfig(), active: true });
+      mocks.getState.mockResolvedValue({ ...makeState("active", "agente"), agentId: "agent-0" });
+      mocks.callLLM.mockResolvedValue(llmOut({ reply: "O prazo de setembro já passou; a próxima janela é em dezembro." }));
+      // Depois desta mensagem veio outra com conteúdo, e ela já foi respondida.
+      mocks.messageFindMany.mockImplementation(async (args: { where?: { id?: { in?: string[] }; direction?: string } }) =>
+        args.where?.id?.in
+          ? [{ createdAt: new Date("2026-01-01T10:00:00Z") }]
+          : args.where?.direction === "in"
+            ? [{ createdAt: new Date("2026-01-01T10:00:06Z"), content: "É possível fazer hoje?", messageType: "text" }]
+            : [],
+      );
+      mocks.messageFindFirst.mockResolvedValue({ id: "out-1" });
+
+      await run("Perdi o prazo de setembro", { messageIds: ["m-old"] });
+
+      expect(mocks.callLLM).not.toHaveBeenCalled();
+      expect(sentTexts()).toHaveLength(0);
+      expect(mocks.logTurn.mock.calls.at(-1)![0].discardedActions).toEqual([{ type: "no_reply", reason: "conversation moved on" }]);
+    });
+
+    it("encerramento pelo agente não dispara fluxos \"Conversa encerrada\"", async () => {
+      mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: baseConfig(), active: true });
+      mocks.getState.mockResolvedValue(makeState("active", "agente", { pendingOptions: ["Não, obrigado(a)!", "Preciso de ajuda"] }));
+      mocks.callLLM.mockResolvedValue(llmOut({ reply: "Combinado! Até mais.", concluded: true }));
+
+      const result = await run("Não, obrigado(a)!");
+
+      expect(result.closed).toBe(true);
+      expect(mocks.resolveInline).toHaveBeenCalledWith(expect.objectContaining({ skipAutomations: true }));
     });
 
     it("clique no botão de fecho encerra", async () => {

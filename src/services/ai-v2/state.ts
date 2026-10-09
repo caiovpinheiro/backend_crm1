@@ -62,6 +62,10 @@ export async function upsertV2ConversationState(args: {
 }): Promise<V2ConversationStateRow> {
   const existing = await getV2ConversationState(args.conversationId);
   const data: Record<string, unknown> = {
+    // O estado segue o agente que atende agora. Na transferência entre
+    // agentes de IA ele ficava com o primeiro, e todo turno do agente novo
+    // parecia "recém-transferido" (contador de repetição zerado sempre).
+    agentId: args.agentId,
     stage: args.stage ?? existing?.stage ?? "idle",
     mode: args.mode ?? existing?.mode ?? null,
     themeId: args.themeId ?? existing?.themeId ?? null,

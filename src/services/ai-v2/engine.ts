@@ -43,7 +43,7 @@ import { NONSENSE_LIMIT_REASON } from "./limits";
 import { applyV2Tabulation } from "./tabulation";
 import { applyReplyEnding, asksClient, classifyReply, effectiveReplyEnding, isGreetingOnlyReply, replyEndingButtons, replyEndingPhrases, withoutReplyEndings } from "./reply-ending";
 import { hasSearchableQuestion, knowledgeChunkTexts, repeatFallback } from "./ground-reply";
-import { loadPriorV2Summary, summaryEnabled, updateRunningSummary, writeV2Summary } from "./summary";
+import { loadPriorV2Summary, summaryEnabled, updateRunningSummary, writeV2Summary, SUMMARY_MESSAGE_TYPE } from "./summary";
 import { saysTriedAndFailed } from "./retry-signal";
 import { applyBoldPolicy } from "./reply-format";
 import { MESSAGE_MODEL_MIN_COVERAGE, MESSAGE_MODEL_REPEATED, announcesSending, introBeforeMaterial, lastV2ResetAt, mediaResendPlan, messageModelCoverage, pickPromisedModelId, recentMediaDeliveries, recentlySentMessageModels, resendWindowStart, saysNotReceived, recentlyAppliedRuleIds, RULE_REPLY_ACTION_TYPES } from "./sent-materials";
@@ -267,6 +267,49 @@ async function arrivedBeforeLastReply(conversationId: string, messageIds: string
     const last = new Date(Math.max(...own.map((m) => new Date(m.createdAt).getTime())));
     const reply = await db.message.findFirst({
       where: { conversationId, direction: "out", createdAt: { gt: last } },
+      select: { id: true },
+    });
+    return !!reply;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Depois das mensagens deste turno o cliente mandou outra (com conteúdo) e
+ * ela já foi respondida. É o turno copiado na transferência entre agentes
+ * (ou reenfileirado) rodando depois do turno da mensagem seguinte:
+ * responder a antiga agora manda a mesma resposta duas vezes.
+ */
+async function conversationMovedOn(conversationId: string, messageIds: string[] | undefined): Promise<boolean> {
+  if (!messageIds?.length) return false;
+  try {
+    const db = prisma as unknown as {
+      message: {
+        findMany: (args: unknown) => Promise<Array<{ createdAt?: Date; content?: string | null; messageType?: string | null }>>;
+        findFirst: (args: unknown) => Promise<{ id: string } | null>;
+      };
+    };
+    const own = await db.message.findMany({ where: { id: { in: messageIds } }, select: { createdAt: true } });
+    if (own.length === 0) return false;
+    const last = new Date(Math.max(...own.map((m) => new Date(m.createdAt ?? 0).getTime())));
+    const newer = await db.message.findMany({
+      where: { conversationId, direction: "in", id: { notIn: messageIds }, createdAt: { gt: last } },
+      select: { createdAt: true, content: true, messageType: true },
+      orderBy: { createdAt: "asc" },
+      take: 5,
+    });
+    const first = newer.find((m) => !isCourtesyOnlyInbound(m.content, m.messageType));
+    if (!first?.createdAt) return false;
+    const reply = await db.message.findFirst({
+      where: {
+        conversationId,
+        direction: "out",
+        isPrivate: false,
+        authorType: { in: ["bot", "human"] },
+        messageType: { notIn: ["note", SUMMARY_MESSAGE_TYPE] },
+        createdAt: { gt: first.createdAt },
+      },
       select: { id: true },
     });
     return !!reply;
@@ -775,6 +818,21 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     return { handoff: false, closed: false };
   }
 
+  // Turno de uma mensagem antiga (copiado na transferência entre agentes ou
+  // reenfileirado): o cliente já mandou outra depois e ela já foi
+  // respondida. Responder a antiga agora duplica a resposta.
+  if (stage !== "closed" && (await conversationMovedOn(input.conversationId, input.messageIds))) {
+    traceStep("entrada", "O cliente já mandou outra mensagem depois desta e ela já foi respondida → este turno não responde");
+    await logV2Turn({
+      organizationId: orgId, conversationId: input.conversationId, agentId: resolved.agentConfigId, turnId: input.turnId,
+      inboundText: input.userMessage, crmContext: context,
+      prompt: "", executedActions: [], discardedActions: [{ type: "no_reply", reason: "conversation moved on" } as any],
+      handoff: false, latencyMs: Date.now() - startedAt,
+      inputTokens: 0, outputTokens: 0, owner, stage, versionId,
+    });
+    return { handoff: false, closed: false };
+  }
+
   function renderConfirmationText(): string {
     const rendered = renderMessage(
       config.entry.confirmationMessage ?? "Confirmo que estou falando com você. Como posso ajudar?",
@@ -983,6 +1041,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
         keepAgent: true,
         keepDepartment: true,
         tabulation: null,
+        skipAutomations: !(await flowsOnAiClose()),
       });
     };
 
@@ -2804,6 +2863,25 @@ async function createInitialDeal(contactId: string): Promise<string | null> {
   }
 }
 
+/** Chave da org: encerramento pelo agente dispara fluxos "Conversa encerrada"? Padrão: não. */
+export const RUN_FLOWS_ON_AI_CLOSE_KEY = "automations.runOnAiClose";
+
+/**
+ * Fluxos "Conversa encerrada" são do encerramento humano/por fluxo. O agente
+ * tem o próprio pós-encerramento (cortesia, retorno, nova demanda) e os
+ * fluxos disputavam a conversa: tiravam o agente, moviam etapa, ficavam
+ * esperando resposta. Ligar na org quando houver fluxo pós-atendimento
+ * pensado para o agente.
+ */
+async function flowsOnAiClose(): Promise<boolean> {
+  try {
+    const { getOrgSettingBool } = await import("@/lib/org-settings");
+    return await getOrgSettingBool(RUN_FLOWS_ON_AI_CLOSE_KEY, false);
+  } catch {
+    return false;
+  }
+}
+
 export async function closeState(
   orgId: string,
   conversationId: string,
@@ -2838,6 +2916,7 @@ export async function closeState(
     keepAgent: true,
     keepDepartment: true,
     tabulation: null,
+    skipAutomations: !(await flowsOnAiClose()),
   });
   await upsertV2ConversationState({
     organizationId: orgId,

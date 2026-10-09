@@ -108,6 +108,7 @@ const NO_REPLY_REASON: Record<string, string> = {
   "post-close no_reply": "Cortesia depois de encerrar; sem resposta",
   queued: "Cliente na fila; o aviso de fila já tinha sido enviado há pouco",
   "answered meanwhile": "Mensagem sem pedido novo que chegou enquanto ele respondia a anterior; a resposta já cobriu",
+  "conversation moved on": "O cliente já tinha mandado outra mensagem depois desta e ela já foi respondida; a resposta cobriu",
 };
 
 /** Ações internas do motor: não aparecem para quem opera. */
