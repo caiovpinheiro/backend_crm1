@@ -126,8 +126,11 @@ todas as queries da request. O ctx é resolvido do Bearer/sessão.
   - `conversation_updated` — status, owner ou contadores mudaram.
   - `agent_status` — agente entrou/saiu (HUMAN).
   - `typing` — outro agente está digitando.
-- Reconecte sempre via header `Last-Event-ID` para evitar perdas. Heartbeats
-  vêm como comentário SSE a cada 30s.
+- Reconecte sempre via header `Last-Event-ID` para evitar perdas.
+- **Heartbeat** (transporte) a cada 25 s, em dois blocos: o comentário SSE
+  `: heartbeat` (keepalive para proxies) e o evento nomeado
+  `event: heartbeat` com `data: {}` (sem `id:`). Clientes `EventSource` podem
+  escutar `heartbeat` para detectar conexão travada; quem não escuta o ignora.
 
 > Para n8n, prefira chamar `GET /api/conversations` por polling a cada 15-30s
 > em vez de manter SSE aberto — webhooks de chegada de mensagem podem vir

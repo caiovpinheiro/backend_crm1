@@ -137,7 +137,9 @@ describe("GET /api/sse/messages — teto de conexões", () => {
     vi.useFakeTimers();
     const { reader, next } = await open();
     await vi.advanceTimersByTimeAsync(25_000);
-    expect(await next()).toBe(": heartbeat\n\n");
+    // Comentário (keepalive de proxy) + evento nomeado que o EventSource
+    // entrega ao `use-sse` (detecção de conexão travada).
+    expect(await next()).toBe(": heartbeat\n\nevent: heartbeat\ndata: {}\n\n");
     expect(mocks.heartbeat).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(25_000);
     expect(mocks.heartbeat).toHaveBeenCalledTimes(2);
