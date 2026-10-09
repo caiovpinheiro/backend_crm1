@@ -1787,6 +1787,25 @@ describe("processV2Turn — correções do motor", () => {
     expect(logged.reply).toContain("Me conta");
   });
 
+  it("explicação barrada por repetição: o envio ignora o fecho e a saída pergunta o que ficou confuso", async () => {
+    const endingPhrase = "Posso te ajudar em mais alguma coisa?";
+    const config = baseConfig({ replyEnding: { info: { enabled: true, phrases: [endingPhrase] } } } as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.callLLM.mockResolvedValue(llmOut({
+      reply: "Para gerar o pagamento, acesse o painel, toque em Pagamentos, escolha o título desejado e selecione boleto ou cartão para concluir o pagamento ainda hoje pelo aplicativo.",
+    }));
+    mocks.sendText
+      .mockResolvedValueOnce({ sent: false, reason: "near_duplicate" })
+      .mockResolvedValue({ sent: true });
+    // Mensagem anterior do agente era só uma pergunta curta: antes a saída
+    // virava "me conta o que você precisa" logo depois de o cliente dizer.
+    await run("Gerar o pagamento");
+    const firstSend = mocks.sendText.mock.calls[0][0] as { text: string; dedupeIgnore?: string[] };
+    expect(firstSend.text).toContain(endingPhrase);
+    expect(firstSend.dedupeIgnore).toContain(endingPhrase);
+    expect(sentTexts()[1]).toContain("Ficou alguma dúvida");
+  });
+
   it("resposta barrada por outro motivo não entra no log como enviada", async () => {
     const config = baseConfig();
     mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
