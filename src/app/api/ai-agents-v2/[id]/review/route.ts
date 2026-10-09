@@ -46,6 +46,7 @@ export async function POST(request: Request, { params }: Params) {
           model: typeof body.model === "string" ? body.model : "",
           includeTurns: body.includeTurns !== false,
           days: days === 15 || days === 30 ? days : 7,
+          scope: body.scope === "texto" ? "texto" : "problemas",
         },
       });
       return NextResponse.json(result, { status: 202 });
