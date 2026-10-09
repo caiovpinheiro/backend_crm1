@@ -6,11 +6,10 @@
  *
  * Fluxo de um agendamento pendente (scheduledAt <= now):
  *
- *  1. Tenta "reservar" via updateMany (where status=PENDING → data.status=PENDING
- *     com updatedAt). Se 0 rows afetadas, outro worker já pegou → skip.
- *     NOTA: implementação atual NÃO usa status intermediário "SENDING" porque
- *     o default de deploy é 1 réplica. Se precisar escalar, adicionar um
- *     ScheduledMessageStatus.SENDING e transição atômica.
+ *  1. Reserva atômica PENDING → SENDING (`updateMany` com count === 1)
+ *     antes de qualquer chamada externa. count === 0: outro worker já
+ *     reservou. SENDING parado além do lease volta a PENDING para o
+ *     retry implícito de crash.
  *  2. Decide modo de envio:
  *       • Canal WhatsApp Meta + sessão 24h expirada → template fallback
  *         (exigido ao criar; se ausente, FAILED).
@@ -24,6 +23,12 @@
  * buscará o binário e chamará o endpoint de media do canal.
  */
 
+import {
+  touchChatLastMessageAt,
+  touchConversationLastMessageAt,
+} from "@/lib/conversation-last-message";
+import { metaGraphFetchWorstCaseMs } from "@/lib/meta-whatsapp/client";
+import { TEMPLATE_DEFINITION_LISTING_PAGE_CAP } from "@/lib/meta-whatsapp/enrich-template-flow";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 // prismaBase para check de concorrencia cross-org (antes de entrar no
@@ -32,6 +37,7 @@ import { prismaBase } from "@/lib/prisma-base";
 import { withSystemContext } from "@/lib/webhook-context";
 import { metaClientFromConfig, metaWhatsApp } from "@/lib/meta-whatsapp/client";
 import { enrichTemplateComponentsForFlowSend } from "@/lib/meta-whatsapp/enrich-template-flow";
+import { scheduledMessageBaileysJobId } from "@/lib/queue";
 import { sendWhatsAppText } from "@/lib/send-whatsapp";
 import { buildOutboundTemplateMessageContent } from "@/lib/whatsapp-outbound-template-label";
 import {
@@ -39,6 +45,7 @@ import {
   markAsFailed,
   markAsSent,
 } from "@/services/scheduled-messages";
+import { ScheduledMessageStatus } from "@prisma/client";
 import { getLogger } from "@/lib/logger";
 import { scheduleBackgroundTimeout, scheduleBackgroundInterval } from "@/lib/background-timers";
 
@@ -46,6 +53,74 @@ const log = getLogger("scheduled-messages-worker");
 
 const INTERVAL_MS = Number(process.env.SCHEDULED_MESSAGES_INTERVAL_MS) || 30_000;
 const SESSION_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Chamadas Graph no pior caminho de `dispatchOne` (`sendViaMetaTemplate`):
+ * GET do template por id + até `TEMPLATE_DEFINITION_LISTING_PAGE_CAP` páginas
+ * de listagem + `sendTemplate`. `sendWhatsAppText` → `sendText` é uma
+ * `graphFetch` só; o lease cobre o caminho mais longo.
+ *
+ * Cada `graphFetch` espera no máximo `GRAPH_TIMEOUT_MS` (20s) ×
+ * `META_GRAPH_MAX_ATTEMPTS` (default 3), mais o backoff linear entre
+ * tentativas (teto 100% de 1s × attempt). A listagem para no primeiro throw,
+ * mas uma página que falha duas vezes e sucede na terceira consome o pior
+ * caso inteiro — e isso pode repetir nas 40 páginas.
+ *
+ * `SCHEDULED_MESSAGE_SENDING_LEASE_MS`, se for maior que esse piso, substitui
+ * o default. Valor menor é ignorado: o lease não pode vencer enquanto a
+ * tentativa ainda cabe no timeout do provider.
+ *
+ * Residual: crash depois do aceite da Meta e antes de gravar SENT pode
+ * reenviar quando o lease expira. A Cloud API deste envio não recebe
+ * idempotency key.
+ *
+ * Baileys não aumenta o lease. `sendWhatsAppText` só faz `queue.add` na fila
+ * `baileys-outbound` (o consumer em `outbound-consumer.ts` é quem fala com o
+ * socket). O agendamento manda `jobId` `scheduled-message-<id>` (BullMQ 5
+ * não aceita `:`). O job concluído fica no Redis por 2× este lease
+ * (`removeOnComplete.age`), então o recovery não recria o id depois que
+ * `removeOnComplete: true` teria apagado o job e antes de gravar `SENT`.
+ */
+const TEMPLATE_DISPATCH_GRAPH_CALLS = 1 + TEMPLATE_DEFINITION_LISTING_PAGE_CAP + 1;
+
+export function scheduledDispatchExternalWorstCaseMs(): number {
+  return TEMPLATE_DISPATCH_GRAPH_CALLS * metaGraphFetchWorstCaseMs();
+}
+
+export function scheduledMessageSendingLeaseMs(): number {
+  const worst = scheduledDispatchExternalWorstCaseMs();
+  const margin = Math.max(30_000, Math.ceil(worst * 0.1));
+  const floor = worst + margin;
+  const raw = Number(process.env.SCHEDULED_MESSAGE_SENDING_LEASE_MS ?? "");
+  if (Number.isFinite(raw) && raw >= floor) return Math.floor(raw);
+  return floor;
+}
+
+/** PENDING → SENDING. Só uma instância recebe count === 1. */
+export async function claimScheduledMessage(id: string): Promise<boolean> {
+  const result = await prismaBase.scheduledMessage.updateMany({
+    where: { id, status: ScheduledMessageStatus.PENDING },
+    data: { status: ScheduledMessageStatus.SENDING },
+  });
+  return result.count === 1;
+}
+
+/**
+ * SENDING cujo `updatedAt` é mais velho que o lease volta a PENDING.
+ * O próximo claim é de novo atômico. Não marca FAILED: o retry de crash
+ * (ficar PENDING e ser pego no tick) continua valendo.
+ */
+export async function reclaimStaleSendingScheduledMessages(now = new Date()): Promise<number> {
+  const cutoff = new Date(now.getTime() - scheduledMessageSendingLeaseMs());
+  const result = await prismaBase.scheduledMessage.updateMany({
+    where: {
+      status: ScheduledMessageStatus.SENDING,
+      updatedAt: { lt: cutoff },
+    },
+    data: { status: ScheduledMessageStatus.PENDING },
+  });
+  return result.count;
+}
 
 let started = false;
 
@@ -81,6 +156,10 @@ export function startScheduledMessagesWorker() {
 }
 
 export async function tickOnce() {
+  await reclaimStaleSendingScheduledMessages().catch((err) => {
+    log.warn({ err }, "[scheduled-messages] reclaim de SENDING falhou");
+  });
+
   const due = await listDueScheduledMessages(25);
   if (due.length === 0) return { processed: 0 };
 
@@ -88,16 +167,20 @@ export async function tickOnce() {
   let failed = 0;
 
   for (const item of due) {
+    const claimed = await claimScheduledMessage(item.id);
+    if (!claimed) continue;
+
     const orgId = item.conversation?.organizationId;
     if (!orgId) {
       // ScheduledMessage orfao (conversa removida) — nao conseguimos
       // montar contexto. markAsFailed precisa de org tambem; usamos
-      // prismaBase direto para registrar a falha sem scope.
+      // prismaBase direto para registrar a falha sem scope. Só a partir
+      // de SENDING, para não atropelar outro worker.
       await prismaBase.scheduledMessage
-        .update({
-          where: { id: item.id },
+        .updateMany({
+          where: { id: item.id, status: ScheduledMessageStatus.SENDING },
           data: {
-            status: "FAILED",
+            status: ScheduledMessageStatus.FAILED,
             failedAt: new Date(),
             failureReason: "Conversa removida antes do envio",
           },
@@ -106,15 +189,6 @@ export async function tickOnce() {
       failed++;
       continue;
     }
-
-    // Concorrência: confirma que ainda está PENDING antes de gastar
-    // I/O externo. Outro worker pode ter processado neste intervalo.
-    // Usa prismaBase para evitar exigir contexto e nao vazar scope.
-    const stillPending = await prismaBase.scheduledMessage.findUnique({
-      where: { id: item.id },
-      select: { status: true },
-    });
-    if (stillPending?.status !== "PENDING") continue;
 
     try {
       // Toda a pipeline de dispatch acessa models scoped (Message,
@@ -228,6 +302,10 @@ async function sendViaText(
     content: item.content,
     messageId: saved.id,
     waJid: conv.waJid,
+    baileysJobId:
+      channelRef?.provider === "BAILEYS_MD"
+        ? scheduledMessageBaileysJobId(item.id)
+        : undefined,
   });
 
   if (result.failed) {
@@ -238,6 +316,11 @@ async function sendViaText(
         data: { sendStatus: "failed", sendError: result.error ?? "send failed" },
       })
       .catch(() => {});
+    // A bolha falhada fica no chat (e na prévia do card): mesma ordem.
+    await touchConversationLastMessageAt({
+      conversationId: conv.id,
+      at: saved.createdAt,
+    }).catch(() => {});
     throw new Error(result.error ?? "Envio WhatsApp falhou");
   }
 
@@ -251,11 +334,12 @@ async function sendViaText(
       },
     })
     .catch(() => {});
+  await touchChatLastMessageAt({ conversationId: conv.id, message: saved }).catch(() => {});
 
-  // Atualiza o sentMessageId no agendamento para auditoria.
+  // Só grava se esta instância ainda é a dona do SENDING.
   await prisma.scheduledMessage
-    .update({
-      where: { id: item.id },
+    .updateMany({
+      where: { id: item.id, status: ScheduledMessageStatus.SENDING },
       data: { sentMessageId: saved.id },
     })
     .catch(() => {});
@@ -364,10 +448,11 @@ async function sendViaMetaTemplate(
       },
     })
     .catch(() => {});
+  await touchChatLastMessageAt({ conversationId: conv.id, message: saved }).catch(() => {});
 
   await prisma.scheduledMessage
-    .update({
-      where: { id: item.id },
+    .updateMany({
+      where: { id: item.id, status: ScheduledMessageStatus.SENDING },
       data: { sentMessageId: saved.id },
     })
     .catch(() => {});

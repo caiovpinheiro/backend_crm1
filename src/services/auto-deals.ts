@@ -39,10 +39,9 @@ import { scheduleBoardInvalidation } from "@/lib/cache/keys";
 import { defaultDealTitleForContact } from "@/lib/display-name";
 import { phoneMatchVariants } from "@/lib/phone";
 import { prisma } from "@/lib/prisma";
-import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { fireTrigger } from "@/services/automation-triggers";
-import { nextDealNumber } from "@/services/deals";
+import { createDeal, wasReusedOpenDeal } from "@/services/deals";
 import { getNextOwner } from "@/services/lead-distribution";
 import { allocateStageSlug, isStageNumberUniqueViolation, nextStageNumber } from "@/services/pipelines";
 import { getLogger } from "@/lib/logger";
@@ -360,38 +359,16 @@ export async function ensureOpenDealForContact(
 
   const ownerId = await getNextOwner(pipeline.id);
 
-  // `Deal.number` e mandatorio (sem default) e unico por org. Tenta
-  // alocar max+1; em P2002 (corrida) repete ate 5x.
-  let deal: { id: string } | null = null;
-  let lastErr: unknown;
-  for (let attempt = 0; attempt < 5; attempt++) {
-    const number = await nextDealNumber();
-    try {
-      deal = await prisma.deal.create({
-        data: withOrgFromCtx({
-          number,
-          title: defaultDealTitleForContact(contactName) ?? `Negócio - #${number}`,
-          contactId,
-          stageId: incomingStage.id,
-          status: "OPEN" as const,
-          position: (maxPos._max.position ?? -1) + 1,
-          ownerId,
-        }),
-        select: { id: true },
-      });
-      break;
-    } catch (err) {
-      lastErr = err;
-      const isUnique =
-        typeof err === "object" &&
-        err !== null &&
-        "code" in err &&
-        (err as { code: string }).code === "P2002";
-      if (!isUnique) throw err;
-    }
-  }
-  if (!deal) {
-    throw lastErr ?? new Error("Falha ao alocar Deal.number apos retries");
+  const deal = await createDeal({
+    contactId,
+    stageId: incomingStage.id,
+    title: defaultDealTitleForContact(contactName) ?? undefined,
+    status: "OPEN",
+    position: (maxPos._max.position ?? -1) + 1,
+    ownerId,
+  });
+  if (wasReusedOpenDeal(deal)) {
+    return { status: "existing", dealId: deal.id };
   }
 
   // O `new_message` só purga os pipelines onde o contato já tem deal, e

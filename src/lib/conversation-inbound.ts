@@ -15,6 +15,11 @@ type InboundWriter = {
  *
  * Não chamar em findOrCreate / ensure / reopen: ticket sem inbound
  * nasce NULL de propósito.
+ *
+ * Grava também `lastMessageAt` (ordem da lista do inbox — ver
+ * `lib/conversation-last-message.ts`) na mesma instrução, sem andar para
+ * trás: webhook atrasado não rebaixa a conversa. Só é chamado para
+ * mensagem de chat do cliente (o recorte da prévia do card).
  */
 export async function touchInbound(args: {
   conversationId: string;
@@ -26,7 +31,8 @@ export async function touchInbound(args: {
     UPDATE conversations
     SET
       "lastInboundAt" = ${args.at},
-      "firstInboundAt" = COALESCE("firstInboundAt", ${args.at})
+      "firstInboundAt" = COALESCE("firstInboundAt", ${args.at}),
+      "lastMessageAt" = GREATEST("lastMessageAt", ${args.at})
     WHERE id = ${args.conversationId}
   `;
 }

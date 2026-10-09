@@ -126,8 +126,11 @@ todas as queries da request. O ctx é resolvido do Bearer/sessão.
   - `conversation_updated` — status, owner ou contadores mudaram.
   - `agent_status` — agente entrou/saiu (HUMAN).
   - `typing` — outro agente está digitando.
-- Reconecte sempre via header `Last-Event-ID` para evitar perdas. Heartbeats
-  vêm como comentário SSE a cada 30s.
+- Reconecte sempre via header `Last-Event-ID` para evitar perdas.
+- **Heartbeat** (transporte) a cada 25 s, em dois blocos: o comentário SSE
+  `: heartbeat` (keepalive para proxies) e o evento nomeado
+  `event: heartbeat` com `data: {}` (sem `id:`). Clientes `EventSource` podem
+  escutar `heartbeat` para detectar conexão travada; quem não escuta o ignora.
 
 > Para n8n, prefira chamar `GET /api/conversations` por polling a cada 15-30s
 > em vez de manter SSE aberto — webhooks de chegada de mensagem podem vir
@@ -222,7 +225,7 @@ todas as queries da request. O ctx é resolvido do Bearer/sessão.
 
 | Método | Path | Auth | Query / Body | Descrição |
 |--------|------|------|--------------|-----------|
-| GET | `/api/conversations` | Bearer/sessão | `?counts=1` ou `?tab=entrada\|esperando\|respondidas\|automacao\|finalizados\|erro\|todos&status=OPEN\|RESOLVED\|PENDING\|SNOOZED&channel=whatsapp&contactId=&ownerId=&stageId=&tagIds=a,b&search=&sortBy=updatedAt\|createdAt\|unreadCount&sortOrder=asc\|desc&cursor=&perPage=30` | Lista conversas filtradas. Com `counts=1` retorna apenas contadores por aba. Paginação por cursor (keyset): a resposta traz `nextCursor` (opaco) e `hasMore`; mande-o de volta em `cursor` para a página seguinte — sem OFFSET, não repete nem pula item. `page=N` continua aceito (legado, usa OFFSET). Cursor ilegível → 400. |
+| GET | `/api/conversations` | Bearer/sessão | `?counts=1` ou `?tab=entrada\|esperando\|respondidas\|automacao\|finalizados\|erro\|todos&status=OPEN\|RESOLVED\|PENDING\|SNOOZED&channel=whatsapp&contactId=&ownerId=&stageId=&tagIds=a,b&search=&sortBy=lastMessageAt\|updatedAt\|createdAt\|unreadCount&sortOrder=asc\|desc&cursor=&perPage=30` | Lista conversas filtradas. Com `counts=1` retorna apenas contadores por aba. Ordem padrão (`sortBy=lastMessageAt`): última mensagem de chat, entrada ou saída (nota, rascunho da IA, ligação WhatsApp e evento não contam) — `COALESCE(lastMessageAt, updatedAt) DESC, id DESC`; ler, atribuir ou encerrar não muda a posição; conversa sem a coluna preenchida usa `updatedAt`. Paginação por cursor (keyset): a resposta traz `nextCursor` (opaco, v2) e `hasMore`; mande-o de volta em `cursor`, com o mesmo `sortBy`, para a página seguinte — sem OFFSET, não repete nem pula item. Cursor v1 aceito por uma versão (inclusive o de `updatedAt` na ordem padrão). `total`: número real do filtro quando conhecido (lista esgotada sem cursor, ou badge em cache), senão `null` — nunca estimado. `page`: número da página sem `cursor`; com `cursor`, `null`. `page=N` continua aceito (legado, usa OFFSET). Cursor ilegível ou de outro `sortBy` → 400. |
 | POST | `/api/conversations/create` | sessão | `{ contactId, channelId?, message?, skipSend? }` | Cria conversa WhatsApp com um contato. `skipSend=true` apenas reserva a conversa sem mandar mensagem. |
 | GET | `/api/conversations/[id]` | Bearer/sessão | — | Detalhe de uma conversa (contato, canal, owner, status, tags). |
 | POST | `/api/conversations/bulk` | sessão | `{ ids: string[], action: "resolve"\|"reopen"\|"assign"\|"unassign"\|"snooze"\|"unsnooze", payload? }` | Operação em massa nas conversas. |

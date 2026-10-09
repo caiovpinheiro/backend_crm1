@@ -16,6 +16,7 @@ import {
   requireConversationAccess,
   requireConversationAccessAndLoad,
 } from "@/lib/conversation-access";
+import { touchChatLastMessageAt } from "@/lib/conversation-last-message";
 import { resolveOutboundChannel } from "@/lib/outbound-channel";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
@@ -1212,6 +1213,7 @@ export async function POST(request: Request, context: RouteContext) {
             ...(sendRes.failed ? { hasError: true } : { hasError: false }),
           },
         });
+        await touchChatLastMessageAt({ conversationId: conv.id, message: savedMsg });
       } catch { /* colunas opcionais */ }
 
       scheduleCapacityReleasedAfterHumanSend(
@@ -1355,6 +1357,7 @@ export async function POST(request: Request, context: RouteContext) {
             hasError: false,
           },
         });
+        await touchChatLastMessageAt({ conversationId: conv.id, message: saved });
       } catch { /* columns may not exist yet */ }
 
       scheduleCapacityReleasedAfterHumanSend(
@@ -1469,6 +1472,7 @@ export async function POST(request: Request, context: RouteContext) {
           ...(sendFailed ? { hasError: true } : { hasError: false }),
         },
       });
+      await touchChatLastMessageAt({ conversationId: conv.id, message: saved });
     } catch { /* columns may not exist yet */ }
 
     scheduleCapacityReleasedAfterHumanSend(

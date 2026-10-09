@@ -573,18 +573,85 @@ function getBaileysControlQueue(): Queue<BaileysControlPayload> | null {
   return globalForQueue.baileysControlQueue;
 }
 
-export async function enqueueBaileysOutbound(payload: BaileysOutboundPayload) {
+/**
+ * `jobId` estável só para quem precisa de deduplicação (agendamento).
+ * BullMQ rejeita `:` no id. Sem `jobId`, o add continua único por chamada
+ * — os outros envios de WhatsApp não mudam (`removeOnComplete: true`).
+ *
+ * O script `addStandardJob` grava o job numa operação atômica. Se o id já
+ * existe, devolve o mesmo job e não cria outro.
+ *
+ * Job de agendamento não some ao completar: `removeOnComplete.age` é
+ * 2× o lease de `SENDING`. Assim, um crash depois do envio e antes de
+ * `SENT` não recria o mesmo `jobId` quando o lease expira.
+ */
+export function scheduledMessageBaileysJobId(scheduledMessageId: string): string {
+  return `scheduled-message-${scheduledMessageId}`;
+}
+
+/** Teto de jobs de agendamento guardados no Redis (completos). A idade é o que cobre o lease. */
+export const SCHEDULED_BAILEYS_JOB_KEEP_COUNT = 10_000;
+
+/** Falha guardada como nos envios comuns: até 1000, sem apagar na hora. */
+export const BAILEYS_OUTBOUND_REMOVE_ON_FAIL = { count: 1000 } as const;
+
+export async function scheduledBaileysCompletedRetention(): Promise<{
+  age: number;
+  count: number;
+}> {
+  const { scheduledMessageSendingLeaseMs } = await import(
+    "@/services/scheduled-messages-worker"
+  );
+  return {
+    age: Math.ceil((2 * scheduledMessageSendingLeaseMs()) / 1000),
+    count: SCHEDULED_BAILEYS_JOB_KEEP_COUNT,
+  };
+}
+
+export class BaileysOutboundAlreadyQueuedError extends Error {
+  constructor() {
+    super("Envio Baileys deste agendamento já está na fila.");
+    this.name = "BaileysOutboundAlreadyQueuedError";
+  }
+}
+
+/** O job deste `jobId` esgotou as tentativas. Não há entrega pendente. */
+export class BaileysOutboundJobFailedError extends Error {
+  constructor() {
+    super("Envio Baileys deste agendamento já falhou na fila.");
+    this.name = "BaileysOutboundJobFailedError";
+  }
+}
+
+export async function enqueueBaileysOutbound(
+  payload: BaileysOutboundPayload,
+  opts?: { jobId?: string },
+) {
   const queue = getBaileysOutboundQueue();
   if (!queue) {
     log.warn("[queue] Redis indisponível — não é possível enviar via Baileys");
     return null;
   }
-  return queue.add("send", payload, {
+  const jobId = opts?.jobId;
+  const job = await queue.add("send", payload, {
     attempts: 4,
     backoff: { type: "exponential", delay: 2000 },
-    removeOnComplete: true,
-    removeOnFail: { count: 1000 },
+    removeOnComplete: jobId ? await scheduledBaileysCompletedRetention() : true,
+    removeOnFail: BAILEYS_OUTBOUND_REMOVE_ON_FAIL,
+    ...(jobId ? { jobId } : {}),
   });
+  if (jobId && payload.messageId) {
+    const stored = await queue.getJob(jobId);
+    if (stored && "getState" in stored && typeof stored.getState === "function") {
+      const state = await stored.getState();
+      if (state === "failed") throw new BaileysOutboundJobFailedError();
+    }
+    const storedMessageId = stored?.data?.messageId;
+    if (storedMessageId && storedMessageId !== payload.messageId) {
+      throw new BaileysOutboundAlreadyQueuedError();
+    }
+  }
+  return job;
 }
 
 export async function enqueueBaileysControl(payload: BaileysControlPayload) {

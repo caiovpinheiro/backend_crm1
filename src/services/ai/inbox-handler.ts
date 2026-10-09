@@ -88,6 +88,7 @@ import {
   type InboxPolicy,
 } from "@/lib/ai-agents/steering";
 import { cache } from "@/lib/cache";
+import { touchChatLastMessageAt } from "@/lib/conversation-last-message";
 import { prisma } from "@/lib/prisma";
 import { isRetiredWhatsAppChannel } from "@/lib/channels/retired-whatsapp";
 import { getOrgIdOrNull } from "@/lib/request-context";
@@ -1759,6 +1760,10 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
           },
         })
         .catch(() => null);
+      await touchChatLastMessageAt({
+        conversationId: args.conversationId,
+        message: saved,
+      }).catch(() => null);
       publishNewMessage({
         organizationId: getOrgIdOrNull(),
         conversationId: args.conversationId,

@@ -22,6 +22,8 @@
  * - Nos outros processos, o pior caso é servir a versão anterior por até
  *   `CACHE_VERSION_MEMO_MS` depois do `INCR`. 500 ms fica abaixo do
  *   refetch que o SSE dispara no cliente (~800 ms).
+ * - Exceção: a família `board` não tem memória (lê a versão sempre) — ver
+ *   `NO_MEMO_FAMILIES`.
  *
  * ## Redis fora
  *
@@ -83,7 +85,32 @@ export function cacheVersionRedisKey(name: string): string {
   return VERSION_KEY_PREFIX + name;
 }
 
-export function cacheVersionMemoMs(): number {
+/**
+ * Famílias sem memória local da versão (E5 / N-BE-9 da auditoria).
+ *
+ * `board`: com 2 réplicas, quem move um card numa réplica e recarrega o
+ * board pela outra podia receber o valor da versão anterior por até
+ * 500 ms (a outra réplica ainda lembrava a versão velha) — o card "voltava"
+ * até o próximo refetch. Ler a versão sempre custa 1 GET pequeno por versão
+ * a cada leitura do board (que já é um GET de até 1 MB e só acontece em
+ * carga/refetch da tela), e as leituras simultâneas no processo continuam
+ * coalescidas (`readsInFlight`). Escolhido no lugar de pub/sub do bump:
+ * não precisa de conexão de subscribe por processo nem trata mensagem
+ * perdida — a leitura no Redis é a fonte da verdade.
+ *
+ * As demais famílias (contadores do Inbox, catálogos, lookups) aceitam o
+ * atraso de até `CACHE_VERSION_MEMO_MS` entre réplicas.
+ */
+const NO_MEMO_FAMILIES: ReadonlySet<string> = new Set(["board"]);
+
+function familyOf(name: string): string {
+  const i = name.indexOf(":");
+  return i < 0 ? name : name.slice(0, i);
+}
+
+/** Memória local da versão, em ms (`name` decide as famílias sem memo). */
+export function cacheVersionMemoMs(name?: string): number {
+  if (name !== undefined && NO_MEMO_FAMILIES.has(familyOf(name))) return 0;
   const raw = process.env.CACHE_VERSION_MEMO_MS?.trim();
   if (!raw) return DEFAULT_MEMO_MS;
   const n = Number(raw);
@@ -195,7 +222,7 @@ async function versionNumber(name: string): Promise<number> {
   if (bumping) return bumping;
 
   const hit = known.get(name);
-  if (hit && Date.now() - hit.at < cacheVersionMemoMs()) return hit.value;
+  if (hit && Date.now() - hit.at < cacheVersionMemoMs(name)) return hit.value;
 
   const reading = readsInFlight.get(name);
   if (reading) return reading;

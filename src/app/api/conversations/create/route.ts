@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { requireChannelScope } from "@/lib/authz/resource-policy";
+import { touchConversationLastMessageAt } from "@/lib/conversation-last-message";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { MetaWhatsAppClient } from "@/lib/meta-whatsapp/client";
@@ -327,6 +328,9 @@ export async function POST(request: Request) {
 
       const senderName = session.user.name ?? session.user.email ?? "Agente";
 
+      // Primeira mensagem do ticket: nenhum update da conversa vem depois,
+      // então a ordem da lista é gravada à parte (uma escrita).
+      let firstMessageAt: Date;
       if (channel.provider === "BAILEYS_MD") {
         const msgRow = await prisma.message.create({
           data: withOrgFromCtx({
@@ -339,6 +343,7 @@ export async function POST(request: Request) {
           }),
         });
 
+        firstMessageAt = msgRow.createdAt;
         const baileysTo = existing?.waJid ?? contact.phone!;
         await enqueueBaileysOutbound({
           channelId: channel.id,
@@ -367,7 +372,7 @@ export async function POST(request: Request) {
         const meta = new MetaWhatsAppClient(accessToken, phoneNumberId, businessAccountId);
         await meta.sendMessage(waTo, message, waRecipient);
 
-        await prisma.message.create({
+        const sentRow = await prisma.message.create({
           data: withOrgFromCtx({
             conversationId: conversation.id,
             channelId: channel.id,
@@ -377,7 +382,12 @@ export async function POST(request: Request) {
             senderName,
           }),
         });
+        firstMessageAt = sentRow.createdAt;
       }
+      await touchConversationLastMessageAt({
+        conversationId: conversation.id,
+        at: firstMessageAt,
+      }).catch((err) => log.warn("Falha ao gravar lastMessageAt (não-fatal):", err));
 
       return NextResponse.json({
         conversation: {

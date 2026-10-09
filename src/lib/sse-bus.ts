@@ -69,7 +69,9 @@ const log = getLogger("sse-bus");
  *
  * Presença "quem está vendo" (`entity_viewers`, `src/lib/entity-presence.ts`):
  * TTL do viewer 90s; heartbeat de 25s enviado só pela aba líder do
- * navegador, que agrega as entidades abertas em todas as abas.
+ * navegador, que agrega as entidades abertas em todas as abas. As salas
+ * moram no Redis (hash `presence:viewers:*`), então valem entre réplicas;
+ * sem Redis, `Map` do processo.
  */
 
 export type SseEventEnvelope = {

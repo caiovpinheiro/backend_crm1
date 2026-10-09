@@ -22,6 +22,7 @@ const h = vi.hoisted(() => {
     messageCount: vi.fn().mockResolvedValue(1),
     messageUpdateMany: vi.fn().mockResolvedValue({ count: 1 }),
     conversationUpdate: vi.fn().mockResolvedValue({}),
+    executeRaw: vi.fn().mockResolvedValue(1),
     conversationFindUnique: vi.fn(),
     templateConfigFindFirst: vi.fn().mockResolvedValue(null),
     getConversationLite: vi.fn(),
@@ -50,6 +51,7 @@ vi.mock("@/lib/prisma", () => ({
       updateMany: h.messageUpdateMany,
     },
     conversation: { update: h.conversationUpdate, findUnique: h.conversationFindUnique },
+    $executeRaw: h.executeRaw,
     whatsAppTemplateConfig: { findFirst: h.templateConfigFindFirst },
   },
 }));
@@ -110,6 +112,8 @@ import {
 } from "@/services/outbound-messaging";
 
 const ORG = "org-a";
+/** `createdAt` da mensagem gravada — vira `conversations.lastMessageAt` no mesmo update. */
+const MESSAGE_CREATED_AT = new Date("2026-09-30T10:00:00Z");
 const ACTOR = { id: "user-1", name: "Ana", email: "ana@x.com", role: "MEMBER", organizationId: ORG };
 
 const CHANNEL = {
@@ -169,7 +173,7 @@ beforeEach(() => {
   h.isBaileysChannel.mockReturnValue(false);
   h.messageCreate.mockImplementation(async (args: { data: Record<string, unknown> }) => ({
     id: "msg-1",
-    createdAt: new Date("2026-09-30T10:00:00Z"),
+    createdAt: MESSAGE_CREATED_AT,
     ...args.data,
   }));
   h.sendWhatsAppText.mockResolvedValue({ externalId: "wamid.1", failed: false, error: null });
@@ -218,6 +222,10 @@ describe("sendTextToConversation — caminho feliz", () => {
       where: { id: "conv-1" },
       data: { ...HUMAN_OUTBOUND_REPLY_MARK, hasError: false },
     });
+    const raw = h.executeRaw.mock.calls.at(-1)!;
+    const rawText = Array.isArray(raw[0]) ? (raw[0] as string[]).join("?") : "";
+    expect(rawText).toContain('GREATEST("lastMessageAt"');
+    expect(raw).toContain(MESSAGE_CREATED_AT);
     expect(h.ssePublish).toHaveBeenCalledWith("new_message", {
       organizationId: ORG,
       conversationId: "conv-1",
