@@ -26,6 +26,7 @@ import {
   humanReplyDuringPauseCancels,
   shouldCancelPausedAutomationForHumanAttendance,
   waitForReplyHijacksAiTurn,
+  aiOwnsInboundOverFlow,
   decideFlowStepInbound,
   isInFlightPlainSend,
 } from "@/services/automation-context";
@@ -660,6 +661,46 @@ describe("waitForReplyHijacksAiTurn", () => {
     expect(
       waitForReplyHijacksAiTurn({ stepType: "question", assigneeType: "AI" }),
     ).toBe(false);
+  });
+});
+
+describe("aiOwnsInboundOverFlow — com a IA atendendo, fluxo parado não responde por ela", () => {
+  const ai = { assigneeType: "AI" as const };
+
+  it("clique nos botões que o agente mandou segue para o agente", () => {
+    expect(aiOwnsInboundOverFlow({ ...ai, stepType: "wait_for_reply", interactiveId: "v2opt_2" })).toBe(true);
+  });
+
+  it("vale para qualquer passo que espera resposta, com texto ou clique", () => {
+    for (const stepType of [
+      "wait_for_reply",
+      "question",
+      "send_whatsapp_interactive",
+      "send_whatsapp_list",
+      "send_whatsapp_template",
+      "send_whatsapp_flow",
+      "closing_protocol",
+    ]) {
+      expect(aiOwnsInboundOverFlow({ ...ai, stepType })).toBe(true);
+      expect(aiOwnsInboundOverFlow({ ...ai, stepType, interactiveId: "btn_0" })).toBe(true);
+    }
+  });
+
+  it("resposta de formulário fica com o fluxo", () => {
+    expect(aiOwnsInboundOverFlow({ ...ai, stepType: "send_whatsapp_flow", flowReply: true })).toBe(false);
+  });
+
+  it("sem IA atendendo, ou passo que não espera resposta, nada muda", () => {
+    expect(aiOwnsInboundOverFlow({ stepType: "wait_for_reply", assigneeType: null })).toBe(false);
+    expect(aiOwnsInboundOverFlow({ stepType: "wait_for_reply", assigneeType: "HUMAN" })).toBe(false);
+    expect(aiOwnsInboundOverFlow({ ...ai, stepType: "delay" })).toBe(false);
+  });
+
+  it("org com o comportamento anterior: só texto livre em wait_for_reply segue para o agente", () => {
+    const legacy = { ...ai, resumeFlowWhileAiAttends: true };
+    expect(aiOwnsInboundOverFlow({ ...legacy, stepType: "wait_for_reply" })).toBe(true);
+    expect(aiOwnsInboundOverFlow({ ...legacy, stepType: "wait_for_reply", interactiveId: "btn_0" })).toBe(false);
+    expect(aiOwnsInboundOverFlow({ ...legacy, stepType: "send_whatsapp_interactive" })).toBe(false);
   });
 });
 
