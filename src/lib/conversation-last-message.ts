@@ -25,6 +25,7 @@ import { prisma } from "@/lib/prisma";
 export const NON_CHAT_MESSAGE_TYPES = [
   "note",
   "ai_draft",
+  "ai_summary",
   "whatsapp_call",
   "whatsapp_call_recording",
 ] as const;
