@@ -51,6 +51,28 @@ const ACK_WORDS = new Set([
   "tchau",
   "flw",
   "falou",
+  // Abreviações e variações comuns de "está tudo bem, obrigado": "ta bm
+  // obrigado", "td certo", "joia", "ciente". Só contam quando a mensagem
+  // inteira é feita delas.
+  "bm",
+  "td",
+  "tb",
+  "tbm",
+  "bom",
+  "boa",
+  "otimo",
+  "otima",
+  "joia",
+  "legal",
+  "top",
+  "massa",
+  "certinho",
+  "entendido",
+  "ciente",
+  "anotado",
+  "grato",
+  "grata",
+  "agradeco",
 ]);
 
 /** Cumprimento solto: não é dúvida nem pedido. */

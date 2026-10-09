@@ -72,6 +72,7 @@ import {
 import { fireTrigger, buildMessageTriggerData, emitConversationCreated, openingMessageTriggerExtra } from "@/services/automation-triggers";
 import { resolveAdAndPersistAsync } from "@/services/meta-ad-resolver";
 import { onInboundMessageForAi } from "@/services/ai/turn-manager";
+import { resolvePostCloseInbound } from "@/services/post-close-return";
 import { ensureInboundAiAttendance } from "@/services/ai/first-attendance";
 import { ensureOpenDealForContact, findExistingContactOnPhone } from "@/services/auto-deals";
 import { sanitizeContactName } from "@/lib/display-name";
@@ -1132,7 +1133,24 @@ async function findOrCreateConversation(
     }
   }
 
-  const inheritAssignee = await inheritContactAssigneeForNewTicket(contactId);
+  // Logo depois de um encerramento: cortesia fica na conversa encerrada
+  // (sem ticket, sem IA); conteúdo após atendimento de pessoa não herda o
+  // agente de IA do contato.
+  const postClose = await resolvePostCloseInbound({
+    contactId,
+    channel: "whatsapp",
+    channelId: targetChannelId,
+    text: opening?.content,
+    messageType: opening?.messageType,
+  });
+  if (postClose?.kind === "courtesy") {
+    const closed = await prisma.conversation.findUnique({ where: { id: postClose.conversation.id }, select: convSelect });
+    if (closed) {
+      return { ...closed, deferDistribution: true as const, postCloseCourtesy: true as const };
+    }
+  }
+  const returnToHuman = postClose?.kind === "return_to_human";
+  const inheritAssignee = returnToHuman ? null : await inheritContactAssigneeForNewTicket(contactId);
 
   try {
     const created = await withConversationNumberRetry((number) =>
@@ -1169,7 +1187,7 @@ async function findOrCreateConversation(
         }),
       });
     }
-    return { ...created, deferDistribution };
+    return { ...created, deferDistribution, returnToHuman };
   } catch (err) {
     // Corrida: dois webhooks/mensagens simultaneos do mesmo numero. O
     // indice unico parcial rejeita o 2o create com P2002 — reusa o
@@ -3551,6 +3569,22 @@ export async function processMetaWebhookPayload(
             // Push notification ao operador (PWA — funciona com app
             // fechado). Disparado em background pra nao atrasar 200
             // OK do webhook (Meta tem janela de retry curta).
+            // Cortesia logo após o encerramento: registrada, e só. Sem push,
+            // sem fluxo, sem gatilho, sem IA — o atendimento acabou.
+            if ("postCloseCourtesy" in conversation && conversation.postCloseCourtesy) {
+              log.info(
+                {
+                  event: "skip_ai_inbound",
+                  conversationId: conversation.id,
+                  messageId: msgCreated.id,
+                  reason: "post_close_courtesy",
+                  messageType: inboundMsgType,
+                },
+                "[ai-turn] skip_ai_inbound",
+              );
+              continue;
+            }
+
             notifyInboundMessage({
               conversationId: conversation.id,
               contactId: contact.id,
@@ -3562,7 +3596,9 @@ export async function processMetaWebhookPayload(
             );
 
             if (
-              !("suppressInboundAutomations" in conversation && conversation.suppressInboundAutomations)
+              !("suppressInboundAutomations" in conversation && conversation.suppressInboundAutomations) &&
+              // Voltou de um atendimento de pessoa: a equipe atende, não a IA.
+              !("returnToHuman" in conversation && conversation.returnToHuman)
             ) {
             // 1º atendimento IA ANTES do salesbot/INICIO-PIPE (allowlist).
             try {

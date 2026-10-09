@@ -2114,7 +2114,10 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // Transferência condicional ("se continuar diferente, encaminho"): a resposta
   // já termina pedindo que o cliente confira e volte; o fecho de passo a passo
   // com "Deu certo / Preciso de ajuda" contradizia o "posso encaminhar".
-  const endingAllowed = !anyHandoff && !anyClose && askOptions.length === 0 && (stage as V2Stage) !== "confirming" && !llmOutput.outOfScope && !noSourceApplied && !conditionalWait;
+  // Cortesia ("ok", "obrigado") não ganha "posso ajudar em mais alguma
+  // coisa?" com botões: o cliente acabou de dizer que não precisa.
+  const courtesyInbound = isShortAckText(input.userMessage);
+  const endingAllowed = !anyHandoff && !anyClose && askOptions.length === 0 && (stage as V2Stage) !== "confirming" && !llmOutput.outOfScope && !noSourceApplied && !conditionalWait && !courtesyInbound;
   if (endingAllowed && !materialFollows && replyText.trim()) {
     const ending = applyReplyEnding({
       reply: replyText,
