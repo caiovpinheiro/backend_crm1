@@ -38,6 +38,8 @@ export type V2SummaryItems = {
   pendencia: string;
   resultado: string;
   proximo: string;
+  /** Folha de tabulação aplicada (fato do sistema, não do modelo). */
+  tabulacao?: string;
   /** Só no nível detalhado: "campo: valor". */
   dados?: string[];
   /** Só no nível detalhado: "hh:mm — o que aconteceu". */
@@ -50,6 +52,7 @@ export const SUMMARY_LABELS = {
   pendencia: "Pendência",
   resultado: "Resultado",
   proximo: "Próximo passo",
+  tabulacao: "Tabulação",
   dados: "Dados coletados",
   marcos: "Mensagens-chave",
 } as const;
@@ -96,7 +99,8 @@ export function renderSummary(items: V2SummaryItems, verbosity: V2SummaryVerbosi
   if (verbosity === "minimal") {
     const pend = clean(items.pendencia);
     const tail = pend && !/^(nenhum|nenhuma|sem pend|—|-)/i.test(pend) ? ` · ${pend}` : "";
-    return `${clean(items.motivo)} → ${clean(items.resultado)}${tail}`.trim();
+    const tab = clean(items.tabulacao);
+    return `${clean(items.motivo)} → ${clean(items.resultado)}${tab ? ` (${tab})` : ""}${tail}`.trim();
   }
   const lines = [
     `${SUMMARY_LABELS.motivo}: ${clean(items.motivo) || "—"}`,
@@ -105,6 +109,8 @@ export function renderSummary(items: V2SummaryItems, verbosity: V2SummaryVerbosi
     `${SUMMARY_LABELS.resultado}: ${clean(items.resultado) || "—"}`,
     `${SUMMARY_LABELS.proximo}: ${clean(items.proximo) || "—"}`,
   ];
+  // A folha de tabulação logo depois do resultado — é o que a equipe filtra.
+  if (clean(items.tabulacao)) lines.splice(4, 0, `${SUMMARY_LABELS.tabulacao}: ${clean(items.tabulacao)}`);
   if (verbosity === "detailed") {
     const dados = (items.dados ?? []).map(clean).filter(Boolean);
     const marcos = (items.marcos ?? []).map(clean).filter(Boolean);
@@ -272,6 +278,8 @@ export async function writeV2Summary(args: {
   moment: "close" | "transfer";
   /** Motivo do encerramento ou tipo do destino da transferência. */
   reason: string;
+  /** Folha de tabulação aplicada neste encerramento/transferência (entra como item). */
+  tabulation?: string | null;
 }): Promise<string | null> {
   const cfg = summaryEnabled(args.config);
   if (!cfg) return null;
@@ -287,7 +295,7 @@ export async function writeV2Summary(args: {
       moment: args.moment,
       verbosity: cfg.verbosity,
     });
-    const text = maskSensitive(renderSummary(items, cfg.verbosity)).text;
+    const text = maskSensitive(renderSummary({ ...items, ...(args.tabulation ? { tabulacao: args.tabulation } : {}) }, cfg.verbosity)).text;
     await prisma.message.create({
       data: {
         organizationId: args.organizationId,
