@@ -29,6 +29,10 @@ import {
   markOperationFailed,
   truncateErrorMessage,
 } from "@/jobs/leads/_update-progress";
+import {
+  LONG_JOB_SHUTDOWN_TIMEOUT_MS,
+  installGracefulShutdown,
+} from "@/workers/graceful-shutdown";
 
 const log = getLogger("worker.leads");
 
@@ -255,19 +259,17 @@ export function startLeadsWorker() {
     "leads-worker started",
   );
 
-  // Graceful shutdown — fecha o worker e a conexão antes de matar o processo.
-  const shutdown = async (signal: string) => {
-    log.info({ signal }, "Recebido sinal de shutdown — fechando worker");
-    try {
-      await worker.close();
-    } catch (err) {
-      log.error({ err: truncateErrorMessage(err) }, "Erro ao fechar worker");
-    }
-    process.exit(0);
-  };
-
-  process.once("SIGINT", () => void shutdown("SIGINT"));
-  process.once("SIGTERM", () => void shutdown("SIGTERM"));
+  // Graceful shutdown — `close()` espera o lote ativo; teto longo
+  // (stop_grace ≥ 120 s), depois fecha o pool do Postgres.
+  installGracefulShutdown({
+    name: "leads-worker",
+    log,
+    timeoutMs: LONG_JOB_SHUTDOWN_TIMEOUT_MS,
+    steps: [
+      { name: "bullmq", run: () => worker.close() },
+      { name: "prisma", run: () => prismaBase.$disconnect() },
+    ],
+  });
 
   return worker;
 }

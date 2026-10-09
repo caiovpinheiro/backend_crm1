@@ -1,21 +1,21 @@
 {
-  "comment": "Só falas inbound do aluno (dump prod 2026-09-18). Sem menu Meta, fila nem consultor.",
+  "comment": "Só falas inbound do aluno (dump prod 2026-09-18), ANONIMIZADO: nomes, telefones, CPF/RGM e e-mail são sintéticos. Sem menu Meta, fila nem consultor.",
   "cases": [
     {
       "id": "404046",
-      "label": "texto fora do menu — Emily",
+      "label": "texto fora do menu — Ana",
       "turns": [
         "?",
         "Atendimento lixo"
       ],
       "contact": {
-        "name": "Emily",
-        "phone": "+5511994538144"
+        "name": "Ana",
+        "phone": "+5511900000001"
       }
     },
     {
       "id": "404026",
-      "label": "pedido de cancelamento — Matheus",
+      "label": "pedido de cancelamento — Bruno",
       "turns": [
         "Oi",
         "Tudo bem",
@@ -23,13 +23,13 @@
         "Cancelamento/trancamento"
       ],
       "contact": {
-        "name": "Matheus Teles Dalosto",
-        "phone": "+5511966109447"
+        "name": "Bruno Exemplo Ficticio",
+        "phone": "+5511900000002"
       }
     },
     {
       "id": "404038",
-      "label": "financeiro como pagar — Stephany",
+      "label": "financeiro como pagar — Carla",
       "turns": [
         "Dúvidas Financeiras",
         "Financeiro",
@@ -38,13 +38,13 @@
         "Parcelamento"
       ],
       "contact": {
-        "name": "Stephany",
-        "phone": "+5511935367709"
+        "name": "Carla",
+        "phone": "+5511900000003"
       }
     },
     {
       "id": "404034",
-      "label": "acesso / login — Leticia",
+      "label": "acesso / login — Diego",
       "turns": [
         "Sobre o Curso",
         "Primeiro Acesso",
@@ -55,21 +55,21 @@
         "Está pedindo e-mail e não CPF"
       ],
       "contact": {
-        "name": "Leticia Domingos de Lima",
-        "phone": "+5511983924204"
+        "name": "Diego Modelo de Amostra",
+        "phone": "+5511900000004"
       }
     },
     {
       "id": "404044",
-      "label": "falar com equipe + dúvida longa — Ester",
+      "label": "falar com equipe + dúvida longa — ELAINE",
       "turns": [
         "Boa tarde !!",
         "Falar com equipe",
         "Solicitei para fazer as dp e as matérias correspondentes para encerrar o curso, mas só aparece 3 matérias na plataforma"
       ],
       "contact": {
-        "name": "ESTER DE SOUZA MENDONÇA",
-        "phone": "+5511962796568"
+        "name": "ELAINE DE AMOSTRA SIMULADO",
+        "phone": "+5511900000005"
       }
     }
   ]

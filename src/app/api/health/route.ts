@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 
+import { isApiDraining } from "@/lib/api-shutdown";
 import {
   canSeeHealthDetail,
   getHealthSnapshot,
@@ -29,6 +30,10 @@ export const runtime = "nodejs";
 const NO_STORE = { "Cache-Control": "no-store, max-age=0" };
 
 export async function GET(request: Request) {
+  // Parada graciosa: 503 sem tocar banco/Redis, para o proxy tirar a réplica.
+  if (isApiDraining()) {
+    return NextResponse.json({ status: "draining" }, { status: 503, headers: NO_STORE });
+  }
   const snapshot = await getHealthSnapshot();
   const status = snapshot.ok ? "ok" : "degraded";
   const httpStatus = snapshot.ok ? 200 : 503;
@@ -51,6 +56,9 @@ export async function GET(request: Request) {
 }
 
 export async function HEAD() {
+  if (isApiDraining()) {
+    return new NextResponse(null, { status: 503, headers: NO_STORE });
+  }
   const snapshot = await getHealthSnapshot();
   return new NextResponse(null, {
     status: snapshot.ok ? 200 : 503,

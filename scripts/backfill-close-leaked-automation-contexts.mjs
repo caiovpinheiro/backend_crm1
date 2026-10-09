@@ -7,9 +7,9 @@
 // question, interactive, list, template) mesmo sem timeout — espera
 // legítima por reply/botão.
 //
-// Uso:
-//   node scripts/backfill-close-leaked-automation-contexts.mjs           → dry-run (só conta)
-//   node scripts/backfill-close-leaked-automation-contexts.mjs --apply   → aplica
+// Uso (DATABASE_URL obrigatório — não há banco padrão):
+//   DATABASE_URL=... node scripts/backfill-close-leaked-automation-contexts.mjs           → dry-run (só conta)
+//   DATABASE_URL=... node scripts/backfill-close-leaked-automation-contexts.mjs --apply   → aplica
 import { Client } from "pg";
 
 const APPLY = process.argv.includes("--apply");
@@ -22,11 +22,16 @@ const REPLY_WAITING = [
   "send_whatsapp_template",
 ];
 
-const c = new Client({
-  connectionString:
-    process.env.DATABASE_URL ??
-    "postgres://postgres:eduit777@!@187.127.27.39:5432/db_crm?sslmode=disable",
-});
+const connectionString = process.env.DATABASE_URL?.trim();
+if (!connectionString) {
+  console.error(
+    "DATABASE_URL ausente. Defina a connection string do banco alvo no ambiente " +
+      "(o script não tem banco padrão).",
+  );
+  process.exit(2);
+}
+
+const c = new Client({ connectionString });
 await c.connect();
 
 const where = `

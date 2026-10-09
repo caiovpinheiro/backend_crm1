@@ -27,6 +27,7 @@ import {
   isReplaySandboxActive,
   recordBlockedEffect,
 } from "@/services/ai/replay-sandbox";
+import { resolveApiSweepers, resolveAutomationExecution } from "@/lib/background-mode";
 import { getLogger } from "@/lib/logger";
 
 const log = getLogger("sse-bus");
@@ -484,45 +485,43 @@ export const sseBus = new SseBus();
 // This runs server-side only (sse-bus is never imported by client components).
 let _bootstrapped = false;
 
-function resolveAppMode(): string {
-  return (process.env.APP_MODE ?? "api").trim().toLowerCase() || "api";
-}
+function bootstrapBackgroundServices() {
+  if (_bootstrapped) return;
+  _bootstrapped = true;
 
-function isAutomationWorkerExternal(): boolean {
-  return (process.env.AUTOMATION_WORKER_MODE ?? "").trim().toLowerCase() === "external";
-}
-
-/** Durante `next build`, o Next define NEXT_PHASE=phase-production-build; não há DB real no container de build. */
-function shouldSkipBackgroundServices(): boolean {
   // Sweepers rodam em UM processo só. Em produção (workers externos):
   //   - APP_MODE=api NÃO sobe nenhum (senão duplica wait_for_reply / sessão).
   //   - worker-automation sobe o timeout (startTimeoutSweeper no próprio worker).
   //   - worker-whatsapp sobe o restante via startWhatsappOwnedSweepers().
   //   - worker-campaigns NÃO sobe sweepers de sessão (só campanha).
   // Import transitivo de sse-bus num worker-* NÃO deve auto-iniciar nada.
-  // Dev local (APP_MODE=api/ausente, AUTOMATION_WORKER_MODE ≠ external)
-  // mantém o bootstrap na API.
-  if (process.env.NEXT_PHASE === "phase-production-build") return true;
-  if (process.env.CRM_SKIP_BACKGROUND_SERVERS === "1") return true;
-  const appMode = resolveAppMode();
-  if (appMode !== "api") return true;
-  return isAutomationWorkerExternal();
-}
-
-function bootstrapBackgroundServices() {
-  if (_bootstrapped) return;
-  _bootstrapped = true;
-
-  if (shouldSkipBackgroundServices()) {
-    if (
-      resolveAppMode() === "api" &&
-      isAutomationWorkerExternal() &&
-      process.env.NEXT_PHASE !== "phase-production-build" &&
-      process.env.CRM_SKIP_BACKGROUND_SERVERS !== "1"
-    ) {
-      log.info("[sse-bus] sweepers desligados (APP_MODE=api, AUTOMATION_WORKER_MODE=external)");
+  // A decisão (padrão de produção = desligado; API_RUN_SWEEPERS=1 religa;
+  // dev local mantém ligado) está em `resolveApiSweepers` (B5).
+  const decision = resolveApiSweepers();
+  if (decision.reason === "not_api" || decision.reason === "build" || decision.reason === "skip_flag") {
+    return;
+  }
+  const automation = resolveAutomationExecution();
+  if (!decision.enabled) {
+    log.info(
+      { reason: decision.reason, automationMode: automation.mode },
+      "[sse-bus] sweepers desligados na API — rodam no worker-whatsapp e no worker-automation (API_RUN_SWEEPERS=1 religa)",
+    );
+    if (automation.mode === "inline") {
+      log.warn(
+        { automationMode: automation.mode },
+        "[sse-bus] AUTOMATION_WORKER_MODE=inline na API: automação executa neste processo, não no worker-automation",
+      );
     }
     return;
+  }
+  if (decision.reason === "explicit_on" && process.env.NODE_ENV === "production") {
+    // Ligado à mão em produção: o worker-whatsapp e o worker-automation
+    // também sobem os mesmos sweepers — só faz sentido sem esses workers.
+    log.warn(
+      { automationMode: automation.mode },
+      "[sse-bus] API_RUN_SWEEPERS ligado em produção: sweepers também na API (duplicam o worker-whatsapp/worker-automation se eles estiverem no ar)",
+    );
   }
 
   // Sweepers no mesmo processo da API competem pelo pool no boot

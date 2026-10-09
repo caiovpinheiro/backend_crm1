@@ -15,7 +15,8 @@ import { processStoredMetaWebhookEvent } from "@/lib/meta-webhook/handler";
 import { flushStatusWrites } from "@/lib/status-write-buffer";
 import { drainInFlightTurns } from "@/services/ai/turn-manager";
 import { startAiTurnSweeper, stopAiTurnSweeper } from "@/services/ai/turn-sweeper";
-import { startListenSweeper } from "@/services/ai-v2/listen";
+import { startListenSweeper, stopListenSweeper } from "@/services/ai-v2/listen";
+import { installGracefulShutdown, type ShutdownStep } from "@/workers/graceful-shutdown";
 
 const log = getLogger("worker.meta-webhook");
 
@@ -112,28 +113,38 @@ export function startMetaWebhookWorker() {
   return worker;
 }
 
-async function shutdown(worker: Worker): Promise<void> {
-  log.info("Encerrando worker-meta-webhook...");
-  // Para de pegar turnos novos; os que estão rodando têm até
-  // AI_TURN_SHUTDOWN_DRAIN_MS para terminar (abaixo do stopGrace do
-  // serviço) e os que não terminam voltam para READY, para o próximo
-  // processo retomar em vez de ficarem presos em PROCESSING.
-  stopAiTurnSweeper();
-  await Promise.all([
-    // Flush dos status bufferizados ANTES de fechar — o handler já respondeu
-    // 200 ("accepted") e a Meta não reenvia, então um status pendente se perderia.
-    flushStatusWrites().catch(() => {}),
-    worker.close().catch(() => {}),
-    drainInFlightTurns(envInt("AI_TURN_SHUTDOWN_DRAIN_MS", 7000)).catch((err) => {
-      log.error({ err: err instanceof Error ? err.message : String(err) }, "drenagem de turnos falhou");
-    }),
-  ]);
-  await prismaBase.$disconnect().catch(() => {});
-  process.exit(0);
+/** Passos do SIGTERM (teto de 25 s em `installGracefulShutdown`). */
+function metaWebhookShutdownSteps(worker: Pick<Worker, "close">): ShutdownStep[] {
+  return [
+    {
+      name: "sweepers",
+      run: () => {
+        stopAiTurnSweeper();
+        stopListenSweeper();
+      },
+    },
+    // Turnos da IA em execução: esperam até AI_TURN_SHUTDOWN_DRAIN_MS e os
+    // que não terminam voltam para READY, para o próximo processo retomar
+    // no 1º tick em vez de ficarem presos em PROCESSING.
+    {
+      name: "turnos",
+      run: () => drainInFlightTurns(envInt("AI_TURN_SHUTDOWN_DRAIN_MS", 7000)),
+    },
+    // Flush dos status bufferizados ANTES de fechar — o handler já respondeu 200
+    // ("accepted") e a Meta não reenvia, então um status pendente se perderia.
+    { name: "status-flush", run: () => flushStatusWrites() },
+    { name: "bullmq", run: () => worker.close() },
+    // Jobs que terminaram durante o close() podem ter bufferizado mais status.
+    { name: "status-flush-final", run: () => flushStatusWrites() },
+    { name: "prisma", run: () => prismaBase.$disconnect() },
+  ];
 }
 
 if (require.main === module) {
   const worker = startMetaWebhookWorker();
-  process.on("SIGINT", () => void shutdown(worker));
-  process.on("SIGTERM", () => void shutdown(worker));
+  installGracefulShutdown({
+    name: "worker-meta-webhook",
+    log,
+    steps: metaWebhookShutdownSteps(worker),
+  });
 }

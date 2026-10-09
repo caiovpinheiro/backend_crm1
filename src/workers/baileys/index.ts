@@ -1,7 +1,8 @@
 import { prisma } from "@/lib/prisma";
 import { drainInFlightTurns } from "@/services/ai/turn-manager";
 import { startAiTurnSweeper, stopAiTurnSweeper } from "@/services/ai/turn-sweeper";
-import { startListenSweeper } from "@/services/ai-v2/listen";
+import { startListenSweeper, stopListenSweeper } from "@/services/ai-v2/listen";
+import { installGracefulShutdown } from "@/workers/graceful-shutdown";
 import { BaileysManager } from "./baileys-manager";
 import { startOutboundConsumer } from "./outbound-consumer";
 import { startControlConsumer } from "./control-consumer";
@@ -27,26 +28,37 @@ async function startup() {
   log.info("[baileys-worker] Pronto — aguardando mensagens e comandos");
 }
 
-async function shutdown() {
-  log.info("[baileys-worker] Encerrando...");
-  stopAiTurnSweeper();
-  const drainMs = Number.parseInt(process.env.AI_TURN_SHUTDOWN_DRAIN_MS ?? "", 10);
-  await drainInFlightTurns(Number.isFinite(drainMs) && drainMs > 0 ? drainMs : 7000).catch((err) => {
-    log.error({ err: err instanceof Error ? err.message : String(err) }, "[baileys-worker] drenagem de turnos falhou");
-  });
-  await manager.shutdownAll();
-  await outboundWorker.close();
-  await controlWorker.close();
-  await prisma.$disconnect();
-  log.info("[baileys-worker] Encerrado");
-}
-
-process.on("SIGINT", () => {
-  void shutdown().then(() => process.exit(0));
-});
-
-process.on("SIGTERM", () => {
-  void shutdown().then(() => process.exit(0));
+// SIGTERM com teto de 25 s (antes: sem teto, e um passo que lançasse
+// impedia os seguintes). Filas fecham antes das sessões: o envio em curso
+// termina com o socket ainda aberto.
+installGracefulShutdown({
+  name: "worker-baileys",
+  log,
+  steps: [
+    {
+      name: "sweepers",
+      run: () => {
+        stopAiTurnSweeper();
+        stopListenSweeper();
+      },
+    },
+    // Turnos da IA em execução: esperam até AI_TURN_SHUTDOWN_DRAIN_MS e os
+    // que não terminam voltam para READY, para o próximo processo retomar
+    // no 1º tick em vez de ficarem presos em PROCESSING.
+    {
+      name: "turnos",
+      run: () => {
+        const ms = Number.parseInt(process.env.AI_TURN_SHUTDOWN_DRAIN_MS ?? "", 10);
+        return drainInFlightTurns(Number.isFinite(ms) && ms > 0 ? ms : 7000);
+      },
+    },
+    {
+      name: "bullmq",
+      run: () => Promise.all([outboundWorker.close(), controlWorker.close()]),
+    },
+    { name: "sessoes", run: () => manager.shutdownAll() },
+    { name: "prisma", run: () => prisma.$disconnect() },
+  ],
 });
 
 void startup().catch((err) => {

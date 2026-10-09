@@ -747,6 +747,12 @@ export function startListenSweeper(): void {
   tickTimer.unref?.();
 }
 
+/** Para o tick (parada graciosa do worker). Idempotente. */
+export function stopListenSweeper(): void {
+  if (tickTimer) clearInterval(tickTimer);
+  tickTimer = null;
+}
+
 async function runSweep(row: Record<string, any>, runId: string): Promise<void> {
   await db.$executeRawUnsafe(
     `INSERT INTO "ai_v2_listen_runs" ("id","sessionId","organizationId","agentId","status") VALUES ($1,$2,$3,$4,'running')`,
