@@ -715,6 +715,34 @@ describe("processV2Turn", () => {
     );
   });
 
+  it("destino de transferência igual ao próprio agente vai para o destino padrão, não para si mesmo", async () => {
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: baseConfig(), active: true });
+    mocks.getState.mockResolvedValue(makeState("active", "agente"));
+    mocks.callLLM.mockResolvedValue({
+      output: {
+        reply: "Vou chamar o time para te ajudar com esse acesso.",
+        confirmed: null,
+        handoff: true,
+        concluded: false,
+        outOfScope: false,
+        sentiment: "neutral",
+        collected: {},
+        reason: "Falha persiste",
+        actions: [{ type: "handoff", destination: { type: "ai_agent", id: "agent-1" } }],
+      } satisfies V2LLMOutput,
+      inputTokens: 10,
+      outputTokens: 5,
+      latencyMs: 100,
+    });
+
+    const { processV2Turn } = await import("../engine");
+    await processV2Turn({ conversationId: "conv-1", channel: "meta", userMessage: "Fica a tela branca, já tentei quatro vezes" });
+
+    expect(mocks.simpleHandoff).toHaveBeenCalledTimes(1);
+    expect(mocks.simpleHandoff).toHaveBeenCalledWith(expect.objectContaining({ destination: { type: "department" } }));
+    expect(mocks.simpleHandoff).not.toHaveBeenCalledWith(expect.objectContaining({ destination: expect.objectContaining({ type: "ai_agent", id: "agent-1" }) }));
+  });
+
   it("governor limit hit sem resultados e sem dados do cliente força handoff", async () => {
     const config = baseConfig({
       themes: [
