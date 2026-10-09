@@ -1025,6 +1025,7 @@ function buildV2SystemPrompt(
   attachmentsSection = "",
   humanRequestWithQuestion = false,
   flows: Array<{ id: string; name: string }> = [],
+  priorSummary: { text: string; at?: Date | null; agent?: string | null; current?: boolean } | null = null,
 ): string {
   const timezone = config.businessHours?.timezone || "America/Sao_Paulo";
   const lines: string[] = [];
@@ -1114,6 +1115,16 @@ function buildV2SystemPrompt(
   if (collectedVariables && Object.keys(collectedVariables).length > 0) {
     lines.push("# Variáveis já coletadas nesta conversa");
     lines.push(JSON.stringify(collectedVariables));
+  }
+
+  // Resumo do atendimento anterior (ou o corrente): contexto para entender
+  // uma resposta curta a uma pergunta antiga, sem repetir nada ao cliente.
+  if (priorSummary?.text) {
+    const when = priorSummary.at ? ` — ${priorSummary.at.toLocaleDateString("pt-BR", { timeZone: timezone })}` : "";
+    const who = priorSummary.agent ? ` · ${priorSummary.agent}` : "";
+    lines.push(priorSummary.current ? "# Resumo desta conversa até aqui" : `# Último atendimento deste cliente (resumo)${when}${who}`);
+    lines.push(priorSummary.text);
+    lines.push("Use este resumo só para entender o contexto. Não o repita ao cliente nem diga que leu um resumo. Se a mensagem atual responde a algo que ficou pendente ali, continue de onde parou.");
   }
 
   const calendar = calendarPromptSection(config.calendar?.events, new Date(), timezone);
@@ -1250,6 +1261,8 @@ export async function callV2LLM(args: {
   previousMessages?: Array<{ role: "user" | "assistant"; content: string }>;
   /** O cliente pediu uma pessoa e fez uma pergunta na mesma mensagem. */
   humanRequestWithQuestion?: boolean;
+  /** Resumo do atendimento anterior do contato (ou corrente desta conversa). */
+  priorSummary?: { text: string; at?: Date | null; agent?: string | null; current?: boolean } | null;
 }): Promise<{
   output: V2LLMOutput;
   inputTokens: number;
@@ -1380,6 +1393,7 @@ export async function callV2LLM(args: {
     attachmentsPromptSection(offeredAttachments),
     args.humanRequestWithQuestion === true,
     flows,
+    args.priorSummary ?? null,
   );
 
   const messages: Array<{ role: "user" | "assistant"; content: string }> = [

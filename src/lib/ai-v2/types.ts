@@ -321,7 +321,20 @@ export type V2PostCloseCaseBehavior =
   /** Transfere para a equipe (destino padrão), com a mensagem do caso. */
   | "handoff";
 
+export type V2SummaryVerbosity = "minimal" | "standard" | "detailed";
+
+/** "Começo e fim › Resumir o atendimento". */
+export interface V2SummaryConfig {
+  enabled: boolean;
+  /** mínimo: uma linha · padrão: cinco itens · detalhado: + dados e mensagens-chave. */
+  verbosity: V2SummaryVerbosity;
+  /** Refaz o resumo corrente a cada resposta (só no estado; sem nota no chat). */
+  everyTurn: boolean;
+}
+
 export interface V2ClosureConfig {
+  /** Resumo para a equipe e para o próximo atendente ao encerrar/transferir. */
+  summary?: V2SummaryConfig;
   /** Janela pós-encerramento em horas (padrão 6). */
   postCloseWindowHours: number;
   /** Comportamento quando a mensagem é cortesia/despedida. */

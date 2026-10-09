@@ -25,6 +25,7 @@ type Db = Pick<PrismaClient, "conversation" | "message">;
 const CHAT_PREVIEW_EXCLUDED = [
   "note",
   "ai_draft",
+  "ai_summary",
   "whatsapp_call",
   "whatsapp_call_recording",
 ] as const;

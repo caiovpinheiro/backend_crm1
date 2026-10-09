@@ -42,6 +42,7 @@ import { NONSENSE_LIMIT_REASON } from "./limits";
 import { applyV2Tabulation } from "./tabulation";
 import { applyReplyEnding, effectiveReplyEnding, isGreetingOnlyReply, replyEndingButtons, replyEndingPhrases, withoutReplyEndings } from "./reply-ending";
 import { hasSearchableQuestion, knowledgeChunkTexts, repeatFallback } from "./ground-reply";
+import { loadPriorV2Summary, summaryEnabled, updateRunningSummary, writeV2Summary } from "./summary";
 import { applyBoldPolicy } from "./reply-format";
 import { MESSAGE_MODEL_MIN_COVERAGE, MESSAGE_MODEL_REPEATED, announcesSending, introBeforeMaterial, lastV2ResetAt, mediaResendPlan, messageModelCoverage, pickPromisedModelId, recentMediaDeliveries, recentlySentMessageModels, resendWindowStart, saysNotReceived } from "./sent-materials";
 import { attachmentsBlockedByResend } from "./material-attachments";
@@ -548,6 +549,19 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       return true;
     }
   };
+  // Resumo para a equipe antes de transferir (quando ligado): quem recebe
+  // a conversa — pessoa ou outro agente — lê o que já aconteceu.
+  const summarizeBeforeHandoff = (destination: { type: string }) =>
+    writeV2Summary({
+      organizationId: orgId,
+      conversationId: input.conversationId,
+      contactId,
+      agentId: resolved!.agentConfigId,
+      config,
+      moment: "transfer",
+      reason: destination.type,
+    });
+
   // Uma pessoa assumiu a conversa durante o turno: o agente para de enviar,
   // não transfere e não manda materiais.
   let humanTookOver = false;
@@ -1088,6 +1102,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     });
     const mediaDestination = resolveHandoffDestination(config, config.handoff.defaultDestination, counters);
     if (mediaDestination.type === "ai_agent") counters.aiTransferCount += 1;
+    await summarizeBeforeHandoff(mediaDestination);
     await simpleHandoff({
       conversationId: input.conversationId,
       contactId,
@@ -1144,6 +1159,15 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // a cada chamada; antes contava duas vezes quando uma regra casava).
   const stop = evaluateV2StopLimits(config, counters, input.userMessage);
   if (stop.blocksReply) traceStep("limites", `Limite de parada atingido: ${stop.reason} → ${stop.action}`);
+
+  // Resumo do atendimento anterior (ou o corrente): contexto para o modelo.
+  let priorSummary: Awaited<ReturnType<typeof loadPriorV2Summary>> = null;
+  try {
+    priorSummary = (await loadPriorV2Summary({ contactId, conversationId: input.conversationId, runningSummary: counters.runningSummary })) ?? null;
+  } catch {
+    priorSummary = null;
+  }
+  if (priorSummary) traceStep("resumo", priorSummary.current ? "Resumo corrente desta conversa entra no contexto" : "Resumo do último atendimento do cliente entra no contexto");
 
   // Fluxo de entrada / onboarding
   let prompt = "";
@@ -1515,7 +1539,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     // `onboardingActive` ficava true sem LLM e todo turno virava handoff.
     if (step) {
       onboardingActive = true;
-      const llmForStep = await callLLMWithTheme(config, context, input, resolved, themeId, collectedVariables, rule, owner, stage);
+      const llmForStep = await callLLMWithTheme(config, context, input, resolved, themeId, collectedVariables, rule, owner, stage, false, priorSummary);
       llmOutput = llmForStep.llmOutput;
       prompt = llmForStep.prompt;
       inputTokens = llmForStep.inputTokens;
@@ -1616,7 +1640,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
         actions: [],
       };
     } else {
-      const llmResult = await callLLMWithTheme(config, context, input, resolved, themeId, collectedVariables, rule, owner, stage, humanRequestWithSubject);
+      const llmResult = await callLLMWithTheme(config, context, input, resolved, themeId, collectedVariables, rule, owner, stage, humanRequestWithSubject, priorSummary);
       llmOutput = llmResult.llmOutput;
       prompt = llmResult.prompt;
       inputTokens = llmResult.inputTokens;
@@ -2279,6 +2303,13 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     }
     await closeState(orgId, input.conversationId, resolved!.agentConfigId, loadedContext.dealId, config, versionId, llmOutput.concluded ? "resolved" : "transferred", loadedContext.contactId, collectedVariables, activeTheme);
   } else {
+    if (summaryEnabled(config)?.everyTurn && sentReply && !anyHandoff) {
+      const running = await updateRunningSummary({ conversationId: input.conversationId, agentId: resolved!.agentConfigId, config });
+      if (running) {
+        counters.runningSummary = running;
+        traceStep("resumo", "Resumo corrente atualizado");
+      }
+    }
     // Atualiza estado
     await upsertV2ConversationState({
       organizationId: orgId,
@@ -2354,6 +2385,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     }
     const destination = resolveHandoffDestination(config, requested ?? config.handoff.defaultDestination, counters);
     if (destination.type === "ai_agent") counters.aiTransferCount += 1;
+    await summarizeBeforeHandoff(destination);
     await simpleHandoff({
       conversationId: input.conversationId,
       contactId,
@@ -2409,6 +2441,7 @@ async function callLLMWithTheme(
   owner: string,
   stage: V2Stage,
   humanRequestWithQuestion = false,
+  priorSummary: Awaited<ReturnType<typeof loadPriorV2Summary>> = null,
 ): Promise<{
   llmOutput?: V2LLMOutput;
   prompt: string;
@@ -2476,6 +2509,7 @@ async function callLLMWithTheme(
 
   try {
     const result = await callV2LLM({
+      priorSummary,
       agentId: resolved!.agentConfigId,
       config,
       context,
@@ -2546,6 +2580,7 @@ async function handoffAndReply(
   const fallbackDestination = resolveHandoffDestination(config, config.handoff.defaultDestination, counters);
   if (fallbackDestination.type === "ai_agent") counters.aiTransferCount += 1;
   traceStep("transferência", `Transferido para ${fallbackDestination.type}${fallbackDestination.id ? ` (${fallbackDestination.id})` : ""}`);
+  await writeV2Summary({ organizationId: orgId, conversationId: input.conversationId, contactId, agentId: resolved.agentConfigId, config, moment: "transfer", reason: fallbackDestination.type });
   await simpleHandoff({
     conversationId: input.conversationId,
     contactId,
@@ -2639,6 +2674,8 @@ export async function closeState(
   collectedVariables?: Record<string, unknown>,
   theme?: V2Theme | null,
 ): Promise<void> {
+  // Resumo para a equipe (quando ligado), com a conversa ainda inteira.
+  await writeV2Summary({ organizationId: orgId, conversationId, contactId, agentId: agentConfigId, config, moment: "close", reason });
   // Tabulação (se ligada) antes de resolver: o encerramento não sobrescreve.
   await applyV2Tabulation({ config, theme, moment: "close", organizationId: orgId, conversationId, contactId, agentId: agentConfigId });
   if (config.closure.fieldUpdates && config.closure.fieldUpdates.length > 0) {
