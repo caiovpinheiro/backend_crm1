@@ -371,6 +371,48 @@ export async function loadPriorV2Summary(args: {
     orderBy: { createdAt: "desc" },
     select: { content: true, createdAt: true, senderName: true },
   });
-  if (!row?.content?.trim()) return null;
-  return { text: row.content.trim(), at: row.createdAt, agent: row.senderName ?? null, current: false };
+  if (row?.content?.trim()) return { text: row.content.trim(), at: row.createdAt, agent: row.senderName ?? null, current: false };
+  return loadPriorConversationExcerpt(args.contactId, args.conversationId);
+}
+
+const PRIOR_EXCERPT_MAX_AGE_HOURS = 24;
+const PRIOR_EXCERPT_MESSAGES = 8;
+
+/**
+ * Sem resumo gravado (o atendimento anterior foi de uma pessoa ou de um
+ * fluxo): as últimas mensagens da conversa anterior recente do contato
+ * servem de contexto. "Já fiz o processo" minutos depois de uma pessoa
+ * explicar o processo não pode virar "qual processo você fez?".
+ */
+export async function loadPriorConversationExcerpt(contactId: string, conversationId: string): Promise<V2PriorSummary | null> {
+  const since = new Date(Date.now() - PRIOR_EXCERPT_MAX_AGE_HOURS * 60 * 60 * 1000);
+  const prev = await prisma.conversation.findFirst({
+    where: { contactId, id: { not: conversationId }, status: "RESOLVED", closedAt: { gte: since } },
+    orderBy: { closedAt: "desc" },
+    select: { id: true, closedAt: true },
+  });
+  if (!prev) return null;
+  const rows = await prisma.message.findMany({
+    where: {
+      conversationId: prev.id,
+      isPrivate: false,
+      authorType: { in: ["human", "bot"] },
+      messageType: { notIn: ["note", SUMMARY_MESSAGE_TYPE] },
+      NOT: { messageType: { startsWith: "event:" } },
+    },
+    orderBy: { createdAt: "desc" },
+    take: PRIOR_EXCERPT_MESSAGES,
+    select: { direction: true, content: true, authorType: true, senderName: true },
+  });
+  const lines = rows
+    .reverse()
+    .map((m) => {
+      const who = m.direction === "in" ? "Cliente" : m.authorType === "human" ? `Equipe${m.senderName ? ` (${m.senderName})` : ""}` : "Agente";
+      const text = (m.content ?? "").replace(/\s+/g, " ").trim();
+      return text ? `${who}: ${text.slice(0, 300)}` : "";
+    })
+    .filter(Boolean);
+  if (lines.length === 0) return null;
+  const text = maskSensitive(`Últimas mensagens da conversa anterior deste cliente (já encerrada):\n${lines.join("\n")}`).text;
+  return { text, at: prev.closedAt ?? null, agent: null, current: false };
 }
