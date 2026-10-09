@@ -715,6 +715,65 @@ describe("processV2Turn", () => {
     );
   });
 
+  it("transferência transparente: o agente que recebe é instruído a não se apresentar; o padrão não", async () => {
+    const transparent = baseConfig({ entry: { ...baseConfig().entry, onAiTransfer: "continue" } } as any);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: transparent, active: true });
+    mocks.getState.mockResolvedValue({ ...makeState("active", "pessoa"), agentId: "agent-0" });
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "A segunda via sai pelo portal, em Pagamentos." }));
+
+    const { processV2Turn } = await import("../engine");
+    await processV2Turn({ conversationId: "conv-1", channel: "meta", userMessage: "Preciso da segunda via", messageIds: ["m-cur"] });
+
+    expect(mocks.callLLM.mock.calls[0][0].transparentTransfer).toBe(true);
+
+    vi.clearAllMocks();
+    mocks.sendText.mockResolvedValue({ sent: true });
+    mocks.upsertState.mockResolvedValue(undefined);
+    mocks.logTurn.mockResolvedValue(undefined);
+    mocks.loadPriorSummary.mockResolvedValue(null);
+    mocks.appliedRules.mockResolvedValue(new Set());
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: baseConfig(), active: true });
+    mocks.getState.mockResolvedValue({ ...makeState("active", "pessoa"), agentId: "agent-0" });
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "A segunda via sai pelo portal, em Pagamentos." }));
+
+    await processV2Turn({ conversationId: "conv-1", channel: "meta", userMessage: "Preciso da segunda via", messageIds: ["m-cur"] });
+
+    expect(mocks.callLLM.mock.calls[0][0].transparentTransfer).toBe(false);
+  });
+
+  it("transferir para agente de IA transparente: sem aviso de transferência ao cliente", async () => {
+    mocks.prismaAIAgentFindUnique.mockImplementation(async (args: { where?: { id?: string } }) =>
+      args?.where?.id === "agent-2"
+        ? { id: "agent-2", simpleConfig: { entry: { onAiTransfer: "continue" } }, active: true }
+        : { id: "agent-1", simpleConfig: baseConfig(), active: true },
+    );
+    mocks.getState.mockResolvedValue(makeState("active", "agente"));
+    mocks.callLLM.mockResolvedValue({
+      output: {
+        reply: "",
+        confirmed: null,
+        handoff: true,
+        concluded: false,
+        outOfScope: false,
+        sentiment: "neutral",
+        collected: {},
+        reason: "Assunto de outro agente",
+        actions: [{ type: "handoff", destination: { type: "ai_agent", id: "agent-2" } }],
+      } satisfies V2LLMOutput,
+      inputTokens: 10,
+      outputTokens: 5,
+      latencyMs: 100,
+    });
+
+    const { processV2Turn } = await import("../engine");
+    const result = await processV2Turn({ conversationId: "conv-1", channel: "meta", userMessage: "Quero falar sobre o plano" });
+
+    expect(result.handoff).toBe(true);
+    expect(mocks.simpleHandoff).toHaveBeenCalledWith(expect.objectContaining({ destination: expect.objectContaining({ type: "ai_agent", id: "agent-2" }) }));
+    const sent = mocks.sendText.mock.calls.map((c) => (c[0] as { text: string }).text).join(" ");
+    expect(sent).not.toContain("Vou transferir");
+  });
+
   it("destino de transferência igual ao próprio agente vai para o destino padrão, não para si mesmo", async () => {
     mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: baseConfig(), active: true });
     mocks.getState.mockResolvedValue(makeState("active", "agente"));

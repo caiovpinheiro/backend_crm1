@@ -149,6 +149,19 @@ export type V2TurnInput = {
 /** Motivos de envio barrado que significam "uma pessoa assumiu a conversa". */
 const HUMAN_TOOK_OVER = new Set(["unassigned", "assignee_changed", "assignee_not_ai", "human_replied_during_run", "human_last_outbound"]);
 
+/** O agente de IA de destino recebe conversas em modo transparente (sem se apresentar). */
+async function aiAgentReceivesTransparently(agentConfigId: string): Promise<boolean> {
+  try {
+    const row = await (prisma as unknown as {
+      aIAgentConfig: { findUnique: (args: unknown) => Promise<{ simpleConfig?: unknown } | null> };
+    }).aIAgentConfig.findUnique({ where: { id: agentConfigId }, select: { simpleConfig: true } });
+    const entry = (row?.simpleConfig as { entry?: { onAiTransfer?: unknown } } | null | undefined)?.entry;
+    return entry?.onAiTransfer === "continue";
+  } catch {
+    return false;
+  }
+}
+
 /** A conversa ainda é do agente (desconhecido = segue). */
 async function assignedToAgent(conversationId: string, agentUserId: string): Promise<boolean> {
   try {
@@ -772,6 +785,10 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       traceStep("limites", "Contador de repetição zerado: a mensagem é a mesma que o agente anterior recebeu, não uma repetição do cliente");
     }
   }
+  // Transferência transparente: este agente segue como se fosse o mesmo
+  // assistente (o modelo é instruído a não se apresentar).
+  const transparentTransfer = handedByAnotherAgent && config.entry.onAiTransfer === "continue";
+  if (transparentTransfer) traceStep("agente", "Transferência transparente: segue o atendimento sem se apresentar");
   const waitingInQueue = owner === "pessoa" && !handedByAnotherAgent && (await isWaitingInQueue(input.conversationId));
   const queueMode = config.handoff.whileQueued ?? "notify";
   if (waitingInQueue) traceStep("fila", `Conversa transferida voltou ao agente com o cliente na fila → "${queueMode === "notify" ? "só avisar" : "responder"}"`);
@@ -1748,7 +1765,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     // `onboardingActive` ficava true sem LLM e todo turno virava handoff.
     if (step) {
       onboardingActive = true;
-      const llmForStep = await callLLMWithTheme(config, context, input, resolved, themeId, collectedVariables, rule, owner, stage, false, priorSummary);
+      const llmForStep = await callLLMWithTheme(config, context, input, resolved, themeId, collectedVariables, rule, owner, stage, false, priorSummary, transparentTransfer);
       llmOutput = llmForStep.llmOutput;
       prompt = llmForStep.prompt;
       inputTokens = llmForStep.inputTokens;
@@ -1849,7 +1866,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
         actions: [],
       };
     } else {
-      const llmResult = await callLLMWithTheme(config, context, input, resolved, themeId, collectedVariables, rule, owner, stage, humanRequestWithSubject, priorSummary);
+      const llmResult = await callLLMWithTheme(config, context, input, resolved, themeId, collectedVariables, rule, owner, stage, humanRequestWithSubject, priorSummary, transparentTransfer);
       llmOutput = llmResult.llmOutput;
       prompt = llmResult.prompt;
       inputTokens = llmResult.inputTokens;
@@ -2657,6 +2674,13 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     opts: { skipMessage?: boolean; message?: string } = {},
   ): Promise<string | undefined> {
     let sent: string | undefined;
+    const planned = resolveHandoffDestination(config, requested ?? config.handoff.defaultDestination, counters, resolved!.agentConfigId);
+    // Agente de IA de destino em modo transparente: o cliente não percebe a
+    // troca — sem "vou te passar para…"; o outro agente responde direto.
+    if (!opts.skipMessage && planned.type === "ai_agent" && planned.id && (await aiAgentReceivesTransparently(planned.id))) {
+      traceStep("transferência", "Agente de destino em modo transparente → sem aviso de transferência");
+      opts = { ...opts, skipMessage: true };
+    }
     if (!opts.skipMessage) {
       // Mensagem do destino (assunto/regra) quando configurada; a tela já
       // tinha o campo, mas valia sempre a mensagem padrão.
@@ -2678,7 +2702,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       humanTookOver = true;
       return sent;
     }
-    const destination = resolveHandoffDestination(config, requested ?? config.handoff.defaultDestination, counters, resolved!.agentConfigId);
+    const destination = planned;
     if (destination.type === "ai_agent") counters.aiTransferCount += 1;
     const tabulation = await applyV2Tabulation({ config, theme: getV2ThemeById(config, themeId), moment: "transfer", organizationId: orgId, conversationId: input.conversationId, contactId, agentId: resolved!.agentConfigId });
     await summarizeBeforeHandoff(destination, tabulation);
@@ -2738,6 +2762,7 @@ async function callLLMWithTheme(
   stage: V2Stage,
   humanRequestWithQuestion = false,
   priorSummary: Awaited<ReturnType<typeof loadPriorV2Summary>> = null,
+  transparentTransfer = false,
 ): Promise<{
   llmOutput?: V2LLMOutput;
   prompt: string;
@@ -2816,6 +2841,7 @@ async function callLLMWithTheme(
       collectedVariables,
       previousMessages,
       humanRequestWithQuestion,
+      transparentTransfer,
     });
     return {
       llmOutput: result.output,

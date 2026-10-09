@@ -748,6 +748,7 @@ export function buildAgentRulesMarkdown(args: {
   const onDeal = e?.onDealNotFound ?? "ask_identification";
   out.push(
     `- Boas-vindas: ${e?.openingEnabled ? (e.openingMessage?.trim() ? q(e.openingMessage) : "_(ligadas sem mensagem → nada é enviado)_") : "desligadas"}`,
+    `- Ao receber transferência de outro agente de IA: ${e?.onAiTransfer === "continue" ? "segue sem se apresentar (transparente — quem transfere não avisa)" : "apresenta-se normalmente"}`,
     `- Confirmar cadastro: ${yesNo(e?.confirmContact)}${e?.confirmContact ? ` (${e.confirmationMode === "separate_turn" ? "na mensagem seguinte" : "junto das boas-vindas"}) · campos: ${list((e.confirmationFields ?? []).map((f) => fieldName(f, names)))} · mensagem: ${q(e.confirmationMessage)}` : ""}`,
     `- Sem cadastro: ${({ ask_identification: "pede e-mail ou documento e passa para a equipe", create_deal: "cria negócio e segue", handoff: "passa para a equipe" } as Record<string, string>)[onDeal]}${onDeal === "ask_identification" ? ` · mensagem: ${q(e?.identificationMessage)} · tentativas: ${e?.maxAttempts ?? 2}` : ""}`,
     ...(Object.keys(e?.automationVariablesMapping ?? {}).length ? [`- Variáveis vindas da automação: ${Object.entries(e?.automationVariablesMapping ?? {}).map(([from, to]) => `${from} → ${to}`).join(", ")}`] : []),

@@ -1026,6 +1026,7 @@ function buildV2SystemPrompt(
   humanRequestWithQuestion = false,
   flows: Array<{ id: string; name: string }> = [],
   priorSummary: { text: string; at?: Date | null; agent?: string | null; current?: boolean } | null = null,
+  transparentTransfer = false,
 ): string {
   const timezone = config.businessHours?.timezone || "America/Sao_Paulo";
   const lines: string[] = [];
@@ -1125,6 +1126,12 @@ function buildV2SystemPrompt(
     lines.push(priorSummary.current ? "# Resumo desta conversa até aqui" : `# Último atendimento deste cliente (resumo)${when}${who}`);
     lines.push(priorSummary.text);
     lines.push("Use este resumo só para entender o contexto. Não o repita ao cliente nem diga que leu um resumo. Se a mensagem atual responde a algo que ficou pendente ali, continue de onde parou.");
+  }
+
+  // Transferência transparente entre agentes: o cliente não percebe a troca.
+  if (transparentTransfer) {
+    lines.push("# Continuidade");
+    lines.push("Esta conversa veio de outro assistente da mesma equipe e o cliente não sabe disso. Continue o atendimento como se fosse o mesmo assistente: não se apresente, não cumprimente de novo, não diga que recebeu a conversa nem que ela foi transferida. Responda direto ao que o cliente pediu.");
   }
 
   const calendar = calendarPromptSection(config.calendar?.events, new Date(), timezone);
@@ -1263,6 +1270,8 @@ export async function callV2LLM(args: {
   humanRequestWithQuestion?: boolean;
   /** Resumo do atendimento anterior do contato (ou corrente desta conversa). */
   priorSummary?: { text: string; at?: Date | null; agent?: string | null; current?: boolean } | null;
+  /** Conversa recebida de outro agente de IA em modo transparente: sem se apresentar. */
+  transparentTransfer?: boolean;
 }): Promise<{
   output: V2LLMOutput;
   inputTokens: number;
@@ -1394,6 +1403,7 @@ export async function callV2LLM(args: {
     args.humanRequestWithQuestion === true,
     flows,
     args.priorSummary ?? null,
+    args.transparentTransfer === true,
   );
 
   const messages: Array<{ role: "user" | "assistant"; content: string }> = [
