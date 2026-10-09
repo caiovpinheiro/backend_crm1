@@ -164,6 +164,28 @@ describe("maybeDistributeNewInboundTicket — guardas do modo leads", () => {
     expect(executeDistribution).toHaveBeenCalledTimes(1);
   });
 
+  it("ticket que voltou de atendimento de pessoa (Regra 0) não passa pelo 1º atendimento da IA", async () => {
+    conversations.set("c0", {
+      id: "c0",
+      contactId: "ct0",
+      assignedToId: null,
+      assignedVia: null,
+      routeMode: null,
+      departmentId: null,
+      assigneeType: "HUMAN",
+    });
+
+    await maybeDistributeNewInboundTicket({
+      conversationId: "c0",
+      contactId: "ct0",
+      assignedToId: null,
+      skipAiFirstAttendance: true,
+    });
+
+    expect(tryAssignFirstAttendanceAi).not.toHaveBeenCalled();
+    expect(executeDistribution).toHaveBeenCalledTimes(1);
+  });
+
   it("conversa em departamento leads: smart NÃO distribui", async () => {
     departmentModes.set("dep1", "leads");
     conversations.set("c1", {
