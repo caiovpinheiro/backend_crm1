@@ -1945,6 +1945,77 @@ describe("processV2Turn — correções do motor", () => {
       expect(sentTexts().join(" ")).not.toContain("Posso te ajudar");
     });
 
+    it("depois de 'me conta o que você precisa', a frase transfere com o assunto", async () => {
+      const config = baseConfig({ handoff: { defaultDestination: { type: "department" }, message: "Vou transferir.", humanRequestKeywords: ["atendente"] } } as unknown as Partial<V2AgentConfig>);
+      mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+      mocks.getState.mockResolvedValue(makeState("active", "agente", { humanRequestAsked: true, humanRequestPending: true }));
+
+      const result = await run("Problemas com a solicitação do documento");
+
+      expect(result.handoff).toBe(true);
+      expect(mocks.callLLM).not.toHaveBeenCalled();
+      expect(sentTexts()).toContain("Vou transferir.");
+    });
+
+    it("'já tentei e não deu certo' depois de uma orientação: transfere, sem reenviar material", async () => {
+      mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: baseConfig(), active: true });
+      mocks.getState.mockResolvedValue(makeState("active", "agente", { guidanceGiven: true }));
+      mocks.callLLM.mockResolvedValue(llmOut({ reply: "Siga de novo os passos: 1. Abra o painel. 2. Envie a solicitação.", actions: [{ type: "send_message_model", modelId: "m-1" }] }));
+
+      const result = await run("Já tentei 3 vezes e deu erro de novo");
+
+      expect(result.handoff).toBe(true);
+      expect(mocks.callLLM).not.toHaveBeenCalled();
+      expect(sentTexts().join(" ")).toContain("já tentou e não deu certo");
+      expect(sentTexts().join(" ")).not.toContain("Siga de novo");
+    });
+
+    it("pedido de ajuda depois de uma orientação transfere na hora, sem perguntar o assunto", async () => {
+      const config = baseConfig({ handoff: { defaultDestination: { type: "department" }, message: "Vou transferir.", humanRequestKeywords: ["preciso de ajuda"] } } as unknown as Partial<V2AgentConfig>);
+      mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+      mocks.getState.mockResolvedValue(makeState("active", "agente", { guidanceGiven: true, pendingOptions: ["Funcionou!", "Preciso de ajuda"] }));
+
+      const result = await run("Preciso de ajuda");
+
+      expect(result.handoff).toBe(true);
+      expect(mocks.callLLM).not.toHaveBeenCalled();
+      expect(sentTexts().join(" ")).toContain("já tentou e não deu certo");
+      expect(sentTexts().join(" ")).not.toContain("me conta em uma frase");
+    });
+
+    it("pergunta com botões não sai se o cliente escreveu enquanto o agente pensava", async () => {
+      mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: baseConfig(), active: true });
+      mocks.getState.mockResolvedValue(makeState("active", "agente"));
+      mocks.callLLM.mockResolvedValue(llmOut({ reply: "O contrato é novo ou renovação?" }));
+      mocks.messageFindMany.mockImplementation(async (args: { where?: { id?: { in?: string[] } } }) =>
+        args.where?.id?.in ? [{ createdAt: new Date("2026-01-01T10:00:00Z") }] : [],
+      );
+      mocks.messageFindFirst.mockResolvedValue({ id: "m-newer" });
+
+      await run("Não consigo concluir a solicitação", { messageIds: ["m-cur"] });
+
+      expect(sentTexts()).toEqual([]);
+    });
+
+    it("clique repetido na opção que acabou de ser respondida não vira turno", async () => {
+      mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: baseConfig(), active: true });
+      mocks.getState.mockResolvedValue(makeState("active", "agente"));
+      mocks.messageFindMany.mockImplementation(async (args: { take?: number }) =>
+        args.take === 3
+          ? [
+              { direction: "out", content: "Sua dúvida é sobre o documento ou o prazo?", messageType: "interactive" },
+              { direction: "in", content: "Contrato novo", messageType: "interactive" },
+            ]
+          : [],
+      );
+
+      const result = await run("Contrato novo", { messageType: "interactive", messageIds: ["m-cur"] });
+
+      expect(result).toEqual({ handoff: false, closed: false });
+      expect(mocks.callLLM).not.toHaveBeenCalled();
+      expect(sentTexts()).toEqual([]);
+    });
+
     it("clique no botão de fecho encerra", async () => {
       mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: baseConfig(), active: true });
       mocks.getState.mockResolvedValue(makeState("active", "agente", { pendingOptions: ["Não, obrigado(a)!", "Preciso de ajuda"] }));
