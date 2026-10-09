@@ -84,6 +84,6 @@
   "src/services/whatsapp-conversation.ts|TS2561|Object literal may only specify known properties, but 'channelId' does not exist in type 'ConversationUpdateInput'. Did you mean to write 'channel'?": 1,
   "src/services/whatsapp-flow-definitions.ts|TS2322|Type 'Omit<MetaFlowListItem, \"alreadyImported\" | \"crmFlowDefinitionId\">[]' is not assignable to type 'MetaFlowListItem[]'.": 1,
   "src/workers/baileys/baileys-manager.ts|TS18048|'session' is possibly 'undefined'.": 1,
-  "src/workers/baileys/message-handler.ts|TS2367|This comparison appears to be unintentional because the types '\"call\" | \"chat\" | \"viewOnceMessage\" | \"viewOnceMessageV2\" | \"viewOnceMessageV2Extension\" | \"senderKeyDistributionMessage\" | \"contactMessage\" | \"locationMessage\" | \"documentMessage\" | ... 80 more ... | \"pollResultSnapshotMessageV3\"' and '\"ptt\"' have no overlap.": 1,
+  "src/workers/baileys/message-handler.ts|TS2367|This comparison appears to be unintentional because the types '\"call\" | \"chat\" | \"contactMessage\" | \"viewOnceMessage\" | \"viewOnceMessageV2\" | \"viewOnceMessageV2Extension\" | \"senderKeyDistributionMessage\" | \"locationMessage\" | \"documentMessage\" | ... 80 more ... | \"pollResultSnapshotMessageV3\"' and '\"ptt\"' have no overlap.": 1,
   "src/workers/baileys/message-handler.ts|TS2551|Property 'channel' does not exist on type '{ status: ConversationStatus; channelId: string | null; assignedToId: string | null; id: string; waJid: string | null; }'. Did you mean 'channelId'?": 1
 }
