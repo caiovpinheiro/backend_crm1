@@ -33,7 +33,7 @@ import { getTenantBaseDomain } from "@/lib/tenant-url";
  */
 
 const DEFAULT_ALLOW_HEADERS =
-  "Accept, Authorization, Content-Type, Range, X-Requested-With, X-Tenant-Slug, X-Cockpit-Access";
+  "Accept, Authorization, Content-Type, Range, X-Requested-With, X-Tenant-Slug";
 
 /** Mesmo formato de slug do signup (`services/onboarding.ts`). */
 const TENANT_SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
