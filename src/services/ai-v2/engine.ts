@@ -113,7 +113,19 @@ function resolveHandoffDestination(
   config: V2AgentConfig,
   destination: V2Destination,
   counters: V2Counters,
+  selfAgentId?: string,
 ): V2Destination {
+  // Destino é o próprio agente (assunto/regra apontando para ele mesmo):
+  // transferir para si copiava o turno, respondia de novo e transferia de
+  // novo até o teto — duas respostas iguais, dois resumos, e só então a
+  // equipe. Vale o destino padrão; se ele também for o próprio agente, o
+  // departamento.
+  if (destination.type === "ai_agent" && selfAgentId && destination.id === selfAgentId) {
+    const fallback = config.handoff.defaultDestination;
+    const next: V2Destination = fallback.type === "ai_agent" && fallback.id === selfAgentId ? { type: "department" } : fallback;
+    traceStep("transferência", `Destino é o próprio agente → ${next.type}${next.id ? ` (${next.id})` : ""}`);
+    return next;
+  }
   if (destination.type === "ai_agent" && counters.aiTransferCount >= config.limits.maxAiTransfers) {
     return config.handoff.defaultDestination;
   }
@@ -1233,7 +1245,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       autonomyMode: mapV2AutonomyToPrisma(config.autonomyMode),
       humanBehavior,
     });
-    const mediaDestination = resolveHandoffDestination(config, config.handoff.defaultDestination, counters);
+    const mediaDestination = resolveHandoffDestination(config, config.handoff.defaultDestination, counters, resolved!.agentConfigId);
     if (mediaDestination.type === "ai_agent") counters.aiTransferCount += 1;
     await summarizeBeforeHandoff(mediaDestination);
     await simpleHandoff({
@@ -2665,7 +2677,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       humanTookOver = true;
       return sent;
     }
-    const destination = resolveHandoffDestination(config, requested ?? config.handoff.defaultDestination, counters);
+    const destination = resolveHandoffDestination(config, requested ?? config.handoff.defaultDestination, counters, resolved!.agentConfigId);
     if (destination.type === "ai_agent") counters.aiTransferCount += 1;
     await summarizeBeforeHandoff(destination);
     await simpleHandoff({
@@ -2862,7 +2874,7 @@ async function handoffAndReply(
     });
     return;
   }
-  const fallbackDestination = resolveHandoffDestination(config, config.handoff.defaultDestination, counters);
+  const fallbackDestination = resolveHandoffDestination(config, config.handoff.defaultDestination, counters, resolved.agentConfigId);
   if (fallbackDestination.type === "ai_agent") counters.aiTransferCount += 1;
   traceStep("transferência", `Transferido para ${fallbackDestination.type}${fallbackDestination.id ? ` (${fallbackDestination.id})` : ""}`);
   await writeV2Summary({ organizationId: orgId, conversationId: input.conversationId, contactId, agentId: resolved.agentConfigId, config, moment: "transfer", reason: fallbackDestination.type });
