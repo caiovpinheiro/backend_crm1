@@ -35,7 +35,7 @@ import { executeV2Actions, sendV2TextMessage, applyV2ClosureFieldUpdates, v2Huma
 import { findInheritablePostCloseState, getV2ConversationState, upsertV2ConversationState } from "./state";
 import { logV2Turn } from "./log";
 import { noteV2Fact, peekV2Fact, runWithV2Trace, traceStep, v2TraceWasLogged } from "./trace";
-import { evaluateV2StopLimits, parseV2Counters, type V2Counters } from "./limits";
+import { evaluateV2StopLimits, parseV2Counters, shouldStopStalled, type V2Counters } from "./limits";
 import { answerToPostCloseQuestion, classifyPostCloseMessage, getPostCloseBehavior, isGreetingOnlyMessage, keepOpenOnNewRequest, postCloseHandoffMessage, postCloseQuestion, postCloseShortReply, isExplicitResolution } from "./closure";
 import { isConfusionMessage, rephraseAfterConfusion } from "./confusion";
 import { applyNoSourceGuard, conditionalHandoff, handoffExplanation, type V2PrefetchFact } from "./no-source";
@@ -2344,6 +2344,41 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   const isTriageQuestion =
     askOptions.length > 0 ||
     (asksClient(coreReply) && coreReply.split(/\s+/).length <= 40 && classifyReply(coreReply) !== "procedure");
+
+  // Trocas sem avanço: o agente respondeu só com outra pergunta (sem
+  // orientação, material, ação nem dado coletado) a uma mensagem que não
+  // era pergunta — o cliente respondeu e ele insistiu. Passado o limite
+  // configurado, a próxima pergunta não sai: a conversa segue pela saída
+  // do assunto (destino escolhido) ou encerra. Pergunta de esclarecimento
+  // a uma pergunta do cliente não conta; orientação ou dado novo zera.
+  if (themeId && themeId !== (stateRow?.themeId ?? undefined)) counters.stalledExchanges = 0;
+  const probingOnly =
+    !anyHandoff && !anyClose && !stopLimits.blocksReply && replyText.trim().length > 0 &&
+    (askOptions.length > 0 || coreReply.trimEnd().endsWith("?")) &&
+    classifyReply(coreReply) !== "procedure" &&
+    !materialFollows && outboundActions.length === 0 &&
+    Object.keys(llmOutput.collected ?? {}).length === 0;
+  if (probingOnly && !asksClient(input.userMessage)) {
+    if (shouldStopStalled(config, counters)) {
+      const stalledAction = config.limits.stalledExchangesAction;
+      traceStep("limites", `Limite de trocas sem avanço: ${counters.stalledExchanges} pergunta(s) seguida(s) sem resolver → ${stalledAction === "close" ? "encerra" : "sai pela saída do assunto, sem insistir"}`);
+      counters.stalledExchanges = 0;
+      replyText = "";
+      replyOptions = [];
+      if (stalledAction === "close") {
+        anyClose = true;
+        llmOutput.concluded = true;
+      } else {
+        anyHandoff = true;
+        llmOutput.handoff = true;
+        noteV2Fact("handoffCause", "limit", { keepFirst: true });
+      }
+    } else {
+      counters.stalledExchanges += 1;
+    }
+  } else if (!probingOnly) {
+    counters.stalledExchanges = 0;
+  }
   const asksSomething = !anyHandoff && !anyClose && !stopLimits.blocksReply && isTriageQuestion;
   if ((greetingOnlyReply || asksSomething) && (await newerInboundArrived(input.conversationId, input.messageIds))) {
     traceStep("resposta", greetingOnlyReply

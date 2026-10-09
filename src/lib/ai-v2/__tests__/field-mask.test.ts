@@ -59,6 +59,18 @@ describe("informação montada", () => {
     expect(derivedFieldValue(f, { name: "Ângela", a: "1234", b: "4567" }, null)).toBe("Âng@123456");
   });
 
+  it("sem acentos: as letras do nome perdem acento e cedilha; o padrão mantém", () => {
+    const parts: V2DerivedField["parts"] = [
+      { kind: "field", key: "name", take: "first", count: 3, charset: "letters", letterCase: "capitalize", accents: "strip" },
+      { kind: "text", text: "@" },
+      { kind: "field", key: "a", take: "all", charset: "digits" },
+    ];
+    expect(derivedFieldValue({ id: "d4", label: "Senha", parts }, { name: "Ângelo Araújo", a: "4213362" }, null)).toBe("Ang@4213362");
+    expect(derivedFieldValue({ id: "d4", label: "Senha", parts }, { name: "Çésar", a: "1" }, null)).toBe("Ces@1");
+    const keep = parts.map((p) => ({ ...p, accents: undefined }));
+    expect(derivedFieldValue({ id: "d5", label: "Senha", parts: keep }, { name: "Ângelo", a: "1" }, null)).toBe("Âng@1");
+  });
+
   it("parte sem campo escolhido: informação vazia", () => {
     expect(derivedFieldValue({ id: "d3", label: "X", parts: [{ kind: "field", take: "all" }] }, { name: "A" }, null)).toBe("");
   });

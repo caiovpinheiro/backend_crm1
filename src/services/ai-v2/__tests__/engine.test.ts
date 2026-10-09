@@ -2150,6 +2150,72 @@ describe("processV2Turn — correções do motor", () => {
       expect(mocks.resolveInline).toHaveBeenCalledWith(expect.objectContaining({ skipAutomations: true }));
     });
 
+    const PROBING_THEME = {
+      id: "t-dec",
+      name: "Decisão",
+      instructions: "Entenda o motivo antes de encaminhar.",
+      when: ["quero cancelar"],
+      examples: [],
+      allowedTools: [],
+      allowedKnowledgeDocIds: [],
+      allowedMessageModelIds: [],
+      knowledgeDocIds: [],
+      messageModelIds: [],
+      productPolicy: { enabled: false, maxItems: 3, showPrice: false, showConditions: false, showImage: false, showLink: false, citableFields: [] },
+      handoffDestination: { type: "department", id: "dep-dec", message: "Vou te passar para o setor responsável, que segue com você." },
+    };
+
+    it("perguntas seguidas sem resolver: no limite, a próxima pergunta vira a saída do assunto", async () => {
+      const config = baseConfig({ themes: [PROBING_THEME as any], limits: { ...baseConfig().limits, maxStalledExchanges: 2, stalledExchangesAction: "handoff" } } as any);
+      mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+      mocks.getState.mockResolvedValue({ ...makeState("active", "agente", { stalledExchanges: 2 }), themeId: "t-dec" });
+      mocks.callLLM.mockResolvedValue(llmOut({ reply: "A rotina corrida pesa mesmo. Essa flexibilidade poderia ajudar você a continuar?", theme: "t-dec" }));
+
+      const result = await run("Falta de tempo");
+
+      expect(result.handoff).toBe(true);
+      expect(mocks.simpleHandoff).toHaveBeenCalledWith(expect.objectContaining({ destination: expect.objectContaining({ type: "department", id: "dep-dec" }) }));
+      expect(sentTexts().join(" ")).toContain("Vou te passar para o setor responsável");
+      expect(sentTexts().join(" ")).not.toContain("poderia ajudar você a continuar?");
+    });
+
+    it("pergunta seguida sem resolver conta; orientação ou dado coletado zera", async () => {
+      const config = baseConfig({ themes: [PROBING_THEME as any], limits: { ...baseConfig().limits, maxStalledExchanges: 2 } } as any);
+      mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+      const saved = () => mocks.upsertState.mock.calls.map((c) => c[0] as { counters?: { stalledExchanges?: number } }).filter((c) => c.counters).at(-1)?.counters?.stalledExchanges;
+
+      mocks.getState.mockResolvedValue({ ...makeState("active", "agente", { stalledExchanges: 1 }), themeId: "t-dec" });
+      mocks.callLLM.mockResolvedValue(llmOut({ reply: "Entendo. O que tem dificultado: tempo, acesso ou outra situação?", theme: "t-dec" }));
+      await run("Não estou conseguindo acompanhar");
+      expect(sentTexts().join(" ")).toContain("O que tem dificultado");
+      expect(saved()).toBe(2);
+
+      vi.clearAllMocks();
+      mocks.sendText.mockResolvedValue({ sent: true });
+      mocks.upsertState.mockResolvedValue(undefined);
+      mocks.logTurn.mockResolvedValue(undefined);
+      mocks.loadPriorSummary.mockResolvedValue(null);
+      mocks.appliedRules.mockResolvedValue(new Set());
+      mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+      mocks.getState.mockResolvedValue({ ...makeState("active", "agente", { stalledExchanges: 2 }), themeId: "t-dec" });
+      mocks.callLLM.mockResolvedValue(llmOut({ reply: "Para pausar, siga estes passos:\n1. Entre no portal\n2. Abra Solicitações\n3. Escolha Pausa e confirme\n\nQuer que eu te mande o link?", theme: "t-dec" }));
+      await run("Quero pausar mesmo assim");
+      expect(sentTexts().join(" ")).toContain("Para pausar, siga estes passos");
+      expect(saved()).toBe(0);
+    });
+
+    it("pergunta de esclarecimento a uma pergunta do cliente não conta como insistência", async () => {
+      const config = baseConfig({ themes: [PROBING_THEME as any], limits: { ...baseConfig().limits, maxStalledExchanges: 2 } } as any);
+      mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+      mocks.getState.mockResolvedValue({ ...makeState("active", "agente", { stalledExchanges: 2 }), themeId: "t-dec" });
+      mocks.callLLM.mockResolvedValue(llmOut({ reply: "Depende do plano. Qual é o seu?", theme: "t-dec" }));
+
+      const result = await run("Como faço para pausar?");
+
+      expect(result.handoff).toBe(false);
+      expect(sentTexts().join(" ")).toContain("Qual é o seu?");
+    });
+
     it("clique no botão de fecho encerra", async () => {
       mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: baseConfig(), active: true });
       mocks.getState.mockResolvedValue(makeState("active", "agente", { pendingOptions: ["Não, obrigado(a)!", "Preciso de ajuda"] }));

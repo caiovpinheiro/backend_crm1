@@ -65,6 +65,7 @@ const derivedFieldSchema = z.object({
         digitsOnly: z.boolean().optional(),
         charset: z.enum(["all", "digits", "letters"]).optional(),
         letterCase: z.enum(["keep", "upper", "lower", "capitalize"]).optional(),
+        accents: z.enum(["keep", "strip"]).optional(),
         text: z.string().optional(),
       }),
     )
