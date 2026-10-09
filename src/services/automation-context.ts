@@ -658,6 +658,13 @@ export async function closeStrandedContext(automationId: string, contactId: stri
   const ctx = await getActiveContext(automationId, contactId);
   if (!ctx) return null;
 
+  // Timer ainda no futuro é espera de verdade. Fechar aqui (passo não
+  // achado no escopo, ou ponteiro ainda no passo anterior) apagava o
+  // "sem resposta" e o negócio ficava em Robo com o robô desligado.
+  if (ctx.timeoutAt && ctx.timeoutAt.getTime() > Date.now()) {
+    return null;
+  }
+
   if (ctx.currentStepId) {
     const step = await prisma.automationStep.findUnique({
       where: { id: ctx.currentStepId },
@@ -824,13 +831,27 @@ export async function cancelActiveContextsForContactIfAny(
   return cancelActiveContextsForContact(contactId);
 }
 
-/** Cancela todos os contextos RUNNING/PAUSED do contato (humano assumiu). */
+/**
+ * Cancela contextos RUNNING/PAUSED do contato (humano assumiu).
+ * `keepArmedTimers`: não derruba espera com `timeoutAt` no futuro.
+ * O inbound que não casou botão cancelava o menu recém-armado e o
+ * timeout de "sem resposta" nunca movia o negócio.
+ */
 export async function cancelActiveContextsForContact(
   contactId: string,
+  opts?: { keepArmedTimers?: boolean },
 ): Promise<number> {
   const active = await getContactActiveContexts(contactId);
+  const now = Date.now();
   let n = 0;
   for (const ctx of active) {
+    if (
+      opts?.keepArmedTimers &&
+      ctx.timeoutAt &&
+      ctx.timeoutAt.getTime() > now
+    ) {
+      continue;
+    }
     const row = await cancelContext(ctx.id);
     if (row) n += 1;
   }
@@ -1434,7 +1455,9 @@ export async function processIncomingMessage(
   }
   // Qualquer RUNNING/PAUSED que o loop não consumiu (já cancelados no
   // corpo, ou recém-criados em corrida): garante saída de Automação.
-  const leftover = await cancelActiveContextsForContact(contactId);
+  const leftover = await cancelActiveContextsForContact(contactId, {
+    keepArmedTimers: true,
+  });
   if (leftover > 0) {
     log.info(
       `processIncomingMessage handoff leftover — contact=${contactId} cancelled=${leftover}`,
@@ -1588,6 +1611,31 @@ async function dispatchToNextStep(
 }
 
 /**
+ * `lastInboundAt` sozinho não prova que o aluno falou depois da pausa:
+ * o horário da mensagem que abriu o menu fica alguns segundos à frente
+ * do `updatedAt` do contexto, e o timeout era cancelado sem mandar o
+ * negócio para perdido.
+ */
+async function hasInboundMessageAfter(
+  conversationId: string | string[],
+  pausedAt: Date,
+): Promise<boolean> {
+  const ids = (Array.isArray(conversationId) ? conversationId : [conversationId]).filter(
+    (id) => id.trim().length > 0,
+  );
+  if (ids.length === 0) return false;
+  const row = await prisma.message.findFirst({
+    where: {
+      conversationId: ids.length === 1 ? ids[0] : { in: ids },
+      direction: "in",
+      createdAt: { gt: pausedAt },
+    },
+    select: { id: true },
+  });
+  return row != null;
+}
+
+/**
  * Timeout de menu/espera depois que o aluno já falou ou já tem consultor
  * não pode seguir a aresta de inatividade até `finish_conversation` —
  * isso tira o ticket da fila no meio do atendimento.
@@ -1611,14 +1659,25 @@ async function abortTimeoutIfAttendanceStarted(
         closedAt: true,
       },
     });
+    if (!target) {
+      // Conversa sumiu do escopo: seguir a aresta. Tratar como encerrada
+      // fechava o contexto e o negócio não saía de Robo.
+      log.warn(
+        `abortTimeout: conversa ${convId} não encontrada — segue a aresta de timeout contact=${contactId}`,
+      );
+      return null;
+    }
     if (
-      !target ||
-      (target.status === "RESOLVED" &&
-        !conversationResolvedBeforePause(target.status, target.closedAt, pausedAt))
+      target.status === "RESOLVED" &&
+      !conversationResolvedBeforePause(target.status, target.closedAt, pausedAt)
     ) {
       return "already_resolved";
     }
-    if (target.lastInboundAt && target.lastInboundAt > pausedAt) {
+    if (
+      target.lastInboundAt &&
+      target.lastInboundAt > pausedAt &&
+      (await hasInboundMessageAfter(convId, pausedAt))
+    ) {
       return "stale_inbound";
     }
     const cfg = nextStep?.config && typeof nextStep.config === "object"
@@ -1640,13 +1699,20 @@ async function abortTimeoutIfAttendanceStarted(
   const convs = await prisma.conversation.findMany({
     where: { contactId, status: { not: "RESOLVED" } },
     select: {
+      id: true,
       lastInboundAt: true,
       assignedToId: true,
       assignedTo: { select: { type: true } },
     },
   });
-  if (convs.length === 0) return "already_resolved";
-  if (convs.some((c) => c.lastInboundAt && c.lastInboundAt > pausedAt)) {
+  if (convs.length === 0) return null;
+  const staleIds = convs
+    .filter((c) => c.lastInboundAt && c.lastInboundAt > pausedAt)
+    .map((c) => c.id);
+  if (
+    staleIds.length > 0 &&
+    (await hasInboundMessageAfter(staleIds, pausedAt))
+  ) {
     return "stale_inbound";
   }
   const cfg = nextStep?.config && typeof nextStep.config === "object"
