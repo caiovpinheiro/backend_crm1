@@ -45,7 +45,7 @@ import { hasSearchableQuestion, knowledgeChunkTexts, repeatFallback } from "./gr
 import { loadPriorV2Summary, summaryEnabled, updateRunningSummary, writeV2Summary } from "./summary";
 import { saysTriedAndFailed } from "./retry-signal";
 import { applyBoldPolicy } from "./reply-format";
-import { MESSAGE_MODEL_MIN_COVERAGE, MESSAGE_MODEL_REPEATED, announcesSending, introBeforeMaterial, lastV2ResetAt, mediaResendPlan, messageModelCoverage, pickPromisedModelId, recentMediaDeliveries, recentlySentMessageModels, resendWindowStart, saysNotReceived } from "./sent-materials";
+import { MESSAGE_MODEL_MIN_COVERAGE, MESSAGE_MODEL_REPEATED, announcesSending, introBeforeMaterial, lastV2ResetAt, mediaResendPlan, messageModelCoverage, pickPromisedModelId, recentMediaDeliveries, recentlySentMessageModels, resendWindowStart, saysNotReceived, recentlyAppliedRuleIds, RULE_REPLY_ACTION_TYPES } from "./sent-materials";
 import { attachmentsBlockedByResend } from "./material-attachments";
 import { buildV2Interactive, matchPendingOption, type V2InteractivePayload } from "./interactive";
 import { simpleHandoff } from "./handoff";
@@ -329,6 +329,33 @@ async function isRepeatedInteractiveReply(conversationId: string, text: string, 
     if (!prevIn || (prevIn.messageType ?? "").toLowerCase() !== "interactive") return false;
     const fold = (s: string) => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, " ").trim();
     return fold(prevIn.content ?? "") === fold(text) && fold(text).length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * O agente anterior já respondeu a esta mesma mensagem (turno copiado na
+ * transferência entre agentes). Um atalho de palavra-chave do agente novo
+ * mandava a resposta fixa em cima da resposta do anterior.
+ */
+async function inboundAlreadyAnswered(conversationId: string, messageIds: string[] | undefined): Promise<boolean> {
+  if (!messageIds?.length) return false;
+  try {
+    const db = prisma as unknown as {
+      message: {
+        findMany: (args: unknown) => Promise<Array<{ createdAt: Date }>>;
+        findFirst: (args: unknown) => Promise<{ id: string } | null>;
+      };
+    };
+    const own = await db.message.findMany({ where: { id: { in: messageIds } }, select: { createdAt: true } });
+    if (own.length === 0) return false;
+    const last = new Date(Math.max(...own.map((m) => new Date(m.createdAt).getTime())));
+    const reply = await db.message.findFirst({
+      where: { conversationId, direction: "out", isPrivate: false, messageType: { not: "note" }, createdAt: { gt: last } },
+      select: { id: true },
+    });
+    return !!reply;
   } catch {
     return false;
   }
@@ -1176,7 +1203,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     contact: loadedContext.contactRaw ?? null,
     selectedDeal: loadedContext.selectedDealRaw ?? null,
   };
-  const rule = evaluateV2Rules(config, {
+  let rule = evaluateV2Rules(config, {
     userMessage: input.userMessage,
     messageType: input.messageType,
     isFirstMessage: !stateRow || (stateRow.stage as V2Stage) === "idle",
@@ -1189,6 +1216,21 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     surveyReceived: counters.surveyPending,
   }, ruleContext);
 
+  // Atalho com mensagem fixa responde uma vez por conversa. Casando de novo
+  // (a palavra-chave continua na mensagem), a resposta fixa não sai: a
+  // mensagem segue para o agente, que já viu o que foi mandado — e, se o
+  // cliente disser que não deu certo, transfere com o contexto.
+  if (rule && rule.actions.some((a) => RULE_REPLY_ACTION_TYPES.has(a.type))) {
+    const fired = await recentlyAppliedRuleIds(input.conversationId).catch(() => new Set<string>());
+    if (fired.has(rule.id)) {
+      traceStep("regra", `Atalho "${rule.name ?? rule.id}" já respondeu nesta conversa → não repete; a mensagem segue para o agente`);
+      counters.guidanceGiven = true;
+      rule = null;
+    } else if (handedByAnotherAgent && (await inboundAlreadyAnswered(input.conversationId, input.messageIds))) {
+      traceStep("regra", `Atalho "${rule.name ?? rule.id}" casou, mas o agente anterior já respondeu a esta mensagem → não repete; segue para o agente`);
+      rule = null;
+    }
+  }
   let appliedRuleId = rule?.id;
   traceStep("regra", rule
     ? `Regra "${rule.name ?? rule.id}" casou → ações: ${(rule.actions as Array<{ type: string }>).map((a) => a.type).join(", ") || "nenhuma"}`
@@ -1324,6 +1366,8 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     }
     const res = await executeV2Actions(otherRuleActions, actionCtx);
     executedActions = res.results;
+    // Resposta fixa do atalho conta como orientação dada.
+    if (res.results.some((r) => r.ok && RULE_REPLY_ACTION_TYPES.has(r.action.type as string))) counters.guidanceGiven = true;
     anyClose = res.anyClose;
     if (res.themeId) {
       themeId = res.themeId;
@@ -2224,7 +2268,16 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // própria pergunta, clicada numa versão anterior —, o turno seguinte
   // decide com tudo em mãos. Antes a pergunta saía em dobro e o cliente
   // respondia às duas.
-  const asksSomething = !anyHandoff && !anyClose && !stopLimits.blocksReply && (replyOptions.length > 0 || asksClient(replyText));
+  // Só PERGUNTA DE TRIAGEM espera (curta, ou com os botões que o modelo
+  // pediu). Resposta com conteúdo sai sempre, mesmo que o fecho diga "me
+  // avise se deu certo" ou "posso ajudar em mais alguma coisa?" — a versão
+  // anterior contava o fecho como pergunta e descartava respostas inteiras
+  // quando o cliente mandava um "ok" no meio.
+  const coreReply = withoutReplyEndings(replyText, replyEndingPhrases(config)).trim();
+  const isTriageQuestion =
+    askOptions.length > 0 ||
+    (asksClient(coreReply) && coreReply.split(/\s+/).length <= 40 && classifyReply(coreReply) !== "procedure");
+  const asksSomething = !anyHandoff && !anyClose && !stopLimits.blocksReply && isTriageQuestion;
   if ((greetingOnlyReply || asksSomething) && (await newerInboundArrived(input.conversationId, input.messageIds))) {
     traceStep("resposta", greetingOnlyReply
       ? "O cliente já mandou outra mensagem; a saudação não sai — a próxima resposta cobre as duas"
