@@ -22,6 +22,10 @@ export interface V2Counters {
   humanRequestAsked?: boolean;
   /** Resumo corrente da conversa ("atualizar a cada resposta"). */
   runningSummary?: string;
+  /** O agente já deu uma orientação (passo a passo, mensagem pronta, material) nesta conversa. */
+  guidanceGiven?: boolean;
+  /** Perguntou "o que você precisa?" ao pedido de atendente; a próxima mensagem transfere. */
+  humanRequestPending?: boolean;
 }
 
 export function defaultV2Counters(): V2Counters {
@@ -51,6 +55,8 @@ export function parseV2Counters(raw: unknown): V2Counters {
     surveyPending: Boolean(r.surveyPending),
     ...(r.postCloseAsked === true ? { postCloseAsked: true } : {}),
     ...(r.humanRequestAsked === true ? { humanRequestAsked: true } : {}),
+    ...(r.guidanceGiven === true ? { guidanceGiven: true } : {}),
+    ...(r.humanRequestPending === true ? { humanRequestPending: true } : {}),
     ...(Array.isArray(r.pendingOptions) && r.pendingOptions.length > 0
       ? { pendingOptions: r.pendingOptions.filter((o): o is string => typeof o === "string").slice(0, 10) }
       : {}),

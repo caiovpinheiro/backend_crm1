@@ -17,6 +17,7 @@ export const SYSTEM_MESSAGE_DEFAULTS = {
   mediaCannotSend: "Não estou conseguindo enviar {{anexo}} por aqui. Vou chamar alguém da equipe para te mandar por outro caminho.",
   mediaNotArriving: "Já enviei {{anexo}} duas vezes e ele não está chegando aí. Vou chamar alguém da equipe para te mandar por outro caminho.",
   humanRequestAsk: "Claro! Antes de te passar para a equipe, me conta em uma frase o que você precisa, para eu encaminhar certo.",
+  triedAndFailedHandoff: "Entendi que você já tentou e não deu certo. Vou passar para alguém da equipe olhar isso com você, com o que já conversamos aqui.",
   returnPromiseHandoff: "Preciso passar isso para um atendente da equipe que vai te ajudar agora.",
   loopWarning: "Recebi a mesma mensagem algumas vezes. Se precisar de algo diferente, me conta com outras palavras.",
   identificationRetry: "Não encontrei um e-mail ou documento na sua mensagem. Pode me enviar o e-mail ou o documento usado no cadastro?",

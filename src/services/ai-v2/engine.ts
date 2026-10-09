@@ -40,9 +40,10 @@ import { isConfusionMessage, rephraseAfterConfusion } from "./confusion";
 import { applyNoSourceGuard, conditionalHandoff, handoffExplanation, type V2PrefetchFact } from "./no-source";
 import { NONSENSE_LIMIT_REASON } from "./limits";
 import { applyV2Tabulation } from "./tabulation";
-import { applyReplyEnding, effectiveReplyEnding, isGreetingOnlyReply, replyEndingButtons, replyEndingPhrases, withoutReplyEndings } from "./reply-ending";
+import { applyReplyEnding, asksClient, classifyReply, effectiveReplyEnding, isGreetingOnlyReply, replyEndingButtons, replyEndingPhrases, withoutReplyEndings } from "./reply-ending";
 import { hasSearchableQuestion, knowledgeChunkTexts, repeatFallback } from "./ground-reply";
 import { loadPriorV2Summary, summaryEnabled, updateRunningSummary, writeV2Summary } from "./summary";
+import { saysTriedAndFailed } from "./retry-signal";
 import { applyBoldPolicy } from "./reply-format";
 import { MESSAGE_MODEL_MIN_COVERAGE, MESSAGE_MODEL_REPEATED, announcesSending, introBeforeMaterial, lastV2ResetAt, mediaResendPlan, messageModelCoverage, pickPromisedModelId, recentMediaDeliveries, recentlySentMessageModels, resendWindowStart, saysNotReceived } from "./sent-materials";
 import { attachmentsBlockedByResend } from "./material-attachments";
@@ -306,6 +307,33 @@ export function looksLikeIdentification(text: string): boolean {
 }
 
 /** Chegou mensagem do cliente depois das deste turno. */
+/**
+ * O cliente clicou de novo na mesma opção que acabou de responder (clique
+ * duplo, ou a pergunta saiu em dobro e ele respondeu às duas). O agente já
+ * respondeu ao primeiro clique: o segundo não vira turno. Antes o modelo
+ * "confirmava de novo" e refazia a pergunta seguinte.
+ */
+async function isRepeatedInteractiveReply(conversationId: string, text: string, messageIds: string[] | undefined): Promise<boolean> {
+  try {
+    const db = prisma as unknown as {
+      message: { findMany: (args: unknown) => Promise<Array<{ direction: string; content: string | null; messageType: string | null }>> };
+    };
+    const rows = await db.message.findMany({
+      where: { conversationId, isPrivate: false, ...(messageIds?.length ? { id: { notIn: messageIds } } : {}) },
+      orderBy: { createdAt: "desc" },
+      take: 3,
+      select: { direction: true, content: true, messageType: true },
+    });
+    if (rows.length < 2 || rows[0].direction !== "out") return false;
+    const prevIn = rows.find((r) => r.direction === "in");
+    if (!prevIn || (prevIn.messageType ?? "").toLowerCase() !== "interactive") return false;
+    const fold = (s: string) => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, " ").trim();
+    return fold(prevIn.content ?? "") === fold(text) && fold(text).length > 0;
+  } catch {
+    return false;
+  }
+}
+
 async function newerInboundArrived(conversationId: string, messageIds: string[] | undefined): Promise<boolean> {
   if (!messageIds?.length) return false;
   try {
@@ -620,6 +648,17 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   let lastAgentMessage: string | null = null;
   let historyLength = 0;
   let versionId: string | undefined = stateRow?.versionId ?? agent.versionId ?? undefined;
+  if ((input.messageType ?? "").toLowerCase() === "interactive" && (await isRepeatedInteractiveReply(input.conversationId, input.userMessage, input.messageIds))) {
+    traceStep("opções", "Clique repetido na opção que acabou de ser respondida → sem novo turno");
+    await logV2Turn({
+      organizationId: orgId, conversationId: input.conversationId, agentId: resolved.agentConfigId, turnId: input.turnId,
+      inboundText: input.userMessage,
+      crmContext: { contact: null, deals: [], selectedDeal: null, fields: { contact: [], deal: [] } },
+      prompt: "repeat_click", executedActions: [], discardedActions: [], handoff: false, latencyMs: Date.now() - startedAt,
+      inputTokens: 0, outputTokens: 0, owner, stage, versionId,
+    });
+    return { handoff: false, closed: false };
+  }
   // A conversa está atribuída a este agente v2 com owner=pessoa: ou é estado
   // antigo (humano anterior, handoff que não trocou o responsável) — o motor
   // ficava mudo com o agente como responsável — ou a conversa transferida
@@ -1160,6 +1199,31 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   const stop = evaluateV2StopLimits(config, counters, input.userMessage);
   if (stop.blocksReply) traceStep("limites", `Limite de parada atingido: ${stop.reason} → ${stop.action}`);
 
+  // Depois de "me conta em uma frase o que você precisa": a frase chegou →
+  // transfere com ela, como prometido. Antes voltava para o agente, que
+  // perguntava tudo de novo e o cliente rodava em círculo.
+  if (counters.humanRequestPending) {
+    counters.humanRequestPending = false;
+    if (!isShortAckText(input.userMessage) && !isGreetingOnlyMessage(input.userMessage)) {
+      noteV2Fact("handoffCause", "human_request", { keepFirst: true });
+      traceStep("transferência", "Cliente disse o que precisa depois do pedido de atendente → transfere com o assunto");
+      await handoffAndReply(resolved, orgId, contactId, loadedContext, input, config, stateRow, versionId, renderMessage(config.handoff.message, vars, defaultFormatter()), counters, themeId);
+      return { handoff: true, closed: false };
+    }
+  }
+  // Depois de uma orientação (passo a passo, mensagem pronta, material), o
+  // cliente diz que já tentou e não deu certo — ou clica em "preciso de
+  // ajuda". Repetir material ou menu é a pior resposta: transfere com o
+  // contexto (o resumo, quando ligado, vai junto).
+  if (counters.guidanceGiven && (saysTriedAndFailed(input.userMessage) || (chosenOption && mentionsHumanRequest(config, chosenOption)))) {
+    noteV2Fact("handoffCause", "tried_and_failed", { keepFirst: true });
+    traceStep("transferência", chosenOption
+      ? "Pedido de ajuda depois de uma orientação → transfere com o contexto, sem perguntar de novo"
+      : "Cliente já tentou e não deu certo → sem reenviar orientação; transfere com o contexto");
+    await handoffAndReply(resolved, orgId, contactId, loadedContext, input, config, stateRow, versionId, renderMessage(systemMessage(config, "triedAndFailedHandoff"), vars, defaultFormatter()), counters, themeId);
+    return { handoff: true, closed: false };
+  }
+
   // Resumo do atendimento anterior (ou o corrente): contexto para o modelo.
   let priorSummary: Awaited<ReturnType<typeof loadPriorV2Summary>> = null;
   try {
@@ -1241,6 +1305,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
         traceStep("regra", "Pedido de pessoa junto com uma pergunta → responde primeiro; transfere só se não conseguir");
       } else if (!counters.humanRequestAsked) {
         counters.humanRequestAsked = true;
+        counters.humanRequestPending = true;
         traceStep("regra", "Pedido de pessoa sem dizer o assunto → pergunta uma vez o que precisa; transfere na próxima mensagem");
         const ask = renderMessage(systemMessage(config, "humanRequestAsk"), vars, defaultFormatter());
         await sendReply(ask);
@@ -2009,6 +2074,9 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       .join(", "));
   }
   executedActions = actionRes.results;
+  if (actionRes.results.some((r) => r.ok && ["send_message_model", "send_product", "send_material_attachment"].includes(r.action.type))) {
+    counters.guidanceGiven = true;
+  }
   Object.assign(collectedVariables, variablesFromActions(actionRes.results));
   anyHandoff = wantsHandoff;
   // O modelo só encerra com confirmação explícita do cliente ("resolvido",
@@ -2116,6 +2184,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // com "Deu certo / Preciso de ajuda" contradizia o "posso encaminhar".
   // Cortesia ("ok", "obrigado") não ganha "posso ajudar em mais alguma
   // coisa?" com botões: o cliente acabou de dizer que não precisa.
+  if (replyText.trim() && classifyReply(replyText) === "procedure") counters.guidanceGiven = true;
   const courtesyInbound = isShortAckText(input.userMessage);
   const endingAllowed = !anyHandoff && !anyClose && askOptions.length === 0 && (stage as V2Stage) !== "confirming" && !llmOutput.outOfScope && !noSourceApplied && !conditionalWait && !courtesyInbound;
   if (endingAllowed && !materialFollows && replyText.trim()) {
@@ -2150,9 +2219,18 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     replyOptions.length === 0 &&
     outboundActions.length === 0 &&
     isGreetingOnlyReply(replyText);
-  if (greetingOnlyReply && (await newerInboundArrived(input.conversationId, input.messageIds))) {
-    traceStep("resposta", "O cliente já mandou outra mensagem; a saudação não sai — a próxima resposta cobre as duas");
+  // Pergunta (com ou sem botões) só sai se o cliente não escreveu nada
+  // enquanto o agente pensava. Se escreveu — muitas vezes é a resposta à
+  // própria pergunta, clicada numa versão anterior —, o turno seguinte
+  // decide com tudo em mãos. Antes a pergunta saía em dobro e o cliente
+  // respondia às duas.
+  const asksSomething = !anyHandoff && !anyClose && !stopLimits.blocksReply && (replyOptions.length > 0 || asksClient(replyText));
+  if ((greetingOnlyReply || asksSomething) && (await newerInboundArrived(input.conversationId, input.messageIds))) {
+    traceStep("resposta", greetingOnlyReply
+      ? "O cliente já mandou outra mensagem; a saudação não sai — a próxima resposta cobre as duas"
+      : "O cliente já mandou outra mensagem enquanto o agente pensava; a pergunta não sai — o próximo turno decide com tudo em mãos");
     replyText = "";
+    replyOptions = [];
   }
 
   // Mensagem pronta a seguir: a resposta só apresenta. Resposta completa +
@@ -2168,7 +2246,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     const withOptions = replyOptions.length > 0 ? buildV2Interactive(replyText, replyOptions, optionTexts) : null;
     const outText = withOptions ? withOptions.fallbackText : replyText;
     // A saudação é conferida de novo depois do "digitando…".
-    const res = await sendReply(outText, withOptions?.payload, { dropIfSuperseded: greetingOnlyReply });
+    const res = await sendReply(outText, withOptions?.payload, { dropIfSuperseded: greetingOnlyReply || asksSomething });
     noteV2Fact("send", { sent: res.sent, reason: res.sent ? null : (res.reason ?? "unknown") });
     if (res.sent) {
       sentReply = outText;
