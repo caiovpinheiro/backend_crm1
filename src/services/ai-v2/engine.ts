@@ -30,6 +30,7 @@ import { guardV2Output } from "./output-guard";
 import { messageModelFilesOnly, messageModelModeFor } from "@/lib/ai-v2/message-model-mode";
 import { customSystemMessage, systemMessage } from "@/lib/ai-v2/system-messages";
 import { isShortAckText } from "@/lib/ai-agents/tabulation-classify-policy";
+import { isCourtesyOnlyInbound } from "@/services/post-close-return";
 import { executeV2Actions, sendV2TextMessage, applyV2ClosureFieldUpdates, v2HumanBehavior } from "./actions";
 import { findInheritablePostCloseState, getV2ConversationState, upsertV2ConversationState } from "./state";
 import { logV2Turn } from "./log";
@@ -361,23 +362,30 @@ async function inboundAlreadyAnswered(conversationId: string, messageIds: string
   }
 }
 
+/**
+ * Chegou mensagem nova do cliente depois das deste turno? Agradecimento/ok
+ * curto não conta: um "obrigada" à mensagem de transferência não muda a
+ * dúvida — descartar a resposta por causa dele deixava o cliente sem
+ * resposta nenhuma (o turno do "obrigada" só respondia "por nada").
+ */
 async function newerInboundArrived(conversationId: string, messageIds: string[] | undefined): Promise<boolean> {
   if (!messageIds?.length) return false;
   try {
     const db = prisma as unknown as {
       message: {
-        findMany: (args: unknown) => Promise<Array<{ createdAt: Date }>>;
-        findFirst: (args: unknown) => Promise<{ id: string } | null>;
+        findMany: (args: unknown) => Promise<Array<{ createdAt?: Date; content?: string | null; messageType?: string | null }>>;
       };
     };
     const own = await db.message.findMany({ where: { id: { in: messageIds } }, select: { createdAt: true } });
     if (own.length === 0) return false;
-    const last = new Date(Math.max(...own.map((m) => new Date(m.createdAt).getTime())));
-    const newer = await db.message.findFirst({
+    const last = new Date(Math.max(...own.map((m) => new Date(m.createdAt ?? 0).getTime())));
+    const newer = await db.message.findMany({
       where: { conversationId, direction: "in", id: { notIn: messageIds }, createdAt: { gt: last } },
-      select: { id: true },
+      select: { content: true, messageType: true },
+      orderBy: { createdAt: "asc" },
+      take: 5,
     });
-    return !!newer;
+    return newer.some((m) => !isCourtesyOnlyInbound(m.content, m.messageType));
   } catch {
     return false;
   }
