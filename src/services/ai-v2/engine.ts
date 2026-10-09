@@ -29,18 +29,19 @@ export { mentionsHumanRequest };
 import { guardV2Output } from "./output-guard";
 import { messageModelFilesOnly, messageModelModeFor } from "@/lib/ai-v2/message-model-mode";
 import { customSystemMessage, systemMessage } from "@/lib/ai-v2/system-messages";
+import { isShortAckText } from "@/lib/ai-agents/tabulation-classify-policy";
 import { executeV2Actions, sendV2TextMessage, applyV2ClosureFieldUpdates, v2HumanBehavior } from "./actions";
 import { findInheritablePostCloseState, getV2ConversationState, upsertV2ConversationState } from "./state";
 import { logV2Turn } from "./log";
 import { noteV2Fact, peekV2Fact, runWithV2Trace, traceStep, v2TraceWasLogged } from "./trace";
 import { evaluateV2StopLimits, parseV2Counters, type V2Counters } from "./limits";
-import { answerToPostCloseQuestion, classifyPostCloseMessage, getPostCloseBehavior, isGreetingOnlyMessage, keepOpenOnNewRequest, postCloseHandoffMessage, postCloseQuestion, postCloseShortReply } from "./closure";
+import { answerToPostCloseQuestion, classifyPostCloseMessage, getPostCloseBehavior, isGreetingOnlyMessage, keepOpenOnNewRequest, postCloseHandoffMessage, postCloseQuestion, postCloseShortReply, isExplicitResolution } from "./closure";
 import { isConfusionMessage, rephraseAfterConfusion } from "./confusion";
 import { applyNoSourceGuard, conditionalHandoff, handoffExplanation, type V2PrefetchFact } from "./no-source";
 import { NONSENSE_LIMIT_REASON } from "./limits";
 import { applyV2Tabulation } from "./tabulation";
 import { applyReplyEnding, effectiveReplyEnding, isGreetingOnlyReply, replyEndingButtons, replyEndingPhrases, withoutReplyEndings } from "./reply-ending";
-import { knowledgeChunkTexts, repeatFallback } from "./ground-reply";
+import { hasSearchableQuestion, knowledgeChunkTexts, repeatFallback } from "./ground-reply";
 import { applyBoldPolicy } from "./reply-format";
 import { MESSAGE_MODEL_MIN_COVERAGE, MESSAGE_MODEL_REPEATED, announcesSending, introBeforeMaterial, lastV2ResetAt, mediaResendPlan, messageModelCoverage, pickPromisedModelId, recentMediaDeliveries, recentlySentMessageModels, resendWindowStart, saysNotReceived } from "./sent-materials";
 import { attachmentsBlockedByResend } from "./material-attachments";
@@ -615,7 +616,18 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // agente, não uma pessoa na fila. Antes o agente que recebia via "cliente
   // na fila", devolvia a conversa à fila e ela ficava sem responsável.
   const handedByAnotherAgent = !!stateRow && stateRow.agentId !== resolved.agentConfigId;
-  if (handedByAnotherAgent) traceStep("agente", "Conversa recebida de outro agente de IA → este agente assume");
+  if (handedByAnotherAgent) {
+    traceStep("agente", "Conversa recebida de outro agente de IA → este agente assume");
+    // A transferência entre agentes copia o turno: o agente novo reprocessa
+    // a MESMA mensagem. Com o contador herdado, uma mensagem que passou por
+    // três agentes contava como três repetições, e o terceiro, em vez de
+    // responder, mandava o aviso de loop.
+    if (counters.loopCount > 0 || counters.lastLoopMessage) {
+      counters.loopCount = 0;
+      counters.lastLoopMessage = undefined;
+      traceStep("limites", "Contador de repetição zerado: a mensagem é a mesma que o agente anterior recebeu, não uma repetição do cliente");
+    }
+  }
   const waitingInQueue = owner === "pessoa" && !handedByAnotherAgent && (await isWaitingInQueue(input.conversationId));
   const queueMode = config.handoff.whileQueued ?? "notify";
   if (waitingInQueue) traceStep("fila", `Conversa transferida voltou ao agente com o cliente na fila → "${queueMode === "notify" ? "só avisar" : "responder"}"`);
@@ -1975,6 +1987,15 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   executedActions = actionRes.results;
   Object.assign(collectedVariables, variablesFromActions(actionRes.results));
   anyHandoff = wantsHandoff;
+  // O modelo só encerra com confirmação explícita do cliente ("resolvido",
+  // "não preciso de mais nada") ou clique num botão. "Ok" / "certo" / 👍
+  // depois de uma orientação é confirmação de leitura: encerrar aí deixava o
+  // cliente que voltava com a dúvida um minuto depois sem agente e com os
+  // botões "mortos". Quem encerra esse caso é a inatividade.
+  if (llmOutput.concluded && !actionRes.anyClose && !chosenOption && isShortAckText(input.userMessage) && !isExplicitResolution(input.userMessage)) {
+    traceStep("encerramento", "Modelo quis encerrar após confirmação curta (\"ok\") → segue aberto; a inatividade encerra se o cliente não voltar");
+    llmOutput.concluded = false;
+  }
   anyClose = actionRes.anyClose || llmOutput.concluded;
   if (actionRes.themeId) themeId = actionRes.themeId;
 
@@ -2006,9 +2027,24 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // Fora do escopo: o limite do início do turno usa o contador antes desta
   // mensagem. Reavalia com o contador novo — o aviso saía duas vezes, e um
   // cliente que voltou ao assunto ficava sem resposta.
-  const stopLimits = stop.blocksReply && stop.reason !== NONSENSE_LIMIT_REASON
+  let stopLimits = stop.blocksReply && stop.reason !== NONSENSE_LIMIT_REASON
     ? stop
     : evaluateV2StopLimits(config, counters, input.userMessage, { countLoop: false });
+  // Pergunta com conteúdo e o modelo respondeu: a resposta vale mais que o
+  // aviso de loop. O aviso é para mensagem curta/sem sentido repetida; uma
+  // pergunta real repetida é sinal de que o cliente ainda não teve resposta.
+  if (
+    stopLimits.blocksReply &&
+    stopLimits.reason === "loop detectado" &&
+    replyText.trim() &&
+    input.userMessage.includes("?") &&
+    hasSearchableQuestion(input.userMessage)
+  ) {
+    traceStep("limites", "Mensagem repetida é uma pergunta com conteúdo e o modelo respondeu → a resposta sai no lugar do aviso de loop");
+    counters.loopCount = 0;
+    counters.lastLoopMessage = undefined;
+    stopLimits = { blocksReply: false, action: "none", reason: "" };
+  }
   if (stopLimits.blocksReply) {
     if (stopLimits !== stop) traceStep("limites", `Limite de parada atingido: ${stopLimits.reason} → ${stopLimits.action}`);
     replyText = stopLimits.warn ? stopWarning(config, stopLimits.reason) : "";

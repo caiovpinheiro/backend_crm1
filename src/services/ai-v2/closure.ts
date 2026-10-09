@@ -70,6 +70,27 @@ export function classifyPostCloseMessage(
 }
 
 /**
+ * O cliente disse, com palavras, que acabou: "resolvido", "não preciso de
+ * mais nada", "pode encerrar". Só isso (ou o clique num botão) autoriza o
+ * encerramento decidido pelo modelo. "Ok", "certo", "beleza", 👍 depois de
+ * uma orientação são confirmação de leitura: o cliente pode voltar com a
+ * dúvida no minuto seguinte, e quem encerra nesse caso é a inatividade.
+ */
+const EXPLICIT_RESOLUTION_TERMS = [
+  "resolvido", "resolveu", "resolvi", "consegui", "funcionou", "deu certo", "esta resolvido",
+  "nao preciso", "nada mais", "mais nada", "so isso", "era so isso", "so agradecer",
+  "pode encerrar", "pode fechar", "pode finalizar", "tudo certo",
+];
+
+export function isExplicitResolution(message: string): boolean {
+  const text = foldText(message).replace(/\?/g, "").trim();
+  if (!text) return false;
+  // "não consegui" / "não funcionou" / "não resolveu" não são confirmação.
+  const withoutNegated = text.replace(/\bnao (?:consegui|funcionou|deu certo|resolveu|resolvido|entendi)\b/g, " ");
+  return hasTerm(withoutNegated, EXPLICIT_RESOLUTION_TERMS);
+}
+
+/**
  * A mensagem traz um pedido novo (não é só agradecimento/despedida). Com
  * pedido novo o turno não encerra: ao encerrar, o cliente recebe a despedida
  * no lugar da resposta — perguntou as datas e recebeu "fico feliz em ajudar".
