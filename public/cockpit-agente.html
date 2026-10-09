@@ -620,7 +620,7 @@
       </div>
     </div>
 
-    <!-- Gerado no deploy (EasyPanel): apiBase + accessSecret — ver deploy/cockpit-monitor -->
+    <!-- Opcional: window.COCKPIT_CONFIG.apiBase (URL base da API) -->
     <script src="/config.js"></script>
     <script>
       var LS_TOKEN = "cockpit.token";
@@ -630,11 +630,6 @@
 
       function deployConfig() {
         return window.COCKPIT_CONFIG || null;
-      }
-
-      function isAutoMode() {
-        var cfg = deployConfig();
-        return !!(cfg && cfg.accessSecret && cfg.apiBase);
       }
 
       function normalizeToken(raw) {
@@ -654,34 +649,27 @@
       function getToken() { return normalizeToken(localStorage.getItem(LS_TOKEN) || ""); }
 
       function fetchCockpit(useToken) {
-        var cfg = deployConfig();
         var token = useToken ? getToken() : "";
         var headers = {};
-        if (cfg && cfg.accessSecret) {
-          headers["X-Cockpit-Access"] = cfg.accessSecret;
-        } else if (token) {
+        if (token) {
           headers.Authorization = "Bearer " + token;
         }
         return fetch(getBase() + "/api/public/agent-cockpit", {
           headers: headers,
-          credentials: cfg && cfg.accessSecret ? "omit" : "include",
+          credentials: "include",
           cache: "no-store",
         });
       }
 
       function loadCockpit(useToken) {
         return fetchCockpit(useToken).then(function (res) {
-          if (res.status === 401 && useToken && getToken() && !isAutoMode()) {
+          if (res.status === 401 && useToken && getToken()) {
             return fetchCockpit(false);
           }
           return res;
         }).then(function (res) {
           if (res.status === 401) {
-            throw new Error(
-              isAutoMode()
-                ? "Cockpit não configurado no servidor (COCKPIT_*)."
-                : "Token inválido ou sessão expirada.",
-            );
+            throw new Error("Token inválido ou sessão expirada.");
           }
           if (!res.ok) throw new Error("Erro " + res.status + " — verifique a URL base da API.");
           return res.json();
@@ -717,14 +705,12 @@
       }
 
       function logout() {
-        if (isAutoMode()) return;
         localStorage.removeItem(LS_TOKEN);
         if (timer) clearInterval(timer);
         showSetup();
       }
 
       function showSetup() {
-        if (isAutoMode()) return;
         document.getElementById("dash").classList.add("hidden");
         document.getElementById("setup").classList.remove("hidden");
         document.getElementById("in-base").value = localStorage.getItem(LS_BASE) || "";
@@ -733,7 +719,7 @@
         document.getElementById("setup").classList.add("hidden");
         document.getElementById("dash").classList.remove("hidden");
         var logoutBtn = document.getElementById("btn-logout");
-        if (logoutBtn) logoutBtn.classList.toggle("hidden", isAutoMode());
+        if (logoutBtn) logoutBtn.classList.remove("hidden");
       }
 
       function setStatus(kind, text) {
@@ -987,7 +973,7 @@
           })
           .catch(function (e) {
             setStatus("err", e.message || "Falha ao atualizar");
-            if (!isAutoMode() && /inv[aá]lido|expirada|expirado|não configurado/i.test(e.message || "")) {
+            if (/inv[aá]lido|expirada|expirado/i.test(e.message || "")) {
               if (getToken()) localStorage.removeItem(LS_TOKEN);
               setTimeout(showSetup, 1500);
             }
@@ -1001,13 +987,6 @@
       });
 
       function boot() {
-        if (isAutoMode()) {
-          showDash();
-          refresh(true);
-          timer = setInterval(function () { refresh(true); }, REFRESH_MS);
-          return;
-        }
-
         var params = new URLSearchParams(window.location.search);
         var qBase = (params.get("base") || "").trim().replace(/\/$/, "");
         var qToken = normalizeToken(params.get("token") || "");

@@ -12,7 +12,7 @@ export const runtime = "nodejs";
 
 /**
  * Endpoint público de saúde, consumido por monitores externos, pelo
- * healthcheck do compose (`deploy/digitalocean`) e pelo cockpit-monitor.
+ * healthcheck do compose (`deploy/digitalocean`).
  * Liberado no middleware — NÃO exigir auth para o estado agregado.
  *
  *  - Sem credencial: `{ "status": "ok" | "degraded" }`, 200 ou 503. Todos
