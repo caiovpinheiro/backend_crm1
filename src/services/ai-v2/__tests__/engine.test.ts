@@ -1806,6 +1806,79 @@ describe("processV2Turn — correções do motor", () => {
     expect(sentTexts()[1]).toContain("Ficou alguma dúvida");
   });
 
+  describe("repetição e encerramento: o agente responde e só encerra com confirmação explícita", () => {
+    const loopConfig = () => baseConfig({ limits: { maxLoopCount: 3, nonsenseAction: "warn_and_silence" } } as unknown as Partial<V2AgentConfig>);
+
+    it("conversa recebida de outro agente: a mesma mensagem não conta como repetição", async () => {
+      mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: loopConfig(), active: true });
+      // Dois agentes já processaram esta mensagem (contador herdado = 2); este é o terceiro.
+      mocks.getState.mockResolvedValue({ ...makeState("active", "pessoa", { loopCount: 2, lastLoopMessage: "qual o prazo de entrega?" }), agentId: "agent-0" });
+      mocks.callLLM.mockResolvedValue(llmOut({ reply: "O prazo de entrega é de 5 dias úteis." }));
+
+      await run("Qual o prazo de entrega?");
+
+      expect(mocks.callLLM).toHaveBeenCalled();
+      expect(sentTexts()).toContain("O prazo de entrega é de 5 dias úteis.");
+      expect(sentTexts().join(" ")).not.toContain("Recebi a mesma mensagem");
+      const saved = mocks.upsertState.mock.calls.map((c) => c[0] as { counters?: { loopCount?: number } }).filter((c) => c.counters);
+      // Para este agente a mensagem é a primeira (contador 1), não a terceira.
+      expect(saved.at(-1)?.counters?.loopCount).toBe(1);
+    });
+
+    it("pergunta com conteúdo repetida: a resposta do modelo sai no lugar do aviso de loop", async () => {
+      mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: loopConfig(), active: true });
+      mocks.getState.mockResolvedValue(makeState("active", "agente", { loopCount: 2, lastLoopMessage: "posso pagar o valor até o dia 26?" }));
+      mocks.callLLM.mockResolvedValue(llmOut({ reply: "Sim, o valor vale até o dia 26." }));
+
+      await run("Posso pagar o valor até o dia 26?");
+
+      expect(sentTexts()).toContain("Sim, o valor vale até o dia 26.");
+      expect(sentTexts().join(" ")).not.toContain("Recebi a mesma mensagem");
+    });
+
+    it("mensagem curta repetida continua recebendo o aviso de loop", async () => {
+      mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: loopConfig(), active: true });
+      mocks.getState.mockResolvedValue(makeState("active", "agente", { loopCount: 2, lastLoopMessage: "oi" }));
+      mocks.callLLM.mockResolvedValue(llmOut({ reply: "Oi! Como posso ajudar?" }));
+
+      await run("Oi");
+
+      expect(sentTexts().join(" ")).toContain("Recebi a mesma mensagem");
+      expect(sentTexts()).not.toContain("Oi! Como posso ajudar?");
+    });
+
+    it("\"Ok\" depois de uma orientação não encerra, mesmo que o modelo queira", async () => {
+      mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: baseConfig(), active: true });
+      mocks.getState.mockResolvedValue(makeState("active", "agente"));
+      mocks.callLLM.mockResolvedValue(llmOut({ reply: "Que bom que consegui te ajudar!", concluded: true }));
+
+      const result = await run("Ok");
+
+      expect(result.closed).toBe(false);
+      expect(mocks.resolveInline).not.toHaveBeenCalled();
+    });
+
+    it("confirmação explícita encerra", async () => {
+      mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: baseConfig(), active: true });
+      mocks.getState.mockResolvedValue(makeState("active", "agente"));
+      mocks.callLLM.mockResolvedValue(llmOut({ reply: "Que bom! Qualquer coisa, é só chamar.", concluded: true }));
+
+      const result = await run("Resolvido, obrigada!");
+
+      expect(result.closed).toBe(true);
+    });
+
+    it("clique no botão de fecho encerra", async () => {
+      mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: baseConfig(), active: true });
+      mocks.getState.mockResolvedValue(makeState("active", "agente", { pendingOptions: ["Não, obrigado(a)!", "Preciso de ajuda"] }));
+      mocks.callLLM.mockResolvedValue(llmOut({ reply: "Combinado! Até mais.", concluded: true }));
+
+      const result = await run("Não, obrigado(a)!");
+
+      expect(result.closed).toBe(true);
+    });
+  });
+
   it("resposta barrada por outro motivo não entra no log como enviada", async () => {
     const config = baseConfig();
     mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
