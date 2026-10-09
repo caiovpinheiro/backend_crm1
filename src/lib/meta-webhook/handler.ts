@@ -929,9 +929,13 @@ async function resolveWebhookContact(
   // não bloqueia a resposta ao webhook da Meta, que tem janela curta
   // de retry). Precisa acontecer ANTES do auto-deal para preservar a
   // ordem semântica (contato criado → deal criado).
+  // O canal do inbound vai no payload: o passo de envio do fluxo usa o
+  // número em que o cliente escreveu, não o fixo configurado no passo
+  // (sessão fechada no outro número → envio falhava).
+  const createdChannelId = (await findChannelByPhoneNumberId(phoneNumberId))?.id ?? null;
   fireTrigger("contact_created", {
     contactId: created.id,
-    data: { source: sourceName, channel: "WhatsApp" },
+    data: { source: sourceName, channel: "WhatsApp", ...(createdChannelId ? { channelId: createdChannelId } : {}) },
   }).catch((err) =>
     log.warn("Falha no gatilho contact_created:", err),
   );

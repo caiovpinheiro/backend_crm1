@@ -66,6 +66,8 @@ describe("mensagem logo depois de uma conversa encerrada", () => {
   it("mídia nunca é cortesia", async () => {
     mocks.conversationFindFirst.mockResolvedValue(resolved());
     expect(isCourtesyOnlyInbound("ok", "image")).toBe(false);
+    // Adiamento logo depois do encerramento fica na conversa encerrada, sem IA.
+    expect(isCourtesyOnlyInbound("Estou no trabalho chamou depoos", "text")).toBe(true);
     const out = await resolvePostCloseInbound({ ...base, text: "ok", messageType: "image" });
     expect(out).toBeNull();
   });

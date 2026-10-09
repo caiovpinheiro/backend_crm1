@@ -3,6 +3,7 @@
  * Nenhum domínio de cliente.
  */
 
+import { isDeferralText } from "@/lib/ai-agents/tabulation-classify-policy";
 import type { V2Action, V2AgentConfig, V2CloseReason, V2PostCloseCaseBehavior, V2Stage } from "@/lib/ai-v2/types";
 import { hasSearchableQuestion } from "./ground-reply";
 
@@ -47,6 +48,8 @@ export function classifyPostCloseMessage(
   config: V2AgentConfig,
   message: string,
 ): V2PostCloseCase {
+  // "Chamo depois" / "agora não posso": despedida temporária, como cortesia.
+  if (isDeferralText(message)) return "courtesy";
   // Resposta numérica à pergunta pós-encerramento ("1 Sim / 2 Não").
   const text = foldText(message);
   const bare = text.replace(/\?/g, "").trim();

@@ -22,6 +22,7 @@ import {
   readStepAllowedChannelIds,
   resolveStepDistributionScope,
   triggerTypeLabel,
+  automationTalksToClient,
 } from "@/lib/automation-workflow";
 import { defaultDealTitleForContact } from "@/lib/display-name";
 import { getLogger } from "@/lib/logger";
@@ -966,14 +967,17 @@ function sendConvOptsFromRt(
  * Campanha / stage_changed / demais: passo explícito, depois o canal
  * herdado do payload (`rt.activeChannelId` / conversa).
  */
-function resolveOutboundChannelId(
+export function resolveOutboundChannelId(
   cfg: Record<string, unknown>,
   rt: RuntimeContext,
 ): string | null {
   const cfgChannelId = readString(cfg, "channelId")?.trim() || null;
   const bound = resolveBoundChannelId(rt);
   const allowed = readStepAllowedChannelIds(cfg);
-  if (rt.event && INBOUND_BOUND_EVENTS.has(rt.event) && bound) {
+  // Disparo que nasceu de um canal (payload com `channelId`: contato criado,
+  // conversa criada…) também sai por ele — não pelo canal fixo do passo.
+  const payloadBound = Boolean(readString(rt.data ?? {}, "channelId")?.trim());
+  if (((rt.event && INBOUND_BOUND_EVENTS.has(rt.event)) || payloadBound) && bound) {
     if (allowed && !allowed.includes(bound)) {
       throw new MetaSendFailureError(
         "Canal da conversa não está entre os canais selecionados neste passo.",
@@ -5203,6 +5207,34 @@ async function humanizeBeforeStep(
   }
 }
 
+/** Chave da org: fluxos que falam com o cliente começam mesmo com agente de IA atendendo? Padrão: não. */
+export const START_FLOWS_WHILE_AI_ATTENDS_KEY = "automations.startWhileAiAttends";
+
+/** Campanha e execução manual: o operador escolheu disparar; retomada já estava rodando. */
+const AI_GATE_EXEMPT_EVENTS = new Set(["campaign_trigger", "manual", "continue"]);
+
+async function startFlowsWhileAiAttends(): Promise<boolean> {
+  try {
+    const { getOrgSettingBool } = await import("@/lib/org-settings");
+    return await getOrgSettingBool(START_FLOWS_WHILE_AI_ATTENDS_KEY, false);
+  } catch {
+    return false;
+  }
+}
+
+/** Conversa aberta e atribuída a um agente de IA. */
+async function conversationAttendedByAi(conversationId: string): Promise<boolean> {
+  try {
+    const conv = await prisma.conversation.findUnique({
+      where: { id: conversationId },
+      select: { status: true, assignedTo: { select: { type: true } } },
+    });
+    return !!conv && conv.status !== "RESOLVED" && conv.assignedTo?.type === "AI";
+  } catch {
+    return false;
+  }
+}
+
 export async function runAutomationInline(payload: AutomationJobPayload): Promise<void> {
   const { automationId, context } = payload;
   const traceId = `at-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -5283,6 +5315,29 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
       select: { id: true },
     });
     runConvIdForMeta = c?.id;
+  }
+
+  // Conversa com agente de IA: fluxo que fala com o cliente não começa
+  // (duas vozes na mesma conversa; o clique nos botões do fluxo iria para
+  // o agente de qualquer jeito). Os silenciosos (etapa, tag, campo, nota)
+  // seguem. Campanha e execução manual não entram: o operador escolheu
+  // disparar. Chave na org para religar.
+  if (
+    runConvIdForMeta &&
+    !AI_GATE_EXEMPT_EVENTS.has(context.event) &&
+    automationTalksToClient(automation.steps) &&
+    (await conversationAttendedByAi(runConvIdForMeta)) &&
+    !(await startFlowsWhileAiAttends())
+  ) {
+    await logStep({
+      automationId,
+      contactId: context.contactId,
+      dealId: context.dealId,
+      status: "SKIPPED",
+      message: `Conversa com agente de IA — fluxo que fala com o cliente não inicia (chave ${START_FLOWS_WHILE_AI_ATTENDS_KEY} para permitir)`,
+      payload: inboundEventPayload(context.event, contextData),
+    });
+    return;
   }
   const runMetaClient = await resolveAutomationMetaClient({
     automationId,

@@ -29,7 +29,7 @@ export { mentionsHumanRequest };
 import { guardV2Output } from "./output-guard";
 import { messageModelFilesOnly, messageModelModeFor } from "@/lib/ai-v2/message-model-mode";
 import { customSystemMessage, systemMessage } from "@/lib/ai-v2/system-messages";
-import { isShortAckText } from "@/lib/ai-agents/tabulation-classify-policy";
+import { isDeferralText, isShortAckText } from "@/lib/ai-agents/tabulation-classify-policy";
 import { isCourtesyOnlyInbound } from "@/services/post-close-return";
 import { executeV2Actions, sendV2TextMessage, applyV2ClosureFieldUpdates, v2HumanBehavior } from "./actions";
 import { findInheritablePostCloseState, getV2ConversationState, upsertV2ConversationState } from "./state";
@@ -1361,6 +1361,26 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     ...((stateRow?.collectedVariables as Record<string, unknown> | null | undefined) ?? {}),
     ...automationVariables,
   };
+  // Adiamento ("chamo depois", "agora não posso", "estou no trabalho"):
+  // não é pedido nem cortesia pura. Responde curto, sem fecho nem botões,
+  // e encerra — a volta entra pela janela pós-encerramento (cortesia /
+  // nova demanda). Antes virava "posso ajudar em mais alguma coisa?" com
+  // botões para quem acabou de dizer que não pode agora.
+  if (stage !== "closed" && !chosenOption && (!input.messageType || input.messageType === "text") && isDeferralText(input.userMessage)) {
+    traceStep("entrada", "Cliente adiou (“chamo depois”) → resposta curta, sem fecho, e encerra");
+    const deferralText = renderMessage(systemMessage(config, "deferralReply"), vars, defaultFormatter());
+    const deferralRes = deferralText.trim() ? await sendReply(deferralText) : { sent: false, reason: "empty" };
+    await closeState(orgId, input.conversationId, resolved!.agentConfigId, loadedContext.dealId, config, versionId, "deferred", loadedContext.contactId, collectedVariables, getV2ThemeById(config, themeId));
+    await logV2Turn({
+      organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId, turnId: input.turnId,
+      inboundText: input.userMessage, crmContext: context, prompt: "deferral", reply: deferralRes.sent ? deferralText : undefined,
+      executedActions: [{ action: { type: "close_conversation" }, ok: true, reason: "deferred" } as any], discardedActions: [],
+      handoff: false, closed: true, latencyMs: Date.now() - startedAt,
+      inputTokens: 0, outputTokens: 0, owner, stage, versionId, themeId,
+    });
+    return { handoff: false, closed: true };
+  }
+
   // O cliente pediu uma pessoa e fez uma pergunta na mesma mensagem: o modelo
   // responde a pergunta e só marca transferência se não conseguir.
   let humanRequestWithSubject = false;
@@ -2608,8 +2628,13 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       // tinha o campo, mas valia sempre a mensagem padrão.
       const destinationMessage = typeof requested?.message === "string" ? requested.message.trim() : "";
       const handoffMsg = renderMessage(opts.message || destinationMessage || config.handoff.message, vars, defaultFormatter());
-      if (handoffMsg.trim() && (await sendReply(handoffMsg)).sent) {
-        sent = handoffMsg;
+      // O aviso de transferência nunca passa pelo guarda de repetição: o
+      // agente anterior (ou este, minutos antes) pode ter mandado o mesmo
+      // texto ao transferir, e o cliente ficava sem saber que mudou de mão.
+      if (handoffMsg.trim()) {
+        const res = await sendReply(handoffMsg, null, { bypassDuplicateGuard: true });
+        if (res.sent) sent = handoffMsg;
+        else traceStep("transferência", `Aviso de transferência não saiu (${res.reason ?? "motivo desconhecido"})`);
       }
     }
     // Uma pessoa assumiu durante o turno (ou outro processo retomou o turno):
@@ -2637,7 +2662,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   async function sendReply(
     text: string,
     interactive?: V2InteractivePayload | null,
-    opts?: { dropIfSuperseded?: boolean },
+    opts?: { dropIfSuperseded?: boolean; bypassDuplicateGuard?: boolean },
   ): Promise<{ sent: boolean; reason?: string }> {
     if (!text.trim()) return { sent: false, reason: "empty" };
     if (humanTookOver) return { sent: false, reason: "human_took_over" };
@@ -2652,6 +2677,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       agentUserId: resolved!.userId,
       text,
       dedupeIgnore: replyEndingPhrases(config),
+      ...(opts?.bypassDuplicateGuard ? { bypassDuplicateGuard: true } : {}),
       channel: input.channel,
       autonomyMode: mapV2AutonomyToPrisma(config.autonomyMode),
       humanBehavior: opts?.dropIfSuperseded
@@ -2799,6 +2825,8 @@ async function handoffAndReply(
     channel: input.channel,
     autonomyMode: mapV2AutonomyToPrisma(config.autonomyMode),
     humanBehavior: v2HumanBehavior(config),
+    // Aviso de transferência: nunca barrado como repetido.
+    bypassDuplicateGuard: true,
   });
   // Uma pessoa assumiu a conversa enquanto isso: sem transferência.
   if ((!res.sent && res.reason && HUMAN_TOOK_OVER.has(res.reason)) || !(await assignedToAgent(input.conversationId, resolved.userId))) {
