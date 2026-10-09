@@ -20,6 +20,8 @@ export interface V2Counters {
   postCloseAsked?: boolean;
   /** Já perguntou uma vez o que a pessoa precisa (pedido de atendente sem assunto). */
   humanRequestAsked?: boolean;
+  /** Resumo corrente da conversa ("atualizar a cada resposta"). */
+  runningSummary?: string;
 }
 
 export function defaultV2Counters(): V2Counters {
@@ -43,6 +45,7 @@ export function parseV2Counters(raw: unknown): V2Counters {
     stalledExchanges: Number(r.stalledExchanges) || 0,
     nonsenseMessages: Number(r.nonsenseMessages) || 0,
     loopCount: Number(r.loopCount) || 0,
+    ...(typeof r.runningSummary === "string" && r.runningSummary ? { runningSummary: r.runningSummary } : {}),
     lastLoopMessage: typeof r.lastLoopMessage === "string" ? r.lastLoopMessage : undefined,
     aiTransferCount: Number(r.aiTransferCount) || 0,
     surveyPending: Boolean(r.surveyPending),

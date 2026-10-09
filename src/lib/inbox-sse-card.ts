@@ -130,7 +130,7 @@ function iso(value: Date | string | null | undefined): string | null {
 function isTimelineOrPrivatePreview(messageType: unknown): boolean {
   if (typeof messageType !== "string" || !messageType) return false;
   if (messageType === "event" || messageType.startsWith("event:")) return true;
-  if (messageType === "note" || messageType === "ai_draft") return true;
+  if (messageType === "note" || messageType === "ai_draft" || messageType === "ai_summary") return true;
   return false;
 }
 

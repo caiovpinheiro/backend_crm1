@@ -232,7 +232,14 @@ const entryConfigSchema = z.object({
   maxAttempts: z.number().int().min(1).optional().default(2),
 });
 
+const summaryConfigSchema = z.object({
+  enabled: z.boolean().optional().default(false),
+  verbosity: z.enum(["minimal", "standard", "detailed"]).optional().default("standard"),
+  everyTurn: z.boolean().optional().default(false),
+});
+
 const closureConfigSchema = z.object({
+  summary: summaryConfigSchema.optional(),
   postCloseWindowHours: z.number().min(0).optional().default(6),
   courtesyBehavior: z.enum(["no_reply", "short_reply", "reopen_and_route", "ask_with_options", "handoff"]).optional().default("no_reply"),
   newDemandBehavior: z.enum(["no_reply", "short_reply", "reopen_and_route", "ask_with_options", "handoff"]).optional().default("reopen_and_route"),

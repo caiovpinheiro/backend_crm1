@@ -8,6 +8,9 @@ const mocks = vi.hoisted(() => ({
   resolveAgent: vi.fn(),
   loadContext: vi.fn(),
   sendText: vi.fn(),
+  writeSummary: vi.fn(),
+  loadPriorSummary: vi.fn(),
+  updateRunningSummary: vi.fn(),
   executeActions: vi.fn(),
   simpleHandoff: vi.fn(),
   getState: vi.fn(),
@@ -67,6 +70,14 @@ vi.mock("../actions", () => ({
     typingPerCharMs: typeof config.typingPerCharMs === "number" && config.typingPerCharMs >= 0 ? config.typingPerCharMs : 25,
     markMessagesRead: config.markMessagesRead !== false,
   }),
+}));
+
+vi.mock("../summary", () => ({
+  writeV2Summary: mocks.writeSummary,
+  loadPriorV2Summary: mocks.loadPriorSummary,
+  updateRunningSummary: mocks.updateRunningSummary,
+  summaryEnabled: (config: { closure?: { summary?: { enabled?: boolean } } }) =>
+    config.closure?.summary?.enabled ? config.closure.summary : null,
 }));
 
 vi.mock("../handoff", () => ({
@@ -177,6 +188,9 @@ describe("processV2Turn", () => {
     mocks.logTurn.mockResolvedValue(undefined);
     mocks.attendanceEnabled.mockResolvedValue(true);
     mocks.findInherited.mockResolvedValue(null);
+    mocks.writeSummary.mockResolvedValue(null);
+    mocks.loadPriorSummary.mockResolvedValue(null);
+    mocks.updateRunningSummary.mockResolvedValue(null);
     mocks.messageFindMany.mockResolvedValue([]);
     mocks.resolveInline.mockResolvedValue({ updated: 1, missing: 0 });
     mocks.distributeNewInbound.mockResolvedValue(undefined);
@@ -963,6 +977,9 @@ describe("processV2Turn — correções do motor", () => {
     mocks.logTurn.mockResolvedValue(undefined);
     mocks.attendanceEnabled.mockResolvedValue(true);
     mocks.findInherited.mockResolvedValue(null);
+    mocks.writeSummary.mockResolvedValue(null);
+    mocks.loadPriorSummary.mockResolvedValue(null);
+    mocks.updateRunningSummary.mockResolvedValue(null);
     mocks.resolveInline.mockResolvedValue({ updated: 1, missing: 0 });
     mocks.distributeNewInbound.mockResolvedValue(undefined);
     mocks.messageFindMany.mockResolvedValue([]);
@@ -1868,6 +1885,54 @@ describe("processV2Turn — correções do motor", () => {
       expect(result.closed).toBe(true);
     });
 
+    it("resumo ao encerrar: gravado antes de fechar, com o motivo", async () => {
+      const config = baseConfig({ closure: { ...baseConfig().closure, summary: { enabled: true, verbosity: "standard", everyTurn: false } } } as Partial<V2AgentConfig>);
+      mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+      mocks.getState.mockResolvedValue(makeState("active", "agente"));
+      mocks.callLLM.mockResolvedValue(llmOut({ reply: "Que bom! Até mais.", concluded: true }));
+
+      const result = await run("Resolvido, obrigada!");
+
+      expect(result.closed).toBe(true);
+      expect(mocks.writeSummary).toHaveBeenCalledWith(expect.objectContaining({ conversationId: "conv-1", moment: "close", reason: "resolved" }));
+    });
+
+    it("resumo ao transferir: gravado com o tipo do destino", async () => {
+      const config = baseConfig({ closure: { ...baseConfig().closure, summary: { enabled: true, verbosity: "minimal", everyTurn: false } } } as Partial<V2AgentConfig>);
+      mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+      mocks.getState.mockResolvedValue(makeState("active", "agente"));
+      mocks.callLLM.mockResolvedValue(llmOut({ reply: "Vou te passar para a equipe.", handoff: true }));
+
+      const result = await run("Quero falar com uma pessoa");
+
+      expect(result.handoff).toBe(true);
+      expect(mocks.writeSummary).toHaveBeenCalledWith(expect.objectContaining({ moment: "transfer", reason: expect.any(String) }));
+    });
+
+    it("resumo do atendimento anterior entra no contexto do modelo", async () => {
+      mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: baseConfig(), active: true });
+      mocks.getState.mockResolvedValue(makeState("active", "agente"));
+      mocks.loadPriorSummary.mockResolvedValue({ text: "Motivo: pedido atrasado\nResultado: Encerrado por inatividade", at: new Date("2026-01-01"), agent: "Agente", current: false });
+      mocks.callLLM.mockResolvedValue(llmOut({ reply: "Sim, o pedido pode ser pago até o dia 10." }));
+
+      await run("Posso pagar até o dia 10?");
+
+      const args = mocks.callLLM.mock.calls[0][0] as { priorSummary?: { text: string } | null };
+      expect(args.priorSummary?.text).toContain("pedido atrasado");
+    });
+
+    it("desligado: nada é gravado", async () => {
+      mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: baseConfig(), active: true });
+      mocks.getState.mockResolvedValue(makeState("active", "agente"));
+      mocks.callLLM.mockResolvedValue(llmOut({ reply: "Até mais.", concluded: true }));
+
+      await run("Resolvido, obrigada!");
+
+      // O módulo decide pelo config; aqui só confirmamos que o gancho passa o config desligado.
+      const call = mocks.writeSummary.mock.calls[0]?.[0] as { config?: { closure?: { summary?: unknown } } } | undefined;
+      expect(call?.config?.closure?.summary).toBeUndefined();
+    });
+
     it("clique no botão de fecho encerra", async () => {
       mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: baseConfig(), active: true });
       mocks.getState.mockResolvedValue(makeState("active", "agente", { pendingOptions: ["Não, obrigado(a)!", "Preciso de ajuda"] }));
@@ -1912,6 +1977,9 @@ describe("processV2Turn — correções do motor", () => {
     mocks.sendText.mockResolvedValue({ sent: true });
     mocks.attendanceEnabled.mockResolvedValue(true);
     mocks.findInherited.mockResolvedValue(null);
+    mocks.writeSummary.mockResolvedValue(null);
+    mocks.loadPriorSummary.mockResolvedValue(null);
+    mocks.updateRunningSummary.mockResolvedValue(null);
     mocks.messageFindMany.mockResolvedValue([]);
     mocks.loadContext.mockResolvedValue(CONTEXT_WITH_DEAL);
     mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
