@@ -420,8 +420,17 @@ async function inboundAlreadyAnswered(conversationId: string, messageIds: string
     const own = await db.message.findMany({ where: { id: { in: messageIds } }, select: { createdAt: true } });
     if (own.length === 0) return false;
     const last = new Date(Math.max(...own.map((m) => new Date(m.createdAt).getTime())));
+    // Só fala de agente/pessoa conta: evento da linha do tempo e resumo
+    // interno não são resposta.
     const reply = await db.message.findFirst({
-      where: { conversationId, direction: "out", isPrivate: false, messageType: { not: "note" }, createdAt: { gt: last } },
+      where: {
+        conversationId,
+        direction: "out",
+        isPrivate: false,
+        authorType: { in: ["bot", "human"] },
+        messageType: { notIn: ["note", SUMMARY_MESSAGE_TYPE] },
+        createdAt: { gt: last },
+      },
       select: { id: true },
     });
     return !!reply;
@@ -2679,6 +2688,14 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     // troca — sem "vou te passar para…"; o outro agente responde direto.
     if (!opts.skipMessage && planned.type === "ai_agent" && planned.id && (await aiAgentReceivesTransparently(planned.id))) {
       traceStep("transferência", "Agente de destino em modo transparente → sem aviso de transferência");
+      opts = { ...opts, skipMessage: true };
+    }
+    // Transferência em cadeia: recebeu de outro agente e transfere de novo
+    // no primeiro turno sem ter respondido nada. O aviso do agente anterior
+    // ("vou te passar para…") já cobriu — repetir soa como ninguém atender.
+    // Se o anterior foi transparente (sem aviso), este aviso sai.
+    if (!opts.skipMessage && handedByAnotherAgent && !sentReply && (await inboundAlreadyAnswered(input.conversationId, input.messageIds))) {
+      traceStep("transferência", "Transferência em cadeia logo após receber a conversa: o aviso do agente anterior já cobriu → sem novo aviso");
       opts = { ...opts, skipMessage: true };
     }
     if (!opts.skipMessage) {

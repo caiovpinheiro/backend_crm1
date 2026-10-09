@@ -774,6 +774,54 @@ describe("processV2Turn", () => {
     expect(sent).not.toContain("Vou transferir");
   });
 
+  it("transferência em cadeia logo após receber: o aviso do agente anterior já cobriu; sem aviso anterior, avisa", async () => {
+    const handoffOut = {
+      reply: "",
+      confirmed: null,
+      handoff: true,
+      concluded: false,
+      outOfScope: true,
+      sentiment: "neutral",
+      collected: {},
+      reason: "Fora do escopo deste agente",
+      actions: [{ type: "handoff", destination: { type: "department" } }],
+    } satisfies V2LLMOutput;
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: baseConfig(), active: true });
+    mocks.getState.mockResolvedValue({ ...makeState("active", "pessoa"), agentId: "agent-0" });
+    mocks.messageFindMany.mockImplementation(async (args: { where?: { id?: { in?: string[] } } }) =>
+      args?.where?.id?.in ? [{ createdAt: new Date("2026-01-01T10:00:00Z") }] : [],
+    );
+    // O agente anterior já mandou "vou te passar para…" depois da mensagem.
+    mocks.messageFindFirst.mockResolvedValue({ id: "m-notice" });
+    mocks.callLLM.mockResolvedValue({ output: handoffOut, inputTokens: 10, outputTokens: 5, latencyMs: 100 });
+
+    const { processV2Turn } = await import("../engine");
+    await processV2Turn({ conversationId: "conv-1", channel: "meta", userMessage: "Quero saber os valores do plano", messageIds: ["m-cur"] });
+
+    expect(mocks.simpleHandoff).toHaveBeenCalledWith(expect.objectContaining({ destination: { type: "department" } }));
+    expect(mocks.sendText.mock.calls.map((c) => (c[0] as { text: string }).text).join(" ")).not.toContain("Vou transferir");
+
+    vi.clearAllMocks();
+    mocks.sendText.mockResolvedValue({ sent: true });
+    mocks.upsertState.mockResolvedValue(undefined);
+    mocks.logTurn.mockResolvedValue(undefined);
+    mocks.loadPriorSummary.mockResolvedValue(null);
+    mocks.appliedRules.mockResolvedValue(new Set());
+    mocks.simpleHandoff.mockResolvedValue(undefined);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: baseConfig(), active: true });
+    mocks.getState.mockResolvedValue({ ...makeState("active", "pessoa"), agentId: "agent-0" });
+    mocks.messageFindMany.mockImplementation(async (args: { where?: { id?: { in?: string[] } } }) =>
+      args?.where?.id?.in ? [{ createdAt: new Date("2026-01-01T10:00:00Z") }] : [],
+    );
+    // Anterior transparente: nada foi dito depois da mensagem → este avisa.
+    mocks.messageFindFirst.mockResolvedValue(null);
+    mocks.callLLM.mockResolvedValue({ output: handoffOut, inputTokens: 10, outputTokens: 5, latencyMs: 100 });
+
+    await processV2Turn({ conversationId: "conv-1", channel: "meta", userMessage: "Quero saber os valores do plano", messageIds: ["m-cur"] });
+
+    expect(mocks.sendText.mock.calls.map((c) => (c[0] as { text: string }).text).join(" ")).toContain("Vou transferir");
+  });
+
   it("destino de transferência igual ao próprio agente vai para o destino padrão, não para si mesmo", async () => {
     mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: baseConfig(), active: true });
     mocks.getState.mockResolvedValue(makeState("active", "agente"));
