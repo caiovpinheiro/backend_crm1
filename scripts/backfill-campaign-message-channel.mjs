@@ -12,10 +12,12 @@
  */
 import { Client } from "pg";
 
+import { pgConnectionConfig } from "./lib/pg-ssl.mjs";
+
 const APPLY = process.argv.includes("--apply");
 const TARGET_ORG = process.env.TARGET_ORG_ID ?? null;
 
-const c = new Client({ connectionString: process.env.DATABASE_URL });
+const c = new Client(pgConnectionConfig());
 await c.connect();
 
 const orgClause = TARGET_ORG ? `AND camp."organizationId" = $1` : "";
