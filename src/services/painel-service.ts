@@ -11,11 +11,14 @@ import { Prisma } from "@prisma/client";
 
 import { analyticsClient, isReplicaConnectionError, tripReplica } from "@/lib/analytics";
 import { isReplicaActive, isReplicaTripped } from "@/lib/prisma-replica";
+import { localTs } from "@/lib/local-time-sql";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { getPainelAgora, type PainelAgora } from "@/services/painel-agora";
 import { loadPainelHours } from "@/services/painel-hours";
 import {
   DEFAULT_NO_REPLY_HOURS,
+  PAINEL_MAX_RANGE_MS,
+  clampRangeFromEnd,
   dayKeyFromDate,
   eachDayKey,
   mean,
@@ -32,10 +35,26 @@ import {
   type PainelRange,
 } from "@/services/painel-period";
 import { getLogger } from "@/lib/logger";
+import type { ServerTiming } from "@/lib/server-timing";
 
 const log = getLogger("painel-service");
 
-export type PainelBlock<T> = { ok: true; data: T } | { ok: false; error: string };
+/**
+ * Motivo (aditivo) de um bloco `ok:false`. Ausente = bloco não pedido
+ * (`error: "omitido"`) ou falha de execução (`error` genérico, detalhe no log).
+ *  - `no_replica`: bloco pedido, mas pulado porque este bloco só roda na réplica
+ *    de leitura (`DATABASE_URL_REPLICA`) e ela está ausente ou derrubada.
+ */
+export type PainelBlockReason = "no_replica";
+
+export type PainelBlock<T> =
+  | { ok: true; data: T }
+  | { ok: false; error: string; reason?: PainelBlockReason };
+
+/** Mensagem do bloco `no_replica` (o front pode ramificar por `reason`, não por texto). */
+export const PAINEL_NO_REPLICA_MESSAGE = "Indisponível sem réplica de leitura";
+/** Mensagem do bloco que falhou: o erro do banco fica só no log estruturado. */
+export const PAINEL_BLOCK_ERROR = "Falha ao carregar este bloco.";
 
 export type PainelTimeStat = {
   medianMs: number | null;
@@ -43,14 +62,58 @@ export type PainelTimeStat = {
   sample: number;
 };
 
+/**
+ * Partição do período (aditivo). Os KPIs de `PainelVolume` NÃO formam uma
+ * partição entre si: `started` e `finished` medem conjuntos diferentes.
+ *
+ *  - COORTE `started` = conversas CRIADAS no período (`createdAt` no período).
+ *    Cada uma tem UMA situação atual, então
+ *      started = resolved + open + other
+ *      open    = stillOpen = openStarted + openWaiting
+ *  - FLUXO `finished` = conversas ENCERRADAS no período (`status` RESOLVED e
+ *    `closedAt` no período), seja qual for a data de criação, então
+ *      finished = finishedFromStarted + finishedCarryover
+ *
+ * Os dois só se encontram em `finishedFromStarted` (criada e encerrada no
+ * período). Por isso `finished + stillOpen` pode passar de `started` (as
+ * encerradas que vieram de antes do período entram em `finished` e não em
+ * `started`) e pode ficar abaixo (criada no período e encerrada depois dele,
+ * ou reaberta, não está em `finished`).
+ *
+ * Situação ATUAL, não histórica: encerrar limpa/define `closedAt`, reabrir
+ * (status OPEN) limpa `closedAt`. Conversa encerrada no período e reaberta
+ * depois sai de `finished`; reaberta, conta em `open` se foi criada no período.
+ * Cada conversa (linha em `conversations`) conta uma vez em `started`.
+ */
+export type PainelVolumePartition = {
+  /** Coorte: criadas no período, hoje encerradas (status RESOLVED, `closedAt` em qualquer data). */
+  resolved: number;
+  /** Coorte: criadas no período e abertas (= `stillOpen`). */
+  open: number;
+  /**
+   * Coorte: o resto. Criadas no período, fora de `resolved` e de `open`:
+   * status PENDING/SNOOZED que ainda guardam `closedAt` de um encerramento anterior.
+   */
+  other: number;
+  /** Fluxo: encerradas no período que também foram criadas nele. */
+  finishedFromStarted: number;
+  /** Fluxo: encerradas no período mas criadas ANTES dele. */
+  finishedCarryover: number;
+};
+
 export type PainelVolume = {
+  /** Criadas no período (coorte). Ver `PainelVolumePartition`. */
   started: { value: number; delta: PainelDelta };
+  /** Encerradas no período, de qualquer criação (fluxo). NÃO é subconjunto de `started`. */
   finished: { value: number; delta: PainelDelta };
+  /** Coorte `started` ainda aberta (status não RESOLVED e sem `closedAt`). */
   stillOpen: { value: number; delta: PainelDelta };
   /** Abertas do período que já tiveram resposta humana. */
   openStarted: { value: number; delta: PainelDelta };
   /** Abertas do período ainda aguardando primeira resposta humana. */
   openWaiting: { value: number; delta: PainelDelta };
+  /** Aditivo: como `started` e `finished` se decompõem. */
+  partition: PainelVolumePartition;
   messagesIn: number;
   messagesOut: number;
   byDay: { date: string; started: number; finished: number; incomplete: boolean }[];
@@ -174,7 +237,7 @@ const PLATFORM_COLORS: Record<string, string> = {
 };
 const MAX_CONNECTION_SERIES = 6;
 /** First-reply / close metrics: full selected range, but never more than 90d. */
-const REPLY_RANGE_MAX_MS = 90 * 24 * 60 * 60 * 1000;
+const REPLY_RANGE_MAX_MS = PAINEL_MAX_RANGE_MS;
 /** Subsequent waits: last 14d of the range, capped inbound rows. */
 const SUBSEQUENT_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
 const SUBSEQUENT_INBOUND_CAP = 1_500;
@@ -185,12 +248,6 @@ const CLOSED_ROWS_CAP = 4_000;
 /** Replica when healthy; primary if unset or tripped after a connect timeout. */
 function db() {
   return analyticsClient();
-}
-
-function clampRangeFromEnd(range: PainelRange, maxMs: number): PainelRange {
-  const span = range.to.getTime() - range.from.getTime();
-  if (span <= maxMs) return range;
-  return { from: new Date(range.to.getTime() - maxMs), to: range.to };
 }
 
 function openWhere(): Prisma.ConversationWhereInput {
@@ -252,7 +309,7 @@ function fillDailyPoints(
   });
 }
 
-async function wrap<T>(fn: () => Promise<T>): Promise<PainelBlock<T>> {
+async function wrap<T>(block: string, fn: () => Promise<T>): Promise<PainelBlock<T>> {
   try {
     return { ok: true, data: await fn() };
   } catch (e) {
@@ -261,20 +318,15 @@ async function wrap<T>(fn: () => Promise<T>): Promise<PainelBlock<T>> {
       try {
         return { ok: true, data: await fn() };
       } catch (retryErr) {
-        log.error({ err: retryErr }, "[painel/service] falhou");
-        return {
-          ok: false,
-          error: retryErr instanceof Error ? retryErr.message : "Falha ao carregar este bloco.",
-        };
+        log.error({ err: retryErr, block }, "[painel/service] bloco falhou");
+        return { ok: false, error: PAINEL_BLOCK_ERROR };
       }
     }
-    log.error({ err: e }, "[painel/service] falhou");
-    return {
-      ok: false,
-      error: e instanceof Error ? e.message : "Falha ao carregar este bloco.",
-    };
+    log.error({ err: e, block }, "[painel/service] bloco falhou");
+    return { ok: false, error: PAINEL_BLOCK_ERROR };
   }
 }
+
 
 type ReplyPair = {
   conversationId: string;
@@ -587,6 +639,7 @@ export async function getPainelVolume(
         stillOpen: bigint;
         openStarted: bigint;
         openWaiting: bigint;
+        resolved: bigint;
       }[]
     >(Prisma.sql`
       SELECT
@@ -601,13 +654,19 @@ export async function getPainelVolume(
         COUNT(*) FILTER (
           WHERE conv.status <> 'RESOLVED'::"ConversationStatus" AND conv."closedAt" IS NULL
             AND conv."hasHumanReply" = false
-        )::bigint AS "openWaiting"
+        )::bigint AS "openWaiting",
+        COUNT(*) FILTER (
+          WHERE conv.status = 'RESOLVED'::"ConversationStatus"
+        )::bigint AS resolved
       FROM conversations conv
       WHERE conv."organizationId" = ${orgId}
         AND conv."createdAt" >= ${range.from} AND conv."createdAt" <= ${range.to}
     `),
-    db().$queryRaw<{ finished: bigint }[]>(Prisma.sql`
-      SELECT COUNT(*)::bigint AS finished
+    db().$queryRaw<{ finished: bigint; fromStarted: bigint }[]>(Prisma.sql`
+      SELECT COUNT(*)::bigint AS finished,
+             COUNT(*) FILTER (
+               WHERE conv."createdAt" >= ${range.from} AND conv."createdAt" <= ${range.to}
+             )::bigint AS "fromStarted"
       FROM conversations conv
       WHERE conv."organizationId" = ${orgId}
         AND conv.status = 'RESOLVED'::"ConversationStatus"
@@ -615,7 +674,7 @@ export async function getPainelVolume(
         AND conv."closedAt" >= ${range.from} AND conv."closedAt" <= ${range.to}
     `),
     db().$queryRaw<{ d: Date; c: bigint }[]>(Prisma.sql`
-      SELECT (conv."createdAt" AT TIME ZONE 'America/Sao_Paulo')::date AS d,
+      SELECT ${localTs('conv."createdAt"')}::date AS d,
              COUNT(*)::bigint AS c
       FROM conversations conv
       WHERE conv."organizationId" = ${orgId}
@@ -623,7 +682,7 @@ export async function getPainelVolume(
       GROUP BY 1
     `),
     db().$queryRaw<{ d: Date; c: bigint }[]>(Prisma.sql`
-      SELECT (conv."closedAt" AT TIME ZONE 'America/Sao_Paulo')::date AS d,
+      SELECT ${localTs('conv."closedAt"')}::date AS d,
              COUNT(*)::bigint AS c
       FROM conversations conv
       WHERE conv."organizationId" = ${orgId}
@@ -642,6 +701,8 @@ export async function getPainelVolume(
   const stillOpen = Number(c?.stillOpen ?? 0);
   const openStarted = Number(c?.openStarted ?? 0);
   const openWaiting = Number(c?.openWaiting ?? 0);
+  const resolved = Number(c?.resolved ?? 0);
+  const finishedFromStarted = Number(finishedRow[0]?.fromStarted ?? 0);
   const hiddenDelta = painelDelta(0, 0, 0);
   // Full-period COUNT on `messages` locks the primary. Volume KPIs come from
   // conversations; the chart subtitle omits message totals when they are 0.
@@ -677,6 +738,13 @@ export async function getPainelVolume(
     openWaiting: {
       value: openWaiting,
       delta: hiddenDelta,
+    },
+    partition: {
+      resolved,
+      open: stillOpen,
+      other: Math.max(0, started - resolved - stillOpen),
+      finishedFromStarted,
+      finishedCarryover: Math.max(0, finished - finishedFromStarted),
     },
     messagesIn,
     messagesOut,
@@ -761,8 +829,8 @@ export async function getPainelHeatmap(range: PainelRange): Promise<PainelHeatma
   const rows = await db().$queryRaw<
     { dow: number; h: number; c: bigint; deptId: string | null; deptName: string | null }[]
   >(Prisma.sql`
-    SELECT EXTRACT(DOW FROM conv."createdAt" AT TIME ZONE 'America/Sao_Paulo')::int AS dow,
-           EXTRACT(HOUR FROM conv."createdAt" AT TIME ZONE 'America/Sao_Paulo')::int AS h,
+    SELECT EXTRACT(DOW FROM ${localTs('conv."createdAt"')})::int AS dow,
+           EXTRACT(HOUR FROM ${localTs('conv."createdAt"')})::int AS h,
            conv."departmentId" AS "deptId",
            d.name AS "deptName",
            COUNT(*)::bigint AS c
@@ -1077,7 +1145,7 @@ export async function getPainelByDepartment(
   const [daily, counts] = await Promise.all([
     db().$queryRaw<{ d: Date; deptId: string | null; deptName: string | null; c: bigint }[]>(
       Prisma.sql`
-        SELECT (conv."createdAt" AT TIME ZONE 'America/Sao_Paulo')::date AS d,
+        SELECT ${localTs('conv."createdAt"')}::date AS d,
                conv."departmentId" AS "deptId",
                d.name AS "deptName",
                COUNT(*)::bigint AS c
@@ -1225,7 +1293,7 @@ export async function getPainelConnections(range: PainelRange): Promise<PainelCo
       c: bigint;
     }[]
   >(Prisma.sql`
-    SELECT (conv."createdAt" AT TIME ZONE 'America/Sao_Paulo')::date AS d,
+    SELECT ${localTs('conv."createdAt"')}::date AS d,
            conv."channelId" AS "chId",
            ch.name AS "chName",
            ch."phoneNumber" AS phone,
@@ -1417,12 +1485,29 @@ export async function getPainelService(
   range: PainelRange,
   clock: ClockMode,
   sections: PainelServiceSection[] = [...SERVICE_SECTIONS],
+  timing?: ServerTiming,
 ): Promise<PainelServiceResult> {
   const want = new Set(sections);
-  const omit = <T,>(msg = "omitido"): PainelBlock<T> => ({
-    ok: false,
-    error: msg,
-  });
+  // `Server-Timing`: uma fase `q-<seção>` por seção que rodou (soma as tentativas,
+  // se a réplica caiu e o bloco repetiu) e `q-shared` para a carga compartilhada
+  // por tempo/atendentes/departamento/canais. Seções rodam em paralelo: as fases
+  // se sobrepõem e a soma passa do `total`. Seção pulada por falta de réplica
+  // leva `desc = no_replica` e dur 0; seção não pedida não aparece.
+  const timed = <T,>(phase: string, fn: () => Promise<T>): Promise<T> =>
+    timing ? timing.time(phase, fn) : fn();
+  // Seção NÃO pedida: sempre "omitido", sem `reason`.
+  const omit = <T,>(): PainelBlock<T> => ({ ok: false, error: "omitido" });
+  // Seção pedida, mas que só roda na réplica de leitura e ela não está disponível.
+  const noReplica = <T,>(block: PainelServiceSection): PainelBlock<T> => {
+    timing?.describe(`q-${block}`, "no_replica");
+    return {
+      ok: false,
+      error: PAINEL_NO_REPLICA_MESSAGE,
+      reason: "no_replica",
+    };
+  };
+  const run = <T,>(block: PainelServiceSection, fn: () => Promise<T>) =>
+    wrap(block, () => timed(`q-${block}`, fn));
 
   const replicaOk = isReplicaActive() && !isReplicaTripped();
   const needReplyMetrics =
@@ -1432,49 +1517,53 @@ export async function getPainelService(
       want.has("byDepartment") ||
       want.has("channels"));
   const sharedPromise = needReplyMetrics
-    ? loadSharedServiceMetrics(range)
+    ? timed("q-shared", () => loadSharedServiceMetrics(range))
     : Promise.resolve(null);
 
   const withShared = <T,>(
-    needed: boolean,
+    block: PainelServiceSection,
     fn: (shared: SharedServiceMetrics) => Promise<T>,
   ): Promise<PainelBlock<T>> => {
-    if (!needed) return Promise.resolve(omit<T>());
+    if (!want.has(block)) return Promise.resolve(omit<T>());
     return sharedPromise.then(
-      (shared) => (shared ? wrap(() => fn(shared)) : Promise.resolve(omit<T>())),
-      (e) => {
-        log.error({ err: e }, "[painel/service] falhou");
-        return omit<T>(e instanceof Error ? e.message : "Falha ao carregar este bloco.");
+      (shared) => (shared ? run(block, () => fn(shared)) : Promise.resolve(noReplica<T>(block))),
+      (e): PainelBlock<T> => {
+        log.error({ err: e, block }, "[painel/service] bloco falhou");
+        return { ok: false, error: PAINEL_BLOCK_ERROR };
       },
     );
   };
 
   const agora = want.has("agora")
-    ? await wrap(() => getPainelAgora(clock))
+    ? await run("agora", () => getPainelAgora(clock))
     : omit<PainelAgora>();
   const volume = want.has("volume")
-    ? await wrap(() => getPainelVolume(range, clock))
+    ? await run("volume", () => getPainelVolume(range, clock))
     : omit<PainelVolume>();
   const [tempo, heatmap, byDepartment, connections, attendants, channels, exceptions] =
     await Promise.all([
-      withShared(want.has("tempo"), (shared) => getPainelTempo(range, clock, shared)),
-      want.has("heatmap") && replicaOk
-        ? wrap(() => getPainelHeatmap(range))
-        : Promise.resolve(omit<PainelHeatmap>()),
-      withShared(want.has("byDepartment"), (shared) =>
+      withShared("tempo", (shared) => getPainelTempo(range, clock, shared)),
+      !want.has("heatmap")
+        ? Promise.resolve(omit<PainelHeatmap>())
+        : replicaOk
+          ? run("heatmap", () => getPainelHeatmap(range))
+          : Promise.resolve(noReplica<PainelHeatmap>("heatmap")),
+      withShared("byDepartment", (shared) =>
         getPainelByDepartment(range, clock, shared),
       ),
-      want.has("connections") && replicaOk
-        ? wrap(() => getPainelConnections(range))
-        : Promise.resolve(omit<PainelConnections>()),
-      withShared(want.has("attendants"), (shared) =>
+      !want.has("connections")
+        ? Promise.resolve(omit<PainelConnections>())
+        : replicaOk
+          ? run("connections", () => getPainelConnections(range))
+          : Promise.resolve(noReplica<PainelConnections>("connections")),
+      withShared("attendants", (shared) =>
         getPainelAttendants(range, clock, shared),
       ),
-      withShared(want.has("channels"), (shared) =>
+      withShared("channels", (shared) =>
         getPainelChannels(range, clock, shared),
       ),
       want.has("exceptions")
-        ? wrap(() => getPainelServiceExceptions(clock))
+        ? run("exceptions", () => getPainelServiceExceptions(clock))
         : Promise.resolve(omit<PainelServiceException[]>()),
     ]);
 

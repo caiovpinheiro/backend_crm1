@@ -53,6 +53,21 @@ export class ServerTiming {
     }
   }
 
+  /**
+   * Fase `cache` com o resultado do cache. Um relatório: `hit`/`miss`/`stale`.
+   * Vários blocos (um cache por bloco): o status único quando todos iguais, senão
+   * `bloco=status bloco=status`. `ms` (tempo de espera pelo cache) soma na fase.
+   */
+  describeCache(statuses: ReadonlyMap<string, string>, ms = 0): void {
+    if (statuses.size === 0) return;
+    const values = new Set(statuses.values());
+    const desc =
+      values.size === 1
+        ? [...values][0]
+        : [...statuses].map(([block, status]) => `${block}=${status}`).join(" ");
+    this.add("cache", ms, desc);
+  }
+
   totalMs(): number {
     return performance.now() - this.startedAt;
   }

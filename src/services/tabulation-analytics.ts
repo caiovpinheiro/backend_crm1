@@ -32,6 +32,21 @@ function uniqueIds(...groups: Array<string | string[] | null | undefined>): stri
   return out;
 }
 
+/**
+ * Quem tabulou. Aditivo: `actorUserId`/`actorName` continuam com o significado
+ * antigo (só o usuário gravado no evento); `actor` diz de fato quem agiu.
+ *  - `user`: pessoa (id = usuário; name = nome do usuário).
+ *  - `ai_agent`: agente de IA (id = id do agente em `AIAgentConfig`, quando
+ *    gravado; name = nome do agente).
+ *  - `automation`: passo de automação (id = id da automação; name = nome dela).
+ *  - `system`: o resto (encerramento em massa, integração, evento sem ator).
+ */
+export type TabulationActor = {
+  kind: "user" | "automation" | "ai_agent" | "system";
+  id: string | null;
+  name: string | null;
+};
+
 export type TabulationAnalyticsRow = {
   id: string;
   occurredAt: string;
@@ -40,6 +55,7 @@ export type TabulationAnalyticsRow = {
   contactName: string | null;
   actorUserId: string | null;
   actorName: string | null;
+  actor: TabulationActor;
   tabulationId: string | null;
   tabulationName: string | null;
   tabulationNumber: number | null;
@@ -74,7 +90,15 @@ export type TabulationByUserItem = {
 };
 
 export type TabulationAnalyticsResult = {
+  /**
+   * Conversas tabuladas no período (cada uma conta uma vez, pela tabulação mais
+   * recente dela no período) + eventos sem conversa. Vale para os KPIs e para
+   * `byTabulation`/`byUser`/`distinct*`. NÃO é o tamanho do log paginado: use
+   * `eventsTotal` para paginar `items`.
+   */
   total: number;
+  /** Aditivo: todos os eventos que casam com os filtros (o log mostra todos). */
+  eventsTotal: number;
   page: number;
   perPage: number;
   /**
@@ -108,6 +132,58 @@ function metaNumber(
   if (typeof v === "number" && Number.isFinite(v)) return v;
   if (typeof v === "string" && /^\d+$/.test(v)) return Number(v);
   return null;
+}
+
+export type TabulationActorSource = {
+  actorType: string | null;
+  actorUserId: string | null;
+  actorLabel: string | null;
+  actorRef: string | null;
+  actorUser: { name: string | null; type: string } | null;
+  meta: Prisma.JsonValue | null | undefined;
+};
+
+/**
+ * Deduz o ator de um evento `CONVERSATION_TABULATED`. O tipo gravado
+ * (`actorType`) manda sobre o `actorUserId`: dentro de uma automação ou de um
+ * turno de IA o `actorUserId` é só o usuário do contexto (pode ser o humano que
+ * mandou a mensagem, ou nulo), não quem tabulou. Origens:
+ *  - humano (outbox de `/conversations/[id]/actions`): HUMAN + actorUserId;
+ *  - IA (`tabulation-classify`, `close-ai-conversation`): AI + actorLabel (nome
+ *    do agente) + actorRef (id do agente) pelo `runWithActor` do runner; sem
+ *    contexto cai em `meta.source = "AI_AGENT"`;
+ *  - automação (`automation-executor`): AUTOMATION + actorLabel (nome) +
+ *    actorRef (id), ou `meta.source = "automation"`;
+ *  - o resto (`bulk-sync`, integração, sem ator): sistema.
+ * `agentNames` completa o nome do agente quando o evento não guardou o rótulo.
+ */
+export function resolveTabulationActor(
+  ev: TabulationActorSource,
+  agentNames: ReadonlyMap<string, string> = new Map(),
+): TabulationActor {
+  const type = (ev.actorType ?? "").toUpperCase();
+  const source = (metaString(ev.meta, "source") ?? "").toLowerCase();
+  const label = ev.actorLabel?.trim() || null;
+
+  if (type === "AUTOMATION" || (type !== "AI" && type !== "HUMAN" && source === "automation")) {
+    return { kind: "automation", id: ev.actorRef, name: label };
+  }
+  if (type === "AI" || ev.actorUser?.type === "AI" || (type !== "HUMAN" && source === "ai_agent")) {
+    const aiUserId = ev.actorUser?.type === "AI" ? ev.actorUserId : null;
+    const id = ev.actorRef ?? aiUserId;
+    return {
+      kind: "ai_agent",
+      id,
+      name: label ?? (ev.actorRef ? agentNames.get(ev.actorRef) : null) ?? ev.actorUser?.name ?? null,
+    };
+  }
+  if (type === "HUMAN" && ev.actorUserId) {
+    return { kind: "user", id: ev.actorUserId, name: ev.actorUser?.name ?? label };
+  }
+  if (!type && ev.actorUserId) {
+    return { kind: "user", id: ev.actorUserId, name: ev.actorUser?.name ?? label };
+  }
+  return { kind: "system", id: null, name: label ?? "Sistema" };
 }
 
 async function buildPathMap(
@@ -201,12 +277,37 @@ export async function getTabulationAnalytics(
   // Agregação no Postgres. A versão anterior puxava até 5000 eventos e
   // contava em memória: acima disso o "total" simplesmente parava de crescer,
   // sem aviso, e os filtros de meta rodavam DEPOIS do corte.
-  const conds: Prisma.Sql[] = [
-    Prisma.sql`"organizationId" = ${orgId}`,
-    Prisma.sql`"type" = 'CONVERSATION_TABULATED'`,
-    Prisma.sql`"occurredAt" >= ${filters.from}`,
-    Prisma.sql`"occurredAt" <= ${filters.to}`,
+  //
+  // REGRA DE CONTAGEM (totais e rankings): conversa retabulada no período conta
+  // UMA vez, pela tabulação mais recente dela no período (maior occurredAt; id
+  // desempata). Evento sem conversationId conta como está. O recorte do período
+  // vem primeiro; os filtros (atendente, departamento, tabulação) valem sobre a
+  // tabulação vigente: filtrar por uma tabulação antiga que a conversa já
+  // trocou não a conta. O log paginado (`items`) continua mostrando TODOS os
+  // eventos e `eventsTotal` conta todos eles.
+  const periodConds: Prisma.Sql[] = [
+    Prisma.sql`e."organizationId" = ${orgId}`,
+    Prisma.sql`e."type" = 'CONVERSATION_TABULATED'`,
+    Prisma.sql`e."occurredAt" >= ${filters.from}`,
+    Prisma.sql`e."occurredAt" <= ${filters.to}`,
   ];
+  const periodSql = Prisma.join(periodConds, " AND ");
+  const latestCte = Prisma.sql`
+    WITH latest AS (
+      (
+        SELECT DISTINCT ON (e."conversationId") e.id, e."actorUserId", e.meta
+        FROM "activity_events" e
+        WHERE ${periodSql} AND e."conversationId" IS NOT NULL
+        ORDER BY e."conversationId", e."occurredAt" DESC, e.id DESC
+      )
+      UNION ALL
+      (
+        SELECT e.id, e."actorUserId", e.meta
+        FROM "activity_events" e
+        WHERE ${periodSql} AND e."conversationId" IS NULL
+      )
+    )`;
+  const conds: Prisma.Sql[] = [];
   if (actorUserIds.length === 1) {
     conds.push(Prisma.sql`"actorUserId" = ${actorUserIds[0]}`);
   } else if (actorUserIds.length > 1) {
@@ -222,7 +323,7 @@ export async function getTabulationAnalytics(
   } else if (tabulationIds.length > 1) {
     conds.push(Prisma.sql`meta->>'tabulationId' IN (${Prisma.join(tabulationIds)})`);
   }
-  const whereSql = Prisma.join(conds, " AND ");
+  const whereSql = conds.length ? Prisma.join(conds, " AND ") : Prisma.sql`TRUE`;
 
   const metaAnd: Prisma.ActivityEventWhereInput[] = [];
   if (departmentIds.length === 1) {
@@ -248,44 +349,51 @@ export async function getTabulationAnalytics(
     });
   }
 
-  const [totals, tabRows, userRows, pageItems] = await Promise.all([
+  const eventsWhere: Prisma.ActivityEventWhereInput = {
+    organizationId: orgId,
+    type: "CONVERSATION_TABULATED",
+    occurredAt: { gte: filters.from, lte: filters.to },
+    ...(actorUserIds.length === 1
+      ? { actorUserId: actorUserIds[0] }
+      : actorUserIds.length > 1
+        ? { actorUserId: { in: actorUserIds } }
+        : {}),
+    ...(metaAnd.length > 0 ? { AND: metaAnd } : {}),
+  };
+
+  const [totals, tabRows, userRows, eventsCount, pageItems] = await Promise.all([
     analyticsClient().$queryRaw<
       { total: bigint; distinct_tabulations: bigint; distinct_users: bigint }[]
     >(Prisma.sql`
+      ${latestCte}
       SELECT COUNT(*)::bigint AS total,
              COUNT(DISTINCT meta->>'tabulationId')::bigint AS distinct_tabulations,
              COUNT(DISTINCT "actorUserId")::bigint AS distinct_users
-      FROM "activity_events"
+      FROM latest
       WHERE ${whereSql}
     `),
     analyticsClient().$queryRaw<{ id: string; count: bigint }[]>(Prisma.sql`
+      ${latestCte}
       SELECT meta->>'tabulationId' AS id, COUNT(*)::bigint AS count
-      FROM "activity_events"
+      FROM latest
       WHERE ${whereSql} AND meta->>'tabulationId' IS NOT NULL
       GROUP BY 1
       ORDER BY count DESC
       LIMIT ${TOP_LIMIT}
     `),
     analyticsClient().$queryRaw<{ id: string; count: bigint }[]>(Prisma.sql`
+      ${latestCte}
       SELECT "actorUserId" AS id, COUNT(*)::bigint AS count
-      FROM "activity_events"
+      FROM latest
       WHERE ${whereSql} AND "actorUserId" IS NOT NULL
       GROUP BY 1
       ORDER BY count DESC
       LIMIT ${TOP_LIMIT}
     `),
+    // Todos os eventos que casam com os filtros (paginação do log).
+    analyticsClient().activityEvent.count({ where: eventsWhere }),
     analyticsClient().activityEvent.findMany({
-      where: {
-        organizationId: orgId,
-        type: "CONVERSATION_TABULATED",
-        occurredAt: { gte: filters.from, lte: filters.to },
-        ...(actorUserIds.length === 1
-          ? { actorUserId: actorUserIds[0] }
-          : actorUserIds.length > 1
-            ? { actorUserId: { in: actorUserIds } }
-            : {}),
-        ...(metaAnd.length > 0 ? { AND: metaAnd } : {}),
-      },
+      where: eventsWhere,
       orderBy: { occurredAt: "desc" },
       skip: (page - 1) * perPage,
       take: perPage,
@@ -295,14 +403,18 @@ export async function getTabulationAnalytics(
         conversationId: true,
         contactId: true,
         actorUserId: true,
+        actorType: true,
+        actorLabel: true,
+        actorRef: true,
         meta: true,
-        actorUser: { select: { id: true, name: true } },
+        actorUser: { select: { id: true, name: true, type: true } },
         contact: { select: { id: true, name: true } },
       },
     }),
   ]);
 
   const total = Number(totals[0]?.total ?? 0);
+  const eventsTotal = eventsCount;
   const distinctTabulations = Number(totals[0]?.distinct_tabulations ?? 0);
   const distinctUsers = Number(totals[0]?.distinct_users ?? 0);
 
@@ -313,6 +425,23 @@ export async function getTabulationAnalytics(
       select: { id: true, name: true },
     });
     for (const u of users) userNames.set(u.id, u.name ?? "Usuário");
+  }
+
+  // Nome do agente de IA quando o evento só guardou o id (`actorRef`).
+  const agentRefs = [
+    ...new Set(
+      pageItems
+        .filter((e) => (e.actorType === "AI" || e.actorUser?.type === "AI") && e.actorRef && !e.actorLabel)
+        .map((e) => e.actorRef as string),
+    ),
+  ];
+  const agentNames = new Map<string, string>();
+  if (agentRefs.length > 0) {
+    const agents = await analyticsClient().aIAgentConfig.findMany({
+      where: { organizationId: orgId, id: { in: agentRefs } },
+      select: { id: true, user: { select: { name: true } } },
+    });
+    for (const a of agents) if (a.user?.name) agentNames.set(a.id, a.user.name);
   }
 
   // O ranking é top 20, mas a página do log pode citar tabulações fora dele —
@@ -379,6 +508,17 @@ export async function getTabulationAnalytics(
       contactName: e.contact?.name ?? null,
       actorUserId: e.actorUserId,
       actorName: e.actorUser?.name ?? null,
+      actor: resolveTabulationActor(
+        {
+          actorType: e.actorType,
+          actorUserId: e.actorUserId,
+          actorLabel: e.actorLabel,
+          actorRef: e.actorRef,
+          actorUser: e.actorUser,
+          meta: e.meta,
+        },
+        agentNames,
+      ),
       tabulationId,
       tabulationName:
         info?.name ?? metaString(e.meta, "tabulationName") ?? null,
@@ -394,6 +534,7 @@ export async function getTabulationAnalytics(
 
   return {
     total,
+    eventsTotal,
     page,
     perPage,
     distinctTabulations,

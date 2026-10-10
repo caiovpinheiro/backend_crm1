@@ -457,6 +457,16 @@ export function contactSourceOptionsKey(orgId: string): string {
   return `contact_sources:${orgId}`;
 }
 
+// ── Relatórios (painel de equipe, tabulações, uso do sistema) ───
+//
+// Valor em envelope SWR (`cache.wrapSwr`), sem invalidação por escrita. A chave
+// leva a org e a impressão digital dos parâmetros (`reportFingerprint`: período
+// ao minuto, ids ordenados). Ver `lib/report-cache.ts`.
+
+export function reportKey(name: string, orgId: string, fingerprint: string): string {
+  return `report:${name}:${orgId}:${fingerprint}`;
+}
+
 // ── Stage Metrics (headers do Kanban) ───────────────────────────
 //
 // computeStageMetrics agrega os deals abertos do pipeline a cada carga do
