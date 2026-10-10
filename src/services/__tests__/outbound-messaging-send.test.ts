@@ -222,10 +222,16 @@ describe("sendTextToConversation — caminho feliz", () => {
       where: { id: "conv-1" },
       data: { ...HUMAN_OUTBOUND_REPLY_MARK, hasError: false },
     });
-    const raw = h.executeRaw.mock.calls.at(-1)!;
-    const rawText = Array.isArray(raw[0]) ? (raw[0] as string[]).join("?") : "";
-    expect(rawText).toContain('GREATEST("lastMessageAt"');
+    // Conversa (GREATEST) e, em seguida, a última mensagem do contato (Kanban).
+    const rawTextOf = (call: unknown[]) =>
+      Array.isArray(call[0]) ? (call[0] as string[]).join("?") : "";
+    const raw = h.executeRaw.mock.calls.at(-2)!;
+    expect(rawTextOf(raw)).toContain('GREATEST("lastMessageAt"');
     expect(raw).toContain(MESSAGE_CREATED_AT);
+    const contactRaw = h.executeRaw.mock.calls.at(-1)!;
+    expect(rawTextOf(contactRaw)).toContain("UPDATE contacts ct");
+    expect(contactRaw).toContain(MESSAGE_CREATED_AT);
+    expect(contactRaw).toContain("out");
     expect(h.ssePublish).toHaveBeenCalledWith("new_message", {
       organizationId: ORG,
       conversationId: "conv-1",

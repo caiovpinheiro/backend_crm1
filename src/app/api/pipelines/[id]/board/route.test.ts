@@ -9,12 +9,21 @@
  *   - idas ao banco em série (`dbDepth`): profundidade do encadeamento das
  *     consultas, como em `io-probe.ts`; o `include` do Prisma sem
  *     `relationJoins` conta 3 níveis (deals → relações → tag);
- *   - total de consultas e as fases do `Server-Timing`.
+ *   - total de consultas e as fases do `Server-Timing`;
+ *   - linhas que o "banco" devolve ao Node (`pgRows`, K6): o tamanho do
+ *     resultado de cada consulta; no `include` do Prisma conta também as
+ *     linhas das relações (contato, dono, tags, atividades), que o motor
+ *     busca em consultas próprias.
  * Estimativa de produção = CPU + `dbDepth` × (15 a 50 ms, o tempo de
  * consulta medido pelo dono).
  *
  * Cenários: POST 200/etapa sem filtro (erro e acerto), com filtro de tag e
- * de origem do contato; GET 10/etapa (Kanban).
+ * de origem do contato; GET 10/etapa (Kanban); e, para o K6, a carga padrão
+ * (sem `perStage`), a ordenação por última interação e o filtro "Mensagem
+ * recebida".
+ *
+ * Cada contato tem uma conversa (1 em 10 não tem nenhuma), 1 em 4 com não
+ * lidas, e pelo menos 5 mensagens do cliente e 1 nossa.
  *
  * NÃO é produção: sem rede, sem compressão HTTP, sem motor do Prisma. Serve
  * para comparar antes × depois no mesmo ambiente. Com
@@ -44,6 +53,12 @@ const h = vi.hoisted(() => {
       down: false,
     },
     pg: [] as string[],
+    /** Backfill de `contacts.lastMessageAt` em andamento (a sonda de prontidão diz "pendente"). */
+    contactsPending: false,
+    /** Ids pedidos em cada `deal.findMany` com include (hidratação dos cards). */
+    includeIds: [] as string[][],
+    /** Linhas devolvidas pelo "banco" na requisição corrente. */
+    rows: 0,
     trips: 0,
     /** Maior profundidade já concluída na requisição corrente. */
     doneDepth: 0,
@@ -178,6 +193,9 @@ const SCHEMA: FakeDbSchema = {
     contact: { kind: "one", table: "contact", localKey: "contactId" },
     stage: { kind: "one", table: "stage", localKey: "stageId" },
   },
+  contact: {
+    conversations: { kind: "many", table: "conversation", foreignKey: "contactId" },
+  },
 };
 const db = new FakeDb(SCHEMA);
 const STAGES = Array.from({ length: STAGE_COUNT }, (_, i) => ({
@@ -208,6 +226,10 @@ const TAGS = Array.from({ length: 6 }, (_, i) => ({
   name: `Tag ${i}`,
   color: "#aa0000",
 }));
+const hasConversation = (n: number) => n % 10 !== 9;
+const directionOf = (n: number) => (n % 3 === 0 ? "in" : "out");
+/** Espalha a última mensagem para a ordem não coincidir com a posição. */
+const lastMessageMinute = (n: number) => (n * 7919) % 10_007;
 for (const st of STAGES) {
   for (let p = 0; p < PER_STAGE + 20; p++) {
     const n = Number(st.id.slice(2)) * 1000 + p;
@@ -221,7 +243,25 @@ for (const st of STAGES) {
       avatarUrl: null,
       source: n % 3 === 0 ? "facebook" : "site",
       adUtmSource: null,
+      // K1: última mensagem de chat do contato, em coluna pronta. 1 em 10 não
+      // tem conversa nenhuma (lead importado) → NULL.
+      lastMessageAt: hasConversation(n) ? new Date(T0 + lastMessageMinute(n) * 60_000) : null,
+      lastMessageDirection: hasConversation(n) ? directionOf(n) : null,
     });
+    if (hasConversation(n)) {
+      db.insert("conversation", {
+        id: `v${n}`,
+        organizationId: ORG,
+        contactId,
+        channel: "whatsapp",
+        unreadCount: n % 4 === 0 ? 2 : 0,
+        status: n % 5 === 0 ? "RESOLVED" : "OPEN",
+        lastMessageDirection: directionOf(n),
+        lastMessageAt: new Date(T0 + lastMessageMinute(n) * 60_000),
+        // Gravações que não são mensagem (atribuição, varredura) mexem aqui.
+        updatedAt: new Date(T0 + (lastMessageMinute(n) + (n % 7) * 13) * 60_000),
+      });
+    }
     db.insert("deal", {
       id: `d${n}`,
       organizationId: ORG,
@@ -255,6 +295,9 @@ type Row = Record<string, unknown>;
 const byId = (table: string) => new Map(db.table(table).map((r) => [r.id as string, r]));
 const contactById = byId("contact");
 const stageById = byId("stage");
+const conversationByContact = new Map(
+  db.table("conversation").map((v) => [v.contactId as string, v]),
+);
 const tagsByDeal = new Map<string, Row[]>();
 for (const t of db.table("tagOnDeal")) {
   const list = tagsByDeal.get(t.dealId as string) ?? [];
@@ -269,6 +312,10 @@ for (const t of db.table("tagOnDeal")) {
   if (key === "tags") return tagsByDeal.get(row.id as string) ?? [];
   if (key === "contact") return row.contactId ? contactById.get(row.contactId as string) ?? null : null;
   if (key === "stage") return stageById.get(row.stageId as string) ?? null;
+  if (key === "conversations") {
+    const conv = conversationByContact.get(row.id as string);
+    return conv ? [conv] : [];
+  }
   return undefined;
 };
 
@@ -306,59 +353,116 @@ function rawValues(call: unknown[]): unknown[] {
   return (first as Prisma.Sql).values;
 }
 
+/** Soma as linhas devolvidas e repassa o resultado. */
+function counted<T extends unknown[]>(rows: T): T {
+  h.rows += rows.length;
+  return rows;
+}
+
+function dealsByStage(): Map<string, Row[]> {
+  const byStage = new Map<string, Row[]>();
+  for (const d of matchingDeals()) {
+    const list = byStage.get(d.stageId as string) ?? [];
+    list.push(d);
+    byStage.set(d.stageId as string, list);
+  }
+  return byStage;
+}
+
+/** Última interação do card: coluna do contato (K1). */
+function lastAtOfDeal(d: Row): number | null {
+  const at = contactById.get(d.contactId as string)?.lastMessageAt as Date | null | undefined;
+  return at ? at.getTime() : null;
+}
+
+function previewRowsFor(contactId: string): Row[] {
+  const conv = conversationByContact.get(contactId);
+  if (!conv) return [];
+  const unread = conv.unreadCount as number;
+  const base = { contactId, channel: conv.channel, unreadCount: unread };
+  const rows: Row[] = [];
+  // Cliente: até 5 quando há não lidas; só a última quando não há (K2).
+  for (let rn = 1; rn <= (unread > 0 ? 5 : 1); rn++) {
+    rows.push({
+      ...base,
+      msgId: `m-${contactId}-in-${rn}`,
+      msgExternalId: `wamid.${contactId}.${rn}`,
+      msgContent: `${TEXT} (${rn})`,
+      msgCreatedAt: new Date(T0 + (10 - rn) * 1000),
+      msgDirection: "in",
+      msgSendStatus: null,
+      msgSendError: null,
+      rn,
+    });
+  }
+  rows.push({
+    ...base,
+    msgId: `m-${contactId}-out`,
+    msgExternalId: null,
+    msgContent: "Claro! Te envio as informações agora.",
+    msgCreatedAt: new Date(T0),
+    msgDirection: "out",
+    msgSendStatus: "sent",
+    msgSendError: null,
+    rn: 1,
+  });
+  return rows;
+}
+
 async function queryRaw(...call: unknown[]): Promise<unknown> {
   const text = rawText(call);
-  await pgDelay(text.includes('PARTITION BY d."stageId"') ? "raw:ranked" : "raw:other");
-  if (text.includes('PARTITION BY d."stageId"')) {
-    const values = rawValues(call);
-    const max = values.find((v) => typeof v === "number") as number;
-    const byStage = new Map<string, Row[]>();
-    for (const d of matchingDeals()) {
-      const list = byStage.get(d.stageId as string) ?? [];
-      list.push(d);
-      byStage.set(d.stageId as string, list);
-    }
+  const ranked = text.includes('PARTITION BY d."stageId"');
+  await pgDelay(ranked ? "raw:ranked" : "raw:other");
+  return counted(emulateRaw(text, rawValues(call)) as unknown[]);
+}
+
+function emulateRaw(text: string, values: unknown[]): Row[] {
+  // Ordenação por última interação: candidatos por etapa, `last_at` do
+  // contato, janela final. values = […, scanCap, maxPerStage].
+  if (text.includes("WITH candidates AS")) {
+    const max = values[values.length - 1] as number;
+    const desc = /last_at DESC NULLS LAST/.test(text);
     const out: Row[] = [];
-    for (const [stageId, list] of byStage) {
-      list.slice(0, max).forEach((d, i) => out.push({ id: d.id, stageId, rn: i + 1 }));
+    for (const [stageId, list] of dealsByStage()) {
+      const sorted = [...list].sort((a, b) => {
+        const la = lastAtOfDeal(a);
+        const lb = lastAtOfDeal(b);
+        if (la != null && lb != null && la !== lb) return desc ? lb - la : la - lb;
+        if (la != null && lb == null) return -1;
+        if (la == null && lb != null) return 1;
+        return (a.position as number) - (b.position as number);
+      });
+      sorted.slice(0, max).forEach((d, i) => {
+        const la = lastAtOfDeal(d);
+        out.push({
+          id: d.id,
+          stageId,
+          rn: i + 1,
+          last_at: la == null ? null : new Date(la),
+          total: list.length,
+        });
+      });
+    }
+    return out;
+  }
+  if (text.includes('PARTITION BY d."stageId"')) {
+    const max = values.find((v) => typeof v === "number") as number;
+    const out: Row[] = [];
+    for (const [stageId, list] of dealsByStage()) {
+      list
+        .slice(0, max)
+        .forEach((d, i) => out.push({ id: d.id, stageId, rn: i + 1, total: list.length }));
     }
     return out;
   }
   if (text.includes("FROM deal_products")) return [];
-  if (text.includes("contact_unread")) {
-    const ids = rawValues(call)[0] as string[];
-    return ids.map((contactId) => ({ contactId, channel: "whatsapp", unreadCount: 2 }));
-  }
-  if (text.includes('PARTITION BY c."contactId", m.direction')) {
-    const ids = rawValues(call)[0] as string[];
-    const rows: Row[] = [];
-    for (const contactId of ids) {
-      for (let rn = 1; rn <= 5; rn++) {
-        rows.push({
-          contactId,
-          msgId: `m-${contactId}-in-${rn}`,
-          msgExternalId: `wamid.${contactId}.${rn}`,
-          msgContent: `${TEXT} (${rn})`,
-          msgCreatedAt: new Date(T0 + rn * 1000),
-          msgDirection: "in",
-          msgSendStatus: null,
-          msgSendError: null,
-          rn,
-        });
-      }
-      rows.push({
-        contactId,
-        msgId: `m-${contactId}-out`,
-        msgExternalId: null,
-        msgContent: "Claro! Te envio as informações agora.",
-        msgCreatedAt: new Date(T0),
-        msgDirection: "out",
-        msgSendStatus: "sent",
-        msgSendError: null,
-        rn: 1,
-      });
-    }
-    return rows;
+  // Organização já com `contacts.lastMessageDirection` preenchida.
+  if (text.includes("AS pending")) return [{ pending: h.contactsPending }];
+  // Contatos "só com conversas encerradas" do caminho antigo da direção: nenhum na fixture.
+  if (text.includes("JOIN LATERAL") && text.includes("last.d")) return [];
+  if (text.includes("per_contact AS")) {
+    // Prévia do card numa consulta: não lidas/canal repetidos em cada linha.
+    return (values[0] as string[]).flatMap(previewRowsFor);
   }
   return [];
 }
@@ -370,7 +474,9 @@ vi.mock("@/lib/prisma", () => ({
     stage: {
       findMany: async (args: { where?: Row }) => {
         await pgDelay("stage.findMany");
-        return db.run("stage", "findMany", { where: args.where, orderBy: { position: "asc" } });
+        return counted(
+          db.run("stage", "findMany", { where: args.where, orderBy: { position: "asc" } }) as Row[],
+        );
       },
     },
     customField: {
@@ -391,7 +497,16 @@ vi.mock("@/lib/prisma", () => ({
           take: args.take,
           select: args.select,
         }) as Row[];
-        return args.include ? rows.map(withInclude) : rows;
+        if (!args.include) return counted(rows);
+        h.includeIds.push(rows.map((r) => r.id as string));
+        const cards = rows.map(withInclude);
+        // O motor do Prisma busca cada relação numa consulta própria: negócios,
+        // contatos, donos, tags_on_deals, tags e atividades.
+        const distinct = (key: string) => new Set(rows.map((r) => r[key]).filter(Boolean)).size;
+        const tagLinks = rows.reduce((n, r) => n + (tagsByDeal.get(r.id as string)?.length ?? 0), 0);
+        h.rows +=
+          rows.length + distinct("contactId") + distinct("ownerId") + tagLinks + TAGS.length + rows.length;
+        return cards;
       },
       groupBy: async (args: { where?: Row }) => {
         await pgDelay("deal.groupBy");
@@ -400,13 +515,14 @@ vi.mock("@/lib/prisma", () => ({
           if (!db.matches("deal", d, args.where)) continue;
           counts.set(d.stageId as string, (counts.get(d.stageId as string) ?? 0) + 1);
         }
-        return [...counts].map(([stageId, n]) => ({ stageId, _count: { _all: n } }));
+        return counted([...counts].map(([stageId, n]) => ({ stageId, _count: { _all: n } })));
       },
     },
   },
 }));
 
 import { GET, POST } from "@/app/api/pipelines/[id]/board/route";
+import { resetContactLastMessageReadyForTests } from "@/services/kanban-filters";
 
 type Measure = {
   scenario: string;
@@ -417,6 +533,10 @@ type Measure = {
   pgTrips: number;
   /** Idas ao banco EM SÉRIE (ver `pgDelay`). */
   dbDepth: number;
+  /** Linhas devolvidas pelo banco ao Node na requisição. */
+  pgRows: number;
+  /** CPU do processo (user + system) por requisição, média das rodadas. */
+  cpuMs: number;
   pgLabels: Record<string, number>;
   bytes: number;
   cards: number;
@@ -450,7 +570,9 @@ async function measure(
     pg: string[];
     trips: number;
     depth: number;
+    rows: number;
   } | null = null;
+  let cpuMicros = 0;
   for (let i = 0; i < RUNS; i++) {
     if (!opts.warm) h.redis.store.clear();
     else if (i === 0) {
@@ -460,11 +582,15 @@ async function measure(
     h.pg.length = 0;
     h.trips = 0;
     h.doneDepth = 0;
+    h.rows = 0;
+    const cpu0 = process.cpuUsage();
     const t = performance.now();
     const res = await send();
     const text = await res.text();
     times.push(performance.now() - t);
-    last = { res, text, pg: [...h.pg], trips: h.trips, depth: h.doneDepth };
+    const cpu = process.cpuUsage(cpu0);
+    cpuMicros += cpu.user + cpu.system;
+    last = { res, text, pg: [...h.pg], trips: h.trips, depth: h.doneDepth, rows: h.rows };
   }
   times.sort((a, b) => a - b);
   const body = JSON.parse(last!.text) as Array<{ deals: unknown[] }>;
@@ -477,6 +603,8 @@ async function measure(
     pgCalls: last!.pg.length,
     pgTrips: last!.trips,
     dbDepth: last!.depth,
+    pgRows: last!.rows,
+    cpuMs: Math.round((cpuMicros / RUNS / 1000) * 10) / 10,
     pgLabels: labels,
     bytes: Buffer.byteLength(last!.text),
     cards: body.reduce((n, s) => n + s.deals.length, 0),
@@ -551,6 +679,100 @@ describe("board sintético 7×200 (benchmark local)", () => {
     expect(m.pgCalls).toBe(0);
   }, 60_000);
 
+  // ── K6: página padrão, última interação e filtro de direção ──────────
+
+  it("POST padrão (sem perStage) — erro de cache: 50 por etapa", async () => {
+    const m = await measure("POST padrão, sem perStage (miss)", OPEN, () =>
+      POST(postReq({}), params()), { warm: false });
+    expect(m.cards).toBe(STAGE_COUNT * 50);
+    // etapas + janela (com os totais) + hidratação + produtos + prévia + avatar
+    expect(m.pgLabels).toEqual({
+      "stage.findMany": 1,
+      "raw:ranked": 1,
+      "deal.findMany(include)": 1,
+      "raw:other": 2,
+      "user.findMany(avatar)": 1,
+    });
+  }, 60_000);
+
+  it("POST 200/etapa por última interação — erro de cache", async () => {
+    const m = await measure("POST 200/etapa lastInteraction desc (miss)", OPEN, () =>
+      POST(postReq({ perStage: PER_STAGE, sort: "lastInteraction", direction: "desc" }), params()), {
+      warm: false,
+    });
+    expect(m.cards).toBe(STAGE_COUNT * PER_STAGE);
+    expect(m.pgLabels["deal.groupBy"]).toBeUndefined();
+    expect(m.pgLabels["deal.findMany(select)"]).toBeUndefined();
+  }, 60_000);
+
+  it("POST 200/etapa com filtro 'Mensagem recebida' — erro de cache", async () => {
+    const where = { AND: [OPEN, { contact: { is: { lastMessageDirection: "in" } } }] };
+    const m = await measure("POST direção=in 200/etapa (miss)", where, () =>
+      POST(postReq({ perStage: PER_STAGE, filters: { lastMessageDirection: "in" } }), params()), {
+      warm: false,
+    });
+    expect(m.cards).toBeGreaterThan(0);
+    // Predicado no contato: traduz para SQL — sem pré-resolver ids, sem
+    // contagem à parte.
+    expect(m.pgLabels["deal.findMany(select)"]).toBeUndefined();
+    expect(m.pgLabels["deal.groupBy"]).toBeUndefined();
+  }, 60_000);
+
+  it("POST 200/etapa com filtro 'Mensagem recebida' e backfill em andamento — erro de cache (L8)", async () => {
+    // Org com contatos por preencher: coluna onde existe + caminho antigo só
+    // para a coluna NULL. Antes (tudo-ou-nada) o where saía do tradutor e o
+    // board pré-resolvia ids numa consulta à parte.
+    resetContactLastMessageReadyForTests();
+    h.contactsPending = true;
+    try {
+      const where = {
+        AND: [
+          OPEN,
+          {
+            OR: [
+              { contact: { is: { lastMessageDirection: "in" } } },
+              {
+                contact: {
+                  is: {
+                    AND: [
+                      { lastMessageAt: null },
+                      {
+                        conversations: {
+                          some: { status: { not: "RESOLVED" }, lastMessageDirection: "in" },
+                        },
+                      },
+                      {
+                        conversations: {
+                          none: { status: { not: "RESOLVED" }, lastMessageDirection: "out" },
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+              { contactId: { in: [] } },
+            ],
+          },
+        ],
+      };
+      const m = await measure("POST direção=in 200/etapa, backfill em andamento (miss)", where, () =>
+        POST(postReq({ perStage: PER_STAGE, filters: { lastMessageDirection: "in" } }), params()), {
+        warm: false,
+      });
+      expect(m.cards).toBeGreaterThan(0);
+      // Tudo na consulta ranqueada: sem pré-resolver ids, sem contagem à parte.
+      expect(m.pgLabels["deal.findMany(select)"]).toBeUndefined();
+      expect(m.pgLabels["deal.groupBy"]).toBeUndefined();
+      expect(m.pgLabels["raw:ranked"]).toBe(1);
+      // Etapas + janela + hidratação + produtos + prévia + avatar + a lista dos
+      // "só encerradas" (a sonda fica em memória por 1 min).
+      expect(m.pgCalls).toBe(7);
+    } finally {
+      h.contactsPending = false;
+      resetContactLastMessageReadyForTests();
+    }
+  }, 60_000);
+
   it("GET 10/etapa (Kanban) — erro e acerto", async () => {
     const get = () =>
       GET(new Request(`http://localhost/api/pipelines/${PIPELINE}/board?perStage=10`), params());
@@ -602,6 +824,86 @@ describe("rota do board: cache canônico e checagens", () => {
     expect(h.pg).toEqual([]);
     // Acerto devolve o mesmo texto guardado, sem reserializar.
     expect(await post.text()).toBe(getText);
+  });
+
+  // ── Tamanho da página (K4) ──────────────────────────────────────────────
+
+  type StageBody = {
+    id: string;
+    deals: { id: string }[];
+    totalCount: number;
+    loadedCount: number;
+    hasMore: boolean;
+    nextCursor: string | null;
+  };
+  const boardOf = async (res: Response) => JSON.parse(await res.text()) as StageBody[];
+  const getBoard = (query: string) =>
+    GET(new Request(`http://localhost/api/pipelines/${PIPELINE}/board${query}`), params());
+
+  it("sem perStage/limit: 50 cards por etapa, com total, hasMore e cursor para o resto", async () => {
+    const board = await boardOf(await getBoard(""));
+    expect(board).toHaveLength(STAGE_COUNT);
+    for (const stage of board) {
+      expect(stage.deals).toHaveLength(50);
+      expect(stage.loadedCount).toBe(50);
+      expect(stage.totalCount).toBe(PER_STAGE + 20);
+      expect(stage.hasMore).toBe(true);
+      expect(typeof stage.nextCursor).toBe("string");
+    }
+  });
+
+  it("`limit` vale como `perStage` (GET e POST) e cai na mesma chave de cache", async () => {
+    const viaLimit = await getBoard("?limit=30");
+    expect(cacheDesc(viaLimit)).toBe("miss");
+    const board = await boardOf(viaLimit);
+    expect(board.every((s) => s.deals.length === 30)).toBe(true);
+
+    const viaPerStage = await getBoard("?perStage=30");
+    expect(cacheDesc(viaPerStage)).toBe("hit");
+    const viaPostLimit = await POST(postReq({ limit: 30 }), params());
+    expect(cacheDesc(viaPostLimit)).toBe("hit");
+    // Os dois informados: `perStage` (nome histórico) vence.
+    const both = await boardOf(await getBoard("?perStage=10&limit=30"));
+    expect(both.every((s) => s.deals.length === 10)).toBe(true);
+  });
+
+  it("o frontend atual pede 200 e recebe 200; acima do teto vem o teto (200), nunca 500", async () => {
+    const at200 = await boardOf(await POST(postReq({ perStage: 200 }), params()));
+    expect(at200.every((s) => s.deals.length === 200 && s.hasMore === true)).toBe(true);
+
+    h.pg.length = 0;
+    const over = await POST(postReq({ perStage: 500 }), params());
+    // Mesmo resultado do pedido de 200 → mesma chave, nenhuma consulta.
+    expect(cacheDesc(over)).toBe("hit");
+    expect(h.pg).toEqual([]);
+    expect((await boardOf(over)).every((s) => s.deals.length === 200)).toBe(true);
+  });
+
+  it("valor inválido cai no padrão (50); zero/negativo vira 1", async () => {
+    expect((await boardOf(await getBoard("?perStage=abc"))).every((s) => s.deals.length === 50)).toBe(true);
+    expect((await boardOf(await getBoard("?limit=0"))).every((s) => s.deals.length === 1)).toBe(true);
+    expect(
+      (await boardOf(await POST(postReq({ perStage: "200" }), params()))).every((s) => s.deals.length === 50),
+    ).toBe(true);
+  });
+
+  it("offsetByStage antigo continua aceito: perStage + extra só na etapa pedida", async () => {
+    const board = await boardOf(
+      await POST(postReq({ perStage: 10, offsetByStage: { st0: 15, st1: -3, st2: 0 } }), params()),
+    );
+    const sizes = Object.fromEntries(board.map((s) => [s.id, s.deals.length]));
+    expect(sizes.st0).toBe(25);
+    expect(sizes.st1).toBe(10);
+    expect(sizes.st2).toBe(10);
+  });
+
+  it("hidrata só os cards devolvidos (ids da página, não a coluna inteira)", async () => {
+    h.includeIds.length = 0;
+    const board = await boardOf(await getBoard("?limit=20"));
+    const returned = board.flatMap((s) => s.deals.map((d) => d.id)).sort();
+    expect(returned).toHaveLength(STAGE_COUNT * 20);
+    expect(h.includeIds).toHaveLength(1);
+    expect([...h.includeIds[0]!].sort()).toEqual(returned);
   });
 
   it("mesmos filtros em outra ordem caem na mesma chave", async () => {

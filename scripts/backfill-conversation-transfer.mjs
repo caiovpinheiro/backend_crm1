@@ -11,9 +11,11 @@
  */
 import { Client } from "pg";
 
+import { pgConnectionConfig } from "./lib/pg-ssl.mjs";
+
 const KEY = "conversation:transfer";
 
-const c = new Client({ connectionString: process.env.DATABASE_URL });
+const c = new Client(pgConnectionConfig());
 await c.connect();
 
 const rows = await c.query(

@@ -186,7 +186,9 @@ function seedDeal(stageId: string, status: "OPEN" | "WON" | "LOST" = "OPEN") {
 function isRankedWindowSql(arg: unknown): arg is Prisma.Sql {
   if (Array.isArray(arg) || typeof arg !== "object" || arg === null) return false;
   const strings = (arg as { strings?: unknown }).strings;
-  return Array.isArray(strings) && strings.join("?").includes("ROW_NUMBER() OVER");
+  // A prévia do card também tem uma janela (por contato); a do board
+  // particiona por etapa.
+  return Array.isArray(strings) && strings.join("?").includes('PARTITION BY d."stageId"');
 }
 
 beforeEach(() => {
@@ -511,19 +513,49 @@ describe("getBoardData — cache por org e where de visibilidade", () => {
     expect(keys[0]).not.toBe(keys[1]);
   });
 
-  it("aplica visibilidade (string legada vira ownerId) + status OPEN + pipeline no COUNT por etapa", async () => {
-    await withOrg(ORG, () => getBoardData("pipe-1", "user-7"));
-    const groupBy = h.prisma.deal.groupBy.mock.calls.at(-1)![0] as { where: unknown };
-    expect(groupBy.where).toEqual({
-      AND: [{ status: "OPEN" }, { ownerId: "user-7" }],
-      stage: { pipelineId: "pipe-1" },
-    });
+  // A contagem por etapa sai da MESMA janela dos cards (K3): o where de
+  // visibilidade que filtra os cards é, por construção, o que conta o total.
+  const oneStageBoard = (total: number) => {
+    h.prisma.stage.findMany.mockResolvedValueOnce([
+      { id: "stage-a", pipelineId: "pipe-1", position: 0, isWon: false, isLost: false, rottingDays: 7 },
+    ]);
+    h.prisma.$queryRaw.mockImplementation(async (first: unknown) =>
+      isRankedWindowSql(first) ? [{ id: "deal-a1", stageId: "stage-a", rn: 1, total }] : [],
+    );
+    h.prisma.deal.findMany.mockResolvedValueOnce([
+      { id: "deal-a1", stageId: "stage-a", contactId: null, contact: null, updatedAt: new Date(), tags: [], activities: [] },
+    ]);
+  };
+  const rankedCall = () => {
+    const ranked = h.prisma.$queryRaw.mock.calls.map((c) => c[0]).filter(isRankedWindowSql);
+    expect(ranked).toHaveLength(1);
+    return { text: ranked[0]!.strings.join("?").replace(/\s+/g, " "), values: ranked[0]!.values };
+  };
+
+  it("aplica visibilidade (string legada vira ownerId) + status OPEN + etapas do funil no total por etapa", async () => {
+    oneStageBoard(7);
+    const out = await withOrg(ORG, () => getBoardData("pipe-1", "user-7"));
+    const { text, values } = rankedCall();
+    expect(text).toContain('COUNT(*) OVER (PARTITION BY d."stageId")::int AS total');
+    expect(text).toContain(
+      'WHERE d."organizationId" = ? AND d."stageId" = ANY(?) AND ((d."status" = ?::"DealStatus" AND d."ownerId" = ?))',
+    );
+    expect(values).toEqual([ORG, ["stage-a"], "OPEN", "user-7", expect.any(Number)]);
+    // Nenhuma contagem à parte.
+    expect(h.prisma.deal.groupBy).not.toHaveBeenCalled();
+    expect(out[0]).toMatchObject({ id: "stage-a", totalCount: 7, loadedCount: 1, hasMore: true });
+    h.prisma.$queryRaw.mockReset().mockResolvedValue([]);
   });
 
-  it("statusFilter ALL sem visibilidade: só o escopo do pipeline", async () => {
-    await withOrg(ORG, () => getBoardData("pipe-1", null, "ALL"));
-    const groupBy = h.prisma.deal.groupBy.mock.calls.at(-1)![0] as { where: unknown };
-    expect(groupBy.where).toEqual({ stage: { pipelineId: "pipe-1" } });
+  it("statusFilter ALL sem visibilidade: só a organização e as etapas do funil", async () => {
+    oneStageBoard(1);
+    const out = await withOrg(ORG, () => getBoardData("pipe-1", null, "ALL"));
+    const { text, values } = rankedCall();
+    expect(text).toContain('WHERE d."organizationId" = ? AND d."stageId" = ANY(?) AND (TRUE)');
+    expect(values).toEqual([ORG, ["stage-a"], expect.any(Number)]);
+    expect(h.prisma.deal.groupBy).not.toHaveBeenCalled();
+    expect(out[0]).toMatchObject({ totalCount: 1, hasMore: false });
+    h.prisma.$queryRaw.mockReset().mockResolvedValue([]);
   });
 
   it("cards de TODAS as etapas saem de UMA consulta ranqueada com o MESMO where de visibilidade", async () => {

@@ -37,7 +37,12 @@ import { enrichContactsWithUserAvatarFallback } from "@/lib/contact-avatar-fallb
 import { cache, type TextCacheSource } from "@/lib/cache";
 import { boardDataKey, invalidateBoardData } from "@/lib/cache/keys";
 import type { ServerTiming } from "@/lib/server-timing";
-import { canonicalBoardVariant } from "@/services/board-cache-variant";
+import {
+  BOARD_MAX_PER_STAGE,
+  canonicalBoardVariant,
+  normalizeBoardOffsets,
+  normalizeBoardPerStage,
+} from "@/services/board-cache-variant";
 import {
   boardColumnKeysetWhere,
   boardColumnOrderBy,
@@ -49,10 +54,12 @@ import {
   type BoardCursorSort,
 } from "@/services/board-column-cursor";
 import {
-  buildDealSearchOr,
   buildDealWhereFromFilters,
+  createDealSearch,
   type AdvancedDealFilters,
+  type DealSearch,
 } from "@/services/kanban-filters";
+import { NON_CHAT_MESSAGE_TYPES } from "@/lib/conversation-last-message";
 import { getLogger } from "@/lib/logger";
 
 const log = getLogger("deals");
@@ -304,6 +311,13 @@ export type GetDealsParams = {
   contactId?: string;
   page?: number;
   perPage?: number;
+  /**
+   * `false` = não rodar o `COUNT(*)` da lista (K5). A resposta sempre traz
+   * `hasMore` (uma linha a mais que a página); `total` vem preenchido quando
+   * sai de graça (última página) e `null` quando exigiria contar. Ausente ou
+   * `true` = conta como sempre (contrato antigo: `total` numérico).
+   */
+  withTotal?: boolean;
   visibilityWhere?: Prisma.DealWhereInput;
   /**
    * Escopo de funis por usuário. `null/undefined` → sem restrição; array
@@ -319,19 +333,22 @@ export type GetDealsParams = {
   updatedSince?: Date;
   /**
    * `lastInteraction` ordena o recorte inteiro (não a página) pelo mesmo
-   * instante da coluna: a última atividade da conversa do contato e, só
-   * sem conversa, o `updatedAt` do negócio. Ausente = `updatedAt` desc.
+   * instante que a coluna da lista mostra — a última mensagem de chat do
+   * contato; sem mensagem, o `updatedAt` do negócio — e só então aplica
+   * skip/take. Ausente = `updatedAt` desc, como sempre.
    */
   sort?: "lastInteraction";
   direction?: "asc" | "desc";
 };
 
 /**
- * Página de ids na ordem da coluna "Última interação":
- * `MAX(conversations.updatedAt)` do contato e, só sem conversa, o
- * `updatedAt` do deal. Um toque no card (etapa, campo, dono) não entra
- * nessa hora — senão "mais antiga" só reordena a janela do último toque.
- * O ORDER BY roda antes do LIMIT.
+ * Página de ids já na ordem da coluna "Última interação": última mensagem
+ * de chat do contato (`contacts.lastMessageAt` e, só se estiver NULL, o
+ * fallback de `conversations`). Sem mensagem, cai no `updatedAt` do deal.
+ * O `updatedAt` não entra quando já existe mensagem: etapa, campo ou dono
+ * mexidos ontem não podem esconder a conversa mais antiga. O `ORDER BY`
+ * roda antes do LIMIT, então a página 1 no sentido antigo é o mais
+ * antigo do filtro, não o mais antigo dos que já estavam na tela.
  */
 async function pageIdsByLastInteraction(
   where: Prisma.DealWhereInput,
@@ -344,22 +361,46 @@ async function pageIdsByLastInteraction(
   const ids = idRows.map((row) => row.id);
   const orgId = getOrgIdOrThrow();
   const dir = direction === "asc" ? Prisma.raw("ASC") : Prisma.raw("DESC");
-  const ranked = await prisma.$queryRaw<{ id: string }[]>`
-    SELECT d.id
-    FROM deals d
-    LEFT JOIN LATERAL (
-      SELECT MAX(cv."updatedAt") AS last_at
-      FROM conversations cv
-      WHERE cv."organizationId" = ${orgId}
-        AND cv."contactId" = d."contactId"
-    ) li ON TRUE
-    WHERE d."organizationId" = ${orgId}
-      AND d.id = ANY(${ids})
-    ORDER BY COALESCE(li.last_at, d."updatedAt") ${dir}, d.id ASC
+  const orderByMessage = Prisma.sql`
+    ORDER BY COALESCE(
+      ct."lastMessageAt",
+      fb.last_at,
+      d."updatedAt"
+    ) ${dir}, d.id ASC
     OFFSET ${skip}
     LIMIT ${take}
   `;
-  return ranked.map((row) => row.id);
+  try {
+    const ranked = await prisma.$queryRaw<{ id: string }[]>`
+      SELECT d.id
+      FROM deals d
+      LEFT JOIN contacts ct
+        ON ct.id = d."contactId" AND ct."organizationId" = ${orgId}
+      LEFT JOIN LATERAL (
+        SELECT MAX(COALESCE(cv."lastMessageAt", cv."updatedAt")) AS last_at
+        FROM conversations cv
+        WHERE ct."lastMessageAt" IS NULL
+          AND cv."organizationId" = ${orgId}
+          AND cv."contactId" = d."contactId"
+      ) fb ON TRUE
+      WHERE d."organizationId" = ${orgId}
+        AND d.id = ANY(${ids})
+      ${orderByMessage}
+    `;
+    return ranked.map((row) => row.id);
+  } catch (error) {
+    if (!missingLastMessageColumn(error)) throw error;
+    const ranked = await prisma.$queryRaw<{ id: string }[]>`
+      SELECT d.id
+      FROM deals d
+      WHERE d."organizationId" = ${orgId}
+        AND d.id = ANY(${ids})
+      ORDER BY d."updatedAt" ${dir}, d.id ASC
+      OFFSET ${skip}
+      LIMIT ${take}
+    `;
+    return ranked.map((row) => row.id);
+  }
 }
 
 const listInclude = {
@@ -371,6 +412,9 @@ const listInclude = {
       phone: true,
       avatarUrl: true,
       source: true,
+      // Última mensagem de chat do contato — insumo de `lastInteractionAt`
+      // sem consultar `conversations` (K1).
+      lastMessageAt: true,
       tags: {
         select: { tag: { select: { id: true, name: true, color: true } } },
       },
@@ -396,6 +440,36 @@ const listInclude = {
   },
   owner: { select: { id: true, name: true, email: true, avatarUrl: true, type: true } },
 } satisfies Prisma.DealInclude;
+
+/** Mesma lista sem `contacts.lastMessageAt` — banco ainda sem a migration. */
+const listIncludeWithoutLastMessage: Prisma.DealInclude = {
+  ...listInclude,
+  contact: {
+    select: {
+      id: true,
+      name: true,
+      email: true,
+      phone: true,
+      avatarUrl: true,
+      source: true,
+      tags: {
+        select: { tag: { select: { id: true, name: true, color: true } } },
+      },
+    },
+  },
+};
+
+function missingLastMessageColumn(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : "";
+  if (!/lastMessageAt/i.test(message)) return false;
+  if (error instanceof Prisma.PrismaClientKnownRequestError) {
+    return error.code === "P2022" || error.code === "P2010";
+  }
+  return (
+    error instanceof Prisma.PrismaClientValidationError ||
+    /does not exist|Unknown field/i.test(message)
+  );
+}
 
 export async function getDeals(params: GetDealsParams = {}) {
   const page = Math.max(1, params.page ?? 1);
@@ -427,14 +501,6 @@ export async function getDeals(params: GetDealsParams = {}) {
   }
   if (params.ownerId) {
     conditions.push({ ownerId: params.ownerId });
-  }
-
-  const search = params.search?.trim();
-  if (search) {
-    // Mesma engine de busca livre do Kanban (título, contato, número do
-    // negócio e qualquer campo personalizado — inclusive CPF/RGM com máscara).
-    const or = await buildDealSearchOr(search);
-    if (or.length > 0) conditions.push({ OR: or });
   }
 
   if (params.contactId) {
@@ -469,77 +535,182 @@ export async function getDeals(params: GetDealsParams = {}) {
     conditions.push({ updatedAt: { gte: params.updatedSince } });
   }
 
+  // Busca livre: mesma engine do Kanban (título, contato, número do negócio e
+  // qualquer campo personalizado — inclusive CPF/RGM com máscara). Os ids saem
+  // de UMA consulta, estreitada pelo que as demais condições já dizem (status,
+  // funil, dono) e ordenada como a lista (mais recentes primeiro). O teto
+  // acompanha a página pedida; `searchCapped` avisa quando houve corte.
+  let searchCapped = false;
+  const searchTerm = params.search?.trim();
+  if (searchTerm) {
+    const dealSearch = createDealSearch(searchTerm);
+    if (dealSearch) {
+      conditions.push(
+        await dealSearch.prismaWhere({
+          narrowSql: narrowSqlOfConditions(conditions),
+          idsCap: Math.min(
+            LIST_SEARCH_IDS_CAP_MAX,
+            Math.max(LIST_SEARCH_IDS_CAP_MIN, skip + perPage + 1),
+          ),
+        }),
+      );
+      searchCapped = dealSearch.resolved()?.capped === true;
+    }
+  }
+
   const where: Prisma.DealWhereInput =
     conditions.length > 0 ? { AND: conditions } : {};
 
-  const totalPromise = prisma.deal.count({ where });
-  const itemsPromise =
-    params.sort === "lastInteraction"
-      ? (async () => {
-          const ids = await pageIdsByLastInteraction(
-            where,
-            params.direction === "asc" ? "asc" : "desc",
-            skip,
-            perPage,
-          );
-          if (ids.length === 0) return [];
-          const rows = await prisma.deal.findMany({
-            where: { id: { in: ids } },
-            include: listInclude,
-          });
-          const order = new Map(ids.map((id, index) => [id, index]));
-          rows.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
-          return rows;
-        })()
-      : prisma.deal.findMany({
+  // Uma linha além da página diz se existe próxima (`hasMore`) sem contar.
+  //
+  // O `COUNT(*)` repete os JOINs do filtro (stages → pipelines) e custava
+  // quase o mesmo que a página (produção, 05/10: 95 ms a página + 81 ms a
+  // contagem, 8.490 pares). Quem não mostra "página X de Y" (buscas, diálogo
+  // de duplicados, integrações que só avançam enquanto há itens) pede
+  // `withTotal=0` e paga só a página. O padrão continua contando: a aba
+  // Lista do frontend atual calcula a última página por `total`.
+  const wantsTotal = params.withTotal !== false;
+  const sortByLastInteraction = params.sort === "lastInteraction";
+  const interactionDir = params.direction === "asc" ? "asc" : "desc";
+  const loadPage = async (include: typeof listInclude) => {
+    const counted = wantsTotal ? prisma.deal.count({ where }) : Promise.resolve(null);
+    if (!sortByLastInteraction) {
+      return Promise.all([
+        prisma.deal.findMany({
           where,
           skip,
-          take: perPage,
+          take: perPage + 1,
           orderBy: [{ updatedAt: "desc" }],
-          include: listInclude,
-        });
-  const [items, total] = await Promise.all([itemsPromise, totalPromise]);
+          include,
+        }),
+        counted,
+      ]);
+    }
+    const [ids, total] = await Promise.all([
+      pageIdsByLastInteraction(where, interactionDir, skip, perPage + 1),
+      counted,
+    ]);
+    if (ids.length === 0) return [[], total] as const;
+    const rows = await prisma.deal.findMany({
+      where: { id: { in: ids } },
+      include,
+    });
+    const order = new Map(ids.map((id, index) => [id, index]));
+    rows.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
+    return [rows, total] as const;
+  };
+  let loaded: Awaited<ReturnType<typeof loadPage>>;
+  try {
+    loaded = await loadPage(listInclude);
+  } catch (error) {
+    if (!missingLastMessageColumn(error)) throw error;
+    log.warn(
+      { err: error },
+      "[deals] contacts.lastMessageAt ausente — lista segue sem a coluna. Aplique a migration 20261006120000_contacts_last_message.",
+    );
+    loaded = await loadPage(
+      // Mesmo formato do include normal, só sem `contact.lastMessageAt`: o tipo da
+      // resposta continua o de `listInclude` para os chamadores não perderem as relações.
+      listIncludeWithoutLastMessage as unknown as typeof listInclude,
+    );
+  }
+  const [rows, counted] = loaded;
+  const hasMore = rows.length > perPage;
+  const items = hasMore ? rows.slice(0, perPage) : rows;
+  // Sem contagem: na última página o total é exato sem consultar
+  // (`skip + itens`). Página vazia depois da primeira não diz o total.
+  const total: number | null =
+    counted ?? (!hasMore && (items.length > 0 || page === 1) ? skip + items.length : null);
 
   await enrichContactsWithUserAvatarFallback(
     items.map((d) => d.contact).filter((c): c is NonNullable<typeof c> => c !== null),
   );
 
-  const itemsWithInteraction = await attachLastInteractionAt(items);
+  const itemsWithInteraction = await attachLastInteractionAt([...items]);
 
-  return { items: itemsWithInteraction, total, page, perPage };
+  return {
+    items: itemsWithInteraction,
+    total,
+    page,
+    perPage,
+    hasMore,
+    ...(searchCapped ? { searchCapped: true } : {}),
+  };
+}
+
+/** Ids da busca na lista: piso e teto (a página pedida empurra o teto até o máximo). */
+const LIST_SEARCH_IDS_CAP_MIN = 2_000;
+const LIST_SEARCH_IDS_CAP_MAX = 5_000;
+
+/**
+ * Última interação de contatos SEM `contacts.lastMessageAt` (ainda não
+ * preenchido pelo backfill, ou contato que nunca teve mensagem de chat):
+ * `MAX(COALESCE(conversations.lastMessageAt, conversations.updatedAt))`.
+ * Contato sem conversa não volta. Só os ids pedidos; quem chama passa
+ * apenas os contatos com a coluna NULL.
+ */
+async function loadConversationLastAtFallback(
+  orgId: string,
+  contactIds: readonly string[],
+): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  if (contactIds.length === 0) return out;
+  const grouped = await prisma.$queryRaw<
+    { contactId: string; last_at: Date | null }[]
+  >`
+    SELECT "contactId", MAX(COALESCE("lastMessageAt", "updatedAt")) AS last_at
+    FROM conversations
+    WHERE "organizationId" = ${orgId}
+      AND "contactId" = ANY(${[...contactIds]})
+    GROUP BY "contactId"
+  `;
+  for (const row of grouped) {
+    if (!row.contactId || !row.last_at) continue;
+    const at = new Date(row.last_at).getTime();
+    if (Number.isFinite(at)) out.set(row.contactId, at);
+  }
+  return out;
 }
 
 /**
- * Última interação do negócio na lista: a última atividade da conversa
- * do contato (`MAX(conversations.updatedAt)`, o mesmo sinal do sort
- * `lastInteraction` do board). Sem conversa, fica o `updatedAt` do deal.
- * Alterar o card não substitui a conversa — senão "mais antiga" só
- * reordena a hora do último toque.
+ * Última interação do negócio na lista: a última MENSAGEM de chat do
+ * contato (`contacts.lastMessageAt`, o mesmo sinal do sort
+ * `lastInteraction` do board). Sem mensagem, fica o `updatedAt` do deal.
+ * Alterar o card não substitui a mensagem — senão "mais antiga" só
+ * reordena a hora do último toque e a página continua parecendo a lista
+ * sem ordenação.
+ *
+ * O contato já vem no `include` da lista, então a página não consulta
+ * `conversations`. Antes: um `GROUP BY "contactId"` com
+ * `MAX(conversations.updatedAt)` por página — que ainda contava como
+ * "interação" qualquer gravação na conversa (atribuição, distribuição).
+ * Contato com a coluna NULL cai em `loadConversationLastAtFallback`.
  */
 async function attachLastInteractionAt<
-  T extends { contactId: string | null; updatedAt: Date },
+  T extends {
+    contactId: string | null;
+    updatedAt: Date;
+    contact?: { lastMessageAt?: Date | null } | null;
+  },
 >(items: T[]): Promise<Array<T & { lastInteractionAt: string }>> {
-  const contactIds = [
-    ...new Set(
-      items.map((d) => d.contactId).filter((id): id is string => Boolean(id)),
-    ),
-  ];
   const lastByContact = new Map<string, number>();
-  if (contactIds.length > 0) {
-    const orgId = getOrgIdOrThrow();
-    const grouped = await prisma.$queryRaw<
-      { contactId: string; last_at: Date | null }[]
-    >`
-      SELECT "contactId", MAX("updatedAt") AS last_at
-      FROM conversations
-      WHERE "organizationId" = ${orgId}
-        AND "contactId" = ANY(${contactIds})
-      GROUP BY "contactId"
-    `;
-    for (const row of grouped) {
-      if (!row.contactId || !row.last_at) continue;
-      const at = new Date(row.last_at).getTime();
-      if (Number.isFinite(at)) lastByContact.set(row.contactId, at);
+  const missing = new Set<string>();
+  for (const deal of items) {
+    if (!deal.contactId) continue;
+    const at = deal.contact?.lastMessageAt;
+    if (at) lastByContact.set(deal.contactId, new Date(at).getTime());
+    else missing.add(deal.contactId);
+  }
+  if (missing.size > 0) {
+    try {
+      const fallback = await loadConversationLastAtFallback(getOrgIdOrThrow(), [...missing]);
+      for (const [contactId, at] of fallback) lastByContact.set(contactId, at);
+    } catch (error) {
+      if (!missingLastMessageColumn(error)) throw error;
+      log.warn(
+        { err: error },
+        "[deals] conversations.lastMessageAt ausente — última interação fica no updatedAt do negócio.",
+      );
     }
   }
 
@@ -2365,9 +2536,12 @@ export async function reopenDeal(id: string) {
   return result;
 }
 
-/** Limite default de cards exibidos por coluna no board. */
-const DEFAULT_BOARD_COLUMN_LIMIT = 100;
-const MAX_BOARD_COLUMN_LIMIT = 500;
+/**
+ * Cards por coluna no board: padrão 50, teto 200 (K4; eram 100 e 500). O
+ * resto da coluna vem pelo "carregar mais" por cursor. Fonte única em
+ * `board-cache-variant.ts` (a chave do cache normaliza com os mesmos números).
+ */
+const MAX_BOARD_COLUMN_LIMIT = BOARD_MAX_PER_STAGE;
 /**
  * TTL do cache-aside do board. Curto o bastante pra manter o quadro
  * "fresco" (novos leads via webhook aparecem em ≤ este intervalo), longo
@@ -2392,15 +2566,16 @@ const BOARD_CACHE_TTL_SEC = 45;
  *   kebab do Kanban no frontend (`_v2-client.tsx`). Cobre TODOS os
  *   cards da coluna porque o orderBy roda antes do `take` do Prisma —
  *   ao contrário do sort client-side antigo, que só ordenava os deals
- *   já carregados (default 100 por coluna).
- * - `lastInteraction`: ordena pela última interação na conversa do
- *   contato vinculado ao deal (`MAX(Conversation.updatedAt)` do
- *   contato). Como o Deal não tem campo desnormalizado, esse sort
- *   percorre um caminho próprio (`loadBoardStagesByLastInteraction`):
- *   busca IDs leves de todos os deals que casam com o filtro,
- *   agrega o último `updatedAt` por contato via `groupBy`, ordena
- *   e pagina em memória, e só então faz o `findMany` completo dos
- *   IDs paginados. Deals sem contato/conversa ficam no fim
+ *   já carregados (default 50 por coluna).
+ * - `lastInteraction`: ordena pela última MENSAGEM de chat do contato
+ *   vinculado ao deal — `contacts.lastMessageAt`, coluna mantida no mesmo
+ *   ponto que `conversations.lastMessageAt` (K1). Antes era
+ *   `MAX(conversations.updatedAt)` do contato, calculado por card a cada
+ *   carga e renovado por gravações que não são mensagem (atribuição,
+ *   varredura de distribuição). Contato com a coluna NULL (backfill
+ *   pendente ou sem mensagem de chat) cai, só ele, em
+ *   `MAX(COALESCE(conversations.lastMessageAt, conversations.updatedAt))`
+ *   (`boardLastInteractionSql`). Deals sem contato/conversa ficam no fim
  *   (`nulls last`) em ambas as direções; `position` é tiebreaker.
  */
 export type BoardSortField = "position" | "createdAt" | "lastInteraction";
@@ -2715,7 +2890,49 @@ const BOARD_CONTACT_TEXT_COLUMNS: Readonly<Record<string, string>> = {
   adUtmSource: "ad_utm_source",
   phone: "phone",
   email: "email",
+  // Filtro "Mensagem recebida/enviada" em coluna pronta (K1).
+  lastMessageDirection: "lastMessageDirection",
 };
+
+/** Colunas de data de `contacts` usadas pelos filtros do board. */
+const BOARD_CONTACT_DATE_COLUMNS: Readonly<Record<string, string>> = {
+  // Contato ainda sem a coluna pronta (`IS NULL`) no filtro de direção (K1).
+  lastMessageAt: "lastMessageAt",
+};
+
+/**
+ * Relação `conversations` do contato: `some`/`none` só com `status`
+ * (`"RESOLVED"` ou `{ not: "RESOLVED" }`) e `lastMessageDirection` — o que o
+ * caminho antigo do filtro de direção produz (`kanban-filters.ts`). Qualquer
+ * outra chave → fallback. Sem filtro por organização, como no Prisma: o
+ * índice `(contactId, status)` atende.
+ */
+function translateContactConversationsFilter(value: unknown): Prisma.Sql | null {
+  if (!isPlainObject(value)) return null;
+  const parts: Prisma.Sql[] = [];
+  for (const [op, inner] of Object.entries(value)) {
+    if (inner === undefined) continue;
+    if ((op !== "some" && op !== "none") || !isPlainObject(inner)) return null;
+    const conds: Prisma.Sql[] = [];
+    for (const [k, v] of Object.entries(inner)) {
+      if (v === undefined) continue;
+      if (k === "status") {
+        if (v === "RESOLVED") conds.push(Prisma.sql`cv.status = 'RESOLVED'`);
+        else if (isPlainObject(v) && Object.keys(v).length === 1 && v.not === "RESOLVED") {
+          conds.push(Prisma.sql`cv.status <> 'RESOLVED'`);
+        } else return null;
+      } else if (k === "lastMessageDirection") {
+        if (v !== "in" && v !== "out") return null;
+        conds.push(Prisma.sql`cv."lastMessageDirection" = ${v}`);
+      } else {
+        return null;
+      }
+    }
+    const exists = Prisma.sql`EXISTS (SELECT 1 FROM conversations cv WHERE cv."contactId" = ct.id AND ${sqlAndAll(conds)})`;
+    parts.push(op === "some" ? exists : Prisma.sql`NOT ${exists}`);
+  }
+  return parts.length > 0 ? sqlAndAll(parts) : null;
+}
 
 /** Where de `contacts` (alias `ct`) só com colunas da lista e AND/OR. */
 function translateContactWhere(where: unknown): Prisma.Sql | null {
@@ -2739,6 +2956,13 @@ function translateContactWhere(where: unknown): Prisma.Sql | null {
         value,
         null,
       );
+    } else if (hasOwn(BOARD_CONTACT_DATE_COLUMNS, key)) {
+      frag = translateDateFilter(
+        Prisma.raw(`ct."${BOARD_CONTACT_DATE_COLUMNS[key] as string}"`),
+        value,
+      );
+    } else if (key === "conversations") {
+      frag = translateContactConversationsFilter(value);
     } else {
       frag = null;
     }
@@ -2868,28 +3092,82 @@ async function preResolveBoardWhere(
  * (só nesse caso o cursor de `lastInteraction` vale). `sql: null` = nem
  * traduz nem cabe no teto → caminho por etapa.
  */
-type BoardWhereResolver = (
-  stageIds: readonly string[],
-) => Promise<{ sql: Prisma.Sql | null; direct: boolean }>;
+type BoardWhereResolver = (stageIds: readonly string[]) => Promise<{
+  sql: Prisma.Sql | null;
+  direct: boolean;
+  /**
+   * Where Prisma COMPLETO (busca incluída, com os ids resolvidos) para o
+   * caminho por etapa, quando `sql` é `null`. Sem busca, o próprio `dealWhere`.
+   */
+  where: Prisma.DealWhereInput;
+}>;
 
-/** Resolvedor com memória: a pré-resolução roda no máximo uma vez por carga. */
-function createBoardWhereResolver(dealWhere: Prisma.DealWhereInput): {
+/**
+ * Restrição em SQL (alias `d`) com o que dá para traduzir de uma lista de
+ * condições em AND — as que não traduzem ficam de fora. Serve só para estreitar
+ * a consulta de ids da busca: as condições continuam no where final, então
+ * estreitar nunca muda o resultado, só reduz candidatos.
+ */
+function narrowSqlOfConditions(
+  conditions: readonly Prisma.DealWhereInput[],
+): Prisma.Sql | null {
+  const parts: Prisma.Sql[] = [];
+  for (const c of conditions) {
+    const sql = translateDealWhereToSql(c);
+    if (sql) parts.push(sql);
+  }
+  return parts.length > 0 ? sqlAndAll(parts) : null;
+}
+
+/** Condições de primeiro nível de um where (o `AND` vira lista; senão, ele mesmo). */
+function andConditionsOf(where: Prisma.DealWhereInput): Prisma.DealWhereInput[] {
+  if (Array.isArray(where.AND)) return where.AND;
+  return where.AND ? [where.AND] : [where];
+}
+
+/**
+ * Resolvedor com memória: a pré-resolução roda no máximo uma vez por carga.
+ *
+ * Busca livre (`search`): quando o resto do where traduz para SQL, o predicado
+ * da busca (subconsultas, sem lista de ids) entra NA MESMA consulta da janela
+ * (`direct`) — cursor de `lastInteraction`, contagem por etapa e "carregar
+ * mais" valem como sem busca. Se o resto não traduz, os ids da busca saem de
+ * uma consulta só e o Prisma avalia o where inteiro (visibilidade incluída).
+ */
+function createBoardWhereResolver(
+  dealWhere: Prisma.DealWhereInput,
+  search: DealSearch | null = null,
+): {
   resolve: BoardWhereResolver;
   /** Resultado da pré-resolução (`undefined` = não rodou; `null` = teto). */
   preResolved: () => PreResolvedBoardWhere | null | undefined;
   directSql: Prisma.Sql | null;
+  /** Where Prisma completo da última resolução (antes dela, o `dealWhere`). */
+  fullWhere: () => Prisma.DealWhereInput;
 } {
-  const directSql = translateDealWhereToSql(dealWhere);
+  const baseSql = translateDealWhereToSql(dealWhere);
+  const directSql = baseSql && search ? sqlAndAll([baseSql, search.sql]) : baseSql;
   let pre: Promise<PreResolvedBoardWhere | null> | undefined;
   let settled: PreResolvedBoardWhere | null | undefined;
+  let fullWhere = dealWhere;
   return {
     directSql,
     preResolved: () => settled,
+    fullWhere: () => fullWhere,
     resolve: async (stageIds) => {
-      if (directSql) return { sql: directSql, direct: true };
-      pre ??= preResolveBoardWhere(dealWhere, stageIds).then((r) => (settled = r));
+      if (directSql) return { sql: directSql, direct: true, where: dealWhere };
+      if (search) {
+        const narrow = narrowSqlOfConditions([
+          ...andConditionsOf(dealWhere),
+          { stageId: { in: [...stageIds] } },
+        ]);
+        fullWhere = {
+          AND: [dealWhere, await search.prismaWhere({ narrowSql: narrow })],
+        };
+      }
+      pre ??= preResolveBoardWhere(fullWhere, stageIds).then((r) => (settled = r));
       const r = await pre;
-      return { sql: r?.sql ?? null, direct: false };
+      return { sql: r?.sql ?? null, direct: false, where: fullWhere };
     },
   };
 }
@@ -2898,6 +3176,12 @@ type BoardRankedRow = {
   id: string;
   stageId: string;
   rn: number;
+  /**
+   * Total de negócios da etapa que casam com o where (`COUNT(*) OVER
+   * (PARTITION BY "stageId")` da mesma janela) — K3: a contagem por etapa
+   * não é mais uma consulta à parte.
+   */
+  total?: number | bigint | null;
   /** Só no ranking por `lastInteraction` (chave do cursor da etapa). */
   last_at?: Date | string | null;
 };
@@ -2917,10 +3201,13 @@ function boardRankOrderBySql(
 
 /**
  * UMA consulta para todas as colunas: `ROW_NUMBER() OVER (PARTITION BY
- * "stageId" ORDER BY …) <= maxPerStage`. Devolve só (id, stageId, rn); a
+ * "stageId" ORDER BY …) <= maxPerStage`. Devolve (id, stageId, rn, total); a
  * hidratação (contato, dono, tags, atividades) é um `findMany` por `id IN`.
+ * `total` = `COUNT(*) OVER (PARTITION BY "stageId")`: o total da etapa sai da
+ * mesma passada (etapa sem negócio não devolve linha → total 0).
  *
- * Antes: N `findMany` (um por etapa, cada um com include) em `Promise.all`.
+ * Antes: N `findMany` (um por etapa, cada um com include) em `Promise.all`,
+ * e a contagem num `groupBy` do Prisma à parte (2–3 LEFT JOIN em `stages`).
  */
 export function buildRankedBoardDealsSql(args: {
   orgId: string;
@@ -2930,7 +3217,7 @@ export function buildRankedBoardDealsSql(args: {
   maxPerStage: number;
 }): Prisma.Sql {
   return Prisma.sql`
-    SELECT r.id, r."stageId", r.rn
+    SELECT r.id, r."stageId", r.rn, r.total
     FROM (
       SELECT
         d.id,
@@ -2938,7 +3225,8 @@ export function buildRankedBoardDealsSql(args: {
         ROW_NUMBER() OVER (
           PARTITION BY d."stageId"
           ORDER BY ${args.orderBy}
-        )::int AS rn
+        )::int AS rn,
+        COUNT(*) OVER (PARTITION BY d."stageId")::int AS total
       FROM deals d
       WHERE d."organizationId" = ${args.orgId}
         AND d."stageId" = ANY(${args.stageIds})
@@ -2970,13 +3258,38 @@ function stagesAllowedByFilter<T extends { id: string }>(
 }
 
 /**
+ * `last_at` (última interação) de cada candidato `c` do board, em SQL:
+ * `contacts.lastMessageAt` pela PK e, SÓ quando a coluna está NULL, o
+ * fallback em `conversations` — o `ct."lastMessageAt" IS NULL` dentro do
+ * LATERAL vira filtro de uma vez por linha, então contato já preenchido não
+ * toca em `conversations`. Devolve os JOINs e a expressão.
+ */
+function boardLastInteractionSql(orgId: string): { joins: Prisma.Sql; lastAt: Prisma.Sql } {
+  return {
+    joins: Prisma.sql`
+      LEFT JOIN contacts ct
+        ON ct.id = c."contactId" AND ct."organizationId" = ${orgId}
+      LEFT JOIN LATERAL (
+        SELECT MAX(COALESCE(cv."lastMessageAt", cv."updatedAt")) AS last_at
+        FROM conversations cv
+        WHERE ct.id IS NOT NULL
+          AND ct."lastMessageAt" IS NULL
+          AND cv."organizationId" = ${orgId}
+          AND cv."contactId" = c."contactId"
+      ) fb ON TRUE`,
+    lastAt: Prisma.sql`COALESCE(ct."lastMessageAt", fb.last_at)`,
+  };
+}
+
+/**
  * `lastInteraction` em UMA consulta: candidatos por etapa (janela por
- * `updatedAt` até `scanCap`), `MAX(conversations.updatedAt)` só desses
- * candidatos via `LEFT JOIN LATERAL` (índice `(organizationId, contactId,
- * updatedAt)`) e segunda janela por etapa na ordem final.
+ * `updatedAt` até `scanCap`), última mensagem do contato desses candidatos
+ * (`boardLastInteractionSql`: coluna pronta em `contacts`, fallback em
+ * `conversations` só para quem está NULL) e segunda janela por etapa na
+ * ordem final.
  *
- * Antes: N `findMany` com `take ≥ 2500` por etapa em `Promise.all` + GROUP BY
- * de conversas + ordenação em memória.
+ * Antes: `LEFT JOIN LATERAL (SELECT MAX(cv."updatedAt") …)` para todo
+ * candidato (78–382 ms × ~14.800 em produção, 05/10).
  */
 export function buildLastInteractionRankedSql(args: {
   orgId: string;
@@ -2987,6 +3300,7 @@ export function buildLastInteractionRankedSql(args: {
   maxPerStage: number;
 }): Prisma.Sql {
   const dir = args.direction === "desc" ? Prisma.raw("DESC") : Prisma.raw("ASC");
+  const li = boardLastInteractionSql(args.orgId);
   return Prisma.sql`
     WITH candidates AS (
       SELECT
@@ -2997,34 +3311,67 @@ export function buildLastInteractionRankedSql(args: {
         ROW_NUMBER() OVER (
           PARTITION BY d."stageId"
           ORDER BY d."updatedAt" DESC, d.id DESC
-        )::int AS scan_rn
+        )::int AS scan_rn,
+        COUNT(*) OVER (PARTITION BY d."stageId")::int AS total
       FROM deals d
       WHERE d."organizationId" = ${args.orgId}
         AND d."stageId" = ANY(${args.stageIds})
         AND (${args.whereSql})
     ),
+    scored AS (
+      SELECT c.id, c."stageId", c."position", c.total, ${li.lastAt} AS last_at
+      FROM candidates c
+      ${li.joins}
+      WHERE c.scan_rn <= ${args.scanCap}
+    ),
     ranked AS (
       SELECT
-        c.id,
-        c."stageId",
-        li.last_at,
+        s.id,
+        s."stageId",
+        s.last_at,
+        s.total,
         ROW_NUMBER() OVER (
-          PARTITION BY c."stageId"
-          ORDER BY li.last_at ${dir} NULLS LAST, c."position" ASC, c.id ASC
+          PARTITION BY s."stageId"
+          ORDER BY s.last_at ${dir} NULLS LAST, s."position" ASC, s.id ASC
         )::int AS rn
-      FROM candidates c
-      LEFT JOIN LATERAL (
-        SELECT MAX(cv."updatedAt") AS last_at
-        FROM conversations cv
-        WHERE cv."organizationId" = ${args.orgId}
-          AND cv."contactId" = c."contactId"
-      ) li ON TRUE
-      WHERE c.scan_rn <= ${args.scanCap}
+      FROM scored s
     )
-    SELECT r.id, r."stageId", r.rn, r.last_at
+    SELECT r.id, r."stageId", r.rn, r.last_at, r.total
     FROM ranked r
     WHERE r.rn <= ${args.maxPerStage}
     ORDER BY r."stageId", r.rn
+  `;
+}
+
+/** Totais por etapa lidos das linhas ranqueadas (`total` da janela). */
+function collectRankedTotals(
+  rows: readonly BoardRankedRow[],
+  totalsOut: Map<string, number> | undefined,
+): void {
+  if (!totalsOut) return;
+  for (const row of rows) {
+    if (row.total == null || totalsOut.has(row.stageId)) continue;
+    totalsOut.set(row.stageId, Number(row.total));
+  }
+}
+
+/**
+ * Contagem por etapa em SQL — para quem não passa pela janela ranqueada (o
+ * "Carregar mais" por cursor). Mesmo where traduzido do board, sem JOIN:
+ * `stageId = ANY(etapas)` já escopa o funil.
+ */
+export function buildBoardStageTotalsSql(args: {
+  orgId: string;
+  stageIds: string[];
+  whereSql: Prisma.Sql;
+}): Prisma.Sql {
+  return Prisma.sql`
+    SELECT d."stageId", COUNT(*)::int AS total
+    FROM deals d
+    WHERE d."organizationId" = ${args.orgId}
+      AND d."stageId" = ANY(${args.stageIds})
+      AND (${args.whereSql})
+    GROUP BY d."stageId"
   `;
 }
 
@@ -3087,6 +3434,23 @@ async function hydrateBoardStages(
   });
 }
 
+/**
+ * O único jeito de ainda cair no `findMany` por etapa: filtro que o tradutor
+ * SQL não cobre E mais de `BOARD_PRERESOLVE_CAP` negócios casando. Fica no
+ * log para sabermos se acontece em produção (era o caminho dos 3 formatos de
+ * `findMany` por etapa que somavam 67,5 M linhas na main).
+ */
+function logBoardPerStageFallback(pipelineId: string, sortField: BoardSortField | undefined): void {
+  log.info(
+    { pipelineId, sort: sortField ?? "position", cap: BOARD_PRERESOLVE_CAP },
+    "[board] caminho por etapa (filtro fora do tradutor e acima do teto de pré-resolução)",
+  );
+}
+
+/** Envolve uma consulta para medi-la (ver `loadBoardStagesRanked`). */
+type MeasureQuery = <T>(fn: () => Promise<T>) => Promise<T>;
+const runQuery: MeasureQuery = (fn) => fn();
+
 /** Caminho novo do board (sort `position`/`createdAt`): 1 janela + 1 hidratação. */
 async function loadBoardStagesRanked(
   stagesRaw: readonly BoardStageRaw[],
@@ -3095,19 +3459,26 @@ async function loadBoardStagesRanked(
   sortDirection: BoardSortDirection,
   perStage: number,
   offsetByStage: Record<string, number>,
+  /** Saída opcional: total por etapa vindo da mesma janela (K3). */
+  totalsOut?: Map<string, number>,
+  /** Mede a consulta da janela (`search.apply` do Server-Timing, só com busca). */
+  measure: MeasureQuery = runQuery,
 ): Promise<BoardStageWithDeals[]> {
   if (stagesRaw.length === 0) return [];
   const orgId = getOrgIdOrThrow();
   const limitByStage = boardLimitByStage(stagesRaw, perStage, offsetByStage);
-  const rows = await prisma.$queryRaw<BoardRankedRow[]>(
-    buildRankedBoardDealsSql({
-      orgId,
-      stageIds: stagesRaw.map((s) => s.id),
-      whereSql,
-      orderBy: boardRankOrderBySql(sortField, sortDirection),
-      maxPerStage: Math.max(...limitByStage.values()),
-    }),
+  const rows = await measure(() =>
+    prisma.$queryRaw<BoardRankedRow[]>(
+      buildRankedBoardDealsSql({
+        orgId,
+        stageIds: stagesRaw.map((s) => s.id),
+        whereSql,
+        orderBy: boardRankOrderBySql(sortField, sortDirection),
+        maxPerStage: Math.max(...limitByStage.values()),
+      }),
+    ),
   );
+  collectRankedTotals(rows, totalsOut);
   return hydrateBoardStages(stagesRaw, groupRankedIdsByStage(rows, limitByStage));
 }
 
@@ -3153,8 +3524,8 @@ async function loadBoardStagesPerStage(
  *   - Where traduzível → `buildLastInteractionRankedSql` (uma consulta) e
  *     hidratação dos ids paginados.
  *   - Fallback (where com relações/operadores não traduzidos): candidatos
- *     por etapa via findMany (concorrência limitada), UMA agregação
- *     `MAX(conversations.updatedAt)` por contato, ordena/pagina em memória.
+ *     por etapa via findMany (concorrência limitada), UMA consulta da última
+ *     mensagem por contato, ordena/pagina em memória.
  */
 async function loadBoardStagesByLastInteraction(
   pipelineId: string,
@@ -3172,6 +3543,13 @@ async function loadBoardStagesByLastInteraction(
   advancedFilters?: AdvancedDealFilters,
   /** Resolvedor do where compartilhado com `computeBoardData` (totais). */
   whereResolver: BoardWhereResolver = createBoardWhereResolver(dealWhere).resolve,
+  /**
+   * Saída opcional: total por etapa vindo da janela (K3). Só é preenchido no
+   * caminho em SQL; no fallback por etapa fica vazio e quem chama conta.
+   */
+  totals?: { fromSql: boolean; byStage: Map<string, number> },
+  /** Mede a consulta da janela (`search.apply` do Server-Timing, só com busca). */
+  measure: MeasureQuery = runQuery,
 ): Promise<BoardStageWithDeals[]> {
   const orgId = getOrgIdOrThrow();
   const stagesRaw = stagesAllowedByFilter(
@@ -3189,18 +3567,28 @@ async function loadBoardStagesByLastInteraction(
   // devolve `last_at` para o cursor: o "Carregar mais" por cursor
   // (`getBoardColumnPages`) só aceita where traduzível — com ids
   // pré-resolvidos o cliente segue pelo `offsetByStage`, como antes.
-  const { sql: whereSql, direct } = await whereResolver(stagesRaw.map((s) => s.id));
+  const {
+    sql: whereSql,
+    direct,
+    where: fallbackWhere,
+  } = await whereResolver(stagesRaw.map((s) => s.id));
   if (whereSql) {
-    const rows = await prisma.$queryRaw<BoardRankedRow[]>(
-      buildLastInteractionRankedSql({
-        orgId,
-        stageIds: stagesRaw.map((s) => s.id),
-        whereSql,
-        direction,
-        scanCap: Math.max(maxPerStage, LAST_INTERACTION_STAGE_SCAN_CAP),
-        maxPerStage,
-      }),
+    const rows = await measure(() =>
+      prisma.$queryRaw<BoardRankedRow[]>(
+        buildLastInteractionRankedSql({
+          orgId,
+          stageIds: stagesRaw.map((s) => s.id),
+          whereSql,
+          direction,
+          scanCap: Math.max(maxPerStage, LAST_INTERACTION_STAGE_SCAN_CAP),
+          maxPerStage,
+        }),
+      ),
     );
+    if (totals) {
+      totals.fromSql = true;
+      collectRankedTotals(rows, totals.byStage);
+    }
     if (lastAtOut && direct) {
       for (const row of rows) {
         if (row.last_at === undefined) continue;
@@ -3210,11 +3598,12 @@ async function loadBoardStagesByLastInteraction(
     return hydrateBoardStages(stagesRaw, groupRankedIdsByStage(rows, limitByStage));
   }
 
+  logBoardPerStageFallback(pipelineId, "lastInteraction");
   return hydrateBoardStages(
     stagesRaw,
     await loadLastInteractionIdsPerStage(
       stagesRaw,
-      dealWhere,
+      fallbackWhere,
       limitByStage,
       direction,
     ),
@@ -3246,8 +3635,9 @@ async function loadLastInteractionIdsPerStage(
     },
   );
 
-  // 2) UMA agregação para o board inteiro: última atividade de conversa por
-  //    contato.
+  // 2) UMA consulta para o board inteiro: última mensagem por contato
+  //    (`contacts.lastMessageAt`; fallback em `conversations` só para quem
+  //    está com a coluna NULL — mesma regra do caminho em SQL).
   const contactIds = [
     ...new Set(
       candidatesByStage
@@ -3261,11 +3651,18 @@ async function loadLastInteractionIdsPerStage(
     const grouped = await prisma.$queryRaw<
       { contactId: string; last_at: Date | null }[]
     >`
-      SELECT "contactId", MAX("updatedAt") AS last_at
-      FROM conversations
-      WHERE "organizationId" = ${orgId}
-        AND "contactId" = ANY(${contactIds})
-      GROUP BY "contactId"
+      SELECT ct.id AS "contactId", COALESCE(ct."lastMessageAt", fb.last_at) AS last_at
+      FROM contacts ct
+      LEFT JOIN LATERAL (
+        SELECT MAX(COALESCE(cv."lastMessageAt", cv."updatedAt")) AS last_at
+        FROM conversations cv
+        WHERE ct."lastMessageAt" IS NULL
+          AND cv."organizationId" = ${orgId}
+          AND cv."contactId" = ct.id
+      ) fb ON TRUE
+      WHERE ct."organizationId" = ${orgId}
+        AND ct.id = ANY(${contactIds})
+        AND COALESCE(ct."lastMessageAt", fb.last_at) IS NOT NULL
     `;
     for (const g of grouped) {
       if (g.contactId && g.last_at) {
@@ -3297,7 +3694,10 @@ async function loadLastInteractionIdsPerStage(
 }
 
 export type BoardLimitOptions = {
-  /** Quantos cards retornar por coluna. */
+  /**
+   * Quantos cards retornar por coluna: padrão `BOARD_DEFAULT_PER_STAGE` (50),
+   * teto `BOARD_MAX_PER_STAGE` (200). As rotas aceitam `perStage` ou `limit`.
+   */
   perStage?: number;
   /** Offset por etapa: stageId -> quantos pular. Permite "Carregar mais". */
   offsetByStage?: Record<string, number>;
@@ -3496,7 +3896,12 @@ async function buildBoardDealWhere(
   visibilityWhere: Prisma.DealWhereInput | null | undefined,
   statusFilter: DealStatus | "ALL" | undefined,
   advancedFilters: AdvancedDealFilters | undefined,
-): Promise<Prisma.DealWhereInput> {
+  timing?: ServerTiming,
+): Promise<{
+  /** Where sem a busca livre (ela entra em SQL, ver `createBoardWhereResolver`). */
+  where: Prisma.DealWhereInput;
+  search: DealSearch | null;
+}> {
   const conditions: Prisma.DealWhereInput[] = [];
 
   if (statusFilter && statusFilter !== "ALL") {
@@ -3508,18 +3913,26 @@ async function buildBoardDealWhere(
     conditions.push(visibilityWhere);
   }
 
+  let search: DealSearch | null = null;
   if (advancedFilters && Object.keys(advancedFilters).length > 0) {
+    // A busca livre sai do where Prisma: vira predicado SQL dentro da consulta
+    // do board (sem pré-consultas nem lista de ids). Os demais filtros e a
+    // visibilidade seguem no where, sempre em AND com ela.
+    const { search: searchTerm, ...rest } = advancedFilters;
+    if (searchTerm?.trim()) search = createDealSearch(searchTerm, { timing });
     // pipelineId/statuses no advancedFilters não substituem visibilidade —
     // ficam como condições adicionais (AND).
-    const advConditions = await buildDealWhereFromFilters(advancedFilters);
+    const advConditions = await buildDealWhereFromFilters(rest);
     for (const c of advConditions) conditions.push(c);
   }
 
-  return conditions.length === 0
-    ? {}
-    : conditions.length === 1
-      ? (conditions[0] as Prisma.DealWhereInput)
-      : { AND: conditions };
+  const where: Prisma.DealWhereInput =
+    conditions.length === 0
+      ? {}
+      : conditions.length === 1
+        ? (conditions[0] as Prisma.DealWhereInput)
+        : { AND: conditions };
+  return { where, search };
 }
 
 async function computeBoardData(
@@ -3535,15 +3948,15 @@ async function computeBoardData(
   const phase = <T>(name: string, fn: () => Promise<T>): Promise<T> =>
     timing ? timing.time(name, fn) : fn();
 
-  const dealWhere = await phase("filters", () =>
-    buildBoardDealWhere(visibilityWhere, statusFilter, advancedFilters),
+  const { where: dealWhere, search } = await phase("filters", () =>
+    buildBoardDealWhere(visibilityWhere, statusFilter, advancedFilters, timing),
   );
+  // Consulta final com a busca dentro: `search.apply` (Server-Timing).
+  const measureSearch: MeasureQuery = <T,>(fn: () => Promise<T>): Promise<T> =>
+    search && timing ? timing.time("search.apply", fn) : fn();
 
-  const perStage = Math.min(
-    MAX_BOARD_COLUMN_LIMIT,
-    Math.max(1, limitOptions?.perStage ?? DEFAULT_BOARD_COLUMN_LIMIT),
-  );
-  const offsetByStage = limitOptions?.offsetByStage ?? {};
+  const perStage = normalizeBoardPerStage(limitOptions?.perStage);
+  const offsetByStage = normalizeBoardOffsets(limitOptions?.offsetByStage);
   const sortField = limitOptions?.sortField;
   const sortDirection: BoardSortDirection =
     limitOptions?.sortDirection === "desc" ? "desc" : "asc";
@@ -3563,38 +3976,34 @@ async function computeBoardData(
   // Promise.all lá embaixo. Não usar `await` aqui — a promise fica em voo.
   const metricsPromise = getStageMetrics(pipelineId);
 
-  // ⚡ COUNT por etapa em paralelo com o SELECT de cards. Antes o groupBy
-  // esperava `stages` só pra montar `stageId IN (...)` — agora escopa por
-  // `stage.pipelineId` (mesmo resultado) e sobe junto com a query pesada.
+  // Contagem por etapa (K3): sai da MESMA janela que ranqueia os cards
+  // (`COUNT(*) OVER (PARTITION BY "stageId")`), com o mesmo where — direto
+  // em SQL ou sobre os ids pré-resolvidos. Antes era um `groupBy` do Prisma à
+  // parte, com `stage.pipelineId` no where (2–3 LEFT JOIN repetidos em
+  // `stages`; ~61 mil chamadas de 30–77 ms em produção, 05/10).
   //
-  // Where não traduzível (filtro de conversa, campo personalizado, busca):
-  // os totais saem dos ids pré-resolvidos, sem um 2º SELECT com o mesmo
-  // filtro caro. O `groupBy` só roda nesse caso se a pré-resolução passar
-  // do teto.
-  const whereResolver = createBoardWhereResolver(dealWhere);
+  // O `groupBy` só sobrevive no caminho por etapa (where que nem traduz nem
+  // cabe no teto da pré-resolução), onde não existe janela.
+  const whereResolver = createBoardWhereResolver(dealWhere, search);
   type TotalsRow = { stageId: string; _count: { _all: number } };
   const groupByTotals = (): Promise<TotalsRow[]> =>
     prisma.deal.groupBy({
       by: ["stageId"],
-      where: { ...dealWhere, stage: { pipelineId } },
+      // `fullWhere`: com busca, já traz os ids resolvidos pelo caminho por etapa.
+      where: { ...whereResolver.fullWhere(), stage: { pipelineId } },
       _count: { _all: true },
     });
-  const totalsPromise: Promise<TotalsRow[]> | null = whereResolver.directSql
-    ? groupByTotals()
-    : null;
-  totalsPromise?.catch(() => undefined);
+  const sqlTotals = { fromSql: false, byStage: new Map<string, number>() };
   const resolveTotals = async (): Promise<TotalsRow[]> => {
-    if (totalsPromise) return totalsPromise;
-    const pre = whereResolver.preResolved();
-    if (!pre) return groupByTotals();
-    return [...pre.countsByStage].map(([stageId, n]) => ({ stageId, _count: { _all: n } }));
+    if (!sqlTotals.fromSql) return groupByTotals();
+    return [...sqlTotals.byStage].map(([stageId, n]) => ({ stageId, _count: { _all: n } }));
   };
 
   let stages: BoardStageWithDeals[];
 
   if (sortField === "lastInteraction") {
-    // Caminho dedicado: ordena por `MAX(Conversation.updatedAt)` do
-    // contato. Já aplica `offsetByStage` internamente (não cai no
+    // Caminho dedicado: ordena pela última mensagem do contato
+    // (`contacts.lastMessageAt`). Já aplica `offsetByStage` internamente (não cai no
     // branch de "Carregar mais" abaixo).
     stages = await phase("cards", () =>
       loadBoardStagesByLastInteraction(
@@ -3606,6 +4015,8 @@ async function computeBoardData(
         lastAtByDealId,
         advancedFilters,
         whereResolver.resolve,
+        sqlTotals,
+        measureSearch,
       ),
     );
   } else {
@@ -3632,7 +4043,11 @@ async function computeBoardData(
       advancedFilters,
     );
     stages = await phase("cards", async () => {
-      const { sql: whereSql } = await whereResolver.resolve(stagesRaw.map((s) => s.id));
+      const { sql: whereSql, where: fallbackWhere } = await whereResolver.resolve(
+        stagesRaw.map((s) => s.id),
+      );
+      if (whereSql) sqlTotals.fromSql = true;
+      else logBoardPerStageFallback(pipelineId, sortField);
       return whereSql
         ? loadBoardStagesRanked(
             stagesRaw,
@@ -3641,10 +4056,12 @@ async function computeBoardData(
             sortDirection,
             perStage,
             offsetByStage,
+            sqlTotals.byStage,
+            measureSearch,
           )
         : loadBoardStagesPerStage(
             stagesRaw,
-            dealWhere,
+            fallbackWhere,
             dealOrderBy,
             perStage,
             offsetByStage,
@@ -3656,8 +4073,8 @@ async function computeBoardData(
   // produtos → última mensagem → métricas → avatares): a latência do board
   // virava a SOMA de ~5 round-trips ao Postgres. São independentes entre
   // si, então rodam em paralelo — `loadBoardCardEnrichment` dispara as
-  // consultas dos cards no mesmo tick; `metricsPromise`/`totalsPromise` já
-  // voam desde antes do findMany de stages.
+  // consultas dos cards no mesmo tick; `metricsPromise` já voa desde antes
+  // do findMany de stages. Os totais já vieram com os cards (K3).
   const [totalsGroups, metrics, enrichCard] = await phase("enrich", () =>
     Promise.all([resolveTotals(), metricsPromise, loadBoardCardEnrichment(stages, now)]),
   );
@@ -3677,7 +4094,9 @@ async function computeBoardData(
   const built = stages
     .map((stage) => {
       const metric = metricsMap.get(stage.id);
-      const totalCount = totalsByStage.get(stage.id) ?? stage.deals.length;
+      // Janela em SQL: etapa sem linha = nenhum negócio casando (total 0).
+      const totalCount =
+        totalsByStage.get(stage.id) ?? (sqlTotals.fromSql ? 0 : stage.deals.length);
       // `extra` agora representa "quantos cards adicionais foram pedidos".
       // O total carregado é o tamanho real do array.
       const loadedCount = stage.deals.length;
@@ -3707,6 +4126,88 @@ async function computeBoardData(
 }
 
 /**
+ * Não lidas, canal e prévia de mensagens dos contatos do board numa consulta
+ * (ver o comentário em `loadBoardCardEnrichment`). Só valores como
+ * parâmetro; o recorte de mensagem de chat é o de
+ * `lib/conversation-last-message.ts`.
+ */
+export function buildBoardCardPreviewSql(args: {
+  orgId: string;
+  contactIds: readonly string[];
+  awaitingCap: number;
+}): Prisma.Sql {
+  const lastOf = (direction: "in" | "out", limit: Prisma.Sql) => Prisma.sql`
+          (SELECT m.id, m."externalId", m.content, m."createdAt", m.direction,
+                  m."sendStatus", m."sendError"
+           FROM messages m
+           WHERE m."conversationId" = conv.id
+             AND m."organizationId" = ${args.orgId}
+             AND m.direction = ${direction}
+             AND m."isPrivate" = false
+             AND m."messageType" NOT IN (${Prisma.join([...NON_CHAT_MESSAGE_TYPES])})
+             AND m."messageType" NOT LIKE 'event%'
+           -- Desempate no mesmo segundo (timestamp do WhatsApp em s).
+           ORDER BY m."createdAt" DESC, m.id DESC
+           LIMIT ${limit})`;
+  const inLimit = Prisma.sql`CASE WHEN pc.unread > 0 THEN ${args.awaitingCap}::int ELSE 1 END`;
+  return Prisma.sql`
+    WITH conv AS (
+      SELECT c.id, c."contactId", c.channel, c."unreadCount", c."updatedAt"
+      FROM conversations c
+      WHERE c."contactId" = ANY(${[...args.contactIds]})
+        AND c."organizationId" = ${args.orgId}
+    ),
+    per_contact AS (
+      SELECT
+        "contactId",
+        COALESCE(SUM("unreadCount"), 0)::int AS unread,
+        (ARRAY_AGG(channel ORDER BY "updatedAt" DESC))[1] AS channel
+      FROM conv
+      GROUP BY "contactId"
+    ),
+    picked AS (
+      SELECT conv."contactId", lm.*
+      FROM conv
+      INNER JOIN per_contact pc ON pc."contactId" = conv."contactId"
+      CROSS JOIN LATERAL (
+        ${lastOf("in", inLimit)}
+        UNION ALL
+        ${lastOf("out", Prisma.sql`1`)}
+      ) lm
+    ),
+    ranked AS (
+      SELECT
+        p.*,
+        ROW_NUMBER() OVER (
+          PARTITION BY p."contactId", p.direction
+          ORDER BY p."createdAt" DESC, p.id DESC
+        )::int AS rn
+      FROM picked p
+    )
+    SELECT
+      pc."contactId",
+      pc.channel,
+      pc.unread AS "unreadCount",
+      r.id AS "msgId",
+      r."externalId" AS "msgExternalId",
+      r.content AS "msgContent",
+      r."createdAt" AS "msgCreatedAt",
+      r.direction AS "msgDirection",
+      r."sendStatus" AS "msgSendStatus",
+      r."sendError" AS "msgSendError",
+      r.rn
+    FROM per_contact pc
+    LEFT JOIN ranked r
+      ON r."contactId" = pc."contactId"
+     AND r.rn <= CASE
+           WHEN r.direction = 'in' AND pc.unread > 0 THEN ${args.awaitingCap}::int
+           ELSE 1
+         END
+    ORDER BY pc."contactId", r.rn
+  `;
+}
+
+/**
  * Enriquecimento dos cards do board: produto, última mensagem (qualquer
  * lado e do cliente), não lidas, canal, prévia “N aguardando” e avatar.
  *
@@ -3715,7 +4216,7 @@ async function computeBoardData(
  * (`computeBoardData`) e pelo “Carregar mais” por cursor
  * (`getBoardColumnPages`) — o card tem o mesmo formato nos dois.
  *
- * As 3 consultas + avatar saem juntas (`Promise.all`); as promessas são
+ * As 2 consultas (produtos e prévia) + avatar saem juntas (`Promise.all`); as promessas são
  * criadas antes do primeiro `await`, então quem chama pode pôr esta função
  * num `Promise.all` com outras consultas sem serializar nada.
  */
@@ -3775,128 +4276,67 @@ async function loadBoardCardEnrichment(
         `
       : Promise.resolve([]);
 
-  // Última mensagem + não lidas + canal por contato.
+  // Não lidas + canal + prévia de mensagens por contato — UMA consulta (K2).
   // Obs.: o "responsável" do contato e do chat são derivados de
   // `Deal.owner` via regra de herança (ver `propagateOwnerToContactAndChat`),
   // então não precisamos carregá-los separadamente aqui.
   //
-  // Antes: findMany conversations + nested messages take 1 por conv — N+1
-  // em SQL gerado. Agora: 1 query em `conversations` (unread + canal) e
-  // 1 passagem em `messages` (abaixo). Semântica: unread = soma; channel =
-  // conv mais recente por updatedAt.
-  type BoardConvRow = {
-    contactId: string;
-    channel: string | null;
-    unreadCount: number;
-  };
-  /**
-   * Uma linha por (contato, direção, posição): `rn = 1` da direção `in` é
-   * a última do cliente; `rn = 1` de cada direção disputa a última mensagem
-   * do contato; `rn <= 5` de `in` alimenta o preview “N aguardando”.
-   */
-  type BoardMsgRow = {
-    contactId: string;
-    msgId: string;
-    msgExternalId: string | null;
-    msgContent: string | null;
-    msgCreatedAt: Date;
-    msgDirection: string;
-    msgSendStatus: string | null;
-    msgSendError: string | null;
-    rn: number;
-  };
-  const AWAITING_PREVIEW_CAP = 5;
-  const convsPromise: Promise<BoardConvRow[]> =
-    allContactIds.length > 0
-      ? prisma.$queryRaw<BoardConvRow[]>`
-          WITH contact_unread AS (
-            SELECT "contactId", SUM("unreadCount")::int AS unread
-            FROM conversations
-            WHERE "contactId" = ANY(${allContactIds})
-              AND "organizationId" = ${orgIdForBoard}
-            GROUP BY "contactId"
-          ),
-          latest_channel AS (
-            SELECT DISTINCT ON ("contactId")
-              "contactId", channel
-            FROM conversations
-            WHERE "contactId" = ANY(${allContactIds})
-              AND "organizationId" = ${orgIdForBoard}
-            ORDER BY "contactId", "updatedAt" DESC
-          )
-          SELECT
-            cu."contactId",
-            lc.channel,
-            COALESCE(cu.unread, 0) AS "unreadCount"
-          FROM contact_unread cu
-          LEFT JOIN latest_channel lc ON lc."contactId" = cu."contactId"
-        `
-      : Promise.resolve([]);
-
-  // UMA passagem em `messages` para última mensagem (qualquer lado), última
-  // do cliente e preview “aguardando”. Antes eram 3 varreduras por contato
-  // (`last_msg`, `last_in` e `awaiting`, cada uma com DISTINCT ON /
-  // ROW_NUMBER próprio). Janela por (contato, direção): `in` guarda até
-  // AWAITING_PREVIEW_CAP linhas, `out` só a mais recente.
+  // Antes eram duas: `contact_unread`/`latest_channel` em `conversations` e
+  // uma janela `ROW_NUMBER() OVER (PARTITION BY contato, direção)` sobre
+  // TODAS as mensagens de todos os contatos do board — o Postgres lia e
+  // ordenava o histórico inteiro para ficar com até 6 linhas por contato
+  // (produção, 05/10: 31.833 + 29.017 chamadas, 19,4 M linhas).
+  //
+  // Agora, por conversa do contato, um LATERAL busca pelo índice
+  // `messages("conversationId", "createdAt")` de trás para a frente e para
+  // em poucas linhas: as últimas do cliente (até AWAITING_PREVIEW_CAP quando
+  // o contato tem não lidas; 1 quando não tem) e a última nossa. A janela
+  // final ranqueia só essas linhas. Semântica: unread = soma; canal = conversa
+  // de `updatedAt` mais recente; `rn = 1` de cada direção disputa a última
+  // mensagem do contato; `rn <= cap` de `in` alimenta o "N aguardando".
   //
   // Preview do card = última msg real de chat (cliente/agente). Exclui nota
   // interna, rascunho IA e eventos de call — senão o kanban/Flow mostra
   // "Lead/Conversa distribuída…" no lugar do Oi. `NOT LIKE 'event%'` vale
   // para as duas direções: mensagens de evento nascem com `direction: "out"`
-  // (`conversation-events.ts`), então o preview “aguardando” (só `in`) não
-  // muda em relação à varredura antiga, que não tinha esse filtro.
-  const msgsPromise: Promise<BoardMsgRow[]> =
+  // (`conversation-events.ts`).
+  //
+  // Única diferença visível: contato SEM não lidas cuja última mensagem do
+  // cliente é só espaços em branco não mostra mais a anterior no "aguardando"
+  // (antes vinham sempre 5 do cliente; agora 1 quando não há não lidas).
+  /**
+   * Uma linha por (contato, direção, posição); contato com conversa mas sem
+   * mensagem de chat devolve uma linha só com `unreadCount`/`channel`.
+   */
+  type BoardPreviewRow = {
+    contactId: string;
+    channel: string | null;
+    unreadCount: number;
+    msgId: string | null;
+    msgExternalId: string | null;
+    msgContent: string | null;
+    msgCreatedAt: Date | null;
+    msgDirection: string | null;
+    msgSendStatus: string | null;
+    msgSendError: string | null;
+    rn: number | null;
+  };
+  type BoardMsgRow = BoardPreviewRow & { msgId: string; msgCreatedAt: Date; msgDirection: string };
+  const AWAITING_PREVIEW_CAP = 5;
+  const previewPromise: Promise<BoardPreviewRow[]> =
     allContactIds.length > 0
-      ? prisma.$queryRaw<BoardMsgRow[]>`
-          SELECT
-            r."contactId",
-            r."msgId",
-            r."msgExternalId",
-            r."msgContent",
-            r."msgCreatedAt",
-            r."msgDirection",
-            r."msgSendStatus",
-            r."msgSendError",
-            r.rn
-          FROM (
-            SELECT
-              c."contactId",
-              m.id AS "msgId",
-              m."externalId" AS "msgExternalId",
-              m.content AS "msgContent",
-              m."createdAt" AS "msgCreatedAt",
-              m.direction AS "msgDirection",
-              m."sendStatus" AS "msgSendStatus",
-              m."sendError" AS "msgSendError",
-              ROW_NUMBER() OVER (
-                PARTITION BY c."contactId", m.direction
-                -- Desempate no mesmo segundo (timestamp do WhatsApp em s).
-                ORDER BY m."createdAt" DESC, m.id DESC
-              )::int AS rn
-            FROM conversations c
-            INNER JOIN messages m ON m."conversationId" = c.id
-            WHERE c."contactId" = ANY(${allContactIds})
-              AND c."organizationId" = ${orgIdForBoard}
-              AND m."organizationId" = ${orgIdForBoard}
-              AND m."isPrivate" = false
-              AND m.direction IN ('in', 'out')
-              AND m."messageType" NOT IN (
-                'note',
-                'ai_draft',
-                'whatsapp_call',
-                'whatsapp_call_recording'
-              )
-              AND m."messageType" NOT LIKE 'event%'
-          ) r
-          WHERE r.rn <= CASE WHEN r."msgDirection" = 'in' THEN ${AWAITING_PREVIEW_CAP} ELSE 1 END
-          ORDER BY r."contactId", r.rn
-        `
+      ? prisma.$queryRaw<BoardPreviewRow[]>(
+          buildBoardCardPreviewSql({
+            orgId: orgIdForBoard,
+            contactIds: allContactIds,
+            awaitingCap: AWAITING_PREVIEW_CAP,
+          }),
+        )
       : Promise.resolve([]);
 
-  const [dealProducts, convs, msgRows] = await Promise.all([
+  const [dealProducts, previewRows] = await Promise.all([
     productsPromise,
-    convsPromise,
-    msgsPromise,
+    previewPromise,
     // Enriquecimento de avatar (fallback PURAMENTE VISUAL — foto do User
     // homônimo quando o Contact não tem avatarUrl). Independe das demais;
     // roda no mesmo lote. Muta `allContacts` em memória e resolve void.
@@ -3927,14 +4367,20 @@ async function loadBoardCardEnrichment(
   const lastInMap = new Map<string, { content: string; createdAt: Date }>();
   const unreadMap = new Map<string, number>();
   const channelMap = new Map<string, { channel: string; updatedAt: Date }>();
-  for (const row of convs) {
+  const msgRows: BoardMsgRow[] = [];
+  for (const row of previewRows) {
     if (!row.contactId) continue;
-    unreadMap.set(row.contactId, row.unreadCount ?? 0);
-    if (row.channel) {
-      channelMap.set(row.contactId, {
-        channel: row.channel,
-        updatedAt: new Date(0),
-      });
+    if (!unreadMap.has(row.contactId)) {
+      unreadMap.set(row.contactId, row.unreadCount ?? 0);
+      if (row.channel) {
+        channelMap.set(row.contactId, {
+          channel: row.channel,
+          updatedAt: new Date(0),
+        });
+      }
+    }
+    if (row.msgId != null && row.msgCreatedAt != null && row.msgDirection != null) {
+      msgRows.push(row as BoardMsgRow);
     }
   }
 
@@ -3951,7 +4397,6 @@ async function loadBoardCardEnrichment(
   // igual ao `DISTINCT ON … ORDER BY createdAt DESC, id DESC` antigo.
   const newestByContact = new Map<string, BoardMsgRow>();
   for (const row of msgRows) {
-    if (!row.contactId || row.msgCreatedAt == null) continue;
     const isIn = row.msgDirection === "in";
     if (row.rn === 1) {
       const current = newestByContact.get(row.contactId);
@@ -4164,6 +4609,7 @@ export function buildLastInteractionColumnPageSql(args: {
       : desc
         ? Prisma.sql`(r.last_at < ${lastAt} OR (r.last_at = ${lastAt} AND ${afterPosition}) OR r.last_at IS NULL)`
         : Prisma.sql`(r.last_at > ${lastAt} OR (r.last_at = ${lastAt} AND ${afterPosition}) OR r.last_at IS NULL)`;
+  const li = boardLastInteractionSql(args.orgId);
   return Prisma.sql`
     WITH candidates AS (
       SELECT d.id, d."contactId", d."position"
@@ -4175,14 +4621,9 @@ export function buildLastInteractionColumnPageSql(args: {
       LIMIT ${args.scanCap}
     ),
     ranked AS (
-      SELECT c.id, c."position", li.last_at
+      SELECT c.id, c."position", ${li.lastAt} AS last_at
       FROM candidates c
-      LEFT JOIN LATERAL (
-        SELECT MAX(cv."updatedAt") AS last_at
-        FROM conversations cv
-        WHERE cv."organizationId" = ${args.orgId}
-          AND cv."contactId" = c."contactId"
-      ) li ON TRUE
+      ${li.joins}
     )
     SELECT r.id, r.last_at
     FROM ranked r
@@ -4195,9 +4636,9 @@ export function buildLastInteractionColumnPageSql(args: {
 /**
  * Próximos cards de uma ou mais etapas, a partir do cursor de cada uma.
  *
- * Custo de uma etapa: 1 consulta das etapas pedidas + 1 contagem (total
- * atual das etapas pedidas) + 1 página de deals (`lastInteraction`: 1
- * ranking + 1 hidratação) + o enriquecimento dos cards devolvidos (3
+ * Custo de uma etapa: 1 consulta das etapas pedidas + 1 contagem em SQL
+ * (total atual das etapas pedidas) + 1 página de deals (`lastInteraction`: 1
+ * ranking + 1 hidratação) + o enriquecimento dos cards devolvidos (2
  * consultas + avatar), feito UMA vez para todas as etapas do pedido. Não
  * passa pelo cache do board.
  *
@@ -4253,13 +4694,17 @@ export async function getBoardColumnPages(
     typeof visibilityWhere === "string"
       ? { ownerId: visibilityWhere }
       : visibilityWhere ?? null;
-  const dealWhere = await buildBoardDealWhere(
+  const { where: baseWhere, search } = await buildBoardDealWhere(
     normalizedWhere,
     statusFilter,
     advancedFilters,
   );
-  const whereSql =
-    sort === "lastInteraction" ? translateDealWhereToSql(dealWhere) : null;
+  // Where em SQL: obrigatório para a página de `lastInteraction`; nas outras
+  // ordenações serve só à contagem (abaixo). A busca livre entra como predicado
+  // (subconsultas); só o caminho por Prisma (`position`/`createdAt`) pede os ids.
+  const baseSql = translateDealWhereToSql(baseWhere);
+  const translatedWhere = baseSql && search ? sqlAndAll([baseSql, search.sql]) : baseSql;
+  const whereSql = sort === "lastInteraction" ? translatedWhere : null;
   if (sort === "lastInteraction" && !whereSql) {
     throw new BoardColumnPageError(
       "cursor_unsupported",
@@ -4272,19 +4717,52 @@ export async function getBoardColumnPages(
     orderBy: { position: "asc" },
   });
 
+  // Where Prisma COMPLETO, só quando um caminho precisa dele (página por
+  // `position`/`createdAt` via findMany, ou `groupBy` de totais sem tradução).
+  // Com busca, os ids saem de UMA consulta estreitada pelas etapas pedidas.
+  const needsPrismaWhere = sort !== "lastInteraction" || !translatedWhere;
+  const dealWhere: Prisma.DealWhereInput =
+    search && needsPrismaWhere
+      ? {
+          AND: [
+            baseWhere,
+            await search.prismaWhere({
+              narrowSql: narrowSqlOfConditions([
+                ...andConditionsOf(baseWhere),
+                { stageId: { in: stagesRaw.map((s) => s.id) } },
+              ]),
+            }),
+          ],
+        }
+      : baseWhere;
+
   // Total ATUAL de cada etapa pedida (o do board pode ter até 45 s de cache):
   // o cliente recalcula "faltam N" sem recarregar o board. Em voo junto com
-  // as páginas.
+  // as páginas. Where traduzível → uma contagem em SQL sem JOIN (K3); senão
+  // o `groupBy` do Prisma, que é quem sabe avaliar o filtro.
   const totalsPromise: Promise<{ stageId: string; _count: { _all: number } }[]> =
     stagesRaw.length === 0
       ? Promise.resolve([])
-      : prisma.deal.groupBy({
-          by: ["stageId"],
-          where: {
-            AND: [dealWhere, { stageId: { in: stagesRaw.map((s) => s.id) } }],
-          },
-          _count: { _all: true },
-        });
+      : translatedWhere
+        ? prisma
+            .$queryRaw<{ stageId: string; total: number | bigint }[]>(
+              buildBoardStageTotalsSql({
+                orgId: getOrgIdOrThrow(),
+                stageIds: stagesRaw.map((s) => s.id),
+                whereSql: translatedWhere,
+              }),
+            )
+            .then((rows) =>
+              rows.map((r) => ({ stageId: r.stageId, _count: { _all: Number(r.total) } })),
+            )
+        : prisma.deal.groupBy({
+            by: ["stageId"],
+            where: {
+              AND: [dealWhere, { stageId: { in: stagesRaw.map((s) => s.id) } }],
+            },
+            _count: { _all: true },
+          });
+  totalsPromise.catch(() => undefined);
 
   const hasMoreByStage = new Map<string, boolean>();
   const lastAtByDealId = new Map<string, Date | null>();

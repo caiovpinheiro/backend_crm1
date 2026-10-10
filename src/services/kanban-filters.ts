@@ -15,8 +15,10 @@ import {
   metaSessionWindowWhere,
   metaWhatsappConversationWhere,
 } from "@/lib/meta-session-window";
+import { chatMessageSqlFilter } from "@/lib/conversation-last-message";
 import { prisma } from "@/lib/prisma";
 import { getRequestContext } from "@/lib/request-context";
+import type { ServerTiming } from "@/lib/server-timing";
 
 /**
  * Quando o termo de busca contém >=3 dígitos, casa o input contra o
@@ -59,18 +61,128 @@ export async function findContactIdsByPhoneDigits(
 }
 
 /**
+ * Estado do preenchimento de `contacts.lastMessageAt` / `lastMessageDirection`
+ * (backfill `scripts/backfill-contacts-last-message.mjs`) numa organização:
+ *
+ *   - `ready`: nenhuma conversa COM mensagem de chat tem contato com a coluna
+ *     NULL. O filtro de direção é um predicado na PK do contato, dentro da
+ *     consulta do board (sem pré-consulta, sem lista de ids).
+ *   - `partial`: ainda existe contato por preencher. O filtro usa a coluna
+ *     onde ela existe e o caminho antigo SÓ para os contatos com a coluna
+ *     NULL (ver `buildLastDirectionConditions`). Um contato retardatário não
+ *     põe mais a organização inteira no caminho caro.
+ *   - `unavailable`: a sonda falhou (migration pendente, banco fora). A coluna
+ *     pode nem existir: caminho antigo puro, sem tocar nela.
+ *
+ * "Com mensagem de chat" = `conversations.lastMessageAt` preenchido OU,
+ * enquanto o backfill da própria conversa não passou, uma mensagem do recorte
+ * em `messages` — sem isso, logo depois do deploy (as duas colunas ainda
+ * vazias no histórico) a organização pareceria pronta e o filtro só acharia
+ * quem escreveu depois do deploy.
+ *
+ * Depois de pronta o código mantém as colunas a cada mensagem
+ * (`touchContactLastMessage`), então o estado não volta: guardamos `ready`
+ * pela vida do processo. Fora disso reconsulta no máximo uma vez por minuto
+ * por organização, e requisições simultâneas dividem a mesma sonda.
+ *
+ * A sonda para na primeira linha pendente; com tudo preenchido percorre as
+ * conversas da organização uma vez por processo (e só olha `messages` das
+ * conversas cujo contato segue NULL, que são as sem mensagem de chat).
+ */
+export type ContactLastMessageState = "ready" | "partial" | "unavailable";
+
+const CONTACT_LAST_MESSAGE_RECHECK_MS = 60_000;
+const contactLastMessageStates = new Map<
+  string,
+  "ready" | { state: Exclude<ContactLastMessageState, "ready">; at: number }
+>();
+const contactLastMessageProbes = new Map<string, Promise<ContactLastMessageState>>();
+
+async function probeContactLastMessage(orgId: string): Promise<ContactLastMessageState> {
+  let state: ContactLastMessageState;
+  try {
+    const rows = await prisma.$queryRaw<{ pending: boolean }[]>`
+      SELECT EXISTS (
+        SELECT 1
+        FROM conversations v
+        INNER JOIN contacts c ON c.id = v."contactId"
+        WHERE v."organizationId" = ${orgId}
+          AND c."lastMessageAt" IS NULL
+          AND (
+            v."lastMessageAt" IS NOT NULL
+            OR EXISTS (
+              SELECT 1 FROM messages m
+              WHERE m."conversationId" = v.id
+                AND ${chatMessageSqlFilter("m")}
+            )
+          )
+      ) AS pending
+    `;
+    state = rows[0]?.pending === false ? "ready" : "partial";
+  } catch {
+    // Coluna ainda não existe (migration pendente) ou banco fora: caminho antigo.
+    state = "unavailable";
+  }
+  contactLastMessageStates.set(
+    orgId,
+    state === "ready" ? "ready" : { state, at: Date.now() },
+  );
+  return state;
+}
+
+export async function getContactLastMessageState(
+  orgId: string,
+): Promise<ContactLastMessageState> {
+  const known = contactLastMessageStates.get(orgId);
+  if (known === "ready") return "ready";
+  if (known && Date.now() - known.at < CONTACT_LAST_MESSAGE_RECHECK_MS) return known.state;
+  let probe = contactLastMessageProbes.get(orgId);
+  if (!probe) {
+    probe = probeContactLastMessage(orgId).finally(() => {
+      contactLastMessageProbes.delete(orgId);
+    });
+    contactLastMessageProbes.set(orgId, probe);
+  }
+  return probe;
+}
+
+/** A organização inteira já tem a coluna do contato preenchida? */
+export async function isContactLastMessageReady(orgId: string): Promise<boolean> {
+  return (await getContactLastMessageState(orgId)) === "ready";
+}
+
+/** Só para testes: esquece o que já foi sondado. */
+export function resetContactLastMessageReadyForTests(): void {
+  contactLastMessageStates.clear();
+  contactLastMessageProbes.clear();
+}
+
+/**
+ * CAMINHO ANTIGO do filtro de direção.
+ *
  * Contatos SEM conversa ativa cuja conversa mais recente terminou com
  * mensagem na direção pedida ("in" = do cliente). Complementa o filtro
  * "Mensagem recebida/enviada" do Kanban, que para contatos com conversa
  * ativa é resolvido no próprio where. Só contatos com negócio entram.
  * Teto de 20 mil ids para o IN não estourar o limite de parâmetros.
+ *
+ * `onlyColumnNull`: só contatos com `contacts.lastMessageAt` NULL (os demais
+ * já respondem pela coluna). Com o backfill avançando a lista encolhe até
+ * ficar vazia.
+ *
+ * Custo em produção (05/10): 989 ms por chamada (LATERAL por contato da
+ * organização inteira) e até 20 mil ids devolvidos ao Node.
  */
 const CLOSED_ONLY_DIRECTION_CAP = 20000;
 export async function findClosedOnlyContactIdsByLastDirection(
   dir: "in" | "out",
+  opts: { onlyColumnNull?: boolean } = {},
 ): Promise<string[]> {
   const orgId = getRequestContext()?.organizationId;
   if (!orgId) return [];
+  const columnNull = opts.onlyColumnNull
+    ? Prisma.sql`AND c."lastMessageAt" IS NULL`
+    : Prisma.empty;
   const rows = await prisma.$queryRaw<{ id: string }[]>`
     SELECT c.id
     FROM contacts c
@@ -82,6 +194,7 @@ export async function findClosedOnlyContactIdsByLastDirection(
       LIMIT 1
     ) last ON true
     WHERE c."organizationId" = ${orgId}
+      ${columnNull}
       AND last.d = ${dir}
       AND EXISTS (
         SELECT 1 FROM deals x
@@ -100,68 +213,98 @@ export async function findClosedOnlyContactIdsByLastDirection(
 }
 
 /**
+ * Condições da direção da última mensagem (sem `conversationStatus`), por
+ * estado da coluna do contato. Cada elemento entra em AND no where do board.
+ */
+async function buildLastDirectionConditions(
+  dir: "in" | "out",
+  orgId: string | null | undefined,
+): Promise<Prisma.DealWhereInput[]> {
+  const state = orgId ? await getContactLastMessageState(orgId) : "unavailable";
+
+  if (state === "ready") {
+    // Direção da ÚLTIMA mensagem de chat do contato, em coluna pronta
+    // (`contacts.lastMessageDirection`, gravada junto de
+    // `conversations.lastMessageAt`). Um predicado na PK do contato: o
+    // board traduz para EXISTS no SQL (`translateContactFilter`), sem
+    // pré-consulta nem lista de ids.
+    //
+    // Diferença para o caminho antigo: vale a última mensagem de chat do
+    // contato em QUALQUER conversa. Antes: com conversa ativa, "tem uma ativa
+    // na direção pedida e nenhuma ativa na oposta" (contato com duas
+    // conversas ativas em direções opostas não casava com nenhum dos dois
+    // filtros; agora casa com a mais recente); só com encerradas, a conversa
+    // de `updatedAt` mais recente (que muda com atribuição e encerramento,
+    // não só com mensagem). Ligação (`whatsapp_call`) e evento não contam
+    // como mensagem.
+    return [{ contact: { is: { lastMessageDirection: dir } } }];
+  }
+
+  // Direção da ÚLTIMA mensagem do contato. Antes bastava "alguma conversa"
+  // com a direção pedida: contato com conversa antiga em que o cliente falou
+  // por último aparecia em "Mensagem recebida" mesmo com a conversa atual
+  // respondida — o filtro mostrava recebidas E enviadas.
+  //
+  // Com conversa ativa: só as não encerradas contam (tem uma com a direção
+  // pedida e nenhuma com a oposta).
+  // Só com conversas encerradas: vale a mais recente.
+  const activeOnly: Prisma.ContactWhereInput[] = [
+    {
+      conversations: {
+        some: { status: { not: "RESOLVED" }, lastMessageDirection: dir },
+      },
+    },
+    {
+      conversations: {
+        none: {
+          status: { not: "RESOLVED" },
+          lastMessageDirection: dir === "in" ? "out" : "in",
+        },
+      },
+    },
+  ];
+
+  if (state === "partial") {
+    // Backfill em andamento: a coluna responde por quem já está preenchido e
+    // o caminho antigo só vale para o contato com a coluna NULL. Todos os
+    // ramos viram SQL no board (`translateContactWhere`); só a lista de
+    // contatos "só encerradas" ainda é pré-consulta, e ela encolhe com o
+    // backfill.
+    return [
+      {
+        OR: [
+          { contact: { is: { lastMessageDirection: dir } } },
+          { contact: { is: { AND: [{ lastMessageAt: null }, ...activeOnly] } } },
+          {
+            contactId: {
+              in: await findClosedOnlyContactIdsByLastDirection(dir, {
+                onlyColumnNull: true,
+              }),
+            },
+          },
+        ],
+      },
+    ];
+  }
+
+  // `unavailable`: a coluna pode nem existir — caminho antigo puro.
+  return [
+    {
+      OR: [
+        { contact: { is: { AND: activeOnly } } },
+        { contactId: { in: await findClosedOnlyContactIdsByLastDirection(dir) } },
+      ],
+    },
+  ];
+}
+
+/**
  * Teto de candidatos por pré-query de busca. Termos genéricos ("a", "silva")
  * casariam com dezenas de milhares de contatos — o IN gigante degradaria a
  * query de deals mais do que ajudaria. Com o teto, a busca fica "melhor
  * esforço" e o usuário refina o termo (padrão de CRMs: Kommo/Pipedrive).
  */
 const SEARCH_CANDIDATE_CAP = 5000;
-
-/**
- * Resolve os candidatos de busca em pré-queries indexadas (trgm GIN em
- * contacts.name/email/phone, ccfv.value, dcfv.value) e devolve IDs para o
- * filtro final de deals usar SÓ colunas da própria tabela (title ILIKE +
- * contactId/id IN). O planner consegue BitmapOr dos índices; o OR cross-table
- * anterior (self-joins em contacts + EXISTS aninhados por linha) seq-scaneava
- * deals — ~1s por COUNT no board e top-1 de CPU no pg_stat_statements.
- */
-export async function resolveDealSearchCandidates(
-  search: string,
-): Promise<{ contactIds: string[]; dealIds: string[] }> {
-  const ctx = getRequestContext();
-  const orgId = ctx?.organizationId;
-  if (!orgId) return { contactIds: [], dealIds: [] };
-  const pattern = `%${search}%`;
-  // Uma coluna por query: OR name/email/phone na mesma cláusula faz o
-  // planner desistir do GIN trgm e varrer contacts (mesmo padrão do
-  // diretório — `resolveContactSearchCandidates`).
-  const [byName, byEmail, byPhone, byCcfv, byDcfv] = await Promise.all([
-    prisma.$queryRaw<{ id: string }[]>`
-      SELECT id FROM contacts
-      WHERE "organizationId" = ${orgId} AND name ILIKE ${pattern}
-      LIMIT ${SEARCH_CANDIDATE_CAP}
-    `,
-    prisma.$queryRaw<{ id: string }[]>`
-      SELECT id FROM contacts
-      WHERE "organizationId" = ${orgId} AND email ILIKE ${pattern}
-      LIMIT ${SEARCH_CANDIDATE_CAP}
-    `,
-    prisma.$queryRaw<{ id: string }[]>`
-      SELECT id FROM contacts
-      WHERE "organizationId" = ${orgId} AND phone ILIKE ${pattern}
-      LIMIT ${SEARCH_CANDIDATE_CAP}
-    `,
-    prisma.$queryRaw<{ contactId: string }[]>`
-      SELECT "contactId" FROM contact_custom_field_values
-      WHERE "organizationId" = ${orgId} AND value ILIKE ${pattern}
-      LIMIT ${SEARCH_CANDIDATE_CAP}
-    `,
-    prisma.$queryRaw<{ dealId: string }[]>`
-      SELECT "dealId" FROM deal_custom_field_values
-      WHERE "organizationId" = ${orgId} AND value ILIKE ${pattern}
-      LIMIT ${SEARCH_CANDIDATE_CAP}
-    `,
-  ]);
-  const contactIds = [
-    ...new Set([
-      ...byName.map((r) => r.id),
-      ...byEmail.map((r) => r.id),
-      ...byPhone.map((r) => r.id),
-      ...byCcfv.map((r) => r.contactId),
-    ]),
-  ];
-  return { contactIds, dealIds: byDcfv.map((r) => r.dealId) };
-}
 
 /**
  * Candidatos da busca do diretório de contatos. ILIKE de name/email/phone
@@ -256,10 +399,13 @@ export async function resolveContactSearchCandidates(
 }
 
 /**
- * Candidatos da busca do inbox. Mesma estratégia de
- * `resolveDealSearchCandidates`, aplicada às colunas que a conversa só
- * alcança por join: contato, empresa, campos personalizados, título de
- * negócio e responsável.
+ * Candidatos da busca do inbox. Mesma estratégia que a busca de negócios usava
+ * antes de `createDealSearch` (pré-consultas indexadas devolvendo ids),
+ * aplicada às colunas que a conversa só alcança por join: contato, empresa,
+ * campos personalizados, título de negócio e responsável. NÃO migrou para
+ * subconsultas: o where de conversas é Prisma em vários caminhos (lista,
+ * contadores, encerramento em massa) e não há consulta SQL própria onde a busca
+ * caiba — ver o relatório do PR "perf(busca)".
  *
  * Devolver IDs deixa o `where` final de conversas tocando apenas colunas da
  * própria tabela (`contactId`/`assignedToId` IN + `inboxName` + `number`),
@@ -393,70 +539,280 @@ export async function findCustomFieldMatchesByDigits(digits: string): Promise<{
   };
 }
 
+// ---------------------------------------------------------------------------
+// Busca livre de negócios (Kanban, lista, busca rápida, exportação)
+// ---------------------------------------------------------------------------
+
 /**
- * Monta o `OR` de busca livre de negócios — usado pelo Kanban (POST /board),
- * pela listagem (`getDeals`) e pela exportação, para que os três respondam
- * exatamente a mesma coisa.
- *
- * Campos cobertos: título, nome/e-mail/telefone do contato, número do negócio
- * e QUALQUER valor de campo personalizado do negócio ou do contato (CPF, RGM,
- * matrícula, polo, curso…). O filtro final toca só colunas de `deals`
- * (title ILIKE + contactId/id IN); o resto vem das pré-queries indexadas.
+ * Termo curto (até 3 caracteres): casa só o título do negócio e o nome do
+ * contato, por prefixo (do texto e de cada palavra). E-mail e campos
+ * personalizados exigem 4+ caracteres. `%ana%` num termo desses casa milhares
+ * de linhas em todas as fontes (org de teste: 4.802 nomes, 3.040 e-mails,
+ * 10.590 valores de campo personalizado só para "ana") e não ajuda quem digita.
  */
-export async function buildDealSearchOr(
+export const SEARCH_SHORT_TERM_MAX = 3;
+
+/** Teto de uma subconsulta de campo personalizado (valores livres, sem recência). */
+const DEAL_SEARCH_CUSTOM_FIELD_CAP = 5000;
+/**
+ * Teto de uma subconsulta de contato (nome/e-mail/telefone). Alto de propósito:
+ * os ids ficam no Postgres. Também dá ao planner uma estimativa pequena o
+ * bastante para fazer `hashed SubPlan` (e não reexecutar a subconsulta por linha).
+ */
+const DEAL_SEARCH_CONTACT_CAP = 20_000;
+const DEAL_SEARCH_PHONE_CAP = 500;
+/**
+ * Teto dos ids de `DealSearch.prismaWhere()` (caminhos que só falam Prisma:
+ * lista, exportação, filtros agregados, "carregar mais" por posição). Um
+ * parâmetro por id no `IN` — o Postgres aceita 32.767 por consulta.
+ */
+export const DEAL_SEARCH_IDS_CAP = 20_000;
+
+const PG_INT4_MAX = 2147483647;
+const TRUE_SQL = Prisma.sql`TRUE`;
+
+/** `%`, `_` e `\` do termo viram literais (o `contains` do Prisma também escapa). */
+function escapeLike(s: string): string {
+  return s.replace(/[\\%_]/g, "\\$&");
+}
+
+/**
+ * `col IN (subconsulta)`. Uma subconsulta entra sem parênteses extras (`IN
+ * ((SELECT …))` é ambíguo para o parser do Postgres: lista de um escalar x
+ * subconsulta); várias viram `IN ((A) UNION ALL (B))`, cada uma com o seu LIMIT.
+ */
+function inSubqueries(col: Prisma.Sql, subs: Prisma.Sql[]): Prisma.Sql {
+  if (subs.length === 1) return Prisma.sql`${col} IN (${subs[0]!})`;
+  const wrapped = subs.map((q) => Prisma.sql`(${q})`);
+  return Prisma.sql`${col} IN (${Prisma.join(wrapped, " UNION ALL ")})`;
+}
+
+export type DealSearchResolved = { ids: number; capped: boolean };
+
+export type DealSearch = {
+  /**
+   * Predicado sobre `deals d` (a organização vem do contexto). Sem lista de
+   * ids: contato, e-mail e campos personalizados viram subconsultas indexadas.
+   * Use dentro de uma consulta SQL que já filtra `d."organizationId"`.
+   */
+  sql: Prisma.Sql;
+  /**
+   * Para quem só fala Prisma: UMA consulta de ids (mesmo predicado, mais recentes
+   * primeiro, com teto) e `{ id: { in } }`. Memoizada na primeira chamada.
+   * `narrowSql` (alias `d`) restringe a consulta ao que o chamador já sabe
+   * traduzir (status, funil, etapas, dono) — são condições que continuam em AND
+   * no where final, então só reduzem candidatos.
+   */
+  prismaWhere(opts?: {
+    narrowSql?: Prisma.Sql | null;
+    idsCap?: number;
+  }): Promise<Prisma.DealWhereInput>;
+  /** Resultado de `prismaWhere()` (`undefined` = ainda não rodou). */
+  resolved(): DealSearchResolved | undefined;
+};
+
+/**
+ * Busca livre de negócios: título, nome/e-mail/telefone do contato, número do
+ * negócio e valores de campos personalizados do negócio ou do contato (CPF,
+ * RGM, matrícula, polo, curso…), com termo numérico por dígitos normalizados.
+ * Mesma resposta no Kanban, na lista (`GET /api/deals?search=`), na busca
+ * rápida e na exportação.
+ *
+ * Antes: 5 pré-consultas `ILIKE '%termo%'` (até 5.000 ids cada) devolviam ~13 mil
+ * ids ao Node, que os mandava de volta como `contactId IN (…)` / `id IN (…)`,
+ * um parâmetro por id. Agora o termo vai como parâmetro e o Postgres resolve
+ * tudo na mesma consulta (o board) ou numa só consulta de ids (`prismaWhere`).
+ *
+ * `search.pre` / `search.ids` (Server-Timing) saem de `prismaWhere`; o board
+ * mede `search.apply` na consulta final.
+ */
+export function createDealSearch(
   searchRaw: string,
-): Promise<Prisma.DealWhereInput[]> {
+  opts: { timing?: ServerTiming } = {},
+): DealSearch | null {
   const search = searchRaw.trim();
-  if (!search) return [];
+  if (!search) return null;
+  const orgId = getRequestContext()?.organizationId;
 
   const digits = search.replace(/\D+/g, "");
   // Termo "numérico": CPF, RGM, matrícula, telefone ou número do negócio, com
-  // ou sem máscara. O ILIKE literal de `resolveDealSearchCandidates` não casa
-  // "123.456.789-00" com "12345678900" (nem o inverso), então para esses
-  // termos usamos os lookups por dígitos normalizados. Procurar em nome/e-mail
-  // é dispensável: não há CPF dentro de nome.
+  // ou sem máscara. O ILIKE literal não casa "123.456.789-00" com
+  // "12345678900" (nem o inverso); para esses termos usa-se os dígitos
+  // normalizados. Procurar em nome/e-mail é dispensável: não há CPF em nome.
   const numericTerm =
     digits.replace(/^0+/, "").length >= 6 && /^[\d\s+().-]+$/.test(search);
+  const short = search.length <= SEARCH_SHORT_TERM_MAX;
 
-  const or: Prisma.DealWhereInput[] = [
-    { title: { contains: search, mode: "insensitive" } },
-  ];
-  const contactIdSet = new Set<string>();
-  const dealIdSet = new Set<string>();
-
-  if (numericTerm) {
-    const [phoneContactIds, cfMatches] = await Promise.all([
-      findContactIdsByPhoneDigits(digits),
-      findCustomFieldMatchesByDigits(digits),
-    ]);
-    for (const id of phoneContactIds) contactIdSet.add(id);
-    for (const id of cfMatches.contactIds) contactIdSet.add(id);
-    for (const id of cfMatches.dealIds) dealIdSet.add(id);
-  } else {
-    const candidates = await resolveDealSearchCandidates(search);
-    for (const id of candidates.contactIds) contactIdSet.add(id);
-    for (const id of candidates.dealIds) dealIdSet.add(id);
-    if (digits.length >= 3) {
-      for (const id of await findContactIdsByPhoneDigits(digits)) {
-        contactIdSet.add(id);
-      }
-    }
-  }
-
-  if (contactIdSet.size > 0) or.push({ contactId: { in: [...contactIdSet] } });
-  if (dealIdSet.size > 0) or.push({ id: { in: [...dealIdSet] } });
+  const esc = escapeLike(search);
+  const contains = `%${esc}%`;
+  const prefix = `${esc}%`;
+  const wordPrefix = `% ${esc}%`;
 
   // Número do negócio ("#123" digitado sem o #). `Deal.number` é int4: termos
   // numéricos longos (CPF, RGM, telefone) estouram o limite e fazem o Postgres
-  // abortar a query inteira — por isso o teto de int32.
+  // abortar a consulta inteira — por isso o teto de int32.
+  let dealNumber: number | null = null;
   if (/^\d+$/.test(search)) {
     const asNumber = Number(search);
-    if (Number.isInteger(asNumber) && asNumber >= 0 && asNumber <= 2147483647) {
-      or.push({ number: asNumber });
+    if (Number.isInteger(asNumber) && asNumber >= 0 && asNumber <= PG_INT4_MAX) {
+      dealNumber = asNumber;
     }
   }
 
-  return or;
+  const titleSql = short
+    ? Prisma.sql`(d.title ILIKE ${prefix} OR d.title ILIKE ${wordPrefix})`
+    : Prisma.sql`d.title ILIKE ${contains}`;
+  const or: Prisma.Sql[] = [titleSql];
+
+  if (orgId) {
+    // Ids de contato por fonte, cada uma uma subconsulta (UNION ALL) com teto.
+    const contactSubs: Prisma.Sql[] = [];
+    const dealSubs: Prisma.Sql[] = [];
+
+    // Telefone por dígitos (sufixo): `contacts_org_phone_digits_rev_pattern_idx`.
+    // `'\\D'` (e não `'\D'`): em template literal o `\D` é cozido para `D` e o
+    // texto deixa de ser a expressão do índice (e o regexp passa a remover a
+    // letra D, deixando a máscara intacta).
+    if (digits.length >= 3) {
+      const suffix = digits.length > 11 ? digits.slice(-11) : digits;
+      const revPrefix = [...suffix].reverse().join("") + "%";
+      contactSubs.push(Prisma.sql`
+        SELECT c.id FROM contacts c
+        WHERE c."organizationId" = ${orgId}
+          AND reverse(regexp_replace(COALESCE(c.phone, ''), '\\D', '', 'g')) LIKE ${revPrefix}
+        LIMIT ${DEAL_SEARCH_PHONE_CAP}
+      `);
+    }
+
+    if (numericTerm) {
+      // Zeros à esquerda saem do termo: a base tem CPF vindo do ERP com o zero
+      // perdido ("1234567890" para 01234567890); `%digits%` casa as duas formas.
+      // Expressão idêntica à dos índices `*_cfv_value_digits_trgm_idx`.
+      const digitsPattern = `%${digits.replace(/^0+/, "")}%`;
+      contactSubs.push(Prisma.sql`
+        SELECT v."contactId" FROM contact_custom_field_values v
+        WHERE v."organizationId" = ${orgId}
+          AND regexp_replace(v.value, '\\D', '', 'g') LIKE ${digitsPattern}
+        LIMIT ${DEAL_SEARCH_CUSTOM_FIELD_CAP}
+      `);
+      dealSubs.push(Prisma.sql`
+        SELECT v."dealId" FROM deal_custom_field_values v
+        WHERE v."organizationId" = ${orgId}
+          AND regexp_replace(v.value, '\\D', '', 'g') LIKE ${digitsPattern}
+        LIMIT ${DEAL_SEARCH_CUSTOM_FIELD_CAP}
+      `);
+    } else {
+      // Uma coluna por subconsulta: OR de name/email/phone na mesma cláusula faz
+      // o planner desistir do GIN trgm. Nome por `contacts_name_trgm_idx`.
+      contactSubs.push(
+        short
+          ? Prisma.sql`
+        SELECT c.id FROM contacts c
+        WHERE c."organizationId" = ${orgId}
+          AND (c.name ILIKE ${prefix} OR c.name ILIKE ${wordPrefix})
+        LIMIT ${DEAL_SEARCH_CONTACT_CAP}
+      `
+          : Prisma.sql`
+        SELECT c.id FROM contacts c
+        WHERE c."organizationId" = ${orgId} AND c.name ILIKE ${contains}
+        LIMIT ${DEAL_SEARCH_CONTACT_CAP}
+      `,
+      );
+      if (!short) {
+        contactSubs.push(Prisma.sql`
+        SELECT c.id FROM contacts c
+        WHERE c."organizationId" = ${orgId} AND c.email ILIKE ${contains}
+        LIMIT ${DEAL_SEARCH_CONTACT_CAP}
+      `);
+        // Telefone é só dígito e pontuação: termo com letra nunca casa.
+        if (/^[\d\s+().-]+$/.test(search)) {
+          contactSubs.push(Prisma.sql`
+        SELECT c.id FROM contacts c
+        WHERE c."organizationId" = ${orgId} AND c.phone ILIKE ${contains}
+        LIMIT ${DEAL_SEARCH_CONTACT_CAP}
+      `);
+        }
+        contactSubs.push(Prisma.sql`
+        SELECT v."contactId" FROM contact_custom_field_values v
+        WHERE v."organizationId" = ${orgId} AND v.value ILIKE ${contains}
+        LIMIT ${DEAL_SEARCH_CUSTOM_FIELD_CAP}
+      `);
+        dealSubs.push(Prisma.sql`
+        SELECT v."dealId" FROM deal_custom_field_values v
+        WHERE v."organizationId" = ${orgId} AND v.value ILIKE ${contains}
+        LIMIT ${DEAL_SEARCH_CUSTOM_FIELD_CAP}
+      `);
+      }
+    }
+
+    if (contactSubs.length > 0) {
+      or.push(inSubqueries(Prisma.sql`d."contactId"`, contactSubs));
+    }
+    if (dealSubs.length > 0) {
+      or.push(inSubqueries(Prisma.sql`d.id`, dealSubs));
+    }
+  }
+  if (dealNumber !== null) or.push(Prisma.sql`d.number = ${dealNumber}`);
+
+  const sql = Prisma.join(or, " OR ", "(", ")");
+
+  let memo: Promise<Prisma.DealWhereInput> | undefined;
+  let resolved: DealSearchResolved | undefined;
+
+  return {
+    sql,
+    resolved: () => resolved,
+    prismaWhere: (o = {}) => {
+      if (memo) return memo;
+      memo = (async () => {
+        if (!orgId) {
+          // Sem organização no contexto: só o que não passa por outra tabela.
+          const orOnly: Prisma.DealWhereInput[] = [
+            { title: { contains: search, mode: "insensitive" } },
+          ];
+          if (dealNumber !== null) orOnly.push({ number: dealNumber });
+          return { OR: orOnly };
+        }
+        const cap = Math.max(1, o.idsCap ?? DEAL_SEARCH_IDS_CAP);
+        const t0 = performance.now();
+        const rows = await prisma.$queryRaw<{ id: string }[]>`
+          SELECT d.id FROM deals d
+          WHERE d."organizationId" = ${orgId}
+            AND (${o.narrowSql ?? TRUE_SQL})
+            AND ${sql}
+          ORDER BY d."updatedAt" DESC, d.id DESC
+          LIMIT ${cap + 1}
+        `;
+        const capped = rows.length > cap;
+        const ids = (capped ? rows.slice(0, cap) : rows).map((r) => r.id);
+        resolved = { ids: ids.length, capped };
+        opts.timing?.add(
+          "search.pre",
+          performance.now() - t0,
+          capped ? "capped" : undefined,
+        );
+        opts.timing?.add("search.ids", ids.length, "count");
+        return { id: { in: ids } };
+      })();
+      return memo;
+    },
+  };
+}
+
+/**
+ * `OR` de busca livre de negócios para os caminhos que só falam Prisma
+ * (filtros avançados da lista/exportação/painéis): uma consulta de ids, não
+ * cinco pré-consultas. O board e a lista usam `createDealSearch` direto.
+ */
+export async function buildDealSearchOr(
+  searchRaw: string,
+  opts: { idsCap?: number; narrowSql?: Prisma.Sql | null; timing?: ServerTiming } = {},
+): Promise<Prisma.DealWhereInput[]> {
+  const search = createDealSearch(searchRaw, { timing: opts.timing });
+  if (!search) return [];
+  return [
+    await search.prismaWhere({ idsCap: opts.idsCap, narrowSql: opts.narrowSql }),
+  ];
 }
 
 export type DateRangeValue = {
@@ -1025,40 +1381,9 @@ export async function buildDealWhereFromFilters(
     else if (filters.conversationStatus === "closed") convSome.status = "RESOLVED";
     const dir = filters.lastMessageDirection;
     if ((dir === "in" || dir === "out") && !filters.conversationStatus) {
-      // Direção da ÚLTIMA mensagem do contato. Antes bastava "alguma
-      // conversa" com a direção pedida: contato com conversa antiga em que o
-      // cliente falou por último aparecia em "Mensagem recebida" mesmo com a
-      // conversa atual respondida — o filtro mostrava recebidas E enviadas.
-      //
-      // Com conversa ativa: só as não encerradas contam (tem uma com a
-      // direção pedida e nenhuma com a oposta).
-      // Só com conversas encerradas: vale a mais recente.
-      conditions.push({
-        OR: [
-          {
-            contact: {
-              is: {
-                AND: [
-                  {
-                    conversations: {
-                      some: { status: { not: "RESOLVED" }, lastMessageDirection: dir },
-                    },
-                  },
-                  {
-                    conversations: {
-                      none: {
-                        status: { not: "RESOLVED" },
-                        lastMessageDirection: dir === "in" ? "out" : "in",
-                      },
-                    },
-                  },
-                ],
-              },
-            },
-          },
-          { contactId: { in: await findClosedOnlyContactIdsByLastDirection(dir) } },
-        ],
-      });
+      conditions.push(
+        ...(await buildLastDirectionConditions(dir, getRequestContext()?.organizationId)),
+      );
     } else {
       if (dir === "in" || dir === "out") convSome.lastMessageDirection = dir;
       if (Object.keys(convSome).length > 0) {

@@ -52,6 +52,10 @@ export async function GET(request: Request) {
     const sort = searchParams.get("sort") === "lastInteraction" ? "lastInteraction" : undefined;
     const directionRaw = searchParams.get("direction");
     const direction = directionRaw === "asc" || directionRaw === "desc" ? directionRaw : undefined;
+    // `withTotal=0|false`: lista sem o COUNT(*) — a resposta traz `hasMore`
+    // e `total` só quando sai de graça (senão `null`). Padrão: conta.
+    const withTotalRaw = searchParams.get("withTotal")?.trim().toLowerCase();
+    const withTotal = withTotalRaw === "0" || withTotalRaw === "false" ? false : undefined;
     const updatedSinceRaw = searchParams.get("updatedSince")?.trim();
     let updatedSince: Date | undefined;
     if (updatedSinceRaw) {
@@ -121,6 +125,7 @@ export async function GET(request: Request) {
       contactPhone,
       page,
       perPage,
+      withTotal,
       sort,
       direction,
       visibilityWhere: andDealWhere(visibility.dealWhere, funnelDealWhere(authz)),
