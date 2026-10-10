@@ -107,7 +107,7 @@ const PAST_OCCURRENCE =
 /** "será realizada", "acontecerá", "vai ocorrer": o evento como ainda por vir. */
 const FUTURE_OCCURRENCE =
   /\b(?:(?:ser[áa]|ser[ãa]o|vai ser|v[ãa]o ser)\s+(?:realizad|aplicad|feit|liberad|divulgad|encerrad|conclu[ií]d|finalizad|disponibilizad)\w*|acontecer[áa]|acontecer[ãa]o|ocorrer[áa]|ocorrer[ãa]o|vai acontecer|v[ãa]o acontecer|vai ocorrer|v[ãa]o ocorrer|(?:ser[áa]|ser[ãa]o)(?=\s+(?:de|em|no dia|nos dias|entre)\s+\d))(?![\p{L}])/giu;
-/** Entre o verbo e a data há outra oração ("foi feita e a prova será…")? Então não estão ligados. */
+/** Entre o verbo e a data há outra oração ("foi feita e o encontro será…")? Então não estão ligados. */
 const CLAUSE_BREAK = /[,;:()]|\b(?:e|mas|por[ée]m|que|se|quando|porque|pois|caso|ou)\b/iu;
 const SENTENCE_SPLIT = /\r?\n|(?<=[.!?])\s+/;
 const PAST_TO_FUTURE: Array<[RegExp, string]> = [
@@ -140,8 +140,8 @@ const fmt = (x: Ymd) => `${pad2(x.d)}/${pad2(x.m)}/${x.y}`;
 export type TenseMismatch = { sentence: string; fixed: string | null; why: string };
 
 /**
- * Frase que põe no passado uma data que ainda vem ("as provas foram
- * realizadas de 06/11 a 09/11", hoje 09/10) ou no futuro uma que já passou
+ * Frase que põe no passado uma data que ainda vem ("os encontros foram
+ * realizados de 06/11 a 09/11", hoje 09/10) ou no futuro uma que já passou
  * ("será aplicada em 06/09"). O modelo erra o tempo verbal mesmo com a
  * situação da data marcada. `fixed` é a frase com o verbo trocado quando a
  * troca é só o verbo; null quando não dá ("já passou") — aí a frase sai.
