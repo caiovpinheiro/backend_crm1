@@ -14,6 +14,8 @@
  * `If-None-Match` igual → 304 sem corpo. O servidor ainda monta o payload
  * para comparar (é o custo de manter o hash fiel); a economia é o corpo
  * e o re-render no cliente.
+ *
+ * `Server-Timing`: auth, query (monta o payload), serialize (JSON + ETag), total.
  */
 
 import { NextResponse } from "next/server";
@@ -25,6 +27,7 @@ import {
   etagMatches,
 } from "@/services/me-bootstrap";
 import { getLogger } from "@/lib/logger";
+import { ServerTiming } from "@/lib/server-timing";
 
 const log = getLogger("api/me/bootstrap");
 
@@ -33,16 +36,25 @@ export const dynamic = "force-dynamic";
 const CACHE_CONTROL = "private, no-store";
 
 export async function GET(request: Request) {
+  const timing = new ServerTiming();
   return withOrgContext(async (session) => {
+    // `auth` = JWT + versão da sessão + rate limit (antes do handler).
+    timing.add("auth", timing.totalMs());
     try {
-      const payload = await buildMeBootstrap(session.user);
-      const body = JSON.stringify(payload);
-      const etag = computeBootstrapEtag(body);
+      const payload = await timing.time("query", () => buildMeBootstrap(session.user));
+      const { body, etag } = timing.timeSync("serialize", () => {
+        const json = JSON.stringify(payload);
+        return { body: json, etag: computeBootstrapEtag(json) };
+      });
 
       if (etagMatches(request.headers.get("if-none-match"), etag)) {
         return new NextResponse(null, {
           status: 304,
-          headers: { ETag: etag, "Cache-Control": CACHE_CONTROL },
+          headers: {
+            ETag: etag,
+            "Cache-Control": CACHE_CONTROL,
+            "Server-Timing": timing.header(),
+          },
         });
       }
 
@@ -52,6 +64,7 @@ export async function GET(request: Request) {
           "Content-Type": "application/json",
           ETag: etag,
           "Cache-Control": CACHE_CONTROL,
+          "Server-Timing": timing.header(),
         },
       });
     } catch (e) {

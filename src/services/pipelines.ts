@@ -6,7 +6,11 @@ import {
   invalidatePipelineBoard,
   unifyDuplicateOpenDealsInPipeline,
 } from "@/services/deal-duplicates";
-import { getOrgIdOrThrow } from "@/lib/request-context";
+import { getOrgIdOrNull, getOrgIdOrThrow } from "@/lib/request-context";
+import {
+  invalidateLocalVersioned,
+  localVersioned,
+} from "@/lib/cache/local-versioned";
 import { slugify } from "@/lib/utils";
 
 const DEFAULT_STAGES: Omit<
@@ -188,6 +192,63 @@ async function withStageCreateRetry<T>(fn: () => Promise<T>): Promise<T> {
 
 const CUID_RE = /^c[a-z0-9]{20,}$/i;
 
+// ── Funis ativos da org em memória (C1 da auditoria de banco, 05/10) ──
+//
+// `pipelines` teve 1,5 M de leituras em 6 dias. Todo carregamento do board
+// (`/pipelines/:ref/board` e `/board/columns`) resolve o ref público do
+// funil ANTES de qualquer outra coisa — uma ida em série ao banco para ler
+// uma tabela de 2–10 linhas por org que só muda em Configurações. A lista
+// (id, número, slug, nome, padrão) fica 60 s na memória do processo;
+// criar/renomear/arquivar/excluir funil invalida pela versão (outras
+// réplicas em ~500 ms). Etapas NÃO entram aqui. Só o ACERTO sai da
+// memória: ref que não está na lista vai ao banco como antes.
+const PIPELINES_META_FAMILY = "pipelines_meta";
+const PIPELINES_META_TTL_MS = 60_000;
+
+type PipelineMetaRow = {
+  id: string;
+  number: number;
+  slug: string;
+  name: string;
+  isDefault: boolean;
+};
+
+/** Funis não arquivados da org corrente, do mais antigo ao mais novo. */
+async function loadActivePipelinesMeta(): Promise<PipelineMetaRow[]> {
+  return prisma.pipeline.findMany({
+    where: { archivedAt: null },
+    orderBy: { createdAt: "asc" },
+    select: { id: true, number: true, slug: true, name: true, isDefault: true },
+  });
+}
+
+/**
+ * `null` = sem org no contexto (super-admin cross-org): quem chama cai na
+ * consulta direta de antes.
+ */
+async function activePipelinesMeta(): Promise<readonly PipelineMetaRow[] | null> {
+  const organizationId = getOrgIdOrNull();
+  if (!organizationId) return null;
+  return localVersioned(
+    {
+      family: PIPELINES_META_FAMILY,
+      scope: [organizationId],
+      ttlMs: PIPELINES_META_TTL_MS,
+    },
+    loadActivePipelinesMeta,
+  );
+}
+
+/**
+ * Chamar depois de criar/editar/arquivar/excluir funil. `organizationId`
+ * explícito para quem escreve fora do contexto da requisição (onboarding).
+ */
+export async function invalidatePipelinesMeta(organizationId?: string): Promise<void> {
+  const orgId = organizationId ?? getOrgIdOrNull();
+  if (!orgId) return;
+  await invalidateLocalVersioned(PIPELINES_META_FAMILY, orgId);
+}
+
 /**
  * Resolve ref público de pipeline na org corrente:
  * dígitos → `number`; CUID → `id`; senão slug, depois nome (compat bookmarks).
@@ -195,6 +256,26 @@ const CUID_RE = /^c[a-z0-9]{20,}$/i;
 export async function resolvePipelineByPublicRef(raw: string) {
   const key = raw.trim();
   if (!key) return null;
+  const cached = await activePipelinesMeta();
+  if (cached) {
+    let hit: PipelineMetaRow | undefined;
+    if (/^\d+$/.test(key)) {
+      const n = Number(key);
+      hit = cached.find((p) => p.number === n);
+    } else if (CUID_RE.test(key)) {
+      hit = cached.find((p) => p.id === key);
+    } else {
+      const lower = key.toLowerCase();
+      hit =
+        cached.find((p) => p.slug === key) ??
+        cached.find((p) => p.name.toLowerCase() === lower);
+    }
+    if (hit) {
+      return { id: hit.id, number: hit.number, slug: hit.slug, name: hit.name };
+    }
+    // Não achou na memória: pode ser funil criado há instantes em outra
+    // réplica. "Não existe" só vale vindo do banco — segue para a consulta.
+  }
   const select = { id: true, number: true, slug: true, name: true } as const;
   if (/^\d+$/.test(key)) {
     return prisma.pipeline.findFirst({
@@ -222,6 +303,12 @@ export async function resolvePipelineByPublicRef(raw: string) {
 
 /** Funil padrão da org: `isDefault`, senão o mais antigo ainda ativo. */
 export async function getDefaultPipelineId(): Promise<string | null> {
+  const cached = await activePipelinesMeta();
+  if (cached) {
+    // A lista vem do mais antigo ao mais novo, como o `orderBy` abaixo.
+    const hit = cached.find((p) => p.isDefault) ?? cached[0];
+    if (hit) return hit.id;
+  }
   const def =
     (await prisma.pipeline.findFirst({
       where: { isDefault: true, archivedAt: null },
@@ -280,6 +367,10 @@ const stageWithCountSelect = {
 } satisfies Prisma.StageSelect;
 
 export async function ensureDefaultPipeline() {
+  // Caminho comum (a org já tem funil): responde da memória. Lista vazia
+  // não decide nada — confirma no banco antes de criar.
+  const cached = await activePipelinesMeta();
+  if (cached && cached.length > 0) return;
   const count = await prisma.pipeline.count({ where: { archivedAt: null } });
   if (count > 0) return;
   const organizationId = getOrgIdOrThrow();
@@ -298,6 +389,7 @@ export async function ensureDefaultPipeline() {
       },
     }),
   );
+  await invalidatePipelinesMeta(organizationId);
 }
 
 export async function getPipelines(options?: { allowedPipelineIds?: string[] | null }) {
@@ -369,6 +461,20 @@ export async function getAllowDuplicateDeals(id: string): Promise<boolean | null
 }
 
 export async function getPipelineMeta(id: string) {
+  const cached = await activePipelinesMeta();
+  if (cached) {
+    const hit = cached.find((p) => p.id === id);
+    if (hit) {
+      return {
+        id: hit.id,
+        name: hit.name,
+        slug: hit.slug,
+        number: hit.number,
+        isDefault: hit.isDefault,
+      };
+    }
+    // Ausente na memória: confirma no banco (ver `resolvePipelineByPublicRef`).
+  }
   return prisma.pipeline.findFirst({
     where: { id, archivedAt: null },
     select: { id: true, name: true, slug: true, number: true, isDefault: true },
@@ -394,6 +500,14 @@ export async function getPipelineById(id: string) {
 }
 
 export async function createPipeline(data: { name: string }) {
+  try {
+    return await createPipelineRow(data);
+  } finally {
+    await invalidatePipelinesMeta();
+  }
+}
+
+async function createPipelineRow(data: { name: string }) {
   const name = data.name.trim();
   if (!name) {
     throw new Error("INVALID_NAME");
@@ -437,6 +551,15 @@ export type UpdatePipelineInput = {
 };
 
 export async function updatePipeline(id: string, data: UpdatePipelineInput) {
+  try {
+    return await updatePipelineRow(id, data);
+  } finally {
+    // Nome, slug e `isDefault` fazem parte da lista em memória.
+    await invalidatePipelinesMeta();
+  }
+}
+
+async function updatePipelineRow(id: string, data: UpdatePipelineInput) {
   const payload: Prisma.PipelineUpdateInput = {};
 
   if (data.name !== undefined) {
@@ -513,7 +636,11 @@ export async function updatePipeline(id: string, data: UpdatePipelineInput) {
 }
 
 export async function deletePipeline(id: string) {
-  await prisma.pipeline.delete({ where: { id } });
+  try {
+    await prisma.pipeline.delete({ where: { id } });
+  } finally {
+    await invalidatePipelinesMeta();
+  }
 }
 
 /**
@@ -560,6 +687,7 @@ export async function archivePipeline(id: string): Promise<void> {
       data: { archivedAt: new Date(), isDefault: false },
     });
   });
+  await invalidatePipelinesMeta(pipeline.organizationId);
 }
 
 export type CreateStageInput = {

@@ -87,8 +87,15 @@ SELECT id, "organizationId" FROM meta_webhook_events
 WHERE processed = false ORDER BY "receivedAt" ASC LIMIT 1000;
 ```
 
-O índice `meta_webhook_events_processed_receivedAt_idx` (migration
-`20260811190000_meta_webhook_processed_idx`) torna essa query barata.
+O índice parcial `meta_webhook_events_unprocessed_idx` (`"receivedAt"`
+`WHERE processed = false`, migration `20261005220000_drop_dead_indexes_0510`)
+torna essa query barata. Ele substituiu
+`meta_webhook_events_processed_receivedAt_idx`, que indexava todos os
+eventos (156 MB) para servir os poucos não processados.
+
+A retenção diária (`services/db-retention-sweeper.ts`) **nunca apaga evento
+com `processed = false`**: o backlog fica disponível para reprocesso por
+mais velho que seja.
 
 ## 5. Verificação
 

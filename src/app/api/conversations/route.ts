@@ -28,6 +28,8 @@ import {
   type InboxTab,
 } from "@/services/conversations";
 import { getLogger } from "@/lib/logger";
+import { ServerTiming } from "@/lib/server-timing";
+import { timedJson } from "@/lib/server-timing-response";
 
 const log = getLogger("api/conversations");
 
@@ -46,7 +48,12 @@ const validSortBy: ReadonlySet<string> = new Set(LIST_SORT_BY_VALUES);
 // CONFIAVEL eh runWithContext envolvendo o handler todo — o que withApiAuthContext
 // faz. Usar esse wrapper aqui resolveu "Erro ao listar conversas." em prod.
 export async function GET(request: Request) {
+  // `Server-Timing`: auth, checks (authz/visibilidade/canais), query (lista ou
+  // contadores), serialize, total. `query` leva `desc` = list | counts.
+  const timing = new ServerTiming();
   return withApiAuthContext(request, async (apiUser) => {
+    // `auth` = autenticação da API (sessão/token + rate limit) antes do handler.
+    timing.add("auth", timing.totalMs());
     try {
       const { searchParams } = new URL(request.url);
       const user = { id: apiUser.id, role: apiUser.role as "ADMIN" | "MANAGER" | "MEMBER" };
@@ -65,16 +72,18 @@ export async function GET(request: Request) {
       // `conversation:view` continuaria preso ao default legado (só
       // "esperando"/"respondidas").
       const memo = createRequestMemo();
-      const [grants, allowedChannelIds, authz, visibility] = await Promise.all([
-        scopeGrantsOnce(memo),
-        listAllowedChannelIds(apiUser, memo),
-        authzContextOnce(memo, {
-          userId: apiUser.id,
-          organizationId: apiUser.organizationId,
-          isSuperAdmin: apiUser.isSuperAdmin,
-        }),
-        getVisibilityFilter(user, { memo }),
-      ]);
+      const [grants, allowedChannelIds, authz, visibility] = await timing.time("checks", () =>
+        Promise.all([
+          scopeGrantsOnce(memo),
+          listAllowedChannelIds(apiUser, memo),
+          authzContextOnce(memo, {
+            userId: apiUser.id,
+            organizationId: apiUser.organizationId,
+            isSuperAdmin: apiUser.isSuperAdmin,
+          }),
+          getVisibilityFilter(user, { memo }),
+        ]),
+      );
       const inboxPerms: ReadonlySet<string> =
         authz.isSuperAdmin || authz.isAdmin ? new Set(["*"]) : authz.permissions;
 
@@ -208,15 +217,18 @@ export async function GET(request: Request) {
           typeof countsSearchRaw === "string" && countsSearchRaw.trim().length > 0
             ? countsSearchRaw.trim()
             : undefined;
-        const counts = await getTabCounts(
-          conversationWhere,
-          memberCategoryTabs,
-          allowedChannelIds,
-          filterConditions,
-          countsSearch,
-          // A lista só colapsa tickets por contato quando NÃO há filtro de
-          // contactId (ver getConversations) — o badge segue a mesma regra.
-          !contactId,
+        timing.describe("query", "counts");
+        const counts = await timing.time("query", () =>
+          getTabCounts(
+            conversationWhere,
+            memberCategoryTabs,
+            allowedChannelIds,
+            filterConditions,
+            countsSearch,
+            // A lista só colapsa tickets por contato quando NÃO há filtro de
+            // contactId (ver getConversations) — o badge segue a mesma regra.
+            !contactId,
+          ),
         );
         if (user.role === "MEMBER") {
           const masked = { ...counts };
@@ -228,9 +240,9 @@ export async function GET(request: Request) {
           if (!canSeeInboxTab({ grants, role: user.role, tab: "ligar", permissions: inboxPerms })) {
             masked.ligar = 0;
           }
-          return NextResponse.json(masked);
+          return timedJson(timing, masked);
         }
-        return NextResponse.json(counts);
+        return timedJson(timing, counts);
       }
 
       const tabRaw = searchParams.get("tab") ?? undefined;
@@ -300,37 +312,40 @@ export async function GET(request: Request) {
             })()
           : undefined;
 
-      const result = await getConversations({
-        contactId,
-        status,
-        channel,
-        channelIds,
-        tab,
-        todosCategoryTabs: memberTodosCategories,
-        search,
-        page,
-        perPage,
-        cursor,
-        ids,
-        visibilityWhere: conversationWhere,
-        ownerId,
-        ownerIds,
-        withoutOwner,
-        stageIds,
-        tagIds,
-        sources,
-        withoutSource,
-        sortBy,
-        sortOrder,
-        allowedChannelIds,
-        sessionExpiresWithinHours,
-        sessionExpiringConversationIds,
-        windowState,
-        painelException,
-        noReplyBefore,
-      });
+      timing.describe("query", "list");
+      const result = await timing.time("query", () =>
+        getConversations({
+          contactId,
+          status,
+          channel,
+          channelIds,
+          tab,
+          todosCategoryTabs: memberTodosCategories,
+          search,
+          page,
+          perPage,
+          cursor,
+          ids,
+          visibilityWhere: conversationWhere,
+          ownerId,
+          ownerIds,
+          withoutOwner,
+          stageIds,
+          tagIds,
+          sources,
+          withoutSource,
+          sortBy,
+          sortOrder,
+          allowedChannelIds,
+          sessionExpiresWithinHours,
+          sessionExpiringConversationIds,
+          windowState,
+          painelException,
+          noReplyBefore,
+        }),
+      );
 
-      return NextResponse.json(result);
+      return timedJson(timing, result);
     } catch (e) {
       // Cursor ilegível ou de outra ordenação: erro do cliente, não 500 —
       // e não cai em silêncio na 1ª página (o scroll infinito repetiria).

@@ -18,7 +18,11 @@
 
 import { prisma } from "@/lib/prisma";
 import { prismaBase } from "@/lib/prisma-base";
-import { getOrgIdOrThrow } from "@/lib/request-context";
+import { getOrgIdOrNull, getOrgIdOrThrow } from "@/lib/request-context";
+import {
+  invalidateLocalVersioned,
+  localVersioned,
+} from "@/lib/cache/local-versioned";
 import type {
   WidgetAvailability,
   WidgetDefinition,
@@ -53,6 +57,40 @@ export interface WidgetWithState extends WidgetDefinition {
   disabled: boolean;
   /** Motivo curto pra UI exibir junto do badge "Indisponivel". */
   disabledReason: string | null;
+}
+
+/**
+ * Slugs ATIVOS da org em memória do processo (C1 da auditoria de banco,
+ * 05/10): `organization_widgets` teve 633 mil leituras em 6 dias numa
+ * tabela vazia — `hasOrganizationWidget("smart_distribution")` roda a cada
+ * passagem do motor de distribuição e `getActiveWidgetSlugs` a cada
+ * bootstrap / sidebar. Uma consulta por org a cada 30 s por processo;
+ * instalar/desinstalar invalida pela versão (vale nas outras réplicas em
+ * ~500 ms). É gate de funcionalidade, não permissão de usuário.
+ */
+const ACTIVE_WIDGETS_FAMILY = "org_widgets";
+const ACTIVE_WIDGETS_TTL_MS = 30_000;
+
+async function loadActiveWidgetSlugs(): Promise<Set<string>> {
+  const rows = await prisma.organizationWidget.findMany({
+    where: { status: "ACTIVE" },
+    select: { widgetSlug: true },
+  });
+  return new Set(rows.map((r) => r.widgetSlug));
+}
+
+async function activeWidgetSlugs(): Promise<ReadonlySet<string>> {
+  // Sem org no contexto (super-admin cross-org): consulta direta, como antes.
+  const organizationId = getOrgIdOrNull();
+  if (!organizationId) return loadActiveWidgetSlugs();
+  return localVersioned(
+    {
+      family: ACTIVE_WIDGETS_FAMILY,
+      scope: [organizationId],
+      ttlMs: ACTIVE_WIDGETS_TTL_MS,
+    },
+    loadActiveWidgetSlugs,
+  );
 }
 
 /**
@@ -212,6 +250,7 @@ export async function installWidget(slug: string, userId: string): Promise<void>
       installedById: userId,
     },
   });
+  await invalidateLocalVersioned(ACTIVE_WIDGETS_FAMILY, organizationId);
 }
 
 /**
@@ -229,6 +268,7 @@ export async function uninstallWidget(slug: string): Promise<void> {
     where: { organizationId, widgetSlug: slug },
     data: { status: "INACTIVE" },
   });
+  await invalidateLocalVersioned(ACTIVE_WIDGETS_FAMILY, organizationId);
 }
 
 /**
@@ -241,11 +281,7 @@ export async function uninstallWidget(slug: string): Promise<void> {
  * em producao mudando o toggle.
  */
 export async function hasOrganizationWidget(slug: string): Promise<boolean> {
-  const row = await prisma.organizationWidget.findFirst({
-    where: { widgetSlug: slug, status: "ACTIVE" },
-    select: { id: true },
-  });
-  return Boolean(row);
+  return (await activeWidgetSlugs()).has(slug);
 }
 
 /**
@@ -253,11 +289,8 @@ export async function hasOrganizationWidget(slug: string): Promise<boolean> {
  * itens de uma vez (ex.: `computeAvailableKeys` da sidebar) com UMA query.
  */
 export async function getActiveWidgetSlugs(): Promise<Set<string>> {
-  const rows = await prisma.organizationWidget.findMany({
-    where: { status: "ACTIVE" },
-    select: { widgetSlug: true },
-  });
-  return new Set(rows.map((r) => r.widgetSlug));
+  // Cópia: o conjunto em memória é compartilhado entre requisições.
+  return new Set(await activeWidgetSlugs());
 }
 
 /** Lancado quando uma feature gateada por widget e usada sem o widget ativo.

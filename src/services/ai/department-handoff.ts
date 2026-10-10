@@ -16,6 +16,7 @@
 import type { InboxPolicy } from "@/lib/ai-agents/steering";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
+import { releaseConversationForHandoff } from "@/services/ai/handoff-release";
 import { createConversationEvent } from "@/services/conversation-events";
 import { executeDistribution } from "@/services/distribution/engine";
 import type { VerticalPackOps } from "@/verticals/types";
@@ -210,16 +211,11 @@ export async function executeGenericDepartmentHandoff(
     contactId = conv?.contactId ?? null;
   }
 
-  await prisma.conversation.update({
-    where: { id: args.conversationId },
-    data: {
-      ...(dept ? { departmentId: dept.id } : {}),
-      // Solta a IA. `aiGreetedAt` fica: zerar reenvia a saudação se o
-      // agente reassumir a conversa depois.
-      assignedToId: null,
-      updatedAt: new Date(),
-    },
-    select: { id: true },
+  // Solta a IA e fixa o departamento — só grava se algo muda (a varredura
+  // de segurança repete o handoff; ver `handoff-release.ts`).
+  await releaseConversationForHandoff({
+    conversationId: args.conversationId,
+    departmentId: dept?.id ?? null,
   });
 
   const distribution = await executeDistribution({

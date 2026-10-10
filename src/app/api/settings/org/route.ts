@@ -24,6 +24,8 @@ import {
   setOrgSetting,
 } from "@/lib/org-settings";
 import { getLogger } from "@/lib/logger";
+import { ServerTiming } from "@/lib/server-timing";
+import { timedJson } from "@/lib/server-timing-response";
 
 const log = getLogger("api/settings/org");
 
@@ -49,7 +51,10 @@ function isMemberReadable(target: string): boolean {
 }
 
 export async function GET(request: Request) {
+  // `Server-Timing`: auth, query, serialize, total.
+  const timing = new ServerTiming();
   return withOrgContext(async (session) => {
+    timing.add("auth", timing.totalMs());
     const role = session.user.role;
     const isPrivileged = role === "ADMIN" || role === "MANAGER";
 
@@ -67,12 +72,12 @@ export async function GET(request: Request) {
 
     try {
       if (key) {
-        const value = await getOrgSetting(key);
-        return NextResponse.json({ key, value });
+        const value = await timing.time("query", () => getOrgSetting(key));
+        return timedJson(timing, { key, value });
       }
       if (prefix) {
-        const map = await getOrgSettingsByPrefix(prefix);
-        return NextResponse.json(Object.fromEntries(map));
+        const map = await timing.time("query", () => getOrgSettingsByPrefix(prefix));
+        return timedJson(timing, Object.fromEntries(map));
       }
       return NextResponse.json(
         { message: "Informe `?key=` ou `?prefix=`." },

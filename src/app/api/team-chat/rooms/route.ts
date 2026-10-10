@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { withOrgContext } from "@/lib/auth-helpers";
+import { ServerTiming } from "@/lib/server-timing";
+import { timedJson } from "@/lib/server-timing-response";
 import { createRoom, listRooms } from "@/services/team-chat";
 import { denyUnless, isServiceError, jsonError, viewerOf } from "../_guard";
 
@@ -12,11 +14,14 @@ const CreateRoom = z.object({
 });
 
 export async function GET() {
+  // `Server-Timing`: auth, checks (permissão), query, serialize, total.
+  const timing = new ServerTiming();
   return withOrgContext(async (session) => {
-    const denied = await denyUnless(session, "team_chat:view");
+    timing.add("auth", timing.totalMs());
+    const denied = await timing.time("checks", () => denyUnless(session, "team_chat:view"));
     if (denied) return denied;
-    const rooms = await listRooms(viewerOf(session));
-    return NextResponse.json({ rooms });
+    const rooms = await timing.time("query", () => listRooms(viewerOf(session)));
+    return timedJson(timing, { rooms });
   });
 }
 
