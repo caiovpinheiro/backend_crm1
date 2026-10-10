@@ -40,6 +40,8 @@ export type ValidationAgent = {
   engine: string;
   createdAt: Date;
   config: V2AgentConfig;
+  /** Versão publicada quando `config` é o rascunho: é ela que atende até publicar. */
+  publishedConfig?: V2AgentConfig;
 };
 
 export type ValidationAutomation = {
@@ -310,6 +312,124 @@ function validateRouting(agent: ValidationAgent, data: ConfigValidationData, add
     if (!incoming && !fromFlow) {
       add({ code: "agente_orfao", severity: "avisa", path: "channelIds", message: "Nenhuma conversa chega a este agente: não está vinculado a um número que ele atenda primeiro, nenhum outro agente transfere para ele e nenhum fluxo de automação o chama." });
     }
+  }
+}
+
+// ─── 7. Mensagens x configuração ─────────────────────────────────────────
+
+/** Todos os textos da configuração (mensagens, frases de fecho, instruções), com o campo. */
+export function allTexts(value: unknown, path = ""): Array<{ path: string; text: string }> {
+  if (typeof value === "string") return value.trim().length >= 12 ? [{ path, text: value }] : [];
+  if (Array.isArray(value)) return value.flatMap((v, i) => allTexts(v, `${path}[${i}]`));
+  if (value && typeof value === "object") {
+    return Object.entries(value as Record<string, unknown>).flatMap(([k, v]) => allTexts(v, path ? `${path}.${k}` : k));
+  }
+  return [];
+}
+
+const MINUTES_RE = /\b(\d{1,3})\s*min(?:utos?)?\b/;
+const CLOSE_WORDS = /\b(?:encerr|fech|finaliz|conclu)/;
+
+/** Projeção do que decide transferências: para comparar rascunho e publicado. */
+function routingProjection(c: V2AgentConfig): Record<string, string> {
+  return {
+    "destino padrão": JSON.stringify(c.handoff?.defaultDestination ?? null),
+    assuntos: JSON.stringify(c.themes.map((t) => [t.id, t.when ?? [], t.handoffDestination ?? null, Boolean(t.directHandoff), t.answerBy ?? null])),
+    atalhos: JSON.stringify(c.rules.filter((r) => r.enabled !== false).map((r) => [r.id, r.actions.filter((a) => a.type === "handoff").map((a) => a.destination ?? null)])),
+    "fora do escopo": JSON.stringify((c.scope?.forbidden ?? []).map((f) => [f.subject, f.destination ?? null])),
+  };
+}
+
+function validateMessages(agent: ValidationAgent, data: ConfigValidationData, add: (f: Omit<ValidationFinding, "agentId">) => void): void {
+  const c = agent.config;
+  const places = [
+    ...data.departments.map((d) => ({ id: d.id, type: "department", name: d.name, key: norm(d.name) })),
+    ...data.agents.map((a) => ({ id: a.id, type: "ai_agent", name: a.name, key: norm(a.name) })),
+  ].filter((p) => p.key.length >= 4);
+  const placeName = (d: V2Destination): { name: string; key: string } | null => {
+    if (!d.id) return null;
+    const hit = places.find((p) => p.type === d.type && p.id === d.id);
+    if (hit) return { name: hit.name, key: hit.key };
+    const u = d.type === "user" ? data.users.find((x) => x.id === d.id) : undefined;
+    return u ? { name: u.name, key: norm(u.name) } : null;
+  };
+  const sameName = (a: string, b: string) => a === b || a.includes(b) || b.includes(a);
+
+  // 7a. Atalho que avisa com mensagem própria, mas sem destino: a conversa vai
+  // para o destino padrão — se a mensagem cita outro lugar, o cliente ouve um
+  // e cai em outro.
+  c.rules.forEach((r, i) => {
+    if (r.enabled === false) return;
+    r.actions.forEach((a, j) => {
+      if (a.type !== "handoff" || a.destination) return;
+      const text = (a.message ?? "").trim();
+      if (!text) return;
+      const fallback = placeName(c.handoff.defaultDestination);
+      add({
+        code: "transferencia_mensagem_sem_destino",
+        severity: "avisa",
+        path: `rules[${i}].actions[${j}].destination`,
+        message: `O atalho ${q(r.name)} transfere com mensagem própria mas sem destino: a conversa vai para o destino padrão${fallback ? ` (${q(fallback.name)})` : ""}. Se a mensagem cita outro lugar, escolha o destino.`,
+        evidence: text.slice(0, 80),
+      });
+    });
+  });
+
+  // 7b. Mensagem de transferência cita um lugar diferente do destino.
+  const refs: Array<{ path: string; label: string; d: V2Destination; text: string }> = [];
+  if (c.handoff?.defaultDestination && c.handoff.message?.trim()) {
+    refs.push({ path: "handoff.message", label: "Destino padrão", d: c.handoff.defaultDestination, text: c.handoff.message });
+  }
+  for (const ref of listDestinations(c)) {
+    const text = (ref.d.message ?? "").trim();
+    if (text) refs.push({ path: `${ref.path}.message`, label: ref.label, d: ref.d, text });
+  }
+  for (const ref of refs) {
+    const target = placeName(ref.d);
+    if (!target) continue;
+    const textKey = ` ${norm(ref.text)} `;
+    const cited = places.find((p) => textKey.includes(` ${p.key} `) && !sameName(p.key, target.key));
+    if (!cited) continue;
+    add({
+      code: "mensagem_cita_outro_lugar",
+      severity: "avisa",
+      path: ref.path,
+      message: `A mensagem de transferência de ${q(ref.label)} cita ${q(cited.name)}, mas o destino é ${q(target.name)}: o cliente ouve um lugar e cai em outro.`,
+      evidence: ref.text.slice(0, 80),
+    });
+  }
+
+  // 7c. Texto que promete encerrar em N minutos x encerramento por inatividade.
+  const inactivity = c.inactivity;
+  for (const { path, text } of allTexts(c)) {
+    const m = MINUTES_RE.exec(norm(text));
+    if (!m || !CLOSE_WORDS.test(norm(text))) continue;
+    const promised = Number(m[1]);
+    if (!inactivity?.enabled) {
+      add({ code: "fecho_promete_minutos", severity: "avisa", path, message: `O texto promete encerrar em ${promised} min, mas o encerramento por inatividade está desligado: a promessa não se cumpre.`, evidence: `${promised} min` });
+      continue;
+    }
+    const closeAfter = inactivity.closeAfter ?? 0;
+    const nudgeAfter = inactivity.nudgeAfter ?? 0;
+    if (promised !== closeAfter) {
+      const nudge = nudgeAfter > 0 && nudgeAfter < closeAfter && promised === nudgeAfter ? ` Aos ${nudgeAfter} min ele só manda o aviso de inatividade.` : "";
+      add({ code: "fecho_promete_minutos", severity: "avisa", path, message: `O texto promete encerrar em ${promised} min, mas o encerramento por inatividade está em ${closeAfter} min.${nudge}`, evidence: `${promised} ≠ ${closeAfter}` });
+    }
+  }
+
+  // 7d. Rascunho que muda transferências e ainda não foi publicado: quem atende é o publicado.
+  if (agent.publishedConfig) {
+    const draft = routingProjection(c);
+    const published = routingProjection(agent.publishedConfig);
+    const changed = Object.keys(draft).filter((k) => draft[k] !== published[k]);
+    if (changed.length > 0) {
+      add({ code: "rascunho_nao_publicado", severity: "avisa", path: "handoff.defaultDestination", message: `O rascunho muda transferências (${changed.join(", ")}) e ainda não foi publicado: quem atende é a versão publicada.`, evidence: changed.join(", ") });
+    }
+  }
+
+  // 7e. Checagem por modelo desligada: orientação sem fonte não é barrada.
+  if (c.groundingCheck === "rules") {
+    add({ code: "checagem_modelo_desligada", severity: "avisa", path: "groundingCheck", message: "A checagem por modelo está desligada: orientação, passo a passo ou link sem fonte nos materiais não é barrada (só as regras fixas valem). Ligue em Resposta › Checagem." });
   }
 }
 
@@ -643,6 +763,7 @@ export function validateAgentConfig(agentId: string, data: ConfigValidationData)
   validateFields(agent.config, add);
   validateTabulation(agent.config, data, add);
   validateAutomations(data, add);
+  validateMessages(agent, data, add);
   return findings.sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]);
 }
 
@@ -685,7 +806,8 @@ export async function loadConfigValidationData(organizationId: string, draftAgen
     const raw = r.id === draftAgentId ? (r.draftConfig ?? r.simpleConfig) : r.simpleConfig;
     if (!raw) continue;
     try {
-      agents.push({ id: r.id, name: r.user?.name ?? r.id, active: r.active, engine: r.engine, createdAt: new Date(r.createdAt), config: normalizeV2Config(raw) });
+      const publishedConfig = r.id === draftAgentId && r.draftConfig && r.simpleConfig ? normalizeV2Config(r.simpleConfig) : undefined;
+      agents.push({ id: r.id, name: r.user?.name ?? r.id, active: r.active, engine: r.engine, createdAt: new Date(r.createdAt), config: normalizeV2Config(raw), ...(publishedConfig ? { publishedConfig } : {}) });
     } catch (err) {
       log.warn({ agentId: r.id, err: err instanceof Error ? err.message : err }, "[config-validators] config inválida ignorada");
     }
