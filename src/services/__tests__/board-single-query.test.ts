@@ -280,7 +280,7 @@ const MESSAGES: MsgRow[] = [
   msg("m15", "v6", "in", "w2", 2),
 ];
 
-const CARD_EXCLUDED_TYPES = new Set(["note", "ai_draft", "whatsapp_call", "whatsapp_call_recording"]);
+const CARD_EXCLUDED_TYPES = new Set(["note", "ai_draft", "ai_summary", "whatsapp_call", "whatsapp_call_recording"]);
 
 // ---------------------------------------------------------------------------
 // Emulação do Prisma (where → JS) e das consultas cruas (janelas)
@@ -1167,7 +1167,7 @@ describe("board: prévia do card numa consulta, sem varrer messages (K2)", () =>
   it("mesmo recorte de mensagem de chat da prévia (nota, rascunho, ligação e evento fora)", () => {
     expect(text.match(/m\."isPrivate" = false/g)).toHaveLength(2);
     expect(text.match(/m\."messageType" NOT LIKE 'event%'/g)).toHaveLength(2);
-    const types = ["note", "ai_draft", "whatsapp_call", "whatsapp_call_recording"];
+    const types = ["note", "ai_draft", "ai_summary", "whatsapp_call", "whatsapp_call_recording"];
     expect(sql.values).toEqual([
       ["c1", "c2"],
       "org-x",
