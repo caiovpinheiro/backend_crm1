@@ -33,8 +33,7 @@ import { cache } from "@/lib/cache";
 import { prismaBase } from "@/lib/prisma-base";
 import { withSystemContext } from "@/lib/webhook-context";
 import { isRetiredWhatsAppChannel } from "@/lib/channels/retired-whatsapp";
-import { resolveAgentVerticalForConversation } from "@/services/ai/agent-vertical";
-import { executeDepartmentHandoff } from "@/services/ai/department-handoff";
+import { executeGenericDepartmentHandoff } from "@/services/ai/department-handoff";
 import { isDistributionEnabled } from "@/services/distribution/enabled";
 import { hasOrganizationWidget } from "@/services/organization-widgets";
 import { getLogger } from "@/lib/logger";
@@ -419,16 +418,8 @@ export async function distributeStuckInbound(
       }
 
       try {
-        // Pack do agente da conversa (pode não ter): a rede de segurança
-        // é genérica — enfileirar/distribuir não é regra de vertical.
-        const agent = await resolveAgentVerticalForConversation(
-          row.conversation_id,
-          row.organization_id,
-        );
         const result = await withSystemContext(row.organization_id, () =>
-          executeDepartmentHandoff({
-            ops: agent.ops,
-            policy: agent.inboxPolicy,
+          executeGenericDepartmentHandoff({
             conversationId: row.conversation_id,
             contactId: row.contact_id,
             reason: `IA sem responder há ${idleMinutes} min — distribuição de segurança`,

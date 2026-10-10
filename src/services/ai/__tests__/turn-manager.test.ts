@@ -218,6 +218,10 @@ const db = vi.hoisted(() => {
   };
 
   const message = {
+    findFirst: async ({ where }: { where?: { id?: string } }) => {
+      const row = where?.id ? messages.get(where.id) : undefined;
+      return row ? { ...row } : null;
+    },
     findMany: async ({
       where,
     }: {
@@ -342,7 +346,6 @@ vi.mock("@/services/ai/attendance-gate", () => ({
 }));
 
 const legacy = vi.hoisted(() => ({
-  scheduleAiReply: vi.fn(async () => {}),
   claimInboundMessageForAi: vi.fn(async () => true),
   collectUnansweredInboundText: vi.fn(async () => ""),
 }));
@@ -358,13 +361,13 @@ const agent = vi.hoisted(() => ({
       contactId: string;
       userMessage: string;
       channel: string;
-      inboundMessageIds?: string[];
+      messageIds?: string[];
       turnId?: string;
     }) => {},
   ),
 }));
 
-vi.mock("@/services/ai/inbox-handler", () => agent);
+vi.mock("@/services/ai-v2/engine", () => ({ processV2Turn: agent.maybeReplyAsAIAgent }));
 
 import {
   appendToOpenTurn,
@@ -383,7 +386,7 @@ import {
 import { sweepConversationTurns } from "@/services/ai/turn-sweeper";
 
 const { maybeReplyAsAIAgent } = agent;
-const { scheduleAiReply, claimInboundMessageForAi } = legacy;
+const { claimInboundMessageForAi } = legacy;
 
 const CONV = "conv-1";
 const CONTACT = "contact-1";
@@ -428,6 +431,12 @@ beforeEach(() => {
   conversations.clear();
   users.clear();
   db.state.seq = 0;
+  // Só o motor v2 existe: a conversa padrão está com um agente v2.
+  setConversation(CONV, {
+    organizationId: ORG,
+    assignedToId: "ai-user-1",
+    assignedTo: { id: "ai-user-1", aiAgentConfig: { id: "agent-1", engine: "simple" } },
+  });
   vi.clearAllMocks();
   claimInboundMessageForAi.mockResolvedValue(true);
   legacy.collectUnansweredInboundText.mockResolvedValue("");
@@ -487,7 +496,7 @@ describe("agregação de mensagens em turno", () => {
     expect(maybeReplyAsAIAgent.mock.calls[0][0].userMessage).toBe(
       "Oi\npreciso\nde ajuda\ncom minha\nmatrícula",
     );
-    expect(maybeReplyAsAIAgent.mock.calls[0][0].inboundMessageIds).toEqual([
+    expect(maybeReplyAsAIAgent.mock.calls[0][0].messageIds).toEqual([
       "m1",
       "m2",
       "m3",
@@ -969,37 +978,6 @@ describe("cancelamento", () => {
 });
 
 describe("entrypoint de ingestão", () => {
-  it("com a flag desligada delega para o debounce legado", async () => {
-    process.env.AI_TURN_MANAGER = "0";
-    addMessage("m1", "Oi");
-
-    await onInboundMessageForAi({
-      conversationId: CONV,
-      contactId: CONTACT,
-      messageId: "m1",
-      userMessage: "Oi",
-      channel: "meta",
-    });
-
-    expect(scheduleAiReply).toHaveBeenCalledTimes(1);
-    expect(turns.size).toBe(0);
-  });
-
-  it("com a flag ligada abre turno e não toca no debounce legado", async () => {
-    addMessage("m1", "Oi");
-
-    await onInboundMessageForAi({
-      conversationId: CONV,
-      contactId: CONTACT,
-      messageId: "m1",
-      userMessage: "Oi",
-      channel: "meta",
-    });
-
-    expect(scheduleAiReply).not.toHaveBeenCalled();
-    expect(turns.size).toBe(1);
-  });
-
   it("flag desligada + agente simple atribuído usa Turn Manager (não debounce v1)", async () => {
     process.env.AI_TURN_MANAGER = "0";
     setConversation(CONV, {
@@ -1020,32 +998,7 @@ describe("entrypoint de ingestão", () => {
       channel: "meta",
     });
 
-    expect(scheduleAiReply).not.toHaveBeenCalled();
     expect(turns.size).toBe(1);
-  });
-
-  it("flag desligada + agente legacy usa debounce v1", async () => {
-    process.env.AI_TURN_MANAGER = "0";
-    setConversation(CONV, {
-      organizationId: ORG,
-      assignedToId: "ai-user-1",
-      assignedTo: {
-        id: "ai-user-1",
-        aiAgentConfig: { id: "agent-1", engine: "legacy" },
-      },
-    });
-    addMessage("m1", "Oi");
-
-    await onInboundMessageForAi({
-      conversationId: CONV,
-      contactId: CONTACT,
-      messageId: "m1",
-      userMessage: "Oi",
-      channel: "meta",
-    });
-
-    expect(scheduleAiReply).toHaveBeenCalledTimes(1);
-    expect(turns.size).toBe(0);
   });
 
   it("flag desligada + sem responsável + agente simple padrão atribui e usa Turn Manager", async () => {
@@ -1071,7 +1024,6 @@ describe("entrypoint de ingestão", () => {
       channel: "meta",
     });
 
-    expect(scheduleAiReply).not.toHaveBeenCalled();
     expect(turns.size).toBe(1);
   });
 
@@ -1100,7 +1052,6 @@ describe("entrypoint de ingestão", () => {
         channel: "meta",
       });
 
-      expect(scheduleAiReply).toHaveBeenCalled();
       expect(turns.size).toBe(0);
     } finally {
       attendanceGate.enabled = true;

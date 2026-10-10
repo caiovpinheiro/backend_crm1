@@ -73,7 +73,7 @@ import { fireTrigger, buildMessageTriggerData, emitConversationCreated, openingM
 import { resolveAdAndPersistAsync } from "@/services/meta-ad-resolver";
 import { onInboundMessageForAi } from "@/services/ai/turn-manager";
 import { resolvePostCloseInbound } from "@/services/post-close-return";
-import { ensureInboundAiAttendance } from "@/services/ai/first-attendance";
+import { ensureInboundAiAttendance } from "@/services/ai-v2/first-attendance";
 import { ensureOpenDealForContact, findExistingContactOnPhone } from "@/services/auto-deals";
 import { sanitizeContactName } from "@/lib/display-name";
 import { getLogger } from "@/lib/logger";
@@ -787,12 +787,12 @@ async function resolveWebhookContact(
   // Histórico: havia um terceiro fallback aqui — se BSUID/phone/fuzzy-phone
   // não casassem, fazia `findFirst({ name: equals(profileName) })`. A ideia
   // era recuperar contatos importados sem phone, mas o efeito real em
-  // produção foi catastrófico para orgs com funil de recrutamento (DNAWork):
+  // produção foi catastrófico para orgs com funil de recrutamento (caso real):
   // qualquer pessoa com `profile.name = "Mari"` (ou "Eduardo", "Kauã", etc.)
   // tinha suas mensagens grudadas no PRIMEIRO contato existente com aquele
   // nome — mesmo sendo um número totalmente diferente.
   //
-  // Diagnóstico: 1.801 inbounds mal-roteadas em 30 dias na DNAWork,
+  // Diagnóstico: 1.801 inbounds mal-roteadas em 30 dias numa org,
   // afetando 429 conversas. Sintoma reportado: composer responde para o
   // phone gravado no contato (correto), mas Meta retorna `131047 Fora da
   // janela de 24h` porque o NÚMERO REAL daquele contato não enviou nada
@@ -3689,7 +3689,7 @@ export async function processMetaWebhookPayload(
             // Quando o salesbot RESPONDEU (clique de botão casado com automação
             // pausada), a IA NÃO fala — a resposta era insumo do fluxo, não uma
             // pergunta pro agente. Mas quando ele só encerrou o robô (handoff
-            // por texto livre / ponteiro morto) ninguém falou com o aluno:
+            // por texto livre / ponteiro morto) ninguém falou com o cliente:
             // silenciar a IA aí deixava a mensagem sem nenhuma resposta.
             if (!isSystemMessage && parsed.text && !salesbotReplied) {
               void onInboundMessageForAi({

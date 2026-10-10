@@ -272,7 +272,7 @@ export function unsupportedFigures(reply: string, sources: string[], clientTexts
     if (!haystack.includes(squash(token)) && !(asPercent && haystack.includes(asPercent)) && !plain.includes(normalize(token))) out.add(token);
   }
   // "metade do valor/da parcela": proporção de dinheiro sem fonte.
-  for (const m of reply.matchAll(/\bmetade\s+d[oa]s?\s+(?:valor|pre[cç]o|parcela|pagamento|cobran[cç]a|mensalidade|taxa|fatura)\b/gi)) {
+  for (const m of reply.matchAll(/\bmetade\s+d[oa]s?\s+(?:valor|pre[cç]o|parcela|pagamento|cobran[cç]a|taxa|fatura)\b/gi)) {
     if (!/metade|50\s?%|cinquenta por cento/.test(sources.join(" ").toLowerCase())) out.add(m[0].trim());
   }
   return [...out];

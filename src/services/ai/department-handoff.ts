@@ -1,25 +1,16 @@
 ﻿/**
- * Transferência para departamento — capacidade GENÉRICA do CRM.
+ * Transferência para departamento — capacidade genérica do CRM.
  *
- * Departamento, distribuição e fila existem para qualquer organização.
- * Mesmo assim, `execute_distribution` e `transfer_to_department`
- * dependiam de ops do pack acadêmico (`resolveDepartmentByName`,
- * `executeAcademicDepartmentHandoff`): agente sem vertical simplesmente
- * NÃO conseguia transferir, e a mensagem de erro citava os departamentos
- * de uma organização só.
- *
- * Aqui a resolução e o handoff são genéricos. O pack, quando existe,
- * REFINA (override de departamento, roster, funil operacional) — nunca é
- * pré-requisito.
+ * Resolve o departamento pelo nome (exato, depois por conter o nome),
+ * solta a conversa do agente e aciona a distribuição; sem departamento
+ * resolvido, ainda enfileira na fila de espera. Nenhum domínio de cliente.
  */
 
-import type { InboxPolicy } from "@/lib/ai-agents/steering";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { releaseConversationForHandoff } from "@/services/ai/handoff-release";
 import { createConversationEvent } from "@/services/conversation-events";
 import { executeDistribution } from "@/services/distribution/engine";
-import type { VerticalPackOps } from "@/verticals/types";
 import { getLogger } from "@/lib/logger";
 
 const log = getLogger("ai.department-handoff");
@@ -40,12 +31,6 @@ function normalize(s: string): string {
     .trim();
 }
 
-/** Aliases configurados pelo operador, achatados em uma lista de termos. */
-function policyAliasTerms(policy?: InboxPolicy | null): string[] {
-  const map = policy?.departmentAliases;
-  if (!map) return [];
-  return [...map.acolhimento, ...map.retencao, ...map.atendimento];
-}
 
 /**
  * Casa `Department.name` da organização do contexto. Exato primeiro,
@@ -54,7 +39,6 @@ function policyAliasTerms(policy?: InboxPolicy | null): string[] {
  */
 export async function resolveDepartmentByNameGeneric(
   name: string,
-  policy?: InboxPolicy | null,
 ): Promise<ResolvedDepartment | null> {
   const trimmed = name.trim();
   if (!trimmed) return null;
@@ -80,14 +64,6 @@ export async function resolveDepartmentByNameGeneric(
   const exact = ranked.find((d) => normalize(d.name) === needle);
   if (exact) return { id: exact.id, name: exact.name };
 
-  // Alias do operador que casa com o que o modelo pediu → o departamento
-  // que contém aquele alias.
-  for (const alias of policyAliasTerms(policy)) {
-    const a = normalize(alias);
-    if (!a || (!a.includes(needle) && !needle.includes(a))) continue;
-    const hit = ranked.find((d) => normalize(d.name).includes(a));
-    if (hit) return { id: hit.id, name: hit.name };
-  }
 
   const contains = ranked.find(
     (d) => normalize(d.name).includes(needle) || needle.includes(normalize(d.name)),
@@ -146,18 +122,6 @@ export async function selfDepartmentRouteError(args: {
   return member ? SELF_DEPARTMENT_ROUTE_ERROR : null;
 }
 
-/** Resolve com refino do pack, se houver; senão, genérico. */
-export async function resolveDepartmentForAgent(
-  name: string,
-  args: { ops?: VerticalPackOps | null; policy?: InboxPolicy | null },
-): Promise<ResolvedDepartment | null> {
-  const packResolve = args.ops?.resolveDepartmentByName;
-  if (packResolve) {
-    return (await packResolve(name, args.policy ?? null)) ?? null;
-  }
-  return resolveDepartmentByNameGeneric(name, args.policy ?? null);
-}
-
 export type DepartmentHandoffArgs = {
   conversationId: string;
   contactId: string | null;
@@ -166,7 +130,6 @@ export type DepartmentHandoffArgs = {
   /** Se informado, tem prioridade sobre o departamento já roteado. */
   departmentName?: string | null;
   reason?: string;
-  policy?: InboxPolicy | null;
 };
 
 /**
@@ -181,10 +144,7 @@ export async function executeGenericDepartmentHandoff(
   let dept: ResolvedDepartment | null = null;
 
   if (args.departmentName?.trim()) {
-    dept = await resolveDepartmentByNameGeneric(
-      args.departmentName,
-      args.policy,
-    );
+    dept = await resolveDepartmentByNameGeneric(args.departmentName);
   }
 
   // Respeita o departamento já fixado na conversa (ex.: via
@@ -282,18 +242,3 @@ export async function executeGenericDepartmentHandoff(
   };
 }
 
-/**
- * Ponto único de handoff. Com pack que implementa o refino, delega; sem
- * pack, executa o genérico. Nunca falha por ausência de vertical.
- */
-export async function executeDepartmentHandoff(
-  args: DepartmentHandoffArgs & { ops?: VerticalPackOps | null },
-): Promise<DepartmentHandoffResult> {
-  const packHandoff = args.ops?.executeAcademicDepartmentHandoff;
-  if (packHandoff) {
-    const { ops: _ops, ...rest } = args;
-    return packHandoff(rest);
-  }
-  const { ops: _ops, ...rest } = args;
-  return executeGenericDepartmentHandoff(rest);
-}

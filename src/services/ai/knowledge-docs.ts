@@ -7,7 +7,6 @@
  * documento compartilhado entre agentes nem entre tenants.
  */
 
-import { normalizeInboxPolicy } from "@/lib/ai-agents/steering";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import {
@@ -16,10 +15,6 @@ import {
   resolveZonedDayStart,
 } from "@/lib/zoned-date";
 import { scheduleIndexing } from "@/services/ai/embeddings";
-import {
-  humanQueueContextFromAgent,
-  resolveAgentTimezone,
-} from "@/services/ai/human-queue-policy";
 import { unwrapMessagePayloadText } from "@/services/ai/knowledge-text";
 import { getLogger } from "@/lib/logger";
 
@@ -186,20 +181,11 @@ export function reconstructContentFromChunks(
 async function requireAgentTimezone(agentId: string): Promise<string> {
   const agent = await prisma.aIAgentConfig.findUnique({
     where: { id: agentId },
-    select: {
-      id: true,
-      inboxPolicy: true,
-      businessHours: true,
-      verticalPack: true,
-    },
+    select: { id: true, simpleConfig: true },
   });
   if (!agent) throw new KnowledgeDocError("Agente não encontrado.", 404);
-  return resolveAgentTimezone(
-    humanQueueContextFromAgent({
-      inboxPolicy: normalizeInboxPolicy(agent.inboxPolicy, agent.verticalPack),
-      businessHours: agent.businessHours,
-    }),
-  );
+  const tz = (agent.simpleConfig as { businessHours?: { timezone?: unknown } } | null)?.businessHours?.timezone;
+  return typeof tz === "string" && tz.trim() ? tz : "America/Sao_Paulo";
 }
 
 export function normalizeTitle(input: unknown): string {

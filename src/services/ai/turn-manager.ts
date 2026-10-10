@@ -33,10 +33,6 @@ import { withSystemContext } from "@/lib/webhook-context";
 import { isContactAllowedForAi } from "@/services/ai/phone-allowlist";
 import { llmMaxAttempts, llmTimeoutMs } from "@/services/ai/llm-retry";
 import {
-  handleAiTestCommand,
-  parseAiTestCommand,
-} from "@/services/ai/test-mode";
-import {
   claimInboundMessageForAi,
   collectUnansweredInboundText,
 } from "@/services/ai/inbound-debounce";
@@ -429,22 +425,6 @@ export async function onInboundMessageForAi(
     if (consumed) return;
   }
 
-  const testCommand = parseAiTestCommand(input.userMessage);
-  if (testCommand) {
-    const consumed = await handleAiTestCommand({
-      conversationId: input.conversationId,
-      contactId: input.contactId,
-      command: testCommand.command,
-      argument: testCommand.argument,
-      channel: input.channel,
-      messageId: input.messageId,
-    }).catch((err) => {
-      log.error({ err }, "[ai-test] comando falhou");
-      return false;
-    });
-    if (consumed) return;
-  }
-
   if (input.userMessage?.trim()) {
     try {
       const { shouldSkipNewAiForIdleInbound } = await import(
@@ -497,13 +477,8 @@ export async function onInboundMessageForAi(
   const simpleAgent = await resolveV2AgentForConversation(
     input.conversationId,
   );
-  const useTurnManager = Boolean(simpleAgent) || isTurnManagerEnabled();
-
-  if (!useTurnManager) {
-    const { scheduleAiReply } = await import("@/services/ai/inbound-debounce");
-    await scheduleAiReply(input);
-    return;
-  }
+  // Sem agente v2 para a conversa, não há quem responder.
+  if (!simpleAgent) return;
 
   // Claim por messageId (webhook repetido / multi-pod). Continua sendo o
   // mesmo claim Redis do debounce antigo: barra o reprocessamento ANTES
@@ -986,17 +961,9 @@ async function runTurnInner(turn: RunnableTurn): Promise<void> {
             claimedAt: turn.claimedAt ?? null,
           });
         } else {
-          const { maybeReplyAsAIAgent } = await import(
-            "@/services/ai/inbox-handler"
-          );
-          await maybeReplyAsAIAgent({
-            conversationId: turn.conversationId,
-            contactId: turn.contactId ?? "",
-            userMessage: text,
-            channel: turn.channel === "baileys" ? "baileys" : "meta",
-            inboundMessageIds: messageIds,
-            turnId: turn.id,
-          });
+          // Conversa sem agente v2 (responsável mudou entre o enfileiramento
+          // e a execução): não há quem responder.
+          logTurn("no_v2_agent", { turnId: turn.id, conversationId: turn.conversationId });
         }
 
         await completeTurn(turn.id, turn.organizationId);

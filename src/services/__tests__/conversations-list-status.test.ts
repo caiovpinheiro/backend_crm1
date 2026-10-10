@@ -32,8 +32,6 @@ const h = vi.hoisted(() => {
     scheduleTabCountsInvalidation: vi.fn(),
     ssePublish: vi.fn(),
     logEvent: vi.fn().mockResolvedValue(undefined),
-    restoreDeal: vi.fn().mockResolvedValue(undefined),
-    resolveAgentVertical: vi.fn(),
     scheduleDrain: vi.fn().mockResolvedValue(undefined),
     clearContactOwnershipOnClose: vi.fn().mockResolvedValue(undefined),
   };
@@ -95,17 +93,8 @@ vi.mock("@/services/kanban-filters", () => ({
 vi.mock("@/lib/contact-avatar-fallback", () => ({
   enrichContactsWithUserAvatarFallback: vi.fn(async (c: unknown[]) => c),
 }));
-vi.mock("@/services/ai/agent-vertical", () => ({
-  resolveAgentVerticalForConversation: h.resolveAgentVertical,
-}));
 vi.mock("@/services/distribution/pending", () => ({
   scheduleProcessPendingDistributionQueue: h.scheduleDrain,
-}));
-vi.mock("@/lib/ai-agents/tabulation-classifier", () => ({
-  isTabulationClassifier: () => false,
-}));
-vi.mock("@/lib/ai-agents/farewell-closer", () => ({
-  isFarewellCloser: () => false,
 }));
 vi.mock("@/services/deals", () => ({
   clearContactOwnershipOnClose: h.clearContactOwnershipOnClose,
@@ -449,12 +438,9 @@ describe("updateConversationStatusInDb", () => {
       ...CONV,
       ...args.data,
     }));
-    h.resolveAgentVertical.mockResolvedValue({
-      ops: { restoreDealToAcademicOrigin: h.restoreDeal },
-    });
   });
 
-  it("encerrar: closedAt, hasError=false, invalida badges da org, devolve deal ao funil de origem e enfileira redistribuição", async () => {
+  it("encerrar: closedAt, hasError=false, invalida badges da org e enfileira redistribuição", async () => {
     await withOrg(ORG, () => updateConversationStatusInDb("conv-1", "RESOLVED"));
 
     const data = h.conversation.update.mock.calls[0]![0].data as Record<string, unknown>;
@@ -465,9 +451,7 @@ describe("updateConversationStatusInDb", () => {
     expect(data).not.toHaveProperty("tabulationId");
 
     expect(h.scheduleTabCountsInvalidation).toHaveBeenCalledWith(ORG);
-    expect(h.resolveAgentVertical).toHaveBeenCalledWith("conv-1", ORG);
-    expect(h.restoreDeal).toHaveBeenCalledWith({ contactId: "contact-1" });
-    await Promise.resolve();
+    await vi.waitFor(() => expect(h.scheduleDrain).toHaveBeenCalled());
     expect(h.scheduleDrain).toHaveBeenCalledWith(
       expect.objectContaining({ trigger: "capacity_released", userId: null }),
     );
@@ -489,7 +473,6 @@ describe("updateConversationStatusInDb", () => {
     expect(data).not.toHaveProperty("closedAt");
     expect(data.followUpAt).toBeInstanceOf(Date);
     expect(data.tabulationId).toBe("tab-1");
-    expect(h.restoreDeal).not.toHaveBeenCalled();
     expect(h.scheduleDrain).not.toHaveBeenCalled();
     expect(h.ssePublish).toHaveBeenCalledWith(
       "conversation_updated",
@@ -503,7 +486,6 @@ describe("updateConversationStatusInDb", () => {
     expect(data).toMatchObject({ status: "OPEN", closedAt: null, tabulationId: null, followUpAt: null });
     expect(data).not.toHaveProperty("hasError");
     expect(h.scheduleTabCountsInvalidation).toHaveBeenCalledWith(ORG);
-    expect(h.restoreDeal).not.toHaveBeenCalled();
   });
 
   it("PENDING não invalida badges nem mexe em closedAt", async () => {
@@ -546,7 +528,7 @@ describe("updateConversationStatusInDb", () => {
     expect(h.clearContactOwnershipOnClose).toHaveBeenCalledWith(
       expect.objectContaining({ contactId: "contact-1", clearedUserId: "user-7" }),
     );
-    await Promise.resolve();
+    await vi.waitFor(() => expect(h.scheduleDrain).toHaveBeenCalled());
     expect(h.scheduleDrain).toHaveBeenCalledWith(
       expect.objectContaining({ userId: "user-7" }),
     );
@@ -560,11 +542,4 @@ describe("updateConversationStatusInDb", () => {
     expect(data).not.toHaveProperty("assignedToId");
   });
 
-  it("falha ao devolver o deal não derruba o encerramento", async () => {
-    h.resolveAgentVertical.mockRejectedValueOnce(new Error("vertical off"));
-    logWarn.mockClear();
-    const row = await withOrg(ORG, () => updateConversationStatusInDb("conv-1", "RESOLVED"));
-    expect(row.status).toBe("RESOLVED");
-    expect(logWarn).toHaveBeenCalled();
-  });
 });
