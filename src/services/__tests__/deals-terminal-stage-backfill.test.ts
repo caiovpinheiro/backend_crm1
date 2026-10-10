@@ -1,6 +1,9 @@
 /**
  * Backfill `20261008130000_deals_terminal_stage_status`: status/closedAt dos
- * negócios em etapa terminal (Ganho/Perdido) e closedAt dos WON/LOST sem data.
+ * negócios em etapa terminal (Ganho/Perdido) e closedAt dos WON/LOST sem data,
+ * SÓ COM EVIDÊNCIA em `deal_events`. Negócio sem histórico (importado de outro
+ * CRM, `createdAt` = data da importação) fica fora do alvo: datá-lo por
+ * createdAt/updatedAt criava um pico falso no painel.
  *
  * Duas camadas:
  *  - Estrutura do SQL (sempre roda, inclusive na CI): backup antes de qualquer
@@ -85,6 +88,10 @@ describe("migration de etapa terminal: estrutura", () => {
     expect(EXEC_SQL).not.toMatch(/!=\s*'(LOST|WON)'/);
   });
 
+  it("o alvo só usa datas de eventos: nada de createdAt/updatedAt do negócio", () => {
+    expect(alvoSelect()).not.toMatch(/d\."(createdAt|updatedAt)"/);
+  });
+
   it("documenta o rollback pela tabela de backup", () => {
     expect(MIGRATION).toContain(
       'FROM "_bkp_deals_terminal_20261010" b WHERE d.id = b.id;',
@@ -151,6 +158,9 @@ const DEALS: Deal[] = [
   deal("won_ganho_sem_data_etapa", "ganho", "WON"),
   deal("lost_comum_sem_evento", "comum", "LOST"),
   deal("lost_ganho_sem_data", "ganho", "LOST"),
+  // importado de outro CRM direto na coluna, sem nenhum evento
+  deal("won_ganho_importado", "ganho", "WON"),
+  deal("open_ganho_importado", "ganho", "OPEN"),
 ];
 
 const EVENTS: Ev[] = [
@@ -244,23 +254,20 @@ describe.skipIf(!LOCAL)("migration de etapa terminal: regras (Postgres local, s�
     });
   });
 
-  it("OPEN em Perdido → LOST (nasceu na etapa: createdAt; formato antigo do evento; sem evento: updatedAt)", async () => {
-    const rows = await alvo(DEALS);
-    expect(rows.get("open_perdido_nasceu")).toMatchObject({
-      novoStatus: "LOST",
-      fonte: "createdAt",
-      novoClosedAt: CREATED,
-    });
-    expect(rows.get("open_perdido_legado")).toMatchObject({
+  it("OPEN em Perdido → LOST pela entrada na etapa (inclui o formato antigo do evento)", async () => {
+    expect((await alvo(DEALS)).get("open_perdido_legado")).toMatchObject({
+      regra: "A_open_em_etapa_terminal",
       novoStatus: "LOST",
       fonte: "STAGE_CHANGED",
       novoClosedAt: "2026-08-11 08:00:00",
     });
-    expect(rows.get("open_perdido_sem_evento")).toMatchObject({
-      novoStatus: "LOST",
-      fonte: "updatedAt",
-      novoClosedAt: UPDATED,
-    });
+  });
+
+  it("OPEN em etapa terminal sem STAGE_CHANGED para ela fica fora do alvo (sem evidência)", async () => {
+    const rows = await alvo(DEALS);
+    for (const id of ["open_perdido_nasceu", "open_perdido_sem_evento", "open_ganho_importado"]) {
+      expect(rows.has(id), id).toBe(false);
+    }
   });
 
   it("LOST em Ganho, WON em Perdido, fechados com data e OPEN em etapa comum ficam intocados", async () => {
@@ -288,7 +295,7 @@ describe.skipIf(!LOCAL)("migration de etapa terminal: regras (Postgres local, s�
     });
   });
 
-  it("sem STATUS_CHANGED: STAGE_CHANGED se a etapa é terminal, senão updatedAt", async () => {
+  it("sem STATUS_CHANGED: STAGE_CHANGED se a etapa é terminal; sem evento fica fora", async () => {
     const rows = await alvo(DEALS);
     expect(rows.get("won_ganho_sem_data_etapa")).toMatchObject({
       fonte: "STAGE_CHANGED",
@@ -299,11 +306,21 @@ describe.skipIf(!LOCAL)("migration de etapa terminal: regras (Postgres local, s�
       fonte: "STAGE_CHANGED",
       novoClosedAt: "2026-08-21 08:00:00",
     });
-    expect(rows.get("lost_comum_sem_evento")).toMatchObject({
-      novoStatus: "LOST",
-      fonte: "updatedAt",
-      novoClosedAt: UPDATED,
-    });
+    expect(rows.has("lost_comum_sem_evento")).toBe(false);
+    expect(rows.has("won_ganho_importado")).toBe(false);
+  });
+
+  it("o alvo tem exatamente os negócios com evidência", async () => {
+    expect([...(await alvo(DEALS)).keys()].sort()).toEqual(
+      [
+        "lost_ganho_sem_data",
+        "open_ganho",
+        "open_perdido_legado",
+        "open_perdido_reaberto_antes",
+        "won_ganho_sem_data_etapa",
+        "won_sem_data_status",
+      ].sort(),
+    );
   });
 
   it("nenhuma linha do alvo fica sem data", async () => {

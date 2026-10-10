@@ -892,6 +892,14 @@ export type CreateDealInput = {
   status?: DealStatus;
   expectedClose?: Date | string | null;
   lostReason?: string | null;
+  /**
+   * Data de fechamento informada pela origem, para negócio que nasce em etapa
+   * Ganho/Perdido. `undefined` (tela, API, automação, IA): o fechamento é
+   * agora, `closedAt = new Date()`. Importação passa a data da planilha ou
+   * `null` quando não há — fechamento antigo sem data não vira "fechado hoje"
+   * (criaria um pico falso nos ganhos/perdidos do período).
+   */
+  closedAt?: Date | null;
   position?: number;
   contactId?: string | null;
   stageId: string;
@@ -1899,22 +1907,27 @@ export function buildStatusSyncPatch(
 /**
  * Status com que um negócio NASCE numa etapa. Etapa Ganho/Perdido manda:
  * o card criado direto na coluna Perdido (importação, API, automação, IA)
- * já nasce LOST com `closedAt`, igual a um card movido pra lá. Em etapa
- * comum nada muda: vale o status pedido pelo caller (o schema dá OPEN).
+ * já nasce LOST, igual a um card movido pra lá. `closedAt` é agora, salvo
+ * quando o caller informa a data da origem (importação: data da planilha ou
+ * `null`). Em etapa comum nada muda: vale o status pedido pelo caller (o
+ * schema dá OPEN) e `closedAt` não é tocado.
  *
  * `stage` nulo (etapa não encontrada) deixa o INSERT falhar na FK, como antes.
  */
 export function buildNewDealStatusPatch(
   stage: StageTerminalFlags | null | undefined,
-  requested: { status?: DealStatus; lostReason?: string | null },
-): { status?: DealStatus; closedAt?: Date; lostReason?: string | null } {
+  requested: { status?: DealStatus; lostReason?: string | null; closedAt?: Date | null },
+): { status?: DealStatus; closedAt?: Date | null; lostReason?: string | null } {
+  // Fechamento real acontece agora; a importação traz a data da origem (ou
+  // `null`, sem data) — ver `CreateDealInput.closedAt`.
+  const closedAt = requested.closedAt === undefined ? new Date() : requested.closedAt;
   if (stage?.isWon) {
-    return { status: "WON", closedAt: new Date(), lostReason: null };
+    return { status: "WON", closedAt, lostReason: null };
   }
   if (stage?.isLost) {
     return {
       status: "LOST",
-      closedAt: new Date(),
+      closedAt,
       lostReason: requested.lostReason?.trim() || null,
     };
   }
