@@ -2295,6 +2295,19 @@ describe("processV2Turn — correções do motor", () => {
       expect(sentTexts().join(" ")).not.toContain("Siga de novo");
     });
 
+    it("erro da tela colado depois de uma orientação: a tentativa falhou → transfere, sem orientar de novo", async () => {
+      mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: baseConfig(), active: true });
+      mocks.getState.mockResolvedValue(makeState("active", "agente", { guidanceGiven: true }));
+      mocks.callLLM.mockResolvedValue(llmOut({ reply: "Volte à opção de acesso e informe os dados de novo." }));
+
+      const result = await run("Não localizamos os dados informados. Tente novamente.");
+
+      expect(result.handoff).toBe(true);
+      expect(mocks.callLLM).not.toHaveBeenCalled();
+      expect(sentTexts().join(" ")).toContain("já tentou e não deu certo");
+      expect(sentTexts().join(" ")).not.toContain("Volte à opção");
+    });
+
     it("pedido de ajuda depois de uma orientação transfere na hora, sem perguntar o assunto", async () => {
       const config = baseConfig({ handoff: { defaultDestination: { type: "department" }, message: "Vou transferir.", humanRequestKeywords: ["preciso de ajuda"] } } as unknown as Partial<V2AgentConfig>);
       mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });

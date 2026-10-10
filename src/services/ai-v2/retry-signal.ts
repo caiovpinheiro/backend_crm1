@@ -21,6 +21,20 @@ const FAILED =
   /\bnao\s+(?:deu certo|funcionou|funciona|resolveu|resolve|consegui|consigo|foi|aceitou|aceita|passou|passa|aparece|apareceu|libera|liberou|chegou|carrega|carregou|abre|abriu|entra|entrou|ta dando|esta dando|esta funcionando|ta funcionando)\b|\bcontinua\s+(?:dando|com|sem|igual|o mesmo|a mesma|aparecendo|sem funcionar)\b|\bmesm[oa]\s+(?:erro|problema|coisa|mensagem|situacao)\b|\b(?:de novo|novamente|outra vez|mais uma vez)\b|\b(?:indeferid|recusad|negad|rejeitad|reprovad|cancelad|bloquead)[oa]s?\b|\bda\s+(?:erro|indeferimento|recusa|negativa|problema)\b|\bsem sucesso\b|\bnada\s+(?:ainda|acontece|aconteceu|muda|mudou)\b|\be nada\b|\bnada\s*$/;
 
 /**
+ * Mensagem de erro de tela colada pelo cliente ("Não localizamos os dados
+ * informados. Tente novamente.", "Usuário ou senha inválidos", "Ocorreu um
+ * erro"): voz de sistema, não do cliente. Depois de uma orientação, é o
+ * resultado da tentativa — e o agente não tem como "tentar de novo" por ele.
+ */
+const SYSTEM_ERROR =
+  /\b(?:nao (?:localizamos|encontramos|foi possivel|conseguimos|reconhecemos|identificamos)|dados (?:informados|invalidos|incorretos)|tente (?:novamente|mais tarde|outra vez)|(?:senha|usuario|codigo|cpf|login|email|e mail|token|acesso) (?:invalid|incorret|nao (?:confere|encontrad|cadastrad|localizad))|acesso negado|sessao expirad|algo deu errado|ocorreu um erro|erro (?:ao|de|interno|desconhecido|\d{3})\b|falha (?:ao|na|no)\b|pagina nao encontrada|servico indisponivel|(?:usuario|conta) bloquead|nao autorizado)/;
+
+export function looksLikeSystemError(text: string | null | undefined): boolean {
+  const t = fold(text ?? "");
+  return !!t && SYSTEM_ERROR.test(t);
+}
+
+/**
  * Sinal de "já tentei e não deu certo". Exige os dois lados (tentativa +
  * falha) ou uma falha que já carrega a repetição ("de novo", "continua",
  * "mesmo erro", "3 tentativas"). Pergunta pura ("e se não der certo?") não

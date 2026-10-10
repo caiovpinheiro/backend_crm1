@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { saysTriedAndFailed } from "../retry-signal";
+import { looksLikeSystemError, saysTriedAndFailed } from "../retry-signal";
 
 describe("já tentei e não deu certo", () => {
   it("tentativa + falha", () => {
@@ -35,6 +35,27 @@ describe("já tentei e não deu certo", () => {
       "como faço para solicitar?",
     ]) {
       expect(saysTriedAndFailed(t), t).toBe(false);
+    }
+  });
+});
+
+describe("mensagem de erro da tela colada pelo cliente", () => {
+  it("voz de sistema conta como tentativa que falhou", () => {
+    for (const t of [
+      "Não localizamos os dados informados. Tente novamente.",
+      "Usuário ou senha inválidos",
+      "Ocorreu um erro ao processar sua solicitação",
+      "Acesso negado",
+      "Código inválido. Verifique os dados e tente novamente.",
+      "Sessão expirada",
+    ]) {
+      expect(looksLikeSystemError(t), t).toBe(true);
+    }
+  });
+
+  it("fala do cliente não conta", () => {
+    for (const t of ["quero cancelar", "como faço para acessar?", "ok obrigado", "não consegui", "e se der erro?"]) {
+      expect(looksLikeSystemError(t), t).toBe(false);
     }
   });
 });
