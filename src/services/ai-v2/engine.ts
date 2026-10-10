@@ -137,7 +137,9 @@ function resolveHandoffDestination(
     return next;
   }
   if (destination.type === "ai_agent" && counters.aiTransferCount >= config.limits.maxAiTransfers) {
-    return config.handoff.defaultDestination;
+    const next = config.handoff.defaultDestination;
+    traceStep("limites", `Limite de transferências entre agentes de IA atingido (${counters.aiTransferCount}/${config.limits.maxAiTransfers}) → destino padrão: ${next.type}${next.id ? ` (${next.id})` : ""}`);
+    return next;
   }
   return destination;
 }
