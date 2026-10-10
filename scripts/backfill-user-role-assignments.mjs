@@ -10,7 +10,9 @@
  */
 import { Client } from "pg";
 
-const c = new Client({ connectionString: process.env.DATABASE_URL });
+import { pgConnectionConfig } from "./lib/pg-ssl.mjs";
+
+const c = new Client(pgConnectionConfig());
 await c.connect();
 
 const VALID_ROLES = new Set(["ADMIN", "MANAGER", "MEMBER"]);

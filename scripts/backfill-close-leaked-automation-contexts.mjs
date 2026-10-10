@@ -12,6 +12,8 @@
 //   DATABASE_URL=... node scripts/backfill-close-leaked-automation-contexts.mjs --apply   → aplica
 import { Client } from "pg";
 
+import { pgConnectionConfig } from "./lib/pg-ssl.mjs";
+
 const APPLY = process.argv.includes("--apply");
 
 const REPLY_WAITING = [
@@ -31,7 +33,7 @@ if (!connectionString) {
   process.exit(2);
 }
 
-const c = new Client({ connectionString });
+const c = new Client(pgConnectionConfig(connectionString));
 await c.connect();
 
 const where = `

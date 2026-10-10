@@ -11,9 +11,11 @@
  */
 import { Client } from "pg";
 
+import { pgConnectionConfig } from "./lib/pg-ssl.mjs";
+
 const APPLY = process.argv.includes("--apply");
 const CF_NAME = process.env.CF_NAME ?? "email";
-const c = new Client({ connectionString: process.env.DATABASE_URL });
+const c = new Client(pgConnectionConfig());
 await c.connect();
 
 let orgId = process.env.TARGET_ORG_ID ?? null;
