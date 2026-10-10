@@ -42,7 +42,7 @@ vi.mock("@/services/ai/attendance-gate", () => ({
   isAiAttendanceEnabled: mocks.attendanceEnabled,
 }));
 
-import { resolveV2AgentForConversation } from "../agent-resolver";
+import { conversationHandedOffToHuman, resolveV2AgentForConversation } from "../agent-resolver";
 
 const UNASSIGNED = {
   id: "conv-1",
@@ -80,6 +80,14 @@ describe("resolveV2AgentForConversation — atribuição automática", () => {
 
     expect(r).toBeNull();
     expect(mocks.conversationUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("conversationHandedOffToHuman: transferida e aberta → de pessoa; encerrada depois → não", async () => {
+    mocks.stateFindUnique.mockResolvedValue({ owner: "pessoa", updatedAt: new Date("2026-10-10T10:00:00Z") });
+    expect(await conversationHandedOffToHuman({ id: "conv-1", closedAt: null })).toBe(true);
+    expect(await conversationHandedOffToHuman({ id: "conv-1", closedAt: new Date("2026-10-10T11:00:00Z") })).toBe(false);
+    mocks.stateFindUnique.mockResolvedValue({ owner: "agente", updatedAt: new Date() });
+    expect(await conversationHandedOffToHuman({ id: "conv-1", closedAt: null })).toBe(false);
   });
 
   it("encerrada depois do handoff: pode voltar para a IA", async () => {

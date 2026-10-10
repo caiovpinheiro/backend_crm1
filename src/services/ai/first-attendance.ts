@@ -22,6 +22,7 @@ import {
   releaseAiAssigneeIfDisabled,
 } from "@/services/ai/attendance-gate";
 import { isContactAllowedForAi } from "@/services/ai/phone-allowlist";
+import { conversationHandedOffToHuman } from "@/services/ai-v2/agent-resolver";
 import { humanWasAssignedInThisConversation } from "@/services/distribution/human-assignment-history";
 import { keepHumanAfterAutomationClose } from "@/services/distribution/return-after-close";
 import {
@@ -429,6 +430,7 @@ export async function tryAssignFirstAttendanceAi(args: {
       hasHumanReply: true,
       departmentId: true,
       aiGreetedAt: true,
+      closedAt: true,
       assignedTo: { select: { type: true } },
     },
   });
@@ -457,6 +459,20 @@ export async function tryAssignFirstAttendanceAi(args: {
     select: { id: true, triggerSource: true },
   });
   if (waitingHuman) {
+    // Transferência de um agente v2 para pessoa: a fila de pessoas vale até
+    // a conversa encerrar, dentro ou fora do horário — o aviso já disse que
+    // a equipe responde no próximo horário. Outro agente de IA assumir aqui
+    // como "1º atendimento" era atender em cima da fila (a exceção abaixo,
+    // "fora do horário a IA fica", é do atendimento antigo).
+    if (await conversationHandedOffToHuman({ id: args.conversationId, closedAt: conv.closedAt })) {
+      logAi("first_attendance_skip_v2_handoff_pending", {
+        conversationId: args.conversationId,
+        contactId,
+        pendingId: waitingHuman.id,
+        triggerSource: waitingHuman.triggerSource,
+      });
+      return null;
+    }
     const vertical = await verticalOnce();
     const { ops } = vertical;
     const msg = args.userMessage ?? "";
