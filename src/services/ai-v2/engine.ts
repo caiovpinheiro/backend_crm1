@@ -494,6 +494,27 @@ async function isWaitingInQueue(conversationId: string): Promise<boolean> {
   }
 }
 
+/**
+ * Pendência de fila aberta a partir do momento dado (a transferência do
+ * outro agente para pessoa): a conversa está na fila de pessoas, não foi
+ * passada entre agentes. Pendência antiga, sem data ou anterior, não conta.
+ */
+async function queuedSince(conversationId: string, since: Date | undefined): Promise<boolean> {
+  if (!since) return false;
+  try {
+    const pending = await (prisma as unknown as {
+      distributionPending: { findFirst: (args: unknown) => Promise<{ id: string; createdAt?: Date | string | null } | null> };
+    }).distributionPending.findFirst({
+      where: { status: "PENDING", conversationId },
+      select: { id: true, createdAt: true },
+    });
+    if (!pending?.createdAt) return false;
+    return new Date(pending.createdAt).getTime() >= new Date(since).getTime() - 5_000;
+  } catch {
+    return false;
+  }
+}
+
 /** Devolve a conversa à fila: sem responsável IA, como no handoff. */
 async function releaseToQueue(conversationId: string): Promise<void> {
   await (prisma as unknown as {
@@ -813,6 +834,24 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       counters.lastLoopMessage = undefined;
       traceStep("limites", "Contador de repetição zerado: a mensagem é a mesma que o agente anterior recebeu, não uma repetição do cliente");
     }
+  }
+  // O outro agente passou a conversa para PESSOA (a pendência de fila nasceu
+  // nessa transferência) e ela chegou a este agente pela distribuição, não
+  // por transferência entre agentes: é fila de pessoas. Assumir aqui era
+  // responder "posso ajudar em mais alguma coisa?" a quem só agradeceu e
+  // espera a equipe. Devolve à fila e não responde.
+  if (handedByAnotherAgent && owner === "pessoa" && (await queuedSince(input.conversationId, stateRow?.updatedAt))) {
+    traceStep("fila", "Conversa na fila de pessoas desde a transferência do outro agente → este agente não assume; devolve à fila");
+    await releaseToQueue(input.conversationId);
+    await logV2Turn({
+      organizationId: orgId, conversationId: input.conversationId, agentId: resolved.agentConfigId, turnId: input.turnId,
+      inboundText: input.userMessage,
+      crmContext: { contact: null, deals: [], selectedDeal: null, fields: { contact: [], deal: [] } },
+      prompt: "", executedActions: [], discardedActions: [{ type: "no_reply", reason: "queued" } as any],
+      handoff: false, latencyMs: Date.now() - startedAt,
+      inputTokens: 0, outputTokens: 0, owner, stage, versionId,
+    });
+    return { handoff: false, closed: false };
   }
   // Transferência transparente: este agente segue como se fosse o mesmo
   // assistente (o modelo é instruído a não se apresentar).

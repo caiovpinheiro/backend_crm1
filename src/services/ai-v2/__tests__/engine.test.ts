@@ -1837,6 +1837,17 @@ describe("processV2Turn — correções do motor", () => {
 
   const sentTexts = () => mocks.sendText.mock.calls.map((c) => (c[0] as { text: string }).text);
 
+  it("o outro agente passou a conversa para pessoa e a fila nasceu nessa transferência: este agente não assume, devolve à fila e não responde", async () => {
+    const config = baseConfig();
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.getState.mockResolvedValue({ ...makeState("active", "pessoa"), agentId: "agent-anterior", updatedAt: new Date("2026-10-10T10:21:56.900Z") });
+    mocks.pendingFindFirst.mockResolvedValueOnce({ id: "pend-fila", createdAt: new Date("2026-10-10T10:21:56.805Z") } as { id: string });
+    await run("Obrigada, fico no aguardo!");
+    expect(mocks.callLLM).not.toHaveBeenCalled();
+    expect(sentTexts()).toEqual([]);
+    expect(mocks.conversationUpdateMany).toHaveBeenCalled();
+  });
+
   it("conversa recebida de outro agente de IA: assume e responde, mesmo com pendência de fila antiga", async () => {
     const config = baseConfig();
     mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
