@@ -109,6 +109,11 @@ function allQueryToolResultsEmpty(
   return queryCalls.every((c) => isEmptyQueryResult(c.result));
 }
 
+/** Registra que este agente passou a mensagem em curso adiante (cadeia do turno). */
+function rememberChainAgent(counters: V2Counters, agentId: string): void {
+  counters.chainAgentIds = [...new Set([...(counters.chainAgentIds ?? []), agentId])];
+}
+
 function resolveHandoffDestination(
   config: V2AgentConfig,
   destination: V2Destination,
@@ -136,9 +141,16 @@ function resolveHandoffDestination(
     traceStep("transferência", `Destino é o próprio agente → ${next.type}${next.id ? ` (${next.id})` : ""}`);
     return next;
   }
-  if (destination.type === "ai_agent" && counters.aiTransferCount >= config.limits.maxAiTransfers) {
-    const next = config.handoff.defaultDestination;
-    traceStep("limites", `Limite de transferências entre agentes de IA atingido (${counters.aiTransferCount}/${config.limits.maxAiTransfers}) → destino padrão: ${next.type}${next.id ? ` (${next.id})` : ""}`);
+  // Ciclo na mesma mensagem (A → B → C → A): agente que já cuidou desta
+  // mensagem não a recebe de novo; vale o destino padrão — ou o
+  // departamento, se o padrão também já passou por ela. Sem teto numérico:
+  // cadeia legítima pode ser longa, e o cliente mudar de assunto não gasta
+  // cota (antes contava a vida do ticket e caía no padrão em silêncio).
+  const chain = counters.chainAgentIds ?? [];
+  if (destination.type === "ai_agent" && destination.id && chain.includes(destination.id)) {
+    const fallback = config.handoff.defaultDestination;
+    const next: V2Destination = fallback.type === "ai_agent" && fallback.id && chain.includes(fallback.id) ? { type: "department" } : fallback;
+    traceStep("transferência", `Ciclo entre agentes de IA nesta mensagem (o destino já cuidou dela) → ${next.type}${next.id ? ` (${next.id})` : ""}`);
     return next;
   }
   return destination;
@@ -837,6 +849,16 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       traceStep("limites", "Contador de repetição zerado: a mensagem é a mesma que o agente anterior recebeu, não uma repetição do cliente");
     }
   }
+  // Mensagem nova do cliente (não a cópia de uma transferência): o contador
+  // de transferências entre IAs volta a zero. Ele barra LOOP — agentes se
+  // passando a conversa no mesmo turno —, não a cadeia legítima de um
+  // atendimento em que o cliente muda de assunto. Antes contava a vida
+  // toda do ticket e, no teto, mandava para o destino padrão em silêncio.
+  if (!handedByAnotherAgent && (counters.aiTransferCount > 0 || (counters.chainAgentIds?.length ?? 0) > 0)) {
+    traceStep("limites", `Mensagem nova do cliente: cadeia de transferências entre IAs zerada (era ${counters.aiTransferCount})`);
+    counters.aiTransferCount = 0;
+    counters.chainAgentIds = [];
+  }
   // O outro agente passou a conversa para PESSOA (a pendência de fila nasceu
   // nessa transferência) e ela chegou a este agente pela distribuição, não
   // por transferência entre agentes: é fila de pessoas. Assumir aqui era
@@ -1334,7 +1356,10 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       humanBehavior,
     });
     const mediaDestination = resolveHandoffDestination(config, config.handoff.defaultDestination, counters, resolved!.agentConfigId);
-    if (mediaDestination.type === "ai_agent") counters.aiTransferCount += 1;
+    if (mediaDestination.type === "ai_agent") {
+      counters.aiTransferCount += 1;
+      rememberChainAgent(counters, resolved!.agentConfigId);
+    }
     await summarizeBeforeHandoff(mediaDestination);
     await simpleHandoff({
       conversationId: input.conversationId,
@@ -2794,7 +2819,10 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       return sent;
     }
     const destination = planned;
-    if (destination.type === "ai_agent") counters.aiTransferCount += 1;
+    if (destination.type === "ai_agent") {
+      counters.aiTransferCount += 1;
+      rememberChainAgent(counters, resolved!.agentConfigId);
+    }
     const tabulation = await applyV2Tabulation({ config, theme: getV2ThemeById(config, themeId), moment: "transfer", organizationId: orgId, conversationId: input.conversationId, contactId, agentId: resolved!.agentConfigId });
     await summarizeBeforeHandoff(destination, tabulation);
     await simpleHandoff({
@@ -2993,7 +3021,10 @@ async function handoffAndReply(
     return;
   }
   const fallbackDestination = resolveHandoffDestination(config, config.handoff.defaultDestination, counters, resolved.agentConfigId);
-  if (fallbackDestination.type === "ai_agent") counters.aiTransferCount += 1;
+  if (fallbackDestination.type === "ai_agent") {
+    counters.aiTransferCount += 1;
+    rememberChainAgent(counters, resolved.agentConfigId);
+  }
   traceStep("transferência", `Transferido para ${fallbackDestination.type}${fallbackDestination.id ? ` (${fallbackDestination.id})` : ""}`);
   const tabulation = await applyV2Tabulation({ config, theme: getV2ThemeById(config, themeId), moment: "transfer", organizationId: orgId, conversationId: input.conversationId, contactId, agentId: resolved!.agentConfigId });
   await writeV2Summary({ organizationId: orgId, conversationId: input.conversationId, contactId, agentId: resolved.agentConfigId, config, moment: "transfer", reason: fallbackDestination.type, tabulation });
