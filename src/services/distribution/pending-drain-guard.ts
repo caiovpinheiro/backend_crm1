@@ -45,7 +45,7 @@ export function shouldSkipScheduledFruitlessCooldown(
  * Outbound (`capacity_released`) também respeita `dist:fruitless:{org}`.
  * Não cobre cron (`scheduled` tem o helper acima) nem gatilhos reais.
  *
- * Cruzeiro EaD / Retenção: um depto com 1 consultor no teto arma o
+ * Um depto com 1 consultor no teto arma o
  * fruitless; o único jeito automático de voltar a drenar é o próprio
  * consultor liberar vaga. Sem `userHasFreeSlot`, o outbound dele
  * continuava em skip — só o botão Reprocessar (manual) limpava.

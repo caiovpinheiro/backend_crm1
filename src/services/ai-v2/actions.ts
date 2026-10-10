@@ -9,7 +9,7 @@ import { prisma } from "@/lib/prisma";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import type { V2Action, V2ActionType, V2AgentConfig, V2Destination, V2LLMOutput } from "@/lib/ai-v2/types";
-import { sendAgentMessage, type HumanBehaviorConfig } from "@/services/ai/piloting-actions";
+import { sendAgentMessage, type HumanBehaviorConfig } from "@/services/ai/send-agent-message";
 import type { V2InteractivePayload } from "./interactive";
 import { adaptMessageModelText } from "./message-adapt";
 import { MESSAGE_MODEL_REPEATED, lastV2ResetAt } from "./sent-materials";

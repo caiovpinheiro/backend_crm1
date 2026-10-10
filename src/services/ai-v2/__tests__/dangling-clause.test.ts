@@ -11,6 +11,8 @@ describe("o que sobra de uma frase cortada fica de pé", () => {
     expect(standaloneClause("Já que o prazo terminou")).toBe("O prazo terminou");
     expect(standaloneClause("Para o primeiro acesso")).toBe("");
     expect(standaloneClause("Se o código não chegar")).toBe("");
+    expect(standaloneClause("Ana, para informar o valor com segurança")).toBe("");
+    expect(standaloneClause("Ana, como o prazo terminou")).toBe("Ana, o prazo terminou");
     expect(standaloneClause("Para acessar sua conta, você precisa do e-mail")).toBe("Para acessar sua conta, você precisa do e-mail");
     expect(standaloneClause("O boleto vence em 3 dias úteis")).toBe("O boleto vence em 3 dias úteis");
   });
@@ -21,6 +23,7 @@ describe("o que sobra de uma frase cortada fica de pé", () => {
     expect(withoutTransferClause("Não tenho informação segura sobre as regras da promoção; vou te passar para alguém da equipe."))
       .toBe("Não tenho informação segura sobre as regras da promoção.");
     expect(withoutTransferClause("Para concluir o cadastro, vou chamar alguém da equipe.")).toBe("");
+    expect(withoutTransferClause("Ana, para informar o valor com segurança, vou te passar para o time.")).toBe("");
     // "chamar o time de X" também é aviso: a explicação fica, o aviso vira a mensagem configurada.
     expect(handoffExplanation("Como o e-mail menciona uma data diferente do calendário e a avaliação não apareceu para você, vou chamar o time de Atendimento para verificar o caso."))
       .toBe("O e-mail menciona uma data diferente do calendário e a avaliação não apareceu para você.");

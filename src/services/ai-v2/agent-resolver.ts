@@ -32,12 +32,14 @@ type ConversationForResolve = {
 
 /**
  * Conversa que a IA transferiu para humano (`owner = pessoa`) continua
- * sendo de humano até ser encerrada. Sem isso, um handoff que caía na fila
- * de espera (sem ninguém elegível → `assignedToId = null`) era desfeito na
- * mensagem seguinte do cliente: o resolver via a conversa sem responsável e
- * devolvia para a IA.
+ * sendo de humano até ser encerrada, dentro ou fora do horário. Sem isso,
+ * um handoff que caía na fila de espera (sem ninguém elegível →
+ * `assignedToId = null`) era desfeito na mensagem seguinte do cliente: o
+ * resolver via a conversa sem responsável e devolvia para a IA. A
+ * distribuição consulta o mesmo antes de entregar o ticket ao 1º
+ * atendimento por IA.
  */
-async function wasHandedOffToHuman(conv: ConversationForResolve): Promise<boolean> {
+export async function conversationHandedOffToHuman(conv: { id: string; closedAt?: Date | null }): Promise<boolean> {
   const state = await (prismaBase as unknown as {
     aISimpleConversationState: {
       findUnique: (args: unknown) => Promise<{ owner: string; updatedAt: Date } | null>;
@@ -128,7 +130,7 @@ export async function resolveV2AgentForConversation(
   // Kill-switch da org (`ai.newAttendanceEnabled`): o v1 não deixa chat novo
   // entrar em Agente IA com ele desligado; o v2 segue a mesma regra.
   if (!(await isAiAttendanceEnabled())) return null;
-  if (await wasHandedOffToHuman(conv)) return null;
+  if (await conversationHandedOffToHuman(conv)) return null;
 
   const agents = await (prismaBase as unknown as {
     user: {

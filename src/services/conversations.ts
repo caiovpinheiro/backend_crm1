@@ -3130,33 +3130,6 @@ export async function getConversationLite(idOrNumber: string) {
   });
 }
 
-/**
- * Devolve o deal do funil Atendimento à origem acadêmica. Sem vertical
- * no agente/org, é no-op. Encerrar conversa (humano, lote, automação, IA)
- * tem que limpar a fila — não só o close da IA.
- */
-async function restoreDealAfterConversationResolved(args: {
-  conversationId: string;
-  contactId: string | null;
-  organizationId: string | null;
-}): Promise<void> {
-  if (!args.contactId || !args.organizationId) return;
-  try {
-    const { resolveAgentVerticalForConversation } = await import(
-      "@/services/ai/agent-vertical"
-    );
-    const agent = await resolveAgentVerticalForConversation(
-      args.conversationId,
-      args.organizationId,
-    );
-    await agent.ops.restoreDealToAcademicOrigin?.({
-      contactId: args.contactId,
-    });
-  } catch (e) {
-    log.warn({ err: e }, "[conversations] restoreDeal after close failed");
-  }
-}
-
 export async function updateConversationStatusInTx(
   _tx: ScopedTx,
   id: string,
@@ -3319,25 +3292,7 @@ export async function updateConversationStatusInDb(
   // deals.ts é pesado e este arquivo é importado por webhooks quentes.
   if (clearedAssignee) {
     const orgId = getOrgIdOrNull();
-    const { isTabulationClassifier } = await import(
-      "@/lib/ai-agents/tabulation-classifier"
-    );
-    const { isFarewellCloser } = await import(
-      "@/lib/ai-agents/farewell-closer"
-    );
-    // Classificador / despedida só carimbam. O Encerrar tira o responsável
-    // e o log "X removida da conversa" parece que a ação caiu.
-    const skipUnassignLog =
-      isTabulationClassifier({
-        archetype: clearedAssignee.archetype,
-        enabledTools: clearedAssignee.enabledTools,
-        name: clearedAssignee.name,
-      }) ||
-      isFarewellCloser({
-        archetype: clearedAssignee.archetype,
-        name: clearedAssignee.name,
-      });
-    if (!skipUnassignLog) {
+    {
       await logEvent({
         type: "ASSIGNEE_CHANGED",
         entityType: "CONVERSATION",
@@ -3374,13 +3329,6 @@ export async function updateConversationStatusInDb(
     }
   }
 
-  if (status === "RESOLVED" && !followUp) {
-    await restoreDealAfterConversationResolved({
-      conversationId: id,
-      contactId: updated.contactId ?? updated.contact?.id ?? closeContactId,
-      organizationId: updated.organizationId,
-    });
-  }
 
   return updated;
 }
@@ -3574,13 +3522,6 @@ export async function resolveConversationsInline(params: {
     });
     updated += toResolve.length;
 
-    for (const conv of toResolve) {
-      await restoreDealAfterConversationResolved({
-        conversationId: conv.id,
-        contactId: conv.contactId,
-        organizationId: conv.organizationId,
-      });
-    }
 
     if (!params.keepAgent) {
       const pairs = new Map<string, { contactId: string; userId: string }>();

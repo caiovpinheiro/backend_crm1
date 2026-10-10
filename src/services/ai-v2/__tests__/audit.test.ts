@@ -62,8 +62,8 @@ describe("auditoria do motor — defeitos objetivos por conversa", () => {
 
   it("resposta duplicada, pergunta repetida, fluxo em cima do agente e canal errado", () => {
     const messages = [
-      msg({ conversationId: "c1", createdAt: at("17:00"), content: "A prova de setembro já passou; a próxima é em dezembro." }),
-      msg({ conversationId: "c1", createdAt: at("17:01"), content: "A prova de setembro já passou, a próxima é em dezembro!" }),
+      msg({ conversationId: "c1", createdAt: at("17:00"), content: "O encontro de setembro já passou; o próximo é em dezembro." }),
+      msg({ conversationId: "c1", createdAt: at("17:01"), content: "O encontro de setembro já passou, o próximo é em dezembro!" }),
       msg({ conversationId: "c1", createdAt: at("17:02"), direction: "in", authorType: "human", aiAgentUserId: null, content: "Destravar" }),
       msg({ conversationId: "c1", createdAt: at("17:03"), content: "Me conta, por favor, o que você precisa resolver?" }),
       msg({ conversationId: "c1", createdAt: at("17:04"), direction: "in", authorType: "human", aiAgentUserId: null, content: "Reativar" }),

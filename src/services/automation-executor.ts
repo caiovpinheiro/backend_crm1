@@ -74,7 +74,6 @@ import {
   type ActiveDealMovedRow,
   type DealBoardChange,
 } from "@/services/deals";
-import { triggerAgentOpeningForContact } from "@/services/ai/piloting-actions";
 import { fireTrigger, notifyDealStageChanged } from "@/services/automation-triggers";
 import { loadIntentionalStageClusterIds } from "@/services/intentional-stage-cluster";
 import { updateContactScore } from "@/services/lead-scoring";
@@ -2682,105 +2681,26 @@ export async function executeStep(
         return {};
       }
 
-      const { isTabulationClassifier } = await import(
-        "@/lib/ai-agents/tabulation-classifier"
-      );
-      const classifier = isTabulationClassifier({
-        ...agentUser.aiAgentConfig,
-        name: agentUser.name,
-      });
-
       const target = readString(cfg, "target") ?? (rt.dealId ? "deal" : "contact");
-      let contactForOpening: string | null = null;
       if (target === "deal") {
         const targetDealId = rt.dealId ?? readString(cfg, "dealId");
         if (!targetDealId) {
           throw new Error("transfer_to_ai_agent: dealId ausente");
         }
-        if (!classifier) {
-          await assignDealOwner(targetDealId, agentUserId);
-        }
-        const deal = await prisma.deal.findUnique({
-          where: { id: targetDealId },
-          select: { contactId: true },
-        });
-        contactForOpening = deal?.contactId ?? null;
+        await assignDealOwner(targetDealId, agentUserId);
       } else {
         const targetContactId = rt.contactId ?? readString(cfg, "contactId");
         if (!targetContactId) {
           throw new Error("transfer_to_ai_agent: contactId ausente");
         }
-        if (!classifier) {
-          await prisma.$transaction((tx) =>
-            propagateOwnerToContactAndChat(tx, targetContactId, agentUserId),
-          );
-        }
-        contactForOpening = targetContactId;
+        await prisma.$transaction((tx) =>
+          propagateOwnerToContactAndChat(tx, targetContactId, agentUserId),
+        );
       }
-
-      // Classificador só carimba a folha — nunca vira dono do WhatsApp.
-      // Saudação proativa: dispara imediatamente após a atribuição,
-      // sem esperar o cliente mandar mensagem. Isso resolve o caso de
-      // automações cujo trigger é "Negócio criado" / etc. — antes, o
-      // agente ficava mudo porque `maybeReplyAsAIAgent` só roda em
-      // inbound. Idempotente via `Conversation.aiGreetedAt`, então
-      // se o cliente mandar algo depois, a saudação não repete.
-      //
-      // Falhas aqui não podem derrubar o passo da automação: o log do
-      // passo já registrou "transfer_to_ai_agent OK". A saudação é
-      // efeito colateral; se falhar, o agente ainda responderá ao
-      // próximo inbound normalmente.
-      if (contactForOpening) {
-        if (classifier) {
-          const { triggerTabulationClassifyForContact } = await import(
-            "@/services/ai/tabulation-classify"
-          );
-          const classified = await triggerTabulationClassifyForContact({
-            contactId: contactForOpening,
-            agentUserId,
-          });
-          if (classified.status === "failed") {
-            throw new Error(
-              `transfer_to_ai_agent: classificação falhou (${classified.reason})`,
-            );
-          }
-          if (classified.status === "skipped") {
-            log.info(
-              `transfer_to_ai_agent: classificação pulada (${classified.reason})`,
-            );
-            return { note: `classificação pulada (${classified.reason})` };
-          }
-          const label = classified.tabulationName ?? classified.tabulationId;
-          log.info(
-            `transfer_to_ai_agent: classificação ${classified.status} (tab=${classified.tabulationId})`,
-          );
-          return {
-            note: `tabulou: ${label}`,
-          };
-        } else {
-          try {
-            const opening = await triggerAgentOpeningForContact({
-              contactId: contactForOpening,
-              agentUserId,
-              channel: "meta",
-            });
-            if (opening.status === "skipped") {
-              log.info(
-                `transfer_to_ai_agent: saudação proativa pulada (${opening.reason})`,
-              );
-            } else {
-              log.info(
-                `transfer_to_ai_agent: saudação proativa ${opening.status} (conv=${opening.conversationId})`,
-              );
-            }
-          } catch (err) {
-            log.warn("transfer_to_ai_agent: falha na saudação proativa:", err);
-          }
-        }
-      }
+      // O agente fala na próxima mensagem do cliente, com as boas-vindas da
+      // própria configuração; a saudação proativa era do motor antigo.
       return {};
     }
-
     case "add_tag": {
       const targetContactId = rt.contactId ?? readString(cfg, "contactId");
       if (!targetContactId) throw new Error("add_tag: contactId ausente");
@@ -4882,64 +4802,10 @@ export async function executeStep(
     }
 
     case "ask_ai_agent": {
-      // Chama um agente de IA com o prompt configurado (interpolando
-      // variáveis) e salva a resposta como variável de contexto pra
-      // usar nos próximos passos (ex: condition, send_whatsapp_message).
-      const agentId = readString(cfg, "agentId");
-      if (!agentId) throw new Error("ask_ai_agent: agentId não configurado");
-      const promptTemplate = readString(cfg, "promptTemplate") ?? "";
-      const variableName = readString(cfg, "saveToVariable") ?? "ai_response";
-
-      const vars = (cfg as Record<string, unknown>)["__variables"] as
-        | Record<string, unknown>
-        | undefined;
-      const prompt = vars
-        ? interpolateVariables(promptTemplate, vars)
-        : promptTemplate;
-      if (!prompt.trim()) throw new Error("ask_ai_agent: prompt vazio");
-
-      // import dinâmico pra evitar ciclo (runner → prisma → services).
-      const { runAgent } = await import("@/services/ai/runner");
-      const openDeal = rt.contactId
-        ? await prisma.deal.findFirst({
-            where: { contactId: rt.contactId, status: "OPEN" },
-            orderBy: { updatedAt: "desc" },
-            select: { id: true },
-          })
-        : null;
-      const conv = rt.contactId
-        ? await prisma.conversation.findFirst({
-            where: { contactId: rt.contactId, channel: "whatsapp" },
-            orderBy: { updatedAt: "desc" },
-            select: { id: true },
-          })
-        : null;
-
-      const result = await runAgent({
-        agentId,
-        source: "automation",
-        userMessage: prompt,
-        conversationId: conv?.id ?? null,
-        contactId: rt.contactId ?? null,
-        dealId: openDeal?.id ?? null,
-      });
-      if (result.status === "FAILED") {
-        throw new Error(`ask_ai_agent: ${result.error ?? "falha no agente"}`);
-      }
-
-      // Persiste a variável no contexto da automation (mesma lógica
-      // usada por `set_variable`).
-      if (rt.contactId) {
-        const ctx = await getActiveContext(rt.automationId, rt.contactId);
-        if (ctx) {
-          const next = { ...((ctx.variables as Record<string, unknown>) ?? {}) };
-          next[variableName] = result.text;
-          await advanceContext(ctx.id, ctx.currentStepId, next);
-        }
-      }
-      return {};
+      // Passo do motor antigo: não existe mais. Falha explícita para o fluxo
+      // não seguir com a variável vazia.
+      throw new Error("ask_ai_agent: passo indisponível — o motor antigo de agentes foi removido");
     }
-
     case "business_hours": {
       const isOpen = evaluateBusinessHoursValue({
         schedule: Array.isArray(cfg.schedule) ? cfg.schedule : [],

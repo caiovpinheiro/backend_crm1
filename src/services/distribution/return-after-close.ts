@@ -141,9 +141,9 @@ export async function findHumanToKeepAfterAutomationClose(
   });
   if (!stillHuman) return null;
 
-  // Offline / fora do expediente: devolver a ele deixaria o aluno parado, então
+  // Offline / fora do expediente: devolver a ele deixaria o cliente parado, então
   // segue o fluxo normal de distribuição. Fila cheia é exceção: o teto barra
-  // lead NOVO, e aqui o aluno já é caso dele — mandar para a fila de espera
+  // lead NOVO, e aqui o cliente já é caso dele — mandar para a fila de espera
   // seria pior do que devolver ao consultor que o atendeu.
   const check = await isAssigneeCurrentlyEligible(stillHuman.id);
   if (check.eligible) return stillHuman.id;

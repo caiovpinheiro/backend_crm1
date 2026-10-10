@@ -62,9 +62,8 @@ async function resolveResetAgent(orgId: string, contactId: string, phone: string
   );
   if (byTestList) return { agentConfigId: byTestList.id, userId: byTestList.userId };
 
-  const { resolveTestModeOperator } = await import("@/services/ai/test-mode");
-  const operator = await resolveTestModeOperator(contactId);
-  return operator ? { agentConfigId: agents[0].id, userId: agents[0].userId } : null;
+  // Fora das listas de números de teste dos agentes, o #reset não vale.
+  return null;
 }
 
 export async function handleV2ResetCommand(input: {
@@ -124,7 +123,7 @@ export async function handleV2ResetCommand(input: {
     ? "🔄 Atendimento reiniciado. Pode mandar a primeira mensagem."
     : "🔄 Atendimento reiniciado.\n\n⚠️ O atendimento por IA está desligado nesta organização (configuração ai.newAttendanceEnabled): a próxima mensagem não vai para o agente.";
 
-  const { sendAgentMessage } = await import("@/services/ai/piloting-actions");
+  const { sendAgentMessage } = await import("@/services/ai/send-agent-message");
   await sendAgentMessage({
     conversationId: input.conversationId,
     contactId: input.contactId,

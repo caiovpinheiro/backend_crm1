@@ -20,6 +20,8 @@ const log = getLogger("ai-v2.agents");
 
 export type V2AgentListItem = {
   id: string;
+  /** Usuário IA do agente: alvo de transferências e atribuições. */
+  userId: string;
   name: string;
   flow: string;
   active: boolean;
@@ -88,11 +90,11 @@ export async function listV2Agents(organizationId: string): Promise<V2AgentListI
     updatedAt: Date;
     simpleConfig: unknown;
     draftConfig: unknown;
-    user: { name: string };
+    user: { id: string; name: string };
   }> = await (prisma as any).aIAgentConfig.findMany({
     where: { organizationId, engine: "simple" },
     orderBy: { updatedAt: "desc" },
-    include: { user: { select: { name: true } } },
+    include: { user: { select: { id: true, name: true } } },
   });
   const ids = rows.map((r) => r.id);
   const [versions, stats] = await Promise.all([
@@ -128,6 +130,7 @@ export async function listV2Agents(organizationId: string): Promise<V2AgentListI
     const today = stats.get(r.id);
     return {
       id: r.id,
+      userId: r.user?.id ?? "",
       name: r.user?.name ?? "",
       flow: published?.flow ?? "full",
       active: r.active,

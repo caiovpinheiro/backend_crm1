@@ -216,7 +216,7 @@ const DEMAND_HINTS = [
   "boleto",
   "senha",
   "acesso",
-  "matricula",
+  "cadastro",
   "pagamento",
   "ajuda",
   "duvida",

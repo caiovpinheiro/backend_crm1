@@ -116,6 +116,23 @@ type DestinationRef = {
   themeId?: string;
 };
 
+/** Palavras dos gatilhos do assunto de origem de uma perna do ciclo; null quando a perna não é assunto (não dá para saber a mensagem). */
+function triggerWordsOf(agent: ValidationAgent | undefined, ref: DestinationRef): Set<string> | null {
+  if (!agent || ref.kind !== "theme" || !ref.themeId) return null;
+  const theme = agent.config.themes.find((t) => t.id === ref.themeId);
+  if (!theme) return null;
+  return new Set((theme.when ?? []).flatMap((w) => themeKeyWords(w)));
+}
+
+/** Gatilho presente nos assuntos de todas as pernas do ciclo (a mesma mensagem dá a volta). */
+export function sharedTriggerWord(legs: Array<{ agent: ValidationAgent | undefined; ref: DestinationRef }>): string | null {
+  const sets = legs.map((l) => triggerWordsOf(l.agent, l.ref));
+  if (sets.some((x) => !x || x.size === 0)) return null;
+  const [first, ...rest] = sets as Set<string>[];
+  for (const w of first) if (rest.every((x) => x.has(w))) return w;
+  return null;
+}
+
 /** Todos os destinos de transferência da configuração, com o campo de origem. */
 export function listDestinations(c: V2AgentConfig): DestinationRef[] {
   const out: DestinationRef[] = [];
@@ -260,15 +277,22 @@ function validateRouting(agent: ValidationAgent, data: ConfigValidationData, add
         if (reported.has(key)) continue;
         reported.add(key);
         const deterministic = cycle.every((e) => e.ref.direct);
+        // A mesma mensagem dá a volta quando um gatilho está nos assuntos de
+        // todas as pernas: aí é ping-pong de verdade (o motor desvia para o
+        // destino padrão, mas o cliente cai na fila errada). Sem gatilho em
+        // comum, o ciclo é só a malha de especialistas devolvendo o que não
+        // é deles — avisa, não bloqueia.
+        const shared = sharedTriggerWord(cycle.map((e) => ({ agent: agents.get(e.from), ref: e.ref })));
         const chain = [...cycle.map((e) => agents.get(e.from)?.name ?? e.from), agent.name].join(" → ");
         const first = cycle[0];
+        const bounce = shared ? ` O gatilho ${q(shared)} está nos assuntos dos dois lados: a mesma mensagem quica.` : "";
         add({
           code: "ciclo_entre_agentes",
-          severity: deterministic ? "bloqueia" : "avisa",
+          severity: deterministic && shared ? "bloqueia" : "avisa",
           path: first.ref.path,
-          message: cycle.length === 2
-            ? `${q(first.ref.label)} transfere para ${q(agents.get(first.to)?.name ?? first.to)}, que devolve a conversa para este agente (${q(cycle[1].ref.label)}): ping-pong até o motor desviar para o destino padrão.`
-            : `Ciclo de transferência entre agentes (${chain}): a conversa volta para este agente em vez de ser resolvida.`,
+          message: (cycle.length === 2
+            ? `${q(first.ref.label)} transfere para ${q(agents.get(first.to)?.name ?? first.to)}, que devolve a conversa para este agente (${q(cycle[1].ref.label)}). O motor barra o ciclo quando a mesma mensagem dá a volta (vai para o destino padrão).`
+            : `Ciclo de transferência entre agentes (${chain}). O motor barra o ciclo quando a mesma mensagem dá a volta (vai para o destino padrão).`) + bounce,
           evidence: chain,
         });
         continue;
@@ -293,7 +317,6 @@ function validateRouting(agent: ValidationAgent, data: ConfigValidationData, add
 
 const GREETINGS = new Set(["oi", "ola", "bom dia", "boa tarde", "boa noite", "tudo bem", "oi tudo bem", "ola tudo bem", "obrigado", "obrigada", "ok", "sim", "nao", "ajuda", "por favor", "alo", "opa", "e ai", "oie", "oii", "hey", "hello"]);
 /** Palavra que, sozinha, costuma aparecer negada ("não quero X", "sem X"): verbo no infinitivo. */
-const INFINITIVE = /^[a-z]{3,}(ar|er|ir)$/;
 
 export function themeKeyWords(trigger: string): string[] {
   return norm(trigger).split(" ").filter((w) => w.length > 2);
@@ -310,8 +333,6 @@ function validateThemes(c: V2AgentConfig, add: (f: Omit<ValidationFinding, "agen
       const words = themeKeyWords(w);
       if (GREETINGS.has(key) || (words.length > 0 && words.every((x) => GREETINGS.has(x)))) {
         add({ code: "gatilho_cumprimento", severity: "avisa", path: `themes[${ti}].when[${wi}]`, message: `Gatilho ${q(w)} de ${q(t.name)} é um cumprimento comum: quase toda conversa começa nesse assunto.`, evidence: w });
-      } else if (words.length === 1 && INFINITIVE.test(words[0])) {
-        add({ code: "gatilho_palavra_solta", severity: "avisa", path: `themes[${ti}].when[${wi}]`, message: `Gatilho de uma palavra só (${q(w)}) também aparece em frases negadas (“não quero ${words[0]}”): use uma frase (“quero ${words[0]}”, “como faço para ${words[0]}”).`, evidence: w });
       }
     });
 
@@ -366,6 +387,9 @@ export function monthsInTitle(title: string): number[] {
     const month = MONTH_NAMES[token];
     if (!month) continue;
     if (token.length === 3 && !/\d\s*(de\s+)?$/.test(text.slice(0, m.index))) continue;
+    // Mês de referência, não do evento: "ref. disc. de março", "disciplina de
+    // março", "ingresso em abril", "turma de maio".
+    if (/(?:\bref\.?|referente(?:\s+a|\s+ao)?|\bdisc\.?|disciplinas?\s+de|ingresso\s+em|turma\s+de|periodo\s+de)\s*(?:de\s+)?$/.test(text.slice(0, m.index))) continue;
     out.add(month);
   }
   for (const m of text.matchAll(DAY_MONTH_RE)) {

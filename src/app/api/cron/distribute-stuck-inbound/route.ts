@@ -2,9 +2,9 @@
  * GET  /api/cron/distribute-stuck-inbound          dry-run (só lista)
  * POST /api/cron/distribute-stuck-inbound?apply=1  enfileira no worker
  *
- * Destrava aluno preso na IA: conversa OPEN, responsável do tipo AI, sem
+ * Destrava cliente preso na IA: conversa OPEN, responsável do tipo AI, sem
  * resposta humana e sem nenhuma outbound depois do último inbound. NÃO
- * envia mensagem ao aluno — só reatribui / enfileira na Distribuição.
+ * envia mensagem ao cliente — só reatribui / enfileira na Distribuição.
  *
  * Autenticação: `Authorization: Bearer ${CRON_SECRET}` (`?secret=` ainda aceito, DEPRECADO — ver `requireCronSecret`).
  *

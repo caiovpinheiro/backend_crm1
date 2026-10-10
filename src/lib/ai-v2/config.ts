@@ -269,6 +269,7 @@ const limitsConfigSchema = z.object({
   silenceMinutes: z.number().int().min(0).optional().default(30),
   loopDetectionWindowMinutes: z.number().int().min(0).optional().default(60),
   maxLoopCount: z.number().int().min(0).optional().default(3),
+  /** Sem efeito desde a detecção de ciclo (engine.resolveHandoffDestination); fica só para configs antigas. */
   maxAiTransfers: z.number().int().min(0).optional().default(3),
 });
 
@@ -440,7 +441,7 @@ export const v2AgentConfigSchema = z.object({
   // resposta contra os materiais. "rules": só as regras fixas.
   groundingCheck: z.enum(["model", "rules"]).optional(),
   /**
-   * Ligado: se o aluno responde um disparo, o agente lê o texto do modelo
+   * Ligado: se o cliente responde um disparo, o agente lê o texto do modelo
    * gravado no chat (e, se a bolha só tiver o nome, o texto salvo do modelo)
    * e continua a partir dessa resposta. Desligado: não busca esse texto.
    */

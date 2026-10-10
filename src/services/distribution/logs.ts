@@ -191,15 +191,8 @@ async function resolveDepartmentsForLogs(
 
   if (afterNotes.length === 0) return out;
 
-  // Último recurso: consultor elegível em exatamente 1 dept acadêmico.
-  const academicNorms = new Set(
-    ["acolhimento", "retencao", "atendimento"].map((n) => n),
-  );
-  const academicDeptIds = new Set(
-    departments
-      .filter((d) => academicNorms.has(normalizeDeptName(d.name)))
-      .map((d) => d.id),
-  );
+  // Último recurso: consultor elegível em exatamente 1 departamento.
+  const deptIds = new Set(departments.map((d) => d.id));
   const userIds = [
     ...new Set(
       afterNotes
@@ -208,12 +201,12 @@ async function resolveDepartmentsForLogs(
     ),
   ];
   const memberships =
-    userIds.length > 0 && academicDeptIds.size > 0
+    userIds.length > 0 && deptIds.size > 0
       ? await prisma.departmentMember.findMany({
           where: {
             organizationId: orgId,
             userId: { in: userIds },
-            departmentId: { in: [...academicDeptIds] },
+            departmentId: { in: [...deptIds] },
           },
           select: { userId: true, departmentId: true },
         })

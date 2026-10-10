@@ -170,34 +170,4 @@ await build({
   outdir: path.resolve(projectRoot, "dist/workers"),
 });
 
-// Build separado: se entrar em `entries`, o outbase vira `src/` e os
-// workers saem em dist/workers/workers/*.js.
-await build({
-  ...workerBuild,
-  entryPoints: ["src/scripts/replay-agent-runs.ts"],
-  outfile: path.resolve(projectRoot, "dist/workers/replay-agent-runs.js"),
-});
-
-// Dump de auditoria dos agentes (somente leitura), rodado no container.
-await build({
-  ...workerBuild,
-  entryPoints: ["src/scripts/dump-agent-audit.ts"],
-  outfile: path.resolve(projectRoot, "dist/workers/dump-agent-audit.js"),
-});
-
-// Materialização das regras do pack no banco. Roda uma vez no container,
-// ANTES do deploy que tira o fallback do runner.
-await build({
-  ...workerBuild,
-  entryPoints: ["src/scripts/materialize-steering-rules.ts"],
-  outfile: path.resolve(projectRoot, "dist/workers/materialize-steering-rules.js"),
-});
-
-// Medição do contrato de atendimento por conversa (somente leitura).
-await build({
-  ...workerBuild,
-  entryPoints: ["src/scripts/audit-attendance.ts"],
-  outfile: path.resolve(projectRoot, "dist/workers/audit-attendance.js"),
-});
-
 console.log("[build-workers] ✓ workers compilados em dist/workers/");

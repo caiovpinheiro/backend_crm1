@@ -1,6 +1,6 @@
 /**
  * "Escutar a equipe": com a escuta ligada, o agente lê em lote os
- * atendimentos das pessoas escolhidas e/ou da origem acadêmica do aluno
+ * atendimentos das pessoas escolhidas e/ou da etapa de origem do contato
  * (depois que a conversa encerra ou fica 1 h parada) e monta propostas de
  * conhecimento (material), abordagem (regras) e tom de voz. Nada muda
  * sozinho: cada proposta é aplicada no rascunho ou recusada por quem
@@ -180,7 +180,7 @@ export type ListenSession = {
   status: ListenStatus;
   userIds: string[];
   people: Array<{ id: string; name: string }>;
-  /** Etapas acadêmicas de onde o aluno veio antes de entrar em atendimento. */
+  /** Etapas de origem de onde o contato veio antes de entrar em atendimento. */
   originStageIds: string[];
   origins: Array<{ id: string; name: string; pipelineName: string }>;
   mode: ListenMode;
@@ -389,7 +389,7 @@ async function validOrigins(organizationId: string, stageIds: string[]): Promise
     organizationId, ids,
   );
   if (rows.length !== ids.length) {
-    throw new Error("A origem é a etapa de onde o aluno veio, não uma etapa do funil Atendimento.");
+    throw new Error("A origem é a etapa de onde o contato veio, não uma etapa do funil de atendimento.");
   }
   return ids;
 }

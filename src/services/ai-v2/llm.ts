@@ -1774,7 +1774,7 @@ export async function callV2LLM(args: {
     const labelsOf = (list: Unsupported[]) => list.map((u) => u.label);
     const textsOf = (list: Unsupported[]) => list.map((u) => u.text).filter(Boolean);
 
-    // Tempo verbal x data: "as provas foram realizadas de 06/11 a 09/11"
+    // Tempo verbal x data: "os encontros foram realizados de 06/11 a 09/11"
     // com 06/11 ainda por vir. Quando é só o verbo, conserta; senão a frase
     // sai (regra em `unsupportedOf`).
     for (const t of tenseMismatches(r.output.reply, new Date(), tz)) {

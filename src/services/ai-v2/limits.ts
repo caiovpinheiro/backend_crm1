@@ -13,6 +13,8 @@ export interface V2Counters {
   loopCount: number;
   lastLoopMessage?: string;
   aiTransferCount: number;
+  /** Agentes que já cuidaram da mensagem em curso (cadeia no mesmo turno): barra ciclo. */
+  chainAgentIds?: string[];
   surveyPending: boolean;
   /** Opções mandadas na última resposta (botões/lista/numeradas), até o cliente responder. */
   pendingOptions?: string[];
@@ -54,6 +56,7 @@ export function parseV2Counters(raw: unknown): V2Counters {
     ...(typeof r.runningSummary === "string" && r.runningSummary ? { runningSummary: r.runningSummary } : {}),
     lastLoopMessage: typeof r.lastLoopMessage === "string" ? r.lastLoopMessage : undefined,
     aiTransferCount: Number(r.aiTransferCount) || 0,
+    ...(Array.isArray(r.chainAgentIds) ? { chainAgentIds: r.chainAgentIds.filter((x): x is string => typeof x === "string") } : {}),
     surveyPending: Boolean(r.surveyPending),
     ...(r.postCloseAsked === true ? { postCloseAsked: true } : {}),
     ...(r.humanRequestAsked === true ? { humanRequestAsked: true } : {}),

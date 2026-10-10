@@ -44,7 +44,7 @@ import { applyV2Tabulation } from "./tabulation";
 import { applyReplyEnding, asksClient, classifyReply, effectiveReplyEnding, isGreetingOnlyReply, replyEndingButtons, replyEndingPhrases, withoutReplyEndings } from "./reply-ending";
 import { hasSearchableQuestion, knowledgeChunkTexts, repeatFallback } from "./ground-reply";
 import { loadPriorV2Summary, summaryEnabled, updateRunningSummary, writeV2Summary, SUMMARY_MESSAGE_TYPE } from "./summary";
-import { saysTriedAndFailed } from "./retry-signal";
+import { looksLikeSystemError, saysTriedAndFailed } from "./retry-signal";
 import { applyBoldPolicy } from "./reply-format";
 import { MESSAGE_MODEL_MIN_COVERAGE, MESSAGE_MODEL_REPEATED, announcesSending, introBeforeMaterial, lastV2ResetAt, mediaResendPlan, messageModelCoverage, pickPromisedModelId, recentMediaDeliveries, recentlySentMessageModels, resendWindowStart, saysNotReceived, recentlyAppliedRuleIds, RULE_REPLY_ACTION_TYPES } from "./sent-materials";
 import { attachmentsBlockedByResend } from "./material-attachments";
@@ -109,6 +109,11 @@ function allQueryToolResultsEmpty(
   return queryCalls.every((c) => isEmptyQueryResult(c.result));
 }
 
+/** Registra que este agente passou a mensagem em curso adiante (cadeia do turno). */
+function rememberChainAgent(counters: V2Counters, agentId: string): void {
+  counters.chainAgentIds = [...new Set([...(counters.chainAgentIds ?? []), agentId])];
+}
+
 function resolveHandoffDestination(
   config: V2AgentConfig,
   destination: V2Destination,
@@ -136,8 +141,17 @@ function resolveHandoffDestination(
     traceStep("transferência", `Destino é o próprio agente → ${next.type}${next.id ? ` (${next.id})` : ""}`);
     return next;
   }
-  if (destination.type === "ai_agent" && counters.aiTransferCount >= config.limits.maxAiTransfers) {
-    return config.handoff.defaultDestination;
+  // Ciclo na mesma mensagem (A → B → C → A): agente que já cuidou desta
+  // mensagem não a recebe de novo; vale o destino padrão — ou o
+  // departamento, se o padrão também já passou por ela. Sem teto numérico:
+  // cadeia legítima pode ser longa, e o cliente mudar de assunto não gasta
+  // cota (antes contava a vida do ticket e caía no padrão em silêncio).
+  const chain = counters.chainAgentIds ?? [];
+  if (destination.type === "ai_agent" && destination.id && chain.includes(destination.id)) {
+    const fallback = config.handoff.defaultDestination;
+    const next: V2Destination = fallback.type === "ai_agent" && fallback.id && chain.includes(fallback.id) ? { type: "department" } : fallback;
+    traceStep("transferência", `Ciclo entre agentes de IA nesta mensagem (o destino já cuidou dela) → ${next.type}${next.id ? ` (${next.id})` : ""}`);
+    return next;
   }
   return destination;
 }
@@ -494,6 +508,27 @@ async function isWaitingInQueue(conversationId: string): Promise<boolean> {
   }
 }
 
+/**
+ * Pendência de fila aberta a partir do momento dado (a transferência do
+ * outro agente para pessoa): a conversa está na fila de pessoas, não foi
+ * passada entre agentes. Pendência antiga, sem data ou anterior, não conta.
+ */
+async function queuedSince(conversationId: string, since: Date | undefined): Promise<boolean> {
+  if (!since) return false;
+  try {
+    const pending = await (prisma as unknown as {
+      distributionPending: { findFirst: (args: unknown) => Promise<{ id: string; createdAt?: Date | string | null } | null> };
+    }).distributionPending.findFirst({
+      where: { status: "PENDING", conversationId },
+      select: { id: true, createdAt: true },
+    });
+    if (!pending?.createdAt) return false;
+    return new Date(pending.createdAt).getTime() >= new Date(since).getTime() - 5_000;
+  } catch {
+    return false;
+  }
+}
+
 /** Devolve a conversa à fila: sem responsável IA, como no handoff. */
 async function releaseToQueue(conversationId: string): Promise<void> {
   await (prisma as unknown as {
@@ -813,6 +848,34 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       counters.lastLoopMessage = undefined;
       traceStep("limites", "Contador de repetição zerado: a mensagem é a mesma que o agente anterior recebeu, não uma repetição do cliente");
     }
+  }
+  // Mensagem nova do cliente (não a cópia de uma transferência): o contador
+  // de transferências entre IAs volta a zero. Ele barra LOOP — agentes se
+  // passando a conversa no mesmo turno —, não a cadeia legítima de um
+  // atendimento em que o cliente muda de assunto. Antes contava a vida
+  // toda do ticket e, no teto, mandava para o destino padrão em silêncio.
+  if (!handedByAnotherAgent && (counters.aiTransferCount > 0 || (counters.chainAgentIds?.length ?? 0) > 0)) {
+    traceStep("limites", `Mensagem nova do cliente: cadeia de transferências entre IAs zerada (era ${counters.aiTransferCount})`);
+    counters.aiTransferCount = 0;
+    counters.chainAgentIds = [];
+  }
+  // O outro agente passou a conversa para PESSOA (a pendência de fila nasceu
+  // nessa transferência) e ela chegou a este agente pela distribuição, não
+  // por transferência entre agentes: é fila de pessoas. Assumir aqui era
+  // responder "posso ajudar em mais alguma coisa?" a quem só agradeceu e
+  // espera a equipe. Devolve à fila e não responde.
+  if (handedByAnotherAgent && owner === "pessoa" && (await queuedSince(input.conversationId, stateRow?.updatedAt))) {
+    traceStep("fila", "Conversa na fila de pessoas desde a transferência do outro agente → este agente não assume; devolve à fila");
+    await releaseToQueue(input.conversationId);
+    await logV2Turn({
+      organizationId: orgId, conversationId: input.conversationId, agentId: resolved.agentConfigId, turnId: input.turnId,
+      inboundText: input.userMessage,
+      crmContext: { contact: null, deals: [], selectedDeal: null, fields: { contact: [], deal: [] } },
+      prompt: "", executedActions: [], discardedActions: [{ type: "no_reply", reason: "queued" } as any],
+      handoff: false, latencyMs: Date.now() - startedAt,
+      inputTokens: 0, outputTokens: 0, owner, stage, versionId,
+    });
+    return { handoff: false, closed: false };
   }
   // Transferência transparente: este agente segue como se fosse o mesmo
   // assistente (o modelo é instruído a não se apresentar).
@@ -1293,7 +1356,10 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       humanBehavior,
     });
     const mediaDestination = resolveHandoffDestination(config, config.handoff.defaultDestination, counters, resolved!.agentConfigId);
-    if (mediaDestination.type === "ai_agent") counters.aiTransferCount += 1;
+    if (mediaDestination.type === "ai_agent") {
+      counters.aiTransferCount += 1;
+      rememberChainAgent(counters, resolved!.agentConfigId);
+    }
     await summarizeBeforeHandoff(mediaDestination);
     await simpleHandoff({
       conversationId: input.conversationId,
@@ -1383,11 +1449,14 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // cliente diz que já tentou e não deu certo — ou clica em "preciso de
   // ajuda". Repetir material ou menu é a pior resposta: transfere com o
   // contexto (o resumo, quando ligado, vai junto).
-  if (counters.guidanceGiven && (saysTriedAndFailed(input.userMessage) || (chosenOption && mentionsHumanRequest(config, chosenOption)))) {
+  const systemError = counters.guidanceGiven && looksLikeSystemError(input.userMessage);
+  if (counters.guidanceGiven && (systemError || saysTriedAndFailed(input.userMessage) || (chosenOption && mentionsHumanRequest(config, chosenOption)))) {
     noteV2Fact("handoffCause", "tried_and_failed", { keepFirst: true });
     traceStep("transferência", chosenOption
       ? "Pedido de ajuda depois de uma orientação → transfere com o contexto, sem perguntar de novo"
-      : "Cliente já tentou e não deu certo → sem reenviar orientação; transfere com o contexto");
+      : systemError
+        ? "Cliente mandou a mensagem de erro da tela depois da orientação → a tentativa falhou; transfere com o contexto"
+        : "Cliente já tentou e não deu certo → sem reenviar orientação; transfere com o contexto");
     await handoffAndReply(resolved, orgId, contactId, loadedContext, input, config, stateRow, versionId, renderMessage(systemMessage(config, "triedAndFailedHandoff"), vars, defaultFormatter()), counters, themeId);
     return { handoff: true, closed: false };
   }
@@ -2727,7 +2796,14 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     if (!opts.skipMessage) {
       // Mensagem do destino (assunto/regra) quando configurada; a tela já
       // tinha o campo, mas valia sempre a mensagem padrão.
-      const destinationMessage = typeof requested?.message === "string" ? requested.message.trim() : "";
+      // A mensagem do assunto só vale para o destino que ele pediu: com o
+      // destino trocado (ping-pong, autotransferência, limite), o texto dele
+      // anunciaria o lugar errado ("setor de X" com a conversa indo para Y).
+      const redirected = !!requested && (planned.type !== requested.type || (planned.id ?? null) !== (requested.id ?? null));
+      if (redirected && typeof requested?.message === "string" && requested.message.trim()) {
+        traceStep("transferência", "Destino trocado: a mensagem do assunto não vale — sai a mensagem padrão de transferência");
+      }
+      const destinationMessage = !redirected && typeof requested?.message === "string" ? requested.message.trim() : "";
       const handoffMsg = renderMessage(opts.message || destinationMessage || config.handoff.message, vars, defaultFormatter());
       // O aviso de transferência nunca passa pelo guarda de repetição: o
       // agente anterior (ou este, minutos antes) pode ter mandado o mesmo
@@ -2746,7 +2822,10 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       return sent;
     }
     const destination = planned;
-    if (destination.type === "ai_agent") counters.aiTransferCount += 1;
+    if (destination.type === "ai_agent") {
+      counters.aiTransferCount += 1;
+      rememberChainAgent(counters, resolved!.agentConfigId);
+    }
     const tabulation = await applyV2Tabulation({ config, theme: getV2ThemeById(config, themeId), moment: "transfer", organizationId: orgId, conversationId: input.conversationId, contactId, agentId: resolved!.agentConfigId });
     await summarizeBeforeHandoff(destination, tabulation);
     await simpleHandoff({
@@ -2945,7 +3024,10 @@ async function handoffAndReply(
     return;
   }
   const fallbackDestination = resolveHandoffDestination(config, config.handoff.defaultDestination, counters, resolved.agentConfigId);
-  if (fallbackDestination.type === "ai_agent") counters.aiTransferCount += 1;
+  if (fallbackDestination.type === "ai_agent") {
+    counters.aiTransferCount += 1;
+    rememberChainAgent(counters, resolved.agentConfigId);
+  }
   traceStep("transferência", `Transferido para ${fallbackDestination.type}${fallbackDestination.id ? ` (${fallbackDestination.id})` : ""}`);
   const tabulation = await applyV2Tabulation({ config, theme: getV2ThemeById(config, themeId), moment: "transfer", organizationId: orgId, conversationId: input.conversationId, contactId, agentId: resolved!.agentConfigId });
   await writeV2Summary({ organizationId: orgId, conversationId: input.conversationId, contactId, agentId: resolved.agentConfigId, config, moment: "transfer", reason: fallbackDestination.type, tabulation });

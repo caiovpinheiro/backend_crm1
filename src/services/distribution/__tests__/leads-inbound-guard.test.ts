@@ -47,7 +47,7 @@ vi.mock("@/services/organization-widgets", () => ({
 vi.mock("@/services/ai/attendance-gate", () => ({
   isAiAttendanceEnabled: vi.fn(async () => false),
 }));
-vi.mock("@/services/ai/first-attendance", () => ({
+vi.mock("@/services/ai-v2/first-attendance", () => ({
   tryAssignFirstAttendanceAi: (...a: unknown[]) =>
     tryAssignFirstAttendanceAi(...a),
 }));

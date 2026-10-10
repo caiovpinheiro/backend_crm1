@@ -54,7 +54,7 @@ vi.mock("@/services/whatsapp-call-consent-webhook", mocks.empty);
 vi.mock("@/services/automation-triggers", mocks.empty);
 vi.mock("@/services/meta-ad-resolver", mocks.empty);
 vi.mock("@/services/ai/turn-manager", mocks.empty);
-vi.mock("@/services/ai/first-attendance", mocks.empty);
+vi.mock("@/services/ai-v2/first-attendance", mocks.empty);
 vi.mock("@/services/auto-deals", mocks.empty);
 vi.mock("@/lib/display-name", mocks.empty);
 vi.mock("@/lib/channels/retired-whatsapp", mocks.empty);

@@ -105,13 +105,17 @@ async function listIdleV2(now: Date): Promise<IdleRow[]> {
        LEFT JOIN "channels" ch ON ch."id" = c."channelId"
        LEFT JOIN "ai_simple_conversation_states" s ON s."conversationId" = c."id"
        JOIN LATERAL (
-         SELECT m."content", m."createdAt" FROM "messages" m
+         SELECT m."content", m."createdAt", m."aiAgentUserId" FROM "messages" m
           WHERE m."conversationId" = c."id" AND m."direction" = 'out'
             AND COALESCE(m."isPrivate", false) = false AND m."messageType" <> 'note'
           ORDER BY m."createdAt" DESC LIMIT 1
        ) last_out ON true
       WHERE c."status" = 'OPEN'
-        AND c."hasHumanReply" = false
+        -- A última mensagem enviada é do próprio agente: o timer dele vale.
+        -- Pessoa que falou antes no ticket (hasHumanReply) não segura o
+        -- encerramento quando a IA voltou a atender e prometeu encerrar; se a
+        -- última foi de uma pessoa ou de um fluxo, não encerra.
+        AND last_out."aiAgentUserId" = c."assignedToId"
         AND (a."simpleConfig"->'inactivity'->>'enabled') = 'true'
         AND (s."id" IS NULL OR (s."owner" <> 'pessoa' AND s."stage" <> 'closed'))
         AND (c."lastInboundAt" IS NULL OR c."lastInboundAt" <= last_out."createdAt")
