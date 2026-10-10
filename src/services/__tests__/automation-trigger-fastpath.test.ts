@@ -23,7 +23,11 @@ const { enqueueAutomation, dispatchIntegrationWebhooks, prismaMock } = vi.hoiste
       findFirst: vi.fn(),
       findMany: vi.fn(),
     },
-    deal: { findFirst: vi.fn() },
+    deal: {
+      findFirst: vi.fn(),
+      // message_received consulta os OPEN do contato antes de disparar.
+      findMany: vi.fn(async () => []),
+    },
     // `shouldSkipIdleInboundAutomation` lê `conversation.closingProtocolEnabled`
     // pelo org-settings; sem linha vale o padrão (protocolo desligado).
     organizationSetting: { findUnique: vi.fn(async () => null) },
@@ -289,5 +293,43 @@ describe("fireTrigger fast-path", () => {
       "move",
       expect.objectContaining({ contactId: "c1", event: "message_received" }),
     );
+  });
+
+  it("stage_changed de duplicata com contexto já gravado não dispara de novo", async () => {
+    prismaMock.automation.findFirst.mockResolvedValue({ id: "auto-1" });
+    prismaMock.automation.findMany.mockResolvedValue([
+      {
+        id: "auto-1",
+        name: "Na etapa",
+        triggerType: "stage_changed",
+        triggerConfig: {},
+      },
+    ]);
+    prismaMock.deal.findMany.mockResolvedValue([
+      {
+        id: "origin",
+        intentionalDuplicate: false,
+        duplicatedFromDealId: null,
+        createdAt: new Date("2026-01-01T00:00:00.000Z"),
+      },
+      {
+        id: "copy",
+        intentionalDuplicate: true,
+        duplicatedFromDealId: "origin",
+        createdAt: new Date("2026-02-01T00:00:00.000Z"),
+      },
+    ] as never);
+    prismaMock.automationContext.findFirst.mockImplementation(
+      async (args: { where?: { status?: string } }) =>
+        args?.where?.status ? null : { id: "ctx-done" },
+    );
+
+    await fireTrigger("stage_changed", {
+      contactId: "c1",
+      dealId: "copy",
+      data: { toStageId: "stage-1" },
+    });
+
+    expect(enqueueAutomation).not.toHaveBeenCalled();
   });
 });

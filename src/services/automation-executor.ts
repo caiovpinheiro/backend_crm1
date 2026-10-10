@@ -68,11 +68,14 @@ import {
   logConversationAssigneeChanges,
   markDealLost,
   markDealWon,
-  publishActiveDealMoved,
   propagateOwnerToContactAndChat,
+  syncBoardsAfterDealChanges,
+  type ActiveDealMovedRow,
+  type DealBoardChange,
 } from "@/services/deals";
 import { triggerAgentOpeningForContact } from "@/services/ai/piloting-actions";
 import { fireTrigger, notifyDealStageChanged } from "@/services/automation-triggers";
+import { loadIntentionalStageClusterIds } from "@/services/intentional-stage-cluster";
 import { updateContactScore } from "@/services/lead-scoring";
 import { executeDistribution } from "@/services/distribution";
 import { executeLeadsDistribution } from "@/services/distribution/leads/engine";
@@ -1565,6 +1568,54 @@ type RuntimeContext = {
   nextStepType?: string | null;
 };
 
+function matchedStageDealIds(data: Record<string, unknown>): string[] {
+  return Array.isArray(data.stageMatchedDealIds)
+    ? data.stageMatchedDealIds.filter(
+        (id): id is string => typeof id === "string" && id.trim() !== "",
+      )
+    : [];
+}
+
+/** Etapa do conjunto de duplicata de propósito, se este fluxo é de `stage_changed`. */
+function intentionalClusterStageId(rt: RuntimeContext): string | null {
+  const marked = readString(rt.data, "intentionalStageClusterStageId");
+  if (marked) return marked;
+  if (rt.event !== "stage_changed") return null;
+  return readString(rt.data, "toStageId") ?? readString(rt.data, "stageId") ?? null;
+}
+
+/** Negócios que um passo de automação pode alterar.
+ *  Fora de `stage_changed`, um só: o `dealId` do gatilho.
+ *  No gatilho de etapa, duplicatas de propósito na etapa seguem juntas.
+ *  Card comum no gatilho de etapa continua o conjunto casado. */
+async function resolveAutomationDealIds(rt: RuntimeContext): Promise<string[]> {
+  const clusterStageId = intentionalClusterStageId(rt);
+  if (clusterStageId && rt.contactId) {
+    const cluster = await loadIntentionalStageClusterIds(rt.contactId, clusterStageId);
+    const marked = Boolean(readString(rt.data, "intentionalStageClusterStageId"));
+    const inCluster = Boolean(rt.dealId && cluster.includes(rt.dealId));
+    if (cluster.length > 0 && (marked || inCluster)) return cluster;
+  }
+
+  const matched = matchedStageDealIds(rt.data);
+  if (rt.event !== "stage_changed") {
+    if (rt.dealId) return [rt.dealId];
+    if (matched.length > 0) return [matched[0]!];
+  } else if (matched.length > 0) {
+    return matched;
+  } else if (rt.dealId) {
+    return [rt.dealId];
+  }
+
+  if (!rt.contactId) return [];
+  const open = await prisma.deal.findMany({
+    where: { contactId: rt.contactId, status: "OPEN" },
+    select: { id: true },
+    take: 2,
+  });
+  return open.length === 1 ? [open[0]!.id] : [];
+}
+
 /**
  * Carrega tags do contato e do deal em arrays paralelos (ids + nomes).
  *
@@ -1755,15 +1806,21 @@ async function resolveRuntimeContext(
   // pela conversa, ou gatilhos de contato): resolve o negócio ABERTO mais
   // recente do contato pra que `{{deal.*}}` e os passos de negócio tenham
   // contexto. Mesmo padrão já usado por `consume_stock`/distribuição.
-  if (!dealId && contactId) {
-    const openDeal = await prisma.deal.findFirst({
+  const presetMatched = Array.isArray(data.stageMatchedDealIds)
+    ? data.stageMatchedDealIds.filter(
+        (id): id is string => typeof id === "string" && id.trim() !== "",
+      )
+    : [];
+  if (!dealId && presetMatched.length === 1) dealId = presetMatched[0];
+  if (!dealId && presetMatched.length === 0 && contactId) {
+    const openDeals = await prisma.deal.findMany({
       where: { contactId, status: "OPEN" },
-      orderBy: { updatedAt: "desc" },
       select: { id: true },
+      take: 2,
     });
-    if (openDeal) {
-      dealId = openDeal.id;
-    } else if (ctx.event === "manual") {
+    if (openDeals.length === 1) {
+      dealId = openDeals[0]!.id;
+    } else if (openDeals.length === 0 && ctx.event === "manual") {
       // 03/ago/26 — Execução manual é ação explícita do operador sobre a
       // conversa que ele está vendo (negócio visível no painel). Sem
       // fallback, `update_field` em deal abortava com "dealId ausente"
@@ -2084,20 +2141,11 @@ export async function executeStep(
     case "move_to_stage": {
       const stageId = readString(cfg, "stageId") ?? readString(cfg, "value");
       if (!stageId) throw new Error("move_stage: stageId obrigatório");
-      const matchedIds = Array.isArray(rt.data.stageMatchedDealIds)
-        ? rt.data.stageMatchedDealIds.filter(
-            (id): id is string => typeof id === "string" && id.trim() !== "",
-          )
-        : [];
-      let targetDealId = rt.dealId ?? readString(cfg, "dealId");
-      if (!targetDealId && matchedIds.length === 0 && rt.contactId) {
-        const openDeal = await prisma.deal.findFirst({
-          where: { contactId: rt.contactId, status: "OPEN" },
-          select: { id: true },
-        });
-        targetDealId = openDeal?.id;
+      const dealIds = [...new Set(await resolveAutomationDealIds(rt))];
+      if (dealIds.length === 0) {
+        const cfgDealId = readString(cfg, "dealId");
+        if (cfgDealId) dealIds.push(cfgDealId);
       }
-      const dealIds = [...new Set(matchedIds.length > 0 ? matchedIds : targetDealId ? [targetDealId] : [])];
       if (dealIds.length === 0) {
         // Opt-in: sem negócio aberto, seguir o fluxo em vez de abortar.
         // Padrão continua sendo throw (ex.: Dna Work não pode mudar).
@@ -2113,6 +2161,11 @@ export async function executeStep(
         select: { isWon: true, isLost: true, name: true, pipelineId: true },
       });
       let moved = 0;
+      // Negócios movidos neste passo, para o board (cache + deal_moved) DEPOIS
+      // do loop: uma invalidação por funil e um evento por card (até o teto do
+      // lote). Vale para qualquer destino, inclusive Ganho/Perdido.
+      const boardChanges: DealBoardChange[] = [];
+      const boardRows = new Map<string, ActiveDealMovedRow>();
       for (const dealId of dealIds) {
       const currentDeal = await prisma.deal.findUnique({
         where: { id: dealId },
@@ -2173,27 +2226,20 @@ export async function executeStep(
           contactId: rt.contactId ?? currentDeal.contactId ?? undefined,
           depth: (rt.depth ?? 0) + 1,
         });
-        // Só o card que continua aberto. Ganho/Perdido não entra no realtime.
-        // Um passo que move vários negócios de uma vez é mudança em massa:
-        // o banco atualiza, o quadro espera o polling.
-        const fromPipelineId = currentDeal.stage?.pipelineId;
-        if (
-          dealIds.length === 1 &&
-          currentDeal.status === "OPEN" &&
-          !currentDeal.stage?.isWon &&
-          !currentDeal.stage?.isLost &&
-          !targetStage?.isWon &&
-          !targetStage?.isLost &&
-          fromPipelineId
-        ) {
-          publishActiveDealMoved({
-            dealId,
-            fromStageId: currentDeal.stageId,
-            fromPipelineId,
-            deal: updated,
-          });
-        }
+        boardChanges.push({
+          dealId,
+          fromStageId: currentDeal.stageId,
+          fromPipelineId: currentDeal.stage?.pipelineId ?? null,
+        });
+        boardRows.set(dealId, updated as ActiveDealMovedRow);
       }
+      }
+      if (boardChanges.length > 0) {
+        await syncBoardsAfterDealChanges({
+          changes: boardChanges,
+          rows: boardRows,
+          extraPipelineIds: [targetStage?.pipelineId],
+        });
       }
       return moved > 1 ? { note: `OK (${moved} negócios)` } : {};
     }
@@ -2210,24 +2256,27 @@ export async function executeStep(
         throw new Error("mark_deal_lost: lostReason obrigatório");
       }
 
-      let targetDealId = rt.dealId ?? readString(cfg, "dealId");
-      if (!targetDealId && rt.contactId) {
-        const openDeal = await prisma.deal.findFirst({
-          where: { contactId: rt.contactId, status: "OPEN" },
-          select: { id: true },
-        });
-        targetDealId = openDeal?.id;
+      const wonDealIds = [...new Set(await resolveAutomationDealIds(rt))];
+      if (wonDealIds.length === 0) {
+        const cfgDealId = readString(cfg, "dealId");
+        if (cfgDealId) wonDealIds.push(cfgDealId);
       }
-      if (!targetDealId) {
+      if (wonDealIds.length === 0) {
         if (cfg.continueIfNoDeal === true) {
           return { note: "ignorado (contato sem negócio aberto)" };
         }
         throw new Error(`${stepType}: dealId ausente no contexto`);
       }
 
+      for (const targetDealId of wonDealIds) {
       const before = await prisma.deal.findUnique({
         where: { id: targetDealId },
-        select: { status: true, stageId: true, contactId: true },
+        select: {
+          status: true,
+          stageId: true,
+          contactId: true,
+          stage: { select: { pipelineId: true } },
+        },
       });
       if (!before) throw new Error(`${stepType}: negócio não encontrado`);
 
@@ -2236,6 +2285,19 @@ export async function executeStep(
         : await markDealWon(targetDealId, { pipelineId });
 
       const contactIdForEvents = rt.contactId ?? before.contactId ?? undefined;
+
+      // Board: markDealWon/Lost já invalidam o cache; falta avisar o quadro em
+      // tempo real (o card vai para a etapa Ganho/Perdido do funil).
+      await syncBoardsAfterDealChanges({
+        changes: [
+          {
+            dealId: targetDealId,
+            fromStageId: before.stageId,
+            fromPipelineId: before.stage?.pipelineId ?? null,
+          },
+        ],
+        rows: new Map([[targetDealId, updated as unknown as ActiveDealMovedRow]]),
+      });
 
       createDealEvent(
         targetDealId,
@@ -2286,6 +2348,7 @@ export async function executeStep(
           depth: (rt.depth ?? 0) + 1,
         });
       }
+      }
 
       return {};
     }
@@ -2323,9 +2386,15 @@ export async function executeStep(
         // propagamos pras conversas abertas — isso é o que faz o agente
         // de IA assumir automaticamente quando o `userId` aponta pra um
         // User type=AI (`maybeReplyAsAIAgent` lê `conversation.assignedToId`).
-        const chatAssigneeChanges = await prisma.$transaction((tx) =>
-          propagateOwnerToContactAndChat(tx, targetContactId, ownerId),
-        );
+        // O dono também entra em todos os negócios OPEN do contato.
+        const chatAssigneeChanges = await prisma.$transaction(async (tx) => {
+          const changes = await propagateOwnerToContactAndChat(tx, targetContactId, ownerId);
+          await tx.deal.updateMany({
+            where: { contactId: targetContactId, status: "OPEN" },
+            data: { ownerId },
+          });
+          return changes;
+        });
         if (chatAssigneeChanges.length > 0) {
           await logConversationAssigneeChanges(chatAssigneeChanges);
         }
@@ -2347,9 +2416,14 @@ export async function executeStep(
             }
           }
         } else if (targetContactId) {
-          const chatAssigneeChanges = await prisma.$transaction((tx) =>
-            propagateOwnerToContactAndChat(tx, targetContactId, ownerId),
-          );
+          const chatAssigneeChanges = await prisma.$transaction(async (tx) => {
+            const changes = await propagateOwnerToContactAndChat(tx, targetContactId, ownerId);
+            await tx.deal.updateMany({
+              where: { contactId: targetContactId, status: "OPEN" },
+              data: { ownerId },
+            });
+            return changes;
+          });
           if (chatAssigneeChanges.length > 0) {
             await logConversationAssigneeChanges(chatAssigneeChanges);
           }
@@ -2743,23 +2817,9 @@ export async function executeStep(
         update: {},
       });
 
-      // 27/mai/26 — Espelha a tag no deal aberto do contato (TagOnDeal)
-      // pra que kanban e inbox mostrem a mesma tag. Antes, `add_tag` só
-      // gravava `TagOnContact`: inbox exibia a tag (renderiza tags do
-      // contato) mas o card do kanban não (renderiza tags do deal).
-      // Operador relatou "no inbox aparece a TAG CLT, mas no kanban não".
-      // Buscamos o deal aberto via `rt.dealId` quando presente, ou caímos
-      // pro deal mais recente do contato — ambos best-effort.
-      const targetDealId =
-        rt.dealId ??
-        (await prisma.deal
-          .findFirst({
-            where: { contactId: targetContactId, status: "OPEN" },
-            select: { id: true },
-            orderBy: { updatedAt: "desc" },
-          })
-          .then((d) => d?.id));
-      if (targetDealId) {
+      // Fora do gatilho de etapa, um card. No stage_changed de duplicata
+      // de propósito, o conjunto que ainda está na etapa.
+      for (const targetDealId of await resolveAutomationDealIds(rt)) {
         try {
           await prisma.tagOnDeal.upsert({
             where: { dealId_tagId: { dealId: targetDealId, tagId: resolvedTagId } },
@@ -2799,18 +2859,7 @@ export async function executeStep(
         await prisma.tagOnContact.deleteMany({
           where: { contactId: targetContactId, tagId: resolvedTagId },
         });
-        // Simétrico ao `add_tag`: remove também do deal aberto do
-        // contato. Mantém inbox e kanban sincronizados.
-        const targetDealId =
-          rt.dealId ??
-          (await prisma.deal
-            .findFirst({
-              where: { contactId: targetContactId, status: "OPEN" },
-              select: { id: true },
-              orderBy: { updatedAt: "desc" },
-            })
-            .then((d) => d?.id));
-        if (targetDealId) {
+        for (const targetDealId of await resolveAutomationDealIds(rt)) {
           await prisma.tagOnDeal.deleteMany({
             where: { dealId: targetDealId, tagId: resolvedTagId },
           });
@@ -2833,8 +2882,11 @@ export async function executeStep(
       }
 
       if (entity === "deal") {
-        const targetDealId = rt.dealId ?? readString(cfg, "dealId");
-        if (!targetDealId) throw new Error("update_field: dealId ausente");
+        const dealIds = await resolveAutomationDealIds(rt);
+        const cfgDealId = readString(cfg, "dealId");
+        if (dealIds.length === 0 && cfgDealId) dealIds.push(cfgDealId);
+        if (dealIds.length === 0) throw new Error("update_field: dealId ausente");
+        for (const targetDealId of dealIds) {
         const data: Prisma.DealUncheckedUpdateInput = {};
         if (field === "title" && typeof value === "string") data.title = value;
         else if (field === "value" && (typeof value === "number" || typeof value === "string")) {
@@ -2847,9 +2899,7 @@ export async function executeStep(
           const isStageMove = field === "stageId" && typeof value === "string";
           let prevStageId: string | null = null;
           let moveContactId: string | null = null;
-          let prevStatus: string | null = null;
           let fromPipelineId: string | null = null;
-          let originTerminal = false;
           if (isStageMove) {
             const cur = await prisma.deal.findUnique({
               where: { id: targetDealId },
@@ -2862,9 +2912,7 @@ export async function executeStep(
             });
             prevStageId = cur?.stageId ?? null;
             moveContactId = cur?.contactId ?? null;
-            prevStatus = cur?.status ?? null;
             fromPipelineId = cur?.stage?.pipelineId ?? null;
-            originTerminal = Boolean(cur?.stage?.isWon || cur?.stage?.isLost);
           }
           const updated = isStageMove
             ? await prisma.deal.update({
@@ -2878,14 +2926,13 @@ export async function executeStep(
               contactId: rt.contactId ?? moveContactId ?? undefined,
               depth: (rt.depth ?? 0) + 1,
             });
-            if (prevStatus === "OPEN" && !originTerminal && fromPipelineId) {
-              publishActiveDealMoved({
-                dealId: targetDealId,
-                fromStageId: prevStageId,
-                fromPipelineId,
-                deal: updated,
-              });
-            }
+            // Qualquer etapa de destino (inclusive Ganho/Perdido): invalida o
+            // board do funil e publica o card.
+            await syncBoardsAfterDealChanges({
+              changes: [{ dealId: targetDealId, fromStageId: prevStageId, fromPipelineId }],
+              rows: new Map([[targetDealId, updated as unknown as ActiveDealMovedRow]]),
+              extraPipelineIds: [fromPipelineId],
+            });
           }
         } else {
           const customField = await prisma.customField.findFirst({
@@ -2911,7 +2958,7 @@ export async function executeStep(
               },
               select: { value: true },
             });
-            if (prev?.value?.trim()) return {};
+            if (prev?.value?.trim()) continue;
           }
           await prisma.dealCustomFieldValue.upsert({
             where: {
@@ -2927,6 +2974,7 @@ export async function executeStep(
               value: stored,
             }),
           });
+        }
         }
       } else {
         const targetContactId = rt.contactId ?? readString(cfg, "contactId");
@@ -5392,9 +5440,21 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
   const MAX_ITER = automation.steps.length * 2 + 10;
 
   let current: typeof automation.steps[0] | undefined = automation.steps[0];
+  if (rt.contactId && rt.event === "stage_changed") {
+    const stageId = readString(rt.data, "toStageId") ?? readString(rt.data, "stageId");
+    if (stageId) {
+      const cluster = await loadIntentionalStageClusterIds(rt.contactId, stageId);
+      if (cluster.length > 0 && rt.dealId && cluster.includes(rt.dealId)) {
+        rt.data.intentionalStageClusterStageId = stageId;
+      }
+    }
+  }
   if (rt.contactId && current) {
     await ensureExecutionContext(automationId, rt.contactId, current.id, {
       conversationId: rt.conversation?.id ?? contextData.conversationId ?? null,
+      ...(typeof rt.data.intentionalStageClusterStageId === "string"
+        ? { intentionalStageClusterStageId: rt.data.intentionalStageClusterStageId }
+        : {}),
     });
   }
   let iterations = 0;

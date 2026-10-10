@@ -124,9 +124,18 @@ export type ConversationUpdatedPayload = {
   closedAt?: string | null;
   followUpAt?: string | null;
   assignedToId?: string | null;
-  /** Só o tipo do responsável (HUMAN/AI) — decide a aba. */
-  assignedTo?: { type: string | null } | null;
+  /**
+   * Responsável. `type` (HUMAN/AI) decide a aba; `id`/`name` só vão quando o
+   * publisher tem o usuário em mãos (atribuição/transferência) — aditivo.
+   */
+  assignedTo?: { type: string | null; id?: string; name?: string | null } | null;
+  /** Departamento atual (`null` = sem departamento). Só em atribuição/transferência. */
+  departmentId?: string | null;
+  /** Responsável antes da troca (`null` = estava sem). Só em atribuição/transferência. */
+  previousAssignedToId?: string | null;
   unreadCount?: number;
+  /** Horário da última mensagem de chat (ISO); atribuir/transferir não o altera. */
+  lastMessageAt?: string | null;
   whatsappCallConsentStatus?: string;
 };
 
@@ -326,6 +335,15 @@ export type DealMovedPayload = {
   toStageId: string;
   position: number;
   updatedAt: string;
+  /**
+   * Dono do negócio (`null` = sem dono). A rota SSE usa para entregar o
+   * `card` só a quem vê o negócio (mesma regra do GET /api/deals/:id) e
+   * tira o campo de quem não vê. Aditivo/opcional: ausente = desconhecido
+   * (o gate trata como "não vejo" para quem só vê os próprios).
+   */
+  ownerId?: string | null;
+  /** Unidade (filial) do negócio, quando conhecida. Aditivo/opcional. */
+  orgUnitId?: string | null;
   card?: DealMovedCard;
 };
 
@@ -462,10 +480,13 @@ export function publishConversationUpdated(
 }
 
 /**
- * Board: um negócio já está na etapa/posição novas. Só o move individual
- * (`moveDeal`). Lote (`POST /api/deals/bulk`, `bulkMoveStage` e qualquer
- * outra movimentação em massa) não publica este evento — o quadro converge
- * no polling. Best-effort: falha de Redis/SSE não desfaz o move.
+ * Board: um negócio já está na etapa/posição novas (ou trocou de dono, ou foi
+ * a Ganho/Perdido). Publicado por `moveDeal`, pela automação e pelos lotes
+ * pequenos (até `DEAL_MOVED_BATCH_LIMIT` negócios, via
+ * `syncBoardsAfterDealChanges`); acima do teto só o cache do board é
+ * invalidado e o quadro converge na próxima leitura. Mudança de dono sem
+ * troca de etapa sai com `fromStageId === toStageId`. Best-effort: falha de
+ * Redis/SSE não desfaz a gravação.
  */
 export function publishDealMoved(payload: DealMovedPayload): void {
   try {

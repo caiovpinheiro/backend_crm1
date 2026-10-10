@@ -320,6 +320,26 @@ export async function getVisibilityFilter(
   };
 }
 
+/**
+ * O usuário pode VER/abrir este negócio, pela posse? Mesma regra do
+ * `dealWhere` de `getVisibilityFilter` e do `GET /api/deals/:id`: quem vê
+ * tudo (`canSeeAll`), o dono, ou — negócio sem dono — quem enxerga o pool
+ * livre (`includeUnassigned`).
+ *
+ * Só a posse: etapa/funil negados são checados à parte (`requireStageScope`,
+ * `requirePipelineScope`). Fonte única da rota de detalhe, do move e do
+ * filtro SSE do `deal_moved`.
+ */
+export function canSeeDealByOwner(
+  visibility: Pick<VisibilityResult, "canSeeAll" | "includeUnassigned">,
+  userId: string,
+  ownerId: string | null,
+): boolean {
+  if (visibility.canSeeAll) return true;
+  if (ownerId === userId) return true;
+  return ownerId === null && visibility.includeUnassigned;
+}
+
 export function permissionsAllowKey(
   perms: ReadonlySet<string>,
   key: string,
