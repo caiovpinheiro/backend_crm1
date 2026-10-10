@@ -272,7 +272,7 @@ describe("automação move_stage", () => {
         duplicatedFromDealId: null,
         createdAt: new Date("2026-03-01T00:00:00.000Z"),
       },
-    ]);
+    ] as never);
     h.dealFindUnique.mockImplementation(async () => ({
       status: "OPEN",
       stageId: "stage-qualificado",

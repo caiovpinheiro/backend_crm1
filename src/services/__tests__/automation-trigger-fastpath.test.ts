@@ -318,7 +318,7 @@ describe("fireTrigger fast-path", () => {
         duplicatedFromDealId: "origin",
         createdAt: new Date("2026-02-01T00:00:00.000Z"),
       },
-    ]);
+    ] as never);
     prismaMock.automationContext.findFirst.mockImplementation(
       async (args: { where?: { status?: string } }) =>
         args?.where?.status ? null : { id: "ctx-done" },
