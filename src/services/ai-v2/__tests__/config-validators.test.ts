@@ -97,23 +97,33 @@ describe("1. grafo de roteamento", () => {
     expect(out.every((f) => f.severity === "bloqueia")).toBe(true);
   });
 
-  it("ping-pong A → B → A com transferência direta bloqueia; sem direta, avisa", () => {
-    const direct = data({
+  it("ping-pong A → B → A: bloqueia só quando é direto e um gatilho está nos dois assuntos; senão avisa", () => {
+    const bounce = data({
       agents: [
-        agent("a", { config: { channelIds: ["ch-1"], themes: [{ id: "t1", name: "Pagamento", instructions: "x", directHandoff: true, handoffDestination: { type: "ai_agent", id: "b" } }] } }),
-        agent("b", { config: { themes: [{ id: "t9", name: "Outro assunto", instructions: "x", directHandoff: true, handoffDestination: { type: "ai_agent", id: "a" } }] } }),
+        agent("a", { config: { channelIds: ["ch-1"], themes: [{ id: "t1", name: "Pagamento", instructions: "x", when: ["pagamento atrasado"], directHandoff: true, handoffDestination: { type: "ai_agent", id: "b" } }] } }),
+        agent("b", { config: { themes: [{ id: "t9", name: "Outro assunto", instructions: "x", when: ["pagamento"], directHandoff: true, handoffDestination: { type: "ai_agent", id: "a" } }] } }),
       ],
     });
-    const f = find(direct, "ciclo_entre_agentes")[0];
+    const f = find(bounce, "ciclo_entre_agentes")[0];
     expect(f).toMatchObject({ severity: "bloqueia", path: "themes[0].handoffDestination", evidence: "a → b → a" });
     expect(f.message).toContain("Outro assunto");
+    expect(f.message).toContain("“pagamento”");
     // O mesmo ciclo aparece para B, no campo de B.
-    expect(find(direct, "ciclo_entre_agentes", "b")[0]).toMatchObject({ severity: "bloqueia", path: "themes[0].handoffDestination" });
+    expect(find(bounce, "ciclo_entre_agentes", "b")[0]).toMatchObject({ severity: "bloqueia", path: "themes[0].handoffDestination" });
+
+    // Malha de especialistas: cada um devolve o que não é dele, sem gatilho em comum → avisa.
+    const mesh = data({
+      agents: [
+        agent("a", { config: { channelIds: ["ch-1"], themes: [{ id: "t1", name: "Pagamento", instructions: "x", when: ["pagamento"], directHandoff: true, handoffDestination: { type: "ai_agent", id: "b" } }] } }),
+        agent("b", { config: { themes: [{ id: "t9", name: "Entrega", instructions: "x", when: ["entrega"], directHandoff: true, handoffDestination: { type: "ai_agent", id: "a" } }] } }),
+      ],
+    });
+    expect(find(mesh, "ciclo_entre_agentes")[0].severity).toBe("avisa");
 
     const soft = data({
       agents: [
-        agent("a", { config: { channelIds: ["ch-1"], themes: [{ id: "t1", name: "Pagamento", instructions: "x", handoffDestination: { type: "ai_agent", id: "b" } }] } }),
-        agent("b", { config: { themes: [{ id: "t9", name: "Outro assunto", instructions: "x", handoffDestination: { type: "ai_agent", id: "a" } }] } }),
+        agent("a", { config: { channelIds: ["ch-1"], themes: [{ id: "t1", name: "Pagamento", instructions: "x", when: ["pagamento"], handoffDestination: { type: "ai_agent", id: "b" } }] } }),
+        agent("b", { config: { themes: [{ id: "t9", name: "Outro assunto", instructions: "x", when: ["pagamento"], handoffDestination: { type: "ai_agent", id: "a" } }] } }),
       ],
     });
     expect(find(soft, "ciclo_entre_agentes")[0].severity).toBe("avisa");
@@ -179,16 +189,13 @@ describe("2. gatilhos de assunto", () => {
     expect(codes(data({ agents: [agent("a", { config: { channelIds: ["ch-1"], themes: [{ id: "t1", name: "Troca", instructions: "x", when: ["troca", "troca"] }] } })] }))).not.toContain("gatilho_repetido");
   });
 
-  it("palavra solta no infinitivo avisa (casa em “não quero cancelar”); frase não", () => {
+  it("palavra solta no infinitivo não avisa: o motor ignora o gatilho quando a palavra só aparece negada", () => {
     const d = data({
       agents: [agent("a", { config: { channelIds: ["ch-1"], themes: [
         { id: "t1", name: "Cancelamento", instructions: "x", when: ["cancelar", "quero cancelar", "cancelamento"] },
       ] } })],
     });
-    const out = find(d, "gatilho_palavra_solta");
-    expect(out).toHaveLength(1);
-    expect(out[0]).toMatchObject({ path: "themes[0].when[0]", severity: "avisa", evidence: "cancelar" });
-    expect(out[0].message).toContain("não quero cancelar");
+    expect(codes(d)).not.toContain("gatilho_palavra_solta");
   });
 
   it("gatilho que é cumprimento comum avisa", () => {
@@ -222,6 +229,10 @@ describe("3. calendário", () => {
     expect(monthsInTitle("Festa à beira-mar")).toEqual([]);
     expect(monthsInTitle("Reunião 15 set")).toEqual([9]);
     expect(monthsInTitle("Início das aulas de MARÇO")).toEqual([3]);
+    // Mês de referência, não do evento.
+    expect(monthsInTitle("Realização da Prova A1 - Ref. Disc. De Fevereiro")).toEqual([]);
+    expect(monthsInTitle("Liberação de Notas da Disciplina de Março")).toEqual([]);
+    expect(monthsInTitle("Início do período de inscrição, ingresso em Abril")).toEqual([]);
   });
 
   it("mês do título diferente do mês da data avisa; período que inclui o mês não", () => {
