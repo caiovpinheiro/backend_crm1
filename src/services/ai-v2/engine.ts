@@ -44,7 +44,7 @@ import { applyV2Tabulation } from "./tabulation";
 import { applyReplyEnding, asksClient, classifyReply, effectiveReplyEnding, isGreetingOnlyReply, replyEndingButtons, replyEndingPhrases, withoutReplyEndings } from "./reply-ending";
 import { hasSearchableQuestion, knowledgeChunkTexts, repeatFallback } from "./ground-reply";
 import { loadPriorV2Summary, summaryEnabled, updateRunningSummary, writeV2Summary, SUMMARY_MESSAGE_TYPE } from "./summary";
-import { saysTriedAndFailed } from "./retry-signal";
+import { looksLikeSystemError, saysTriedAndFailed } from "./retry-signal";
 import { applyBoldPolicy } from "./reply-format";
 import { MESSAGE_MODEL_MIN_COVERAGE, MESSAGE_MODEL_REPEATED, announcesSending, introBeforeMaterial, lastV2ResetAt, mediaResendPlan, messageModelCoverage, pickPromisedModelId, recentMediaDeliveries, recentlySentMessageModels, resendWindowStart, saysNotReceived, recentlyAppliedRuleIds, RULE_REPLY_ACTION_TYPES } from "./sent-materials";
 import { attachmentsBlockedByResend } from "./material-attachments";
@@ -1449,11 +1449,14 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // cliente diz que já tentou e não deu certo — ou clica em "preciso de
   // ajuda". Repetir material ou menu é a pior resposta: transfere com o
   // contexto (o resumo, quando ligado, vai junto).
-  if (counters.guidanceGiven && (saysTriedAndFailed(input.userMessage) || (chosenOption && mentionsHumanRequest(config, chosenOption)))) {
+  const systemError = counters.guidanceGiven && looksLikeSystemError(input.userMessage);
+  if (counters.guidanceGiven && (systemError || saysTriedAndFailed(input.userMessage) || (chosenOption && mentionsHumanRequest(config, chosenOption)))) {
     noteV2Fact("handoffCause", "tried_and_failed", { keepFirst: true });
     traceStep("transferência", chosenOption
       ? "Pedido de ajuda depois de uma orientação → transfere com o contexto, sem perguntar de novo"
-      : "Cliente já tentou e não deu certo → sem reenviar orientação; transfere com o contexto");
+      : systemError
+        ? "Cliente mandou a mensagem de erro da tela depois da orientação → a tentativa falhou; transfere com o contexto"
+        : "Cliente já tentou e não deu certo → sem reenviar orientação; transfere com o contexto");
     await handoffAndReply(resolved, orgId, contactId, loadedContext, input, config, stateRow, versionId, renderMessage(systemMessage(config, "triedAndFailedHandoff"), vars, defaultFormatter()), counters, themeId);
     return { handoff: true, closed: false };
   }
