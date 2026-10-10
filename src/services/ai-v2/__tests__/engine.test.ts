@@ -901,6 +901,35 @@ describe("processV2Turn", () => {
     expect(saved?.counters?.receivedFromAgentId).toBe("agent-0");
   });
 
+  it("destino trocado (ping-pong): a mensagem do assunto não sai — sai a mensagem padrão de transferência", async () => {
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: baseConfig(), active: true });
+    mocks.getState.mockResolvedValue({ ...makeState("active", "pessoa"), agentId: "agent-0" });
+    mocks.callLLM.mockResolvedValue({
+      output: {
+        reply: "",
+        confirmed: null,
+        handoff: true,
+        concluded: false,
+        outOfScope: true,
+        sentiment: "neutral",
+        collected: {},
+        reason: "Assunto do outro agente",
+        actions: [{ type: "handoff", destination: { type: "ai_agent", id: "agent-0", message: "Vou te passar para o setor X." } }],
+      } satisfies V2LLMOutput,
+      inputTokens: 10,
+      outputTokens: 5,
+      latencyMs: 100,
+    });
+
+    const { processV2Turn } = await import("../engine");
+    await processV2Turn({ conversationId: "conv-1", channel: "meta", userMessage: "Quero mudar de plano" });
+
+    expect(mocks.simpleHandoff).toHaveBeenCalledWith(expect.objectContaining({ destination: { type: "department" } }));
+    const sent = mocks.sendText.mock.calls.map((c) => (c[0] as { text: string }).text).join(" | ");
+    expect(sent).not.toContain("setor X");
+    expect(sent).toContain("Vou transferir.");
+  });
+
   it("destino de transferência igual ao próprio agente vai para o destino padrão, não para si mesmo", async () => {
     mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: baseConfig(), active: true });
     mocks.getState.mockResolvedValue(makeState("active", "agente"));

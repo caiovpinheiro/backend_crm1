@@ -39,13 +39,17 @@ const DEPENDENT_START = /^(?:para|pra|se|caso|quando|assim que|antes de|depois d
  */
 export function standaloneClause(clause: string): string {
   const s = clause.trim();
-  if (s.includes(",")) return s;
-  const causal = s.match(CAUSAL_START);
+  // "Ana, para informar o valor com segurança": o vocativo não torna a
+  // oração independente — o que conta é o que vem depois dele.
+  const vocative = s.match(/^([\p{Lu}][\p{L}]+(?:\s[\p{Lu}][\p{L}]+)?),\s+/u);
+  const body = vocative ? s.slice(vocative[0].length) : s;
+  if (body.includes(",")) return s;
+  const causal = body.match(CAUSAL_START);
   if (causal) {
-    const rest = s.slice(causal[0].length);
-    return rest.charAt(0).toUpperCase() + rest.slice(1);
+    const rest = body.slice(causal[0].length);
+    return vocative ? `${vocative[1]}, ${rest}` : rest.charAt(0).toUpperCase() + rest.slice(1);
   }
-  return DEPENDENT_START.test(s) ? "" : s;
+  return DEPENDENT_START.test(body) ? "" : s;
 }
 
 function norm(s: string): string {
