@@ -658,9 +658,8 @@ describe("processV2Turn", () => {
     expect(mocks.callLLM).toHaveBeenCalled();
   });
 
-  it("excedido limite de transferências IA força handoff para destino padrão", async () => {
+  it("ciclo na mesma mensagem: destino que já cuidou dela vai para o destino padrão (sem teto numérico)", async () => {
     const config = baseConfig({
-      limits: { maxAiTransfers: 1 } as any,
       handoff: { defaultDestination: { type: "department" }, message: "Vou transferir.", humanRequestKeywords: ["humano"] },
       themes: [
         {
@@ -685,7 +684,7 @@ describe("processV2Turn", () => {
       selectedDeal: { id: "deal-1" },
       dealId: "deal-1",
     });
-    mocks.getState.mockResolvedValue(makeState("active", "agente", { aiTransferCount: 1 }));
+    mocks.getState.mockResolvedValue({ ...makeState("active", "agente", { aiTransferCount: 2, chainAgentIds: ["agent-2", "agent-0"] }), agentId: "agent-0" });
     mocks.callLLM.mockResolvedValue({
       output: {
         reply: "Vou passar.",
@@ -713,6 +712,64 @@ describe("processV2Turn", () => {
     expect(mocks.simpleHandoff).toHaveBeenCalledWith(
       expect.objectContaining({ destination: { type: "department" } }),
     );
+  });
+
+  it("cadeia longa sem ciclo: a transferência para o outro agente segue, sem teto", async () => {
+    const config = baseConfig({
+      handoff: { defaultDestination: { type: "department" }, message: "Vou transferir.", humanRequestKeywords: ["humano"] },
+      themes: [
+        {
+          id: "vendas",
+          name: "Vendas",
+          instructions: "venda",
+          when: [],
+          examples: [],
+          allowedTools: ["handoff"],
+          allowedKnowledgeDocIds: [],
+          allowedMessageModelIds: [],
+          knowledgeDocIds: [],
+          messageModelIds: [],
+          productPolicy: { enabled: false, maxItems: 3, showPrice: false, showConditions: false, showImage: false, showLink: false, citableFields: [] },
+        } as any,
+      ],
+    });
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config });
+    mocks.loadContext.mockResolvedValue({
+      contact: { name: "João" },
+      deals: [{ id: "deal-1" }],
+      selectedDeal: { id: "deal-1" },
+      dealId: "deal-1",
+    });
+    mocks.getState.mockResolvedValue({ ...makeState("active", "agente", { aiTransferCount: 7, chainAgentIds: ["agent-0"] }), agentId: "agent-0" });
+    mocks.callLLM.mockResolvedValue({
+      output: {
+        reply: "Vou passar.",
+        confirmed: null,
+        handoff: true,
+        concluded: false,
+        outOfScope: false,
+        sentiment: "neutral",
+        collected: {},
+        reason: "Para IA",
+        actions: [{ type: "handoff", destination: { type: "ai_agent", id: "agent-2" } }],
+      } satisfies V2LLMOutput,
+      inputTokens: 10,
+      outputTokens: 5,
+      latencyMs: 100,
+    });
+
+    const { processV2Turn } = await import("../engine");
+    await processV2Turn({
+      conversationId: "conv-1",
+      channel: "meta",
+      userMessage: "Quero falar com outro bot",
+    });
+
+    expect(mocks.simpleHandoff).toHaveBeenCalledWith(
+      expect.objectContaining({ destination: expect.objectContaining({ type: "ai_agent", id: "agent-2" }) }),
+    );
+    const saved = mocks.upsertState.mock.calls.map((c) => c[0] as { counters?: { chainAgentIds?: string[] } }).find((c) => c.counters?.chainAgentIds?.includes("agent-1"));
+    expect(saved?.counters?.chainAgentIds).toEqual(["agent-0", "agent-1"]);
   });
 
   it("transferência transparente: o agente que recebe é instruído a não se apresentar; o padrão não", async () => {
