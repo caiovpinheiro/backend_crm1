@@ -33,9 +33,14 @@
  *   - um lote = uma transação curta (UPDATE de até --batch contatos pela PK),
  *     com pausa entre lotes e statement_timeout por instrução.
  *
- * Uso (rodar DEPOIS do deploy, no diretório do backend):
- *   DATABASE_URL=... node scripts/backfill-contacts-last-message.mjs            # dry-run
- *   DATABASE_URL=... node scripts/backfill-contacts-last-message.mjs --apply
+ * Uso (rodar DEPOIS do deploy). No container da API o DATABASE_URL já está
+ * no ambiente; o `sslmode=require` do Postgres da DigitalOcean é tratado
+ * por `scripts/lib/pg-ssl.mjs` (TLS sem verificar o CA, como o `require` da
+ * libpq) — não precisa acrescentar `uselibpqcompat` à URL:
+ *   node scripts/backfill-contacts-last-message.mjs            # dry-run
+ *   node scripts/backfill-contacts-last-message.mjs --apply
+ * Fora do container: `DATABASE_URL=... node scripts/backfill-contacts-last-message.mjs [--apply]`.
+ * Para verificar o certificado: PG_SSL_VERIFY=1 PGSSLROOTCERT=/caminho/ca.crt.
  *
  * Opções:
  *   --apply            grava (sem isso só conta o que mudaria)
@@ -49,6 +54,8 @@
  * Ctrl+C termina o lote em andamento e imprime o comando para retomar.
  */
 import { Client } from "pg";
+
+import { pgConnectionConfig } from "./lib/pg-ssl.mjs";
 
 function arg(name, fallback) {
   const hit = process.argv.find((a) => a === `--${name}` || a.startsWith(`--${name}=`));
@@ -82,7 +89,7 @@ process.on("SIGINT", () => {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const c = new Client({
-  connectionString: process.env.DATABASE_URL,
+  ...pgConnectionConfig(),
   application_name: "backfill-contacts-last-message",
 });
 await c.connect();

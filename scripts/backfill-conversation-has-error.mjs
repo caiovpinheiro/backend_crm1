@@ -21,6 +21,8 @@
  */
 import { Client } from "pg";
 
+import { pgConnectionConfig } from "./lib/pg-ssl.mjs";
+
 const APPLY = process.argv.includes("--apply");
 const TARGET_ORG = process.env.TARGET_ORG_ID ?? null;
 
@@ -31,7 +33,7 @@ const EXCLUDED_TYPES = [
   "whatsapp_call_recording",
 ];
 
-const c = new Client({ connectionString: process.env.DATABASE_URL });
+const c = new Client(pgConnectionConfig());
 await c.connect();
 
 const selectSql = `
