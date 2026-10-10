@@ -107,7 +107,7 @@ export function conditionalHandoff(reply: string): boolean {
 /** A resposta já avisa a transferência (não vale mandar antes do aviso). */
 export function announcesTransfer(reply: string): boolean {
   return /\b(?:transfer|encaminh|atendente|equipe)\w*/i.test(reply) ||
-    // "vou chamar o time de X", "acionar o setor", "chamar alguém" (e não "chamar a prova").
+    // "vou chamar o time de X", "acionar o setor", "chamar alguém" (e não "chamar a atenção").
     /\b(?:chamar|acionar|envolver|direcionar)\s+(?:(?:voc[eê]|te|lhe)\s+)?(?:para\s+|pra\s+)?(?:algu[eé]m|uma pessoa|um(?:a)? (?:colega|atendente|especialista|respons[áa]vel)|o time|a equipe|o setor|o pessoal|o departamento|a [áa]rea|o suporte|o respons[áa]vel|o especialista|o atendimento|o financeiro)(?![\p{L}])/iu.test(reply) ||
     // "vou te passar para o time…" (e não "vou te passar o link").
     /\b(?:vou|irei|vamos|posso)\s+(?:te\s+|lhe\s+)?passar\s+(?:voc[eê]\s+)?(?:para|pra)\b/i.test(reply);
