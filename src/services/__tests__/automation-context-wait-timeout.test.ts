@@ -40,9 +40,16 @@ const h = vi.hoisted(() => {
     ssePublish: vi.fn(),
     attendance: vi.fn(),
     continueFromStep: vi.fn().mockResolvedValue(undefined),
+    automationLogCreate: vi.fn().mockResolvedValue({ id: "log-1" }),
     updateOrgSeen: [] as Array<{ id: string; org: string | null }>,
+    orgBool: vi.fn((_key: string, fallback: boolean) => Promise.resolve(fallback)),
   };
 });
+
+vi.mock("@/lib/org-settings", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/org-settings")>()),
+  getOrgSettingBool: (key: string, fallback: boolean) => h.orgBool(key, fallback),
+}));
 
 const { logError } = vi.hoisted(() => ({ logError: vi.fn() }));
 
@@ -58,6 +65,7 @@ vi.mock("@/lib/prisma", () => ({
     automationStep: h.step,
     message: h.message,
     conversation: h.conversation,
+    automationLog: { create: h.automationLogCreate },
   },
 }));
 vi.mock("@/lib/prisma-base", () => ({
@@ -308,7 +316,7 @@ describe("processIncomingMessage — wait_for_reply", () => {
     expect(h.continueFromStep).not.toHaveBeenCalled();
   });
 
-  it("IA atendendo + clique de botão: retoma o fluxo (o cliente respondeu ao robô de propósito)", async () => {
+  it("IA atendendo + clique nos botões do agente: o fluxo parado não consome — segue para o agente", async () => {
     h.attendance.mockResolvedValue({
       assignedToId: "ai-1",
       assigneeType: "AI",
@@ -318,10 +326,53 @@ describe("processIncomingMessage — wait_for_reply", () => {
     h.ctx.findMany.mockResolvedValueOnce([ctxRow()]);
 
     const out = await withOrg(ORG, () =>
-      processIncomingMessage("contact-1", "Sim", { interactiveId: "btn_0" }),
+      processIncomingMessage("contact-1", "Preciso de ajuda", { interactiveId: "v2opt_3" }),
+    );
+
+    // Antes: o fluxo andava, terminava sem responder e `replied: true`
+    // calava a IA.
+    expect(out).toEqual({ handled: false, replied: false });
+    expect(updateData()).toEqual({ status: "COMPLETED", currentStepId: null, timeoutAt: null });
+    expect(h.continueFromStep).not.toHaveBeenCalled();
+  });
+
+  it("IA atendendo + resposta de formulário: fica com o fluxo", async () => {
+    h.attendance.mockResolvedValue({
+      assignedToId: "ai-1",
+      assigneeType: "AI",
+      humanAttending: false,
+      hasHumanReply: false,
+    });
+    h.ctx.findMany.mockResolvedValueOnce([ctxRow()]);
+
+    const out = await withOrg(ORG, () =>
+      processIncomingMessage("contact-1", "[formulário]", { flowReply: true }),
     );
     expect(out.handled).toBe(true);
     expect(updateData().currentStepId).toBe("step-next");
+  });
+
+  it("org com o comportamento anterior ligado: clique retoma o fluxo", async () => {
+    h.orgBool.mockImplementation((key: string, fallback: boolean) =>
+      Promise.resolve(key === "automations.resumeWhileAiAttends" ? true : fallback),
+    );
+    h.attendance.mockResolvedValue({
+      assignedToId: "ai-1",
+      assigneeType: "AI",
+      humanAttending: false,
+      hasHumanReply: false,
+    });
+    h.ctx.findMany.mockResolvedValueOnce([ctxRow()]);
+
+    try {
+      const out = await withOrg(ORG, () =>
+        processIncomingMessage("contact-1", "Sim", { interactiveId: "btn_0" }),
+      );
+      expect(out.handled).toBe(true);
+      expect(updateData().currentStepId).toBe("step-next");
+    } finally {
+      h.orgBool.mockImplementation((_key: string, fallback: boolean) => Promise.resolve(fallback));
+    }
   });
 
   it("consultor falou DEPOIS da pausa cancela; reply humano anterior (flag sticky) não cancela", async () => {
@@ -473,6 +524,97 @@ describe("processTimeout / sweepExpiredTimeouts", () => {
     expect(h.continueFromStep).not.toHaveBeenCalled();
   });
 
+  it("lista sem resposta: falha na retomada regrava a espera e registra o erro", async () => {
+    const steps = withSteps({
+      "step-wait": {
+        type: "send_whatsapp_list",
+        config: {
+          rows: [{ id: "r1", title: "Vaga", gotoStepId: "step-next" }],
+          timeoutMs: 3_600_000,
+          timeoutAction: "goto",
+          timeoutGotoStepId: "step-timeout",
+        },
+      },
+      "step-timeout": {
+        type: "remove_tag",
+        config: { tagName: "varias vagas enviadas", nextStepId: "step-next" },
+      },
+    });
+    h.ctx.findUnique.mockResolvedValueOnce(ctxRow({ currentStepId: "step-wait" }, steps));
+    h.continueFromStep.mockRejectedValueOnce(new Error("db down"));
+
+    await withOrg(ORG, () => processTimeout("ctx-1"));
+
+    expect(h.continueFromStep).toHaveBeenCalledWith("auto-1", "contact-1", "step-timeout", {
+      conversationId: "conv-1",
+    });
+    expect(updateData(1)).toMatchObject({
+      currentStepId: "step-wait",
+      timeoutAt: new Date(NOW.getTime() + 60_000),
+      variables: {
+        conversationId: "conv-1",
+        __timeoutResumeRetries: { stepId: "step-wait", n: 1 },
+      },
+    });
+    expect(updateData(1)).not.toHaveProperty("status");
+    expect(h.automationLogCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        organizationId: ORG,
+        automationId: "auto-1",
+        contactId: "contact-1",
+        stepId: "step-wait",
+        stepType: "send_whatsapp_list",
+        status: "FAILED",
+        message: expect.stringContaining("Nova tentativa em 1 min"),
+      }),
+    });
+  });
+
+  it("lista sem resposta: depois de 5 falhas encerra o fluxo e registra", async () => {
+    const steps = withSteps({
+      "step-wait": {
+        type: "send_whatsapp_list",
+        config: {
+          rows: [{ id: "r1", title: "Vaga", gotoStepId: "step-next" }],
+          timeoutMs: 3_600_000,
+          timeoutAction: "goto",
+          timeoutGotoStepId: "step-timeout",
+        },
+      },
+      "step-timeout": {
+        type: "remove_tag",
+        config: { tagName: "varias vagas enviadas" },
+      },
+    });
+    h.ctx.findUnique.mockResolvedValueOnce(
+      ctxRow(
+        {
+          currentStepId: "step-wait",
+          variables: {
+            conversationId: "conv-1",
+            __timeoutResumeRetries: { stepId: "step-wait", n: 5 },
+          },
+        },
+        steps,
+      ),
+    );
+    h.continueFromStep.mockRejectedValueOnce(new Error("db down"));
+
+    await withOrg(ORG, () => processTimeout("ctx-1"));
+
+    expect(updateData(1)).toMatchObject({
+      status: "COMPLETED",
+      currentStepId: null,
+      timeoutAt: null,
+    });
+    expect(h.automationLogCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        status: "FAILED",
+        message: expect.stringContaining("Fluxo encerrado"),
+      }),
+    });
+  });
+
   it("wait_for_reply sem timeoutGotoStepId fecha o contexto", async () => {
     h.ctx.findUnique.mockResolvedValueOnce(
       ctxRow({}, withSteps({ "step-wait": { config: { timeoutGotoStepId: null } } })),
@@ -491,12 +633,28 @@ describe("processTimeout / sweepExpiredTimeouts", () => {
       assignedTo: null,
       closedAt: null,
     });
+    h.message.findFirst.mockResolvedValueOnce({ id: "in-1" });
     await withOrg(ORG, () => processTimeout("ctx-1"));
     expect(h.conversation.findFirst).toHaveBeenCalledWith(
       expect.objectContaining({ where: { id: "conv-1" } }),
     );
     expect(updateData()).toMatchObject({ status: "COMPLETED", currentStepId: null });
     expect(h.continueFromStep).not.toHaveBeenCalled();
+  });
+
+  it("lastInboundAt novo sem mensagem depois da pausa segue a aresta", async () => {
+    h.ctx.findUnique.mockResolvedValueOnce(ctxRow());
+    h.conversation.findFirst.mockResolvedValueOnce({
+      status: "OPEN",
+      lastInboundAt: new Date(PAUSED_AT.getTime() + 5_000),
+      assignedToId: null,
+      assignedTo: null,
+      closedAt: null,
+    });
+    h.message.findFirst.mockResolvedValueOnce(null);
+    await withOrg(ORG, () => processTimeout("ctx-1"));
+    expect(updateData().currentStepId).toBe("step-timeout");
+    expect(h.continueFromStep).toHaveBeenCalledTimes(1);
   });
 
   it("mídia ignorada pelo menu não aborta a aresta de timeout", async () => {
@@ -518,6 +676,7 @@ describe("processTimeout / sweepExpiredTimeouts", () => {
       assignedTo: null,
       closedAt: null,
     });
+    h.message.findFirst.mockResolvedValueOnce({ id: "in-media" });
     h.message.findMany.mockResolvedValueOnce([
       { content: "curriculo.pdf", messageType: "document" },
     ]);
@@ -546,6 +705,7 @@ describe("processTimeout / sweepExpiredTimeouts", () => {
       assignedTo: null,
       closedAt: null,
     });
+    h.message.findFirst.mockResolvedValueOnce({ id: "in-1" });
     h.message.findMany.mockResolvedValueOnce([
       { content: "quero falar com alguém", messageType: "text" },
     ]);

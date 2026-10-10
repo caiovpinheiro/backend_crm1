@@ -191,6 +191,11 @@ export async function sendAgentMessage(args: {
    * segunda confirmação (que só muda o horário) morre como near-duplicate.
    */
   bypassDuplicateGuard?: boolean;
+  /**
+   * Trechos que o anti-spam não conta ao comparar (fecho configurado, igual
+   * de propósito em várias respostas).
+   */
+  dedupeIgnore?: readonly string[];
   interactive?: AgentInteractiveMessage;
 }): Promise<SendAgentMessageResult> {
   const text = rewriteMismatchedDaypartWish(args.text.trim());
@@ -209,9 +214,13 @@ export async function sendAgentMessage(args: {
   // muito parecido nos últimos minutos (fila/conexão ou overlap alto).
   if (!args.bypassDuplicateGuard) {
     try {
-      const { isNearDuplicateBotText } = await import(
-        "@/services/ai/human-queue-policy"
-      );
+      const { isNearDuplicateBotText, isNearDuplicateBotTextIgnoring } =
+        await import("@/services/ai/human-queue-policy");
+      const ignore = args.dedupeIgnore ?? [];
+      const sameAs = (existing: string) =>
+        ignore.length > 0
+          ? isNearDuplicateBotTextIgnoring(text, existing, ignore)
+          : isNearDuplicateBotText(text, existing);
       const recentBot = await prisma.message.findMany({
         where: {
           conversationId: args.conversationId,
@@ -227,7 +236,7 @@ export async function sendAgentMessage(args: {
       });
       if (
         recentBot.some(
-          (m) => m.content && isNearDuplicateBotText(text, m.content),
+          (m) => m.content && sameAs(m.content),
         )
       ) {
         return { status: "skipped", reason: "near_duplicate" };

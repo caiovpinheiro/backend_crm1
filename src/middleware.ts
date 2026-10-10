@@ -205,7 +205,7 @@ const PWA_PUBLIC_PATHS = new Set([
 
 export async function middleware(req: NextRequest) {
   // Preflight do browser → api.{tenant} (antes do 401 JSON). Origens
-  // cockpit/widgets (não-tenant) caem nas rotas que já têm CORS próprio.
+  // de widgets (não-tenant) caem nas rotas que já têm CORS próprio.
   let corsOrigin: string | null = null;
   try {
     corsOrigin = await decideCors(req);

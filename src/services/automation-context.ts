@@ -153,6 +153,17 @@ export function linearFallbackStepId(
   return steps[idx + 1]?.id ?? null;
 }
 
+/**
+ * Variável da resposta recebida. O canvas grava `saveToVariable: ""`
+ * quando o campo fica em branco; isso não pode descartar o texto
+ * (CEP `{{lastResponse}}` gravava string vazia e o passo seguia OK).
+ */
+export function replyVariableName(config: Record<string, unknown>): string {
+  const raw = config.saveToVariable;
+  const name = typeof raw === "string" ? raw.trim() : "";
+  return name || "lastResponse";
+}
+
 /** Lê uma referência de step do config, tratando `""`/`__none__` como ausente. */
 export function readStepRef(config: unknown, key: string): string | null {
   if (config === null || typeof config !== "object") return null;
@@ -471,6 +482,39 @@ export function waitForReplyHijacksAiTurn(input: {
 }
 
 /**
+ * Configuração da org que devolve o comportamento anterior: com a IA
+ * atendendo, clique de botão/lista ainda retoma o fluxo parado.
+ */
+export const RESUME_FLOW_WHILE_AI_ATTENDS_KEY = "automations.resumeWhileAiAttends";
+
+/**
+ * Conversa atribuída a um agente de IA: a resposta é do agente. Um fluxo
+ * parado esperando o cliente (texto, menu, lista, template, protocolo de
+ * encerramento) não consome a mensagem — sai de cena e ela segue para o
+ * agente. Antes só o texto livre num `wait_for_reply` seguia; o clique nos
+ * botões que o próprio agente mandou retomava o fluxo, que terminava sem
+ * responder, e o `replied: true` calava a IA: o cliente ficava sem resposta
+ * e, como foi o último a falar, a inatividade também não encerrava.
+ *
+ * Fica com o fluxo só a resposta de formulário (WhatsApp Flow): é dado que o
+ * fluxo pediu.
+ */
+export function aiOwnsInboundOverFlow(input: {
+  stepType: string;
+  assigneeType?: string | null;
+  interactiveId?: string | null;
+  flowReply?: boolean;
+  /** `RESUME_FLOW_WHILE_AI_ATTENDS_KEY` ligada na org. */
+  resumeFlowWhileAiAttends?: boolean;
+}): boolean {
+  if (input.assigneeType !== "AI") return false;
+  if (!PAUSING_STEP_TYPES.has(input.stepType)) return false;
+  if (input.flowReply) return false;
+  if (input.resumeFlowWhileAiAttends) return waitForReplyHijacksAiTurn(input);
+  return true;
+}
+
+/**
  * Casa resposta de botão/lista com a opção do config.
  * O executor envia `b.id || btn_${i}` / `r.id || row_${i}` (0-based) — quando
  * o JSON salvo não tem `id`, o `list_reply.id`/`button_reply.id` ainda casa
@@ -613,6 +657,13 @@ export async function releaseOtherAutomationContexts(args: {
 export async function closeStrandedContext(automationId: string, contactId: string) {
   const ctx = await getActiveContext(automationId, contactId);
   if (!ctx) return null;
+
+  // Timer ainda no futuro é espera de verdade. Fechar aqui (passo não
+  // achado no escopo, ou ponteiro ainda no passo anterior) apagava o
+  // "sem resposta" e o negócio ficava em Robo com o robô desligado.
+  if (ctx.timeoutAt && ctx.timeoutAt.getTime() > Date.now()) {
+    return null;
+  }
 
   if (ctx.currentStepId) {
     const step = await prisma.automationStep.findUnique({
@@ -780,13 +831,27 @@ export async function cancelActiveContextsForContactIfAny(
   return cancelActiveContextsForContact(contactId);
 }
 
-/** Cancela todos os contextos RUNNING/PAUSED do contato (humano assumiu). */
+/**
+ * Cancela contextos RUNNING/PAUSED do contato (humano assumiu).
+ * `keepArmedTimers`: não derruba espera com `timeoutAt` no futuro.
+ * O inbound que não casou botão cancelava o menu recém-armado e o
+ * timeout de "sem resposta" nunca movia o negócio.
+ */
 export async function cancelActiveContextsForContact(
   contactId: string,
+  opts?: { keepArmedTimers?: boolean },
 ): Promise<number> {
   const active = await getContactActiveContexts(contactId);
+  const now = Date.now();
   let n = 0;
   for (const ctx of active) {
+    if (
+      opts?.keepArmedTimers &&
+      ctx.timeoutAt &&
+      ctx.timeoutAt.getTime() > now
+    ) {
+      continue;
+    }
     const row = await cancelContext(ctx.id);
     if (row) n += 1;
   }
@@ -907,6 +972,14 @@ export async function processIncomingMessage(
   }
 
   const activeContexts = await getContactActiveContexts(contactId);
+  // Lida uma vez e só quando a IA atende com fluxo parado.
+  let resumeFlowSetting: Promise<boolean> | null = null;
+  const resumeFlowWhileAiAttends = () =>
+    (resumeFlowSetting ??= import("@/lib/org-settings")
+      .then(({ getOrgSettingBool }) =>
+        getOrgSettingBool(RESUME_FLOW_WHILE_AI_ATTENDS_KEY, false),
+      )
+      .catch(() => false));
 
   log.debug(
     `processIncomingMessage contactId=${contactId} contexts=${activeContexts.length} msg="${messageContent.slice(0, 40)}"`,
@@ -977,17 +1050,19 @@ export async function processIncomingMessage(
       continue;
     }
     if (
-      waitForReplyHijacksAiTurn({
+      aiOwnsInboundOverFlow({
         stepType: currentStep.type,
         assigneeType,
         interactiveId: opts?.interactiveId,
         flowReply: opts?.flowReply,
+        resumeFlowWhileAiAttends:
+          assigneeType === "AI" ? await resumeFlowWhileAiAttends() : false,
       })
     ) {
-      // A conversa é da IA e o cliente escreveu texto livre. Consumir aqui
-      // roubava o turno do agente (ver `waitForReplyHijacksAiTurn`).
+      // A conversa é da IA: consumir aqui roubava o turno do agente
+      // (ver `aiOwnsInboundOverFlow`).
       log.info(
-        `processIncomingMessage handoff — ctx ${ctx.id} (auto=${ctx.automation.name}) wait_for_reply com IA atendendo; mensagem segue para o agente`,
+        `processIncomingMessage handoff — ctx ${ctx.id} (auto=${ctx.automation.name}) ${currentStep.type} com IA atendendo (${opts?.interactiveId ? "clique" : "texto"}); mensagem segue para o agente`,
       );
       await cancelContext(ctx.id);
       continue;
@@ -1055,10 +1130,8 @@ export async function processIncomingMessage(
         );
       }
     } else if (currentStep.type === "wait_for_reply") {
-      const varName = String(config.saveToVariable ?? "lastResponse").trim();
-      if (varName) {
-        variables = { ...variables, [varName]: messageContent };
-      }
+      const varName = replyVariableName(config);
+      variables = { ...variables, [varName]: messageContent };
       const receivedGoto = readStepRef(config, "receivedGotoStepId");
       if (receivedGoto) {
         nextStepId = receivedGoto;
@@ -1382,7 +1455,9 @@ export async function processIncomingMessage(
   }
   // Qualquer RUNNING/PAUSED que o loop não consumiu (já cancelados no
   // corpo, ou recém-criados em corrida): garante saída de Automação.
-  const leftover = await cancelActiveContextsForContact(contactId);
+  const leftover = await cancelActiveContextsForContact(contactId, {
+    keepArmedTimers: true,
+  });
   if (leftover > 0) {
     log.info(
       `processIncomingMessage handoff leftover — contact=${contactId} cancelled=${leftover}`,
@@ -1393,11 +1468,58 @@ export async function processIncomingMessage(
   return { handled: false, replied: false };
 }
 
+/** Tentativas da retomada quando o timeout vence e a continuação quebra. */
+const TIMEOUT_RESUME_RETRY_VAR = "__timeoutResumeRetries";
+const TIMEOUT_RESUME_RETRY_DELAY_MS = 60_000;
+const TIMEOUT_RESUME_RETRY_MAX = 5;
+
+function timeoutResumeAttempt(variables: Record<string, unknown>, stepId: string): number {
+  const raw = variables[TIMEOUT_RESUME_RETRY_VAR];
+  if (!raw || typeof raw !== "object") return 0;
+  const rec = raw as { stepId?: unknown; n?: unknown };
+  if (rec.stepId !== stepId) return 0;
+  const n = typeof rec.n === "number" ? rec.n : 0;
+  return n > 0 ? n : 0;
+}
+
+async function recordTimeoutResumeFailure(args: {
+  automationId: string;
+  contactId: string | null;
+  stepId: string;
+  stepType: string;
+  attempt: number;
+  error: unknown;
+  gaveUp: boolean;
+}): Promise<void> {
+  const detail = args.error instanceof Error ? args.error.message : String(args.error);
+  const message = args.gaveUp
+    ? `Retomada da espera falhou (${args.attempt}/${TIMEOUT_RESUME_RETRY_MAX}) — ${detail}. Fluxo encerrado.`
+    : `Retomada da espera falhou (${args.attempt}/${TIMEOUT_RESUME_RETRY_MAX}) — ${detail}. Nova tentativa em 1 min.`;
+  try {
+    await prisma.automationLog.create({
+      data: withOrgFromCtx({
+        automationId: args.automationId,
+        contactId: args.contactId,
+        stepId: args.stepId,
+        stepType: args.stepType,
+        status: "FAILED",
+        message,
+      }),
+    });
+  } catch (err) {
+    log.error(
+      `falha ao gravar log da retomada — auto=${args.automationId} step=${args.stepId}:`,
+      err,
+    );
+  }
+}
+
 async function dispatchToNextStep(
   ctx: { id: string; automationId: string; contactId: string | null; automation: { name?: string; steps: { id: string; type: string; config: unknown }[] } },
   nextStepId: string | null,
   variables: Record<string, unknown>,
   reason: string,
+  pausedStep?: { id: string; type: string },
 ): Promise<void> {
   if (!nextStepId) {
     await advanceContext(ctx.id, null, variables);
@@ -1446,11 +1568,39 @@ async function dispatchToNextStep(
         `continueFromStep error (${reason}) — auto=${ctx.automation.name ?? ctx.automationId} step=${nextStepId}:`,
         err,
       );
-      // A continuação morreu no meio do ramo SEM re-pausar (um throw sai
-      // do loop antes de qualquer wait). Se não fecharmos aqui, o contexto
-      // fica RUNNING eternamente no step despachado e a trava de reentrada
-      // (getActiveContext no fireTrigger) bloqueia a automação pro contato
-      // pra sempre.
+      // A continuação quebrou antes de re-pausar (DNA Work, Talita #66719:
+      // a hora da lista venceu, o remove_tag não rodou e o catch encerrava
+      // o fluxo sem log). Rearma a espera para o próximo ciclo. Sem isso o
+      // contexto fica RUNNING no passo despachado, sem timer, e a trava de
+      // reentrada prende o contato.
+      const attempt = pausedStep ? timeoutResumeAttempt(variables, pausedStep.id) + 1 : 1;
+      const gaveUp = !pausedStep || attempt > TIMEOUT_RESUME_RETRY_MAX;
+      if (pausedStep) {
+        await recordTimeoutResumeFailure({
+          automationId: ctx.automationId,
+          contactId: ctx.contactId,
+          stepId: pausedStep.id,
+          stepType: pausedStep.type,
+          attempt: Math.min(attempt, TIMEOUT_RESUME_RETRY_MAX),
+          error: err,
+          gaveUp,
+        });
+      }
+      if (!gaveUp && pausedStep) {
+        await advanceContext(
+          ctx.id,
+          pausedStep.id,
+          {
+            ...variables,
+            [TIMEOUT_RESUME_RETRY_VAR]: { stepId: pausedStep.id, n: attempt },
+          },
+          TIMEOUT_RESUME_RETRY_DELAY_MS,
+        );
+        log.warn(
+          `retomada falhou, espera rearmada (${attempt}/${TIMEOUT_RESUME_RETRY_MAX}) — auto=${ctx.automation.name ?? ctx.automationId} step=${pausedStep.id}`,
+        );
+        return;
+      }
       await advanceContext(ctx.id, null, variables).catch(() => {});
     }
   } else if (PAUSING_STEP_TYPES.has(targetStep.type)) {
@@ -1458,6 +1608,31 @@ async function dispatchToNextStep(
       `próximo step pausa (${targetStep.type}, ${reason}) sem contactId — auto=${ctx.automation.name ?? ctx.automationId} timeoutMs=${targetTimeoutMs ?? "—"}`,
     );
   }
+}
+
+/**
+ * `lastInboundAt` sozinho não prova que o aluno falou depois da pausa:
+ * o horário da mensagem que abriu o menu fica alguns segundos à frente
+ * do `updatedAt` do contexto, e o timeout era cancelado sem mandar o
+ * negócio para perdido.
+ */
+async function hasInboundMessageAfter(
+  conversationId: string | string[],
+  pausedAt: Date,
+): Promise<boolean> {
+  const ids = (Array.isArray(conversationId) ? conversationId : [conversationId]).filter(
+    (id) => id.trim().length > 0,
+  );
+  if (ids.length === 0) return false;
+  const row = await prisma.message.findFirst({
+    where: {
+      conversationId: ids.length === 1 ? ids[0] : { in: ids },
+      direction: "in",
+      createdAt: { gt: pausedAt },
+    },
+    select: { id: true },
+  });
+  return row != null;
 }
 
 /**
@@ -1484,14 +1659,25 @@ async function abortTimeoutIfAttendanceStarted(
         closedAt: true,
       },
     });
+    if (!target) {
+      // Conversa sumiu do escopo: seguir a aresta. Tratar como encerrada
+      // fechava o contexto e o negócio não saía de Robo.
+      log.warn(
+        `abortTimeout: conversa ${convId} não encontrada — segue a aresta de timeout contact=${contactId}`,
+      );
+      return null;
+    }
     if (
-      !target ||
-      (target.status === "RESOLVED" &&
-        !conversationResolvedBeforePause(target.status, target.closedAt, pausedAt))
+      target.status === "RESOLVED" &&
+      !conversationResolvedBeforePause(target.status, target.closedAt, pausedAt)
     ) {
       return "already_resolved";
     }
-    if (target.lastInboundAt && target.lastInboundAt > pausedAt) {
+    if (
+      target.lastInboundAt &&
+      target.lastInboundAt > pausedAt &&
+      (await hasInboundMessageAfter(convId, pausedAt))
+    ) {
       return "stale_inbound";
     }
     const cfg = nextStep?.config && typeof nextStep.config === "object"
@@ -1513,13 +1699,20 @@ async function abortTimeoutIfAttendanceStarted(
   const convs = await prisma.conversation.findMany({
     where: { contactId, status: { not: "RESOLVED" } },
     select: {
+      id: true,
       lastInboundAt: true,
       assignedToId: true,
       assignedTo: { select: { type: true } },
     },
   });
-  if (convs.length === 0) return "already_resolved";
-  if (convs.some((c) => c.lastInboundAt && c.lastInboundAt > pausedAt)) {
+  if (convs.length === 0) return null;
+  const staleIds = convs
+    .filter((c) => c.lastInboundAt && c.lastInboundAt > pausedAt)
+    .map((c) => c.id);
+  if (
+    staleIds.length > 0 &&
+    (await hasInboundMessageAfter(staleIds, pausedAt))
+  ) {
     return "stale_inbound";
   }
   const cfg = nextStep?.config && typeof nextStep.config === "object"
@@ -1592,6 +1785,7 @@ export async function processTimeout(contextId: string) {
       delayNext,
       delayVars,
       "delay concluído",
+      { id: step.id, type: step.type },
     );
     return;
   }
@@ -1663,6 +1857,7 @@ export async function processTimeout(contextId: string) {
       encerrar,
       variables,
       "closing_protocol encerrar (sem resposta)",
+      { id: step.id, type: step.type },
     );
     return;
   }
@@ -1692,7 +1887,13 @@ export async function processTimeout(contextId: string) {
     log.info(
       `wait_for_reply timeout — auto=${ctx.automation.name} contato=${ctx.contactId} → step=${timeoutGoto}`,
     );
-    await dispatchToNextStep(ctxForDispatch, timeoutGoto, variables, "wait_for_reply timeout");
+    await dispatchToNextStep(
+      ctxForDispatch,
+      timeoutGoto,
+      variables,
+      "wait_for_reply timeout",
+      { id: step.id, type: step.type },
+    );
     return;
   }
 
@@ -1771,7 +1972,13 @@ export async function processTimeout(contextId: string) {
   log.info(
     `question/interactive timeout — auto=${ctx.automation.name} action=${action} → step=${nextStepId ?? "(fim)"}`,
   );
-  await dispatchToNextStep(ctxForDispatch, nextStepId, variables, `${step.type} timeout`);
+  await dispatchToNextStep(
+    ctxForDispatch,
+    nextStepId,
+    variables,
+    `${step.type} timeout`,
+    { id: step.id, type: step.type },
+  );
 }
 
 const MENU_STAY_ON_MEDIA_TYPES = new Set([

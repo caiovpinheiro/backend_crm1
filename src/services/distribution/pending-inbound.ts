@@ -195,6 +195,11 @@ export async function maybeDistributeNewInboundTicket(input: {
   conversationId: string;
   contactId: string;
   assignedToId?: string | null;
+  /**
+   * Voltou de um atendimento de pessoa há pouco (Regra 0): a equipe atende,
+   * não a IA — este caminho não pode entregar o ticket ao 1º atendimento IA.
+   */
+  skipAiFirstAttendance?: boolean;
 }): Promise<void> {
   // Toggle desligado: o inbound não entra. O widget instalado não basta —
   // a reavaliação de expediente zerava o responsável da automação
@@ -461,12 +466,17 @@ export async function maybeDistributeNewInboundTicket(input: {
   }
 
   // 1º atendimento: Agente IA (se houver ativo) assume antes da fila humana.
+  // Ticket que voltou de um atendimento de pessoa (Regra 0) pula a IA e vai
+  // direto para a fila humana — antes o handler pulava, mas este caminho
+  // entregava à IA do mesmo jeito.
   try {
-    const aiUserId = await tryAssignFirstAttendanceAi({
-      conversationId: input.conversationId,
-      contactId: input.contactId,
-      assignedToId: assignee,
-    });
+    const aiUserId = input.skipAiFirstAttendance
+      ? null
+      : await tryAssignFirstAttendanceAi({
+          conversationId: input.conversationId,
+          contactId: input.contactId,
+          assignedToId: assignee,
+        });
     if (aiUserId) {
       debugWarn(
         "[DBG-e46688 maybeDist] first_attendance_ai",

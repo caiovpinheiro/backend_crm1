@@ -23,26 +23,30 @@ import { isMediaPlaceholderText } from "@/lib/ai-agents/media-placeholder";
 import { getMediaTexts, mediaTextLine, understoodKindOf } from "./media-understanding";
 import { callV2LLM } from "./llm";
 import { themePromptText } from "./theme-prompt";
-import { actionValueAllowed, allowedActionTypes, allowedMessageModelIdsFor, humanRequestSubject, mentionsHumanRequest, normalizeAskOptions } from "./action-policy";
+import { actionValueAllowed, allowedActionTypes, allowedFlowIdsFor, allowedMessageModelIdsFor, humanRequestSubject, mentionsHumanRequest, normalizeAskOptions } from "./action-policy";
 
 export { mentionsHumanRequest };
 import { guardV2Output } from "./output-guard";
 import { messageModelFilesOnly, messageModelModeFor } from "@/lib/ai-v2/message-model-mode";
 import { customSystemMessage, systemMessage } from "@/lib/ai-v2/system-messages";
+import { isDeferralText, isShortAckText } from "@/lib/ai-agents/tabulation-classify-policy";
+import { isCourtesyOnlyInbound } from "@/services/post-close-return";
 import { executeV2Actions, sendV2TextMessage, applyV2ClosureFieldUpdates, v2HumanBehavior } from "./actions";
 import { findInheritablePostCloseState, getV2ConversationState, upsertV2ConversationState } from "./state";
 import { logV2Turn } from "./log";
 import { noteV2Fact, peekV2Fact, runWithV2Trace, traceStep, v2TraceWasLogged } from "./trace";
-import { evaluateV2StopLimits, parseV2Counters, type V2Counters } from "./limits";
-import { answerToPostCloseQuestion, classifyPostCloseMessage, getPostCloseBehavior, isGreetingOnlyMessage, keepOpenOnNewRequest, postCloseHandoffMessage, postCloseQuestion, postCloseShortReply } from "./closure";
+import { evaluateV2StopLimits, parseV2Counters, shouldStopStalled, type V2Counters } from "./limits";
+import { answerToPostCloseQuestion, classifyPostCloseMessage, getPostCloseBehavior, isGreetingOnlyMessage, keepOpenOnNewRequest, postCloseHandoffMessage, postCloseQuestion, postCloseShortReply, isExplicitResolution } from "./closure";
 import { isConfusionMessage, rephraseAfterConfusion } from "./confusion";
 import { applyNoSourceGuard, conditionalHandoff, handoffExplanation, type V2PrefetchFact } from "./no-source";
 import { NONSENSE_LIMIT_REASON } from "./limits";
 import { applyV2Tabulation } from "./tabulation";
-import { applyReplyEnding, effectiveReplyEnding, isGreetingOnlyReply, replyEndingButtons } from "./reply-ending";
-import { knowledgeChunkTexts, repeatFallback } from "./ground-reply";
+import { applyReplyEnding, asksClient, classifyReply, effectiveReplyEnding, isGreetingOnlyReply, replyEndingButtons, replyEndingPhrases, withoutReplyEndings } from "./reply-ending";
+import { hasSearchableQuestion, knowledgeChunkTexts, repeatFallback } from "./ground-reply";
+import { loadPriorV2Summary, summaryEnabled, updateRunningSummary, writeV2Summary, SUMMARY_MESSAGE_TYPE } from "./summary";
+import { saysTriedAndFailed } from "./retry-signal";
 import { applyBoldPolicy } from "./reply-format";
-import { MESSAGE_MODEL_MIN_COVERAGE, MESSAGE_MODEL_REPEATED, announcesSending, introBeforeMaterial, lastV2ResetAt, mediaResendPlan, messageModelCoverage, pickPromisedModelId, recentMediaDeliveries, recentlySentMessageModels, resendWindowStart, saysNotReceived } from "./sent-materials";
+import { MESSAGE_MODEL_MIN_COVERAGE, MESSAGE_MODEL_REPEATED, announcesSending, introBeforeMaterial, lastV2ResetAt, mediaResendPlan, messageModelCoverage, pickPromisedModelId, recentMediaDeliveries, recentlySentMessageModels, resendWindowStart, saysNotReceived, recentlyAppliedRuleIds, RULE_REPLY_ACTION_TYPES } from "./sent-materials";
 import { attachmentsBlockedByResend } from "./material-attachments";
 import { buildV2Interactive, matchPendingOption, type V2InteractivePayload } from "./interactive";
 import { simpleHandoff } from "./handoff";
@@ -109,7 +113,29 @@ function resolveHandoffDestination(
   config: V2AgentConfig,
   destination: V2Destination,
   counters: V2Counters,
+  selfAgentId?: string,
 ): V2Destination {
+  // Destino é o próprio agente (assunto/regra apontando para ele mesmo):
+  // transferir para si copiava o turno, respondia de novo e transferia de
+  // novo até o teto — duas respostas iguais, dois resumos, e só então a
+  // equipe. Vale o destino padrão; se ele também for o próprio agente, o
+  // departamento.
+  // Devolver para o agente que acabou de passar a conversa (A → B → A):
+  // ping-pong até o teto, com aviso e resumo a cada volta. Vale o destino
+  // padrão — ou o departamento, se o padrão for um dos dois.
+  if (destination.type === "ai_agent" && destination.id && counters.receivedFromAgentId && destination.id === counters.receivedFromAgentId) {
+    const fallback = config.handoff.defaultDestination;
+    const bounces = fallback.type === "ai_agent" && (fallback.id === counters.receivedFromAgentId || fallback.id === selfAgentId);
+    const next: V2Destination = bounces ? { type: "department" } : fallback;
+    traceStep("transferência", `Destino é o agente que acabou de passar a conversa → ${next.type}${next.id ? ` (${next.id})` : ""}`);
+    return next;
+  }
+  if (destination.type === "ai_agent" && selfAgentId && destination.id === selfAgentId) {
+    const fallback = config.handoff.defaultDestination;
+    const next: V2Destination = fallback.type === "ai_agent" && fallback.id === selfAgentId ? { type: "department" } : fallback;
+    traceStep("transferência", `Destino é o próprio agente → ${next.type}${next.id ? ` (${next.id})` : ""}`);
+    return next;
+  }
   if (destination.type === "ai_agent" && counters.aiTransferCount >= config.limits.maxAiTransfers) {
     return config.handoff.defaultDestination;
   }
@@ -132,6 +158,19 @@ export type V2TurnInput = {
 
 /** Motivos de envio barrado que significam "uma pessoa assumiu a conversa". */
 const HUMAN_TOOK_OVER = new Set(["unassigned", "assignee_changed", "assignee_not_ai", "human_replied_during_run", "human_last_outbound"]);
+
+/** O agente de IA de destino recebe conversas em modo transparente (sem se apresentar). */
+async function aiAgentReceivesTransparently(agentConfigId: string): Promise<boolean> {
+  try {
+    const row = await (prisma as unknown as {
+      aIAgentConfig: { findUnique: (args: unknown) => Promise<{ simpleConfig?: unknown } | null> };
+    }).aIAgentConfig.findUnique({ where: { id: agentConfigId }, select: { simpleConfig: true } });
+    const entry = (row?.simpleConfig as { entry?: { onAiTransfer?: unknown } } | null | undefined)?.entry;
+    return entry?.onAiTransfer === "continue";
+  } catch {
+    return false;
+  }
+}
 
 /** A conversa ainda é do agente (desconhecido = segue). */
 async function assignedToAgent(conversationId: string, agentUserId: string): Promise<boolean> {
@@ -271,6 +310,49 @@ async function arrivedBeforeLastReply(conversationId: string, messageIds: string
   }
 }
 
+/**
+ * Depois das mensagens deste turno o cliente mandou outra (com conteúdo) e
+ * ela já foi respondida. É o turno copiado na transferência entre agentes
+ * (ou reenfileirado) rodando depois do turno da mensagem seguinte:
+ * responder a antiga agora manda a mesma resposta duas vezes.
+ */
+async function conversationMovedOn(conversationId: string, messageIds: string[] | undefined): Promise<boolean> {
+  if (!messageIds?.length) return false;
+  try {
+    const db = prisma as unknown as {
+      message: {
+        findMany: (args: unknown) => Promise<Array<{ createdAt?: Date; content?: string | null; messageType?: string | null }>>;
+        findFirst: (args: unknown) => Promise<{ id: string } | null>;
+      };
+    };
+    const own = await db.message.findMany({ where: { id: { in: messageIds } }, select: { createdAt: true } });
+    if (own.length === 0) return false;
+    const last = new Date(Math.max(...own.map((m) => new Date(m.createdAt ?? 0).getTime())));
+    const newer = await db.message.findMany({
+      where: { conversationId, direction: "in", id: { notIn: messageIds }, createdAt: { gt: last } },
+      select: { createdAt: true, content: true, messageType: true },
+      orderBy: { createdAt: "asc" },
+      take: 5,
+    });
+    const first = newer.find((m) => !isCourtesyOnlyInbound(m.content, m.messageType));
+    if (!first?.createdAt) return false;
+    const reply = await db.message.findFirst({
+      where: {
+        conversationId,
+        direction: "out",
+        isPrivate: false,
+        authorType: { in: ["bot", "human"] },
+        messageType: { notIn: ["note", SUMMARY_MESSAGE_TYPE] },
+        createdAt: { gt: first.createdAt },
+      },
+      select: { id: true },
+    });
+    return !!reply;
+  } catch {
+    return false;
+  }
+}
+
 /** Mensagem sem pedido: "?", "oi", "alô", "não entendi". */
 export function isFillerMessage(text: string): boolean {
   const t = text.trim();
@@ -304,7 +386,39 @@ export function looksLikeIdentification(text: string): boolean {
 }
 
 /** Chegou mensagem do cliente depois das deste turno. */
-async function newerInboundArrived(conversationId: string, messageIds: string[] | undefined): Promise<boolean> {
+/**
+ * O cliente clicou de novo na mesma opção que acabou de responder (clique
+ * duplo, ou a pergunta saiu em dobro e ele respondeu às duas). O agente já
+ * respondeu ao primeiro clique: o segundo não vira turno. Antes o modelo
+ * "confirmava de novo" e refazia a pergunta seguinte.
+ */
+async function isRepeatedInteractiveReply(conversationId: string, text: string, messageIds: string[] | undefined): Promise<boolean> {
+  try {
+    const db = prisma as unknown as {
+      message: { findMany: (args: unknown) => Promise<Array<{ direction: string; content: string | null; messageType: string | null }>> };
+    };
+    const rows = await db.message.findMany({
+      where: { conversationId, isPrivate: false, ...(messageIds?.length ? { id: { notIn: messageIds } } : {}) },
+      orderBy: { createdAt: "desc" },
+      take: 3,
+      select: { direction: true, content: true, messageType: true },
+    });
+    if (rows.length < 2 || rows[0].direction !== "out") return false;
+    const prevIn = rows.find((r) => r.direction === "in");
+    if (!prevIn || (prevIn.messageType ?? "").toLowerCase() !== "interactive") return false;
+    const fold = (s: string) => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, " ").trim();
+    return fold(prevIn.content ?? "") === fold(text) && fold(text).length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * O agente anterior já respondeu a esta mesma mensagem (turno copiado na
+ * transferência entre agentes). Um atalho de palavra-chave do agente novo
+ * mandava a resposta fixa em cima da resposta do anterior.
+ */
+async function inboundAlreadyAnswered(conversationId: string, messageIds: string[] | undefined): Promise<boolean> {
   if (!messageIds?.length) return false;
   try {
     const db = prisma as unknown as {
@@ -316,11 +430,49 @@ async function newerInboundArrived(conversationId: string, messageIds: string[] 
     const own = await db.message.findMany({ where: { id: { in: messageIds } }, select: { createdAt: true } });
     if (own.length === 0) return false;
     const last = new Date(Math.max(...own.map((m) => new Date(m.createdAt).getTime())));
-    const newer = await db.message.findFirst({
-      where: { conversationId, direction: "in", id: { notIn: messageIds }, createdAt: { gt: last } },
+    // Só fala de agente/pessoa conta: evento da linha do tempo e resumo
+    // interno não são resposta.
+    const reply = await db.message.findFirst({
+      where: {
+        conversationId,
+        direction: "out",
+        isPrivate: false,
+        authorType: { in: ["bot", "human"] },
+        messageType: { notIn: ["note", SUMMARY_MESSAGE_TYPE] },
+        createdAt: { gt: last },
+      },
       select: { id: true },
     });
-    return !!newer;
+    return !!reply;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Chegou mensagem nova do cliente depois das deste turno? Agradecimento/ok
+ * curto não conta: um "obrigada" à mensagem de transferência não muda a
+ * dúvida — descartar a resposta por causa dele deixava o cliente sem
+ * resposta nenhuma (o turno do "obrigada" só respondia "por nada").
+ */
+async function newerInboundArrived(conversationId: string, messageIds: string[] | undefined): Promise<boolean> {
+  if (!messageIds?.length) return false;
+  try {
+    const db = prisma as unknown as {
+      message: {
+        findMany: (args: unknown) => Promise<Array<{ createdAt?: Date; content?: string | null; messageType?: string | null }>>;
+      };
+    };
+    const own = await db.message.findMany({ where: { id: { in: messageIds } }, select: { createdAt: true } });
+    if (own.length === 0) return false;
+    const last = new Date(Math.max(...own.map((m) => new Date(m.createdAt ?? 0).getTime())));
+    const newer = await db.message.findMany({
+      where: { conversationId, direction: "in", id: { notIn: messageIds }, createdAt: { gt: last } },
+      select: { content: true, messageType: true },
+      orderBy: { createdAt: "asc" },
+      take: 5,
+    });
+    return newer.some((m) => !isCourtesyOnlyInbound(m.content, m.messageType));
   } catch {
     return false;
   }
@@ -547,6 +699,20 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       return true;
     }
   };
+  // Resumo para a equipe antes de transferir (quando ligado): quem recebe
+  // a conversa — pessoa ou outro agente — lê o que já aconteceu.
+  const summarizeBeforeHandoff = (destination: { type: string }, tabulation?: string | null) =>
+    writeV2Summary({
+      organizationId: orgId,
+      conversationId: input.conversationId,
+      contactId,
+      agentId: resolved!.agentConfigId,
+      config,
+      moment: "transfer",
+      reason: destination.type,
+      tabulation,
+    });
+
   // Uma pessoa assumiu a conversa durante o turno: o agente para de enviar,
   // não transfere e não manda materiais.
   let humanTookOver = false;
@@ -605,6 +771,17 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   let lastAgentMessage: string | null = null;
   let historyLength = 0;
   let versionId: string | undefined = stateRow?.versionId ?? agent.versionId ?? undefined;
+  if ((input.messageType ?? "").toLowerCase() === "interactive" && (await isRepeatedInteractiveReply(input.conversationId, input.userMessage, input.messageIds))) {
+    traceStep("opções", "Clique repetido na opção que acabou de ser respondida → sem novo turno");
+    await logV2Turn({
+      organizationId: orgId, conversationId: input.conversationId, agentId: resolved.agentConfigId, turnId: input.turnId,
+      inboundText: input.userMessage,
+      crmContext: { contact: null, deals: [], selectedDeal: null, fields: { contact: [], deal: [] } },
+      prompt: "repeat_click", executedActions: [], discardedActions: [], handoff: false, latencyMs: Date.now() - startedAt,
+      inputTokens: 0, outputTokens: 0, owner, stage, versionId,
+    });
+    return { handoff: false, closed: false };
+  }
   // A conversa está atribuída a este agente v2 com owner=pessoa: ou é estado
   // antigo (humano anterior, handoff que não trocou o responsável) — o motor
   // ficava mudo com o agente como responsável — ou a conversa transferida
@@ -615,7 +792,32 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // agente, não uma pessoa na fila. Antes o agente que recebia via "cliente
   // na fila", devolvia a conversa à fila e ela ficava sem responsável.
   const handedByAnotherAgent = !!stateRow && stateRow.agentId !== resolved.agentConfigId;
-  if (handedByAnotherAgent) traceStep("agente", "Conversa recebida de outro agente de IA → este agente assume");
+  if (handedByAnotherAgent) {
+    traceStep("agente", "Conversa recebida de outro agente de IA → este agente assume");
+    // Quem passou a conversa: não devolver para ele (ping-pong entre agentes).
+    counters.receivedFromAgentId = stateRow!.agentId;
+    // A conversa já está em atendimento: sem boas-vindas nem confirmação de
+    // cadastro de novo — o cliente já disse o que precisa ao agente anterior
+    // e a mensagem copiada é essa. Antes o agente novo mandava "Olá! Sou seu
+    // assistente… Confirmo que estou falando com…" e ignorava o pedido.
+    if (stage === "idle" || stage === "confirming") {
+      traceStep("entrada", "Recebida de outro agente: sem boas-vindas nem confirmação de cadastro — responde direto ao pedido");
+      stage = "active";
+    }
+    // A transferência entre agentes copia o turno: o agente novo reprocessa
+    // a MESMA mensagem. Com o contador herdado, uma mensagem que passou por
+    // três agentes contava como três repetições, e o terceiro, em vez de
+    // responder, mandava o aviso de loop.
+    if (counters.loopCount > 0 || counters.lastLoopMessage) {
+      counters.loopCount = 0;
+      counters.lastLoopMessage = undefined;
+      traceStep("limites", "Contador de repetição zerado: a mensagem é a mesma que o agente anterior recebeu, não uma repetição do cliente");
+    }
+  }
+  // Transferência transparente: este agente segue como se fosse o mesmo
+  // assistente (o modelo é instruído a não se apresentar).
+  const transparentTransfer = handedByAnotherAgent && config.entry.onAiTransfer === "continue";
+  if (transparentTransfer) traceStep("agente", "Transferência transparente: segue o atendimento sem se apresentar");
   const waitingInQueue = owner === "pessoa" && !handedByAnotherAgent && (await isWaitingInQueue(input.conversationId));
   const queueMode = config.handoff.whileQueued ?? "notify";
   if (waitingInQueue) traceStep("fila", `Conversa transferida voltou ao agente com o cliente na fila → "${queueMode === "notify" ? "só avisar" : "responder"}"`);
@@ -669,6 +871,21 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       organizationId: orgId, conversationId: input.conversationId, agentId: resolved.agentConfigId, turnId: input.turnId,
       inboundText: input.userMessage, crmContext: context,
       prompt: "", executedActions: [], discardedActions: [{ type: "no_reply", reason: "answered meanwhile" } as any],
+      handoff: false, latencyMs: Date.now() - startedAt,
+      inputTokens: 0, outputTokens: 0, owner, stage, versionId,
+    });
+    return { handoff: false, closed: false };
+  }
+
+  // Turno de uma mensagem antiga (copiado na transferência entre agentes ou
+  // reenfileirado): o cliente já mandou outra depois e ela já foi
+  // respondida. Responder a antiga agora duplica a resposta.
+  if (stage !== "closed" && (await conversationMovedOn(input.conversationId, input.messageIds))) {
+    traceStep("entrada", "O cliente já mandou outra mensagem depois desta e ela já foi respondida → este turno não responde");
+    await logV2Turn({
+      organizationId: orgId, conversationId: input.conversationId, agentId: resolved.agentConfigId, turnId: input.turnId,
+      inboundText: input.userMessage, crmContext: context,
+      prompt: "", executedActions: [], discardedActions: [{ type: "no_reply", reason: "conversation moved on" } as any],
       handoff: false, latencyMs: Date.now() - startedAt,
       inputTokens: 0, outputTokens: 0, owner, stage, versionId,
     });
@@ -883,6 +1100,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
         keepAgent: true,
         keepDepartment: true,
         tabulation: null,
+        skipAutomations: !(await flowsOnAiClose()),
       });
     };
 
@@ -1074,8 +1292,9 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       autonomyMode: mapV2AutonomyToPrisma(config.autonomyMode),
       humanBehavior,
     });
-    const mediaDestination = resolveHandoffDestination(config, config.handoff.defaultDestination, counters);
+    const mediaDestination = resolveHandoffDestination(config, config.handoff.defaultDestination, counters, resolved!.agentConfigId);
     if (mediaDestination.type === "ai_agent") counters.aiTransferCount += 1;
+    await summarizeBeforeHandoff(mediaDestination);
     await simpleHandoff({
       conversationId: input.conversationId,
       contactId,
@@ -1110,7 +1329,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     contact: loadedContext.contactRaw ?? null,
     selectedDeal: loadedContext.selectedDealRaw ?? null,
   };
-  const rule = evaluateV2Rules(config, {
+  let rule = evaluateV2Rules(config, {
     userMessage: input.userMessage,
     messageType: input.messageType,
     isFirstMessage: !stateRow || (stateRow.stage as V2Stage) === "idle",
@@ -1123,6 +1342,21 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     surveyReceived: counters.surveyPending,
   }, ruleContext);
 
+  // Atalho com mensagem fixa responde uma vez por conversa. Casando de novo
+  // (a palavra-chave continua na mensagem), a resposta fixa não sai: a
+  // mensagem segue para o agente, que já viu o que foi mandado — e, se o
+  // cliente disser que não deu certo, transfere com o contexto.
+  if (rule && rule.actions.some((a) => RULE_REPLY_ACTION_TYPES.has(a.type))) {
+    const fired = await recentlyAppliedRuleIds(input.conversationId).catch(() => new Set<string>());
+    if (fired.has(rule.id)) {
+      traceStep("regra", `Atalho "${rule.name ?? rule.id}" já respondeu nesta conversa → não repete; a mensagem segue para o agente`);
+      counters.guidanceGiven = true;
+      rule = null;
+    } else if (handedByAnotherAgent && (await inboundAlreadyAnswered(input.conversationId, input.messageIds))) {
+      traceStep("regra", `Atalho "${rule.name ?? rule.id}" casou, mas o agente anterior já respondeu a esta mensagem → não repete; segue para o agente`);
+      rule = null;
+    }
+  }
   let appliedRuleId = rule?.id;
   traceStep("regra", rule
     ? `Regra "${rule.name ?? rule.id}" casou → ações: ${(rule.actions as Array<{ type: string }>).map((a) => a.type).join(", ") || "nenhuma"}`
@@ -1132,6 +1366,40 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // a cada chamada; antes contava duas vezes quando uma regra casava).
   const stop = evaluateV2StopLimits(config, counters, input.userMessage);
   if (stop.blocksReply) traceStep("limites", `Limite de parada atingido: ${stop.reason} → ${stop.action}`);
+
+  // Depois de "me conta em uma frase o que você precisa": a frase chegou →
+  // transfere com ela, como prometido. Antes voltava para o agente, que
+  // perguntava tudo de novo e o cliente rodava em círculo.
+  if (counters.humanRequestPending) {
+    counters.humanRequestPending = false;
+    if (!isShortAckText(input.userMessage) && !isGreetingOnlyMessage(input.userMessage)) {
+      noteV2Fact("handoffCause", "human_request", { keepFirst: true });
+      traceStep("transferência", "Cliente disse o que precisa depois do pedido de atendente → transfere com o assunto");
+      await handoffAndReply(resolved, orgId, contactId, loadedContext, input, config, stateRow, versionId, renderMessage(config.handoff.message, vars, defaultFormatter()), counters, themeId);
+      return { handoff: true, closed: false };
+    }
+  }
+  // Depois de uma orientação (passo a passo, mensagem pronta, material), o
+  // cliente diz que já tentou e não deu certo — ou clica em "preciso de
+  // ajuda". Repetir material ou menu é a pior resposta: transfere com o
+  // contexto (o resumo, quando ligado, vai junto).
+  if (counters.guidanceGiven && (saysTriedAndFailed(input.userMessage) || (chosenOption && mentionsHumanRequest(config, chosenOption)))) {
+    noteV2Fact("handoffCause", "tried_and_failed", { keepFirst: true });
+    traceStep("transferência", chosenOption
+      ? "Pedido de ajuda depois de uma orientação → transfere com o contexto, sem perguntar de novo"
+      : "Cliente já tentou e não deu certo → sem reenviar orientação; transfere com o contexto");
+    await handoffAndReply(resolved, orgId, contactId, loadedContext, input, config, stateRow, versionId, renderMessage(systemMessage(config, "triedAndFailedHandoff"), vars, defaultFormatter()), counters, themeId);
+    return { handoff: true, closed: false };
+  }
+
+  // Resumo do atendimento anterior (ou o corrente): contexto para o modelo.
+  let priorSummary: Awaited<ReturnType<typeof loadPriorV2Summary>> = null;
+  try {
+    priorSummary = (await loadPriorV2Summary({ contactId, conversationId: input.conversationId, runningSummary: counters.runningSummary })) ?? null;
+  } catch {
+    priorSummary = null;
+  }
+  if (priorSummary) traceStep("resumo", priorSummary.current ? "Resumo corrente desta conversa entra no contexto" : "Resumo do último atendimento do cliente entra no contexto");
 
   // Fluxo de entrada / onboarding
   let prompt = "";
@@ -1152,6 +1420,26 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     ...((stateRow?.collectedVariables as Record<string, unknown> | null | undefined) ?? {}),
     ...automationVariables,
   };
+  // Adiamento ("chamo depois", "agora não posso", "estou no trabalho"):
+  // não é pedido nem cortesia pura. Responde curto, sem fecho nem botões,
+  // e encerra — a volta entra pela janela pós-encerramento (cortesia /
+  // nova demanda). Antes virava "posso ajudar em mais alguma coisa?" com
+  // botões para quem acabou de dizer que não pode agora.
+  if (stage !== "closed" && !chosenOption && (!input.messageType || input.messageType === "text") && isDeferralText(input.userMessage)) {
+    traceStep("entrada", "Cliente adiou (“chamo depois”) → resposta curta, sem fecho, e encerra");
+    const deferralText = renderMessage(systemMessage(config, "deferralReply"), vars, defaultFormatter());
+    const deferralRes = deferralText.trim() ? await sendReply(deferralText) : { sent: false, reason: "empty" };
+    await closeState(orgId, input.conversationId, resolved!.agentConfigId, loadedContext.dealId, config, versionId, "deferred", loadedContext.contactId, collectedVariables, getV2ThemeById(config, themeId));
+    await logV2Turn({
+      organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId, turnId: input.turnId,
+      inboundText: input.userMessage, crmContext: context, prompt: "deferral", reply: deferralRes.sent ? deferralText : undefined,
+      executedActions: [{ action: { type: "close_conversation" }, ok: true, reason: "deferred" } as any], discardedActions: [],
+      handoff: false, closed: true, latencyMs: Date.now() - startedAt,
+      inputTokens: 0, outputTokens: 0, owner, stage, versionId, themeId,
+    });
+    return { handoff: false, closed: true };
+  }
+
   // O cliente pediu uma pessoa e fez uma pergunta na mesma mensagem: o modelo
   // responde a pergunta e só marca transferência se não conseguir.
   let humanRequestWithSubject = false;
@@ -1205,6 +1493,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
         traceStep("regra", "Pedido de pessoa junto com uma pergunta → responde primeiro; transfere só se não conseguir");
       } else if (!counters.humanRequestAsked) {
         counters.humanRequestAsked = true;
+        counters.humanRequestPending = true;
         traceStep("regra", "Pedido de pessoa sem dizer o assunto → pergunta uma vez o que precisa; transfere na próxima mensagem");
         const ask = renderMessage(systemMessage(config, "humanRequestAsk"), vars, defaultFormatter());
         await sendReply(ask);
@@ -1223,6 +1512,8 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     }
     const res = await executeV2Actions(otherRuleActions, actionCtx);
     executedActions = res.results;
+    // Resposta fixa do atalho conta como orientação dada.
+    if (res.results.some((r) => r.ok && RULE_REPLY_ACTION_TYPES.has(r.action.type as string))) counters.guidanceGiven = true;
     anyClose = res.anyClose;
     if (res.themeId) {
       themeId = res.themeId;
@@ -1503,7 +1794,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     // `onboardingActive` ficava true sem LLM e todo turno virava handoff.
     if (step) {
       onboardingActive = true;
-      const llmForStep = await callLLMWithTheme(config, context, input, resolved, themeId, collectedVariables, rule, owner, stage);
+      const llmForStep = await callLLMWithTheme(config, context, input, resolved, themeId, collectedVariables, rule, owner, stage, false, priorSummary, transparentTransfer);
       llmOutput = llmForStep.llmOutput;
       prompt = llmForStep.prompt;
       inputTokens = llmForStep.inputTokens;
@@ -1604,7 +1895,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
         actions: [],
       };
     } else {
-      const llmResult = await callLLMWithTheme(config, context, input, resolved, themeId, collectedVariables, rule, owner, stage, humanRequestWithSubject);
+      const llmResult = await callLLMWithTheme(config, context, input, resolved, themeId, collectedVariables, rule, owner, stage, humanRequestWithSubject, priorSummary, transparentTransfer);
       llmOutput = llmResult.llmOutput;
       prompt = llmResult.prompt;
       inputTokens = llmResult.inputTokens;
@@ -1638,7 +1929,9 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       prefetch: peekV2Fact("prefetch") as V2PrefetchFact | undefined,
       themeId,
     });
-    if (guarded.applied) {
+    if (guarded.applied && guarded.explanationDropped) {
+      traceStep("verificação", "Nada nos materiais cobre a mensagem e a explicação antes da transferência afirmava fatos → só o aviso de transferência sai");
+    } else if (guarded.applied) {
       noSourceApplied = !guarded.handoff;
       if (guarded.handoff) noteV2Fact("handoffCause", "no_source", { keepFirst: true });
       traceStep("verificação", guarded.handoff
@@ -1717,6 +2010,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // `messageModel` do próprio LLM era descartado sem aviso).
   const activeTheme = getV2ThemeById(config, themeId);
   const allowedModelIds = allowedMessageModelIdsFor(config, activeTheme);
+  const allowedFlowIds = allowedFlowIdsFor(config);
   const allowedTools = allowedActionTypes(config, activeTheme);
 
   // Handoff não passa pelo executor: vira sinal e roda uma vez só, depois
@@ -1742,6 +2036,10 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     // Modelo fora da lista liberada = o LLM inventou/escolheu um modelo que
     // o operador não autorizou para este agente/assunto.
     if (a.type === "send_message_model" && !allowedModelIds.includes(String((a as { modelId?: unknown }).modelId ?? ""))) {
+      discardedActions.push(a);
+      continue;
+    }
+    if (a.type === "send_whatsapp_flow" && !allowedFlowIds.includes(String((a as { flowId?: unknown }).flowId ?? ""))) {
       discardedActions.push(a);
       continue;
     }
@@ -1857,7 +2155,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // Ações que mandam mensagem ao cliente saem DEPOIS da reply (a reply
   // apresenta, a mensagem pronta/produto/modelo vem em seguida). As demais
   // (tag, campo, nota…) rodam agora.
-  const OUTBOUND_ACTIONS = new Set(["send_message_model", "send_product", "send_whatsapp_template", "send_message", "send_material_attachment"]);
+  const OUTBOUND_ACTIONS = new Set(["send_message_model", "send_product", "send_whatsapp_template", "send_whatsapp_flow", "send_message", "send_material_attachment"]);
   let outboundActions = allowedActions.filter((a) => OUTBOUND_ACTIONS.has(a.type));
   // Resposta trocada pela mensagem "sem material": anexo de material não cabe.
   if (noSourceApplied) outboundActions = outboundActions.filter((a) => a.type !== "send_material_attachment");
@@ -1968,8 +2266,20 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       .join(", "));
   }
   executedActions = actionRes.results;
+  if (actionRes.results.some((r) => r.ok && ["send_message_model", "send_product", "send_material_attachment"].includes(r.action.type))) {
+    counters.guidanceGiven = true;
+  }
   Object.assign(collectedVariables, variablesFromActions(actionRes.results));
   anyHandoff = wantsHandoff;
+  // O modelo só encerra com confirmação explícita do cliente ("resolvido",
+  // "não preciso de mais nada") ou clique num botão. "Ok" / "certo" / 👍
+  // depois de uma orientação é confirmação de leitura: encerrar aí deixava o
+  // cliente que voltava com a dúvida um minuto depois sem agente e com os
+  // botões "mortos". Quem encerra esse caso é a inatividade.
+  if (llmOutput.concluded && !actionRes.anyClose && !chosenOption && isShortAckText(input.userMessage) && !isExplicitResolution(input.userMessage)) {
+    traceStep("encerramento", "Modelo quis encerrar após confirmação curta (\"ok\") → segue aberto; a inatividade encerra se o cliente não voltar");
+    llmOutput.concluded = false;
+  }
   anyClose = actionRes.anyClose || llmOutput.concluded;
   if (actionRes.themeId) themeId = actionRes.themeId;
 
@@ -2001,9 +2311,24 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // Fora do escopo: o limite do início do turno usa o contador antes desta
   // mensagem. Reavalia com o contador novo — o aviso saía duas vezes, e um
   // cliente que voltou ao assunto ficava sem resposta.
-  const stopLimits = stop.blocksReply && stop.reason !== NONSENSE_LIMIT_REASON
+  let stopLimits = stop.blocksReply && stop.reason !== NONSENSE_LIMIT_REASON
     ? stop
     : evaluateV2StopLimits(config, counters, input.userMessage, { countLoop: false });
+  // Pergunta com conteúdo e o modelo respondeu: a resposta vale mais que o
+  // aviso de loop. O aviso é para mensagem curta/sem sentido repetida; uma
+  // pergunta real repetida é sinal de que o cliente ainda não teve resposta.
+  if (
+    stopLimits.blocksReply &&
+    stopLimits.reason === "loop detectado" &&
+    replyText.trim() &&
+    input.userMessage.includes("?") &&
+    hasSearchableQuestion(input.userMessage)
+  ) {
+    traceStep("limites", "Mensagem repetida é uma pergunta com conteúdo e o modelo respondeu → a resposta sai no lugar do aviso de loop");
+    counters.loopCount = 0;
+    counters.lastLoopMessage = undefined;
+    stopLimits = { blocksReply: false, action: "none", reason: "" };
+  }
   if (stopLimits.blocksReply) {
     if (stopLimits !== stop) traceStep("limites", `Limite de parada atingido: ${stopLimits.reason} → ${stopLimits.action}`);
     replyText = stopLimits.warn ? stopWarning(config, stopLimits.reason) : "";
@@ -2049,7 +2374,11 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // Transferência condicional ("se continuar diferente, encaminho"): a resposta
   // já termina pedindo que o cliente confira e volte; o fecho de passo a passo
   // com "Deu certo / Preciso de ajuda" contradizia o "posso encaminhar".
-  const endingAllowed = !anyHandoff && !anyClose && askOptions.length === 0 && (stage as V2Stage) !== "confirming" && !llmOutput.outOfScope && !noSourceApplied && !conditionalWait;
+  // Cortesia ("ok", "obrigado") não ganha "posso ajudar em mais alguma
+  // coisa?" com botões: o cliente acabou de dizer que não precisa.
+  if (replyText.trim() && classifyReply(replyText) === "procedure") counters.guidanceGiven = true;
+  const courtesyInbound = isShortAckText(input.userMessage);
+  const endingAllowed = !anyHandoff && !anyClose && askOptions.length === 0 && (stage as V2Stage) !== "confirming" && !llmOutput.outOfScope && !noSourceApplied && !conditionalWait && !courtesyInbound;
   if (endingAllowed && !materialFollows && replyText.trim()) {
     const ending = applyReplyEnding({
       reply: replyText,
@@ -2082,9 +2411,62 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     replyOptions.length === 0 &&
     outboundActions.length === 0 &&
     isGreetingOnlyReply(replyText);
-  if (greetingOnlyReply && (await newerInboundArrived(input.conversationId, input.messageIds))) {
-    traceStep("resposta", "O cliente já mandou outra mensagem; a saudação não sai — a próxima resposta cobre as duas");
+  // Pergunta (com ou sem botões) só sai se o cliente não escreveu nada
+  // enquanto o agente pensava. Se escreveu — muitas vezes é a resposta à
+  // própria pergunta, clicada numa versão anterior —, o turno seguinte
+  // decide com tudo em mãos. Antes a pergunta saía em dobro e o cliente
+  // respondia às duas.
+  // Só PERGUNTA DE TRIAGEM espera (curta, ou com os botões que o modelo
+  // pediu). Resposta com conteúdo sai sempre, mesmo que o fecho diga "me
+  // avise se deu certo" ou "posso ajudar em mais alguma coisa?" — a versão
+  // anterior contava o fecho como pergunta e descartava respostas inteiras
+  // quando o cliente mandava um "ok" no meio.
+  const coreReply = withoutReplyEndings(replyText, replyEndingPhrases(config)).trim();
+  const isTriageQuestion =
+    askOptions.length > 0 ||
+    (asksClient(coreReply) && coreReply.split(/\s+/).length <= 40 && classifyReply(coreReply) !== "procedure");
+
+  // Trocas sem avanço: o agente respondeu só com outra pergunta (sem
+  // orientação, material, ação nem dado coletado) a uma mensagem que não
+  // era pergunta — o cliente respondeu e ele insistiu. Passado o limite
+  // configurado, a próxima pergunta não sai: a conversa segue pela saída
+  // do assunto (destino escolhido) ou encerra. Pergunta de esclarecimento
+  // a uma pergunta do cliente não conta; orientação ou dado novo zera.
+  if (themeId && themeId !== (stateRow?.themeId ?? undefined)) counters.stalledExchanges = 0;
+  const probingOnly =
+    !anyHandoff && !anyClose && !stopLimits.blocksReply && replyText.trim().length > 0 &&
+    (askOptions.length > 0 || coreReply.trimEnd().endsWith("?")) &&
+    classifyReply(coreReply) !== "procedure" &&
+    !materialFollows && outboundActions.length === 0 &&
+    Object.keys(llmOutput.collected ?? {}).length === 0;
+  if (probingOnly && !asksClient(input.userMessage)) {
+    if (shouldStopStalled(config, counters)) {
+      const stalledAction = config.limits.stalledExchangesAction;
+      traceStep("limites", `Limite de trocas sem avanço: ${counters.stalledExchanges} pergunta(s) seguida(s) sem resolver → ${stalledAction === "close" ? "encerra" : "sai pela saída do assunto, sem insistir"}`);
+      counters.stalledExchanges = 0;
+      replyText = "";
+      replyOptions = [];
+      if (stalledAction === "close") {
+        anyClose = true;
+        llmOutput.concluded = true;
+      } else {
+        anyHandoff = true;
+        llmOutput.handoff = true;
+        noteV2Fact("handoffCause", "limit", { keepFirst: true });
+      }
+    } else {
+      counters.stalledExchanges += 1;
+    }
+  } else if (!probingOnly) {
+    counters.stalledExchanges = 0;
+  }
+  const asksSomething = !anyHandoff && !anyClose && !stopLimits.blocksReply && isTriageQuestion;
+  if ((greetingOnlyReply || asksSomething) && (await newerInboundArrived(input.conversationId, input.messageIds))) {
+    traceStep("resposta", greetingOnlyReply
+      ? "O cliente já mandou outra mensagem; a saudação não sai — a próxima resposta cobre as duas"
+      : "O cliente já mandou outra mensagem enquanto o agente pensava; a pergunta não sai — o próximo turno decide com tudo em mãos");
     replyText = "";
+    replyOptions = [];
   }
 
   // Mensagem pronta a seguir: a resposta só apresenta. Resposta completa +
@@ -2100,7 +2482,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     const withOptions = replyOptions.length > 0 ? buildV2Interactive(replyText, replyOptions, optionTexts) : null;
     const outText = withOptions ? withOptions.fallbackText : replyText;
     // A saudação é conferida de novo depois do "digitando…".
-    const res = await sendReply(outText, withOptions?.payload, { dropIfSuperseded: greetingOnlyReply });
+    const res = await sendReply(outText, withOptions?.payload, { dropIfSuperseded: greetingOnlyReply || asksSomething });
     noteV2Fact("send", { sent: res.sent, reason: res.sent ? null : (res.reason ?? "unknown") });
     if (res.sent) {
       sentReply = outText;
@@ -2111,9 +2493,36 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     } else if (res.reason === "near_duplicate") {
       // A trava anti-repetição do envio olha as últimas mensagens do agente;
       // a do motor, só a anterior. Barrada, o cliente ficava sem nada.
-      const fallback = repeatFallback(lastAgentMessage, config);
-      const alt = await sendReply(fallback);
-      if (alt.sent) sentReply = fallback;
+      // A saída se mede também pela resposta barrada (sem o fecho): ela
+      // repetia uma explicação, mesmo quando a mensagem anterior era só uma
+      // pergunta curta — e "me conta o que você precisa" chegava logo depois
+      // de o cliente dizer o que precisava.
+      const blocked = withoutReplyEndings(replyText, replyEndingPhrases(config));
+      const basis = blocked.length > (lastAgentMessage ?? "").length ? blocked : lastAgentMessage;
+      const fallback = repeatFallback(basis, config);
+      const clientSaidSomething =
+        !chosenOption && !isFillerMessage(input.userMessage) && !isShortAckText(input.userMessage) && !isGreetingOnlyMessage(input.userMessage);
+      const nothingToSay = fallback === systemMessage(config, "stillHere");
+      if (clientSaidSomething && nothingToSay && !anyHandoff && !anyClose) {
+        // O cliente disse o que precisa e o agente só repetiria a pergunta:
+        // "Estou por aqui! Me conta o que você precisa" em cima disso é
+        // surdez. Sai pela saída do assunto (ou encerra), como no limite de
+        // trocas sem avanço, com o contexto. Explicação repetida continua
+        // com "ficou alguma dúvida sobre o que te passei?".
+        const stalledAction = config.limits.stalledExchangesAction;
+        traceStep("resposta", `Só repetiria a pergunta depois de o cliente dizer o que precisa → ${stalledAction === "close" ? "encerra" : "transfere pela saída do assunto, com o contexto"}`);
+        if (stalledAction === "close") {
+          anyClose = true;
+          llmOutput.concluded = true;
+        } else {
+          anyHandoff = true;
+          llmOutput.handoff = true;
+          noteV2Fact("handoffCause", "limit", { keepFirst: true });
+        }
+      } else {
+        const alt = await sendReply(fallback);
+        if (alt.sent) sentReply = fallback;
+      }
     }
     // Não enviada fica fora do log do turno: antes o log dizia que o agente
     // respondeu e o cliente não tinha recebido nada.
@@ -2232,6 +2641,13 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     }
     await closeState(orgId, input.conversationId, resolved!.agentConfigId, loadedContext.dealId, config, versionId, llmOutput.concluded ? "resolved" : "transferred", loadedContext.contactId, collectedVariables, activeTheme);
   } else {
+    if (summaryEnabled(config)?.everyTurn && sentReply && !anyHandoff) {
+      const running = await updateRunningSummary({ conversationId: input.conversationId, agentId: resolved!.agentConfigId, config });
+      if (running) {
+        counters.runningSummary = running;
+        traceStep("resumo", "Resumo corrente atualizado");
+      }
+    }
     // Atualiza estado
     await upsertV2ConversationState({
       organizationId: orgId,
@@ -2289,13 +2705,37 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     opts: { skipMessage?: boolean; message?: string } = {},
   ): Promise<string | undefined> {
     let sent: string | undefined;
+    const planned = resolveHandoffDestination(config, requested ?? config.handoff.defaultDestination, counters, resolved!.agentConfigId);
+    // Transferência entre agentes de IA em modo transparente (opção em
+    // qualquer um dos dois): o cliente não percebe a troca — sem "vou te
+    // passar para…"; o outro agente responde direto.
+    if (!opts.skipMessage && planned.type === "ai_agent" && planned.id) {
+      const who = config.entry.onAiTransfer === "continue" ? "Este agente" : (await aiAgentReceivesTransparently(planned.id)) ? "Agente de destino" : null;
+      if (who) {
+        traceStep("transferência", `${who} em modo transparente → sem aviso de transferência`);
+        opts = { ...opts, skipMessage: true };
+      }
+    }
+    // Transferência em cadeia: recebeu de outro agente e transfere de novo
+    // no primeiro turno sem ter respondido nada. O aviso do agente anterior
+    // ("vou te passar para…") já cobriu — repetir soa como ninguém atender.
+    // Se o anterior foi transparente (sem aviso), este aviso sai.
+    if (!opts.skipMessage && handedByAnotherAgent && !sentReply && (await inboundAlreadyAnswered(input.conversationId, input.messageIds))) {
+      traceStep("transferência", "Transferência em cadeia logo após receber a conversa: o aviso do agente anterior já cobriu → sem novo aviso");
+      opts = { ...opts, skipMessage: true };
+    }
     if (!opts.skipMessage) {
       // Mensagem do destino (assunto/regra) quando configurada; a tela já
       // tinha o campo, mas valia sempre a mensagem padrão.
       const destinationMessage = typeof requested?.message === "string" ? requested.message.trim() : "";
       const handoffMsg = renderMessage(opts.message || destinationMessage || config.handoff.message, vars, defaultFormatter());
-      if (handoffMsg.trim() && (await sendReply(handoffMsg)).sent) {
-        sent = handoffMsg;
+      // O aviso de transferência nunca passa pelo guarda de repetição: o
+      // agente anterior (ou este, minutos antes) pode ter mandado o mesmo
+      // texto ao transferir, e o cliente ficava sem saber que mudou de mão.
+      if (handoffMsg.trim()) {
+        const res = await sendReply(handoffMsg, null, { bypassDuplicateGuard: true });
+        if (res.sent) sent = handoffMsg;
+        else traceStep("transferência", `Aviso de transferência não saiu (${res.reason ?? "motivo desconhecido"})`);
       }
     }
     // Uma pessoa assumiu durante o turno (ou outro processo retomou o turno):
@@ -2305,8 +2745,10 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       humanTookOver = true;
       return sent;
     }
-    const destination = resolveHandoffDestination(config, requested ?? config.handoff.defaultDestination, counters);
+    const destination = planned;
     if (destination.type === "ai_agent") counters.aiTransferCount += 1;
+    const tabulation = await applyV2Tabulation({ config, theme: getV2ThemeById(config, themeId), moment: "transfer", organizationId: orgId, conversationId: input.conversationId, contactId, agentId: resolved!.agentConfigId });
+    await summarizeBeforeHandoff(destination, tabulation);
     await simpleHandoff({
       conversationId: input.conversationId,
       contactId,
@@ -2315,14 +2757,13 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       turnId: input.turnId,
     });
     traceStep("transferência", `Transferido para ${destination.type}${destination.id ? ` (${destination.id})` : ""}`);
-    await applyV2Tabulation({ config, theme: getV2ThemeById(config, themeId), moment: "transfer", organizationId: orgId, conversationId: input.conversationId, contactId, agentId: resolved!.agentConfigId });
     return sent;
   }
 
   async function sendReply(
     text: string,
     interactive?: V2InteractivePayload | null,
-    opts?: { dropIfSuperseded?: boolean },
+    opts?: { dropIfSuperseded?: boolean; bypassDuplicateGuard?: boolean },
   ): Promise<{ sent: boolean; reason?: string }> {
     if (!text.trim()) return { sent: false, reason: "empty" };
     if (humanTookOver) return { sent: false, reason: "human_took_over" };
@@ -2336,6 +2777,8 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       contactId: contactId!,
       agentUserId: resolved!.userId,
       text,
+      dedupeIgnore: replyEndingPhrases(config),
+      ...(opts?.bypassDuplicateGuard ? { bypassDuplicateGuard: true } : {}),
       channel: input.channel,
       autonomyMode: mapV2AutonomyToPrisma(config.autonomyMode),
       humanBehavior: opts?.dropIfSuperseded
@@ -2361,6 +2804,8 @@ async function callLLMWithTheme(
   owner: string,
   stage: V2Stage,
   humanRequestWithQuestion = false,
+  priorSummary: Awaited<ReturnType<typeof loadPriorV2Summary>> = null,
+  transparentTransfer = false,
 ): Promise<{
   llmOutput?: V2LLMOutput;
   prompt: string;
@@ -2428,6 +2873,7 @@ async function callLLMWithTheme(
 
   try {
     const result = await callV2LLM({
+      priorSummary,
       agentId: resolved!.agentConfigId,
       config,
       context,
@@ -2438,6 +2884,7 @@ async function callLLMWithTheme(
       collectedVariables,
       previousMessages,
       humanRequestWithQuestion,
+      transparentTransfer,
     });
     return {
       llmOutput: result.output,
@@ -2481,6 +2928,8 @@ async function handoffAndReply(
     channel: input.channel,
     autonomyMode: mapV2AutonomyToPrisma(config.autonomyMode),
     humanBehavior: v2HumanBehavior(config),
+    // Aviso de transferência: nunca barrado como repetido.
+    bypassDuplicateGuard: true,
   });
   // Uma pessoa assumiu a conversa enquanto isso: sem transferência.
   if ((!res.sent && res.reason && HUMAN_TOOK_OVER.has(res.reason)) || !(await assignedToAgent(input.conversationId, resolved.userId))) {
@@ -2495,9 +2944,11 @@ async function handoffAndReply(
     });
     return;
   }
-  const fallbackDestination = resolveHandoffDestination(config, config.handoff.defaultDestination, counters);
+  const fallbackDestination = resolveHandoffDestination(config, config.handoff.defaultDestination, counters, resolved.agentConfigId);
   if (fallbackDestination.type === "ai_agent") counters.aiTransferCount += 1;
   traceStep("transferência", `Transferido para ${fallbackDestination.type}${fallbackDestination.id ? ` (${fallbackDestination.id})` : ""}`);
+  const tabulation = await applyV2Tabulation({ config, theme: getV2ThemeById(config, themeId), moment: "transfer", organizationId: orgId, conversationId: input.conversationId, contactId, agentId: resolved!.agentConfigId });
+  await writeV2Summary({ organizationId: orgId, conversationId: input.conversationId, contactId, agentId: resolved.agentConfigId, config, moment: "transfer", reason: fallbackDestination.type, tabulation });
   await simpleHandoff({
     conversationId: input.conversationId,
     contactId,
@@ -2505,7 +2956,6 @@ async function handoffAndReply(
     destination: fallbackDestination,
     turnId: input.turnId,
   });
-  await applyV2Tabulation({ config, theme: getV2ThemeById(config, themeId), moment: "transfer", organizationId: orgId, conversationId: input.conversationId, contactId, agentId: resolved!.agentConfigId });
   await upsertV2ConversationState({
     organizationId: orgId,
     conversationId: input.conversationId,
@@ -2579,6 +3029,25 @@ async function createInitialDeal(contactId: string): Promise<string | null> {
   }
 }
 
+/** Chave da org: encerramento pelo agente dispara fluxos "Conversa encerrada"? Padrão: não. */
+export const RUN_FLOWS_ON_AI_CLOSE_KEY = "automations.runOnAiClose";
+
+/**
+ * Fluxos "Conversa encerrada" são do encerramento humano/por fluxo. O agente
+ * tem o próprio pós-encerramento (cortesia, retorno, nova demanda) e os
+ * fluxos disputavam a conversa: tiravam o agente, moviam etapa, ficavam
+ * esperando resposta. Ligar na org quando houver fluxo pós-atendimento
+ * pensado para o agente.
+ */
+async function flowsOnAiClose(): Promise<boolean> {
+  try {
+    const { getOrgSettingBool } = await import("@/lib/org-settings");
+    return await getOrgSettingBool(RUN_FLOWS_ON_AI_CLOSE_KEY, false);
+  } catch {
+    return false;
+  }
+}
+
 export async function closeState(
   orgId: string,
   conversationId: string,
@@ -2592,7 +3061,10 @@ export async function closeState(
   theme?: V2Theme | null,
 ): Promise<void> {
   // Tabulação (se ligada) antes de resolver: o encerramento não sobrescreve.
-  await applyV2Tabulation({ config, theme, moment: "close", organizationId: orgId, conversationId, contactId, agentId: agentConfigId });
+  // E antes do resumo: a folha escolhida entra nele.
+  const tabulation = await applyV2Tabulation({ config, theme, moment: "close", organizationId: orgId, conversationId, contactId, agentId: agentConfigId });
+  // Resumo para a equipe (quando ligado), com a conversa ainda inteira.
+  await writeV2Summary({ organizationId: orgId, conversationId, contactId, agentId: agentConfigId, config, moment: "close", reason, tabulation });
   if (config.closure.fieldUpdates && config.closure.fieldUpdates.length > 0) {
     await applyV2ClosureFieldUpdates(config, contactId, dealId);
   }
@@ -2611,6 +3083,7 @@ export async function closeState(
     keepAgent: true,
     keepDepartment: true,
     tabulation: null,
+    skipAutomations: !(await flowsOnAiClose()),
   });
   await upsertV2ConversationState({
     organizationId: orgId,

@@ -23,6 +23,7 @@ export async function GET() {
       users,
       aiAgents,
       messageTemplates,
+      publishedFlowRows,
       knowledgeDocs,
       channels,
       pipelines,
@@ -48,6 +49,13 @@ export async function GET() {
       p.messageTemplate.findMany({
         where: { organizationId },
         select: { id: true, name: true },
+        orderBy: { name: "asc" },
+      }),
+      // Mesma consulta das mensagens prontas, no contexto da request.
+      // Um import() solto perdia a org e o erro virava lista vazia.
+      p.whatsappFlowDefinition.findMany({
+        where: { organizationId, status: "PUBLISHED" },
+        select: { id: true, name: true, metaFlowId: true },
         orderBy: { name: "asc" },
       }),
       p.aIAgentKnowledgeDoc.findMany({
@@ -135,6 +143,9 @@ export async function GET() {
       ),
       products,
       whatsappTemplates: whatsappTemplateCatalog,
+      messageFlows: (publishedFlowRows as Array<{ id: string; name: string; metaFlowId: string | null }>)
+        .filter((f) => Boolean(f.metaFlowId?.trim()))
+        .map((f) => ({ id: f.id, name: f.name })),
       models: V2_MODELS.map((m) => ({
         id: m.id,
         name: m.label,

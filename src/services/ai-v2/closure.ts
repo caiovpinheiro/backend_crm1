@@ -3,6 +3,7 @@
  * Nenhum domínio de cliente.
  */
 
+import { isDeferralText } from "@/lib/ai-agents/tabulation-classify-policy";
 import type { V2Action, V2AgentConfig, V2CloseReason, V2PostCloseCaseBehavior, V2Stage } from "@/lib/ai-v2/types";
 import { hasSearchableQuestion } from "./ground-reply";
 
@@ -47,6 +48,8 @@ export function classifyPostCloseMessage(
   config: V2AgentConfig,
   message: string,
 ): V2PostCloseCase {
+  // "Chamo depois" / "agora não posso": despedida temporária, como cortesia.
+  if (isDeferralText(message)) return "courtesy";
   // Resposta numérica à pergunta pós-encerramento ("1 Sim / 2 Não").
   const text = foldText(message);
   const bare = text.replace(/\?/g, "").trim();
@@ -67,6 +70,27 @@ export function classifyPostCloseMessage(
   // botões "precisa de ajuda?" em vez da resposta.
   if (!hasCourtesy && message.includes("?") && hasSearchableQuestion(message)) return "new_demand";
   return "ambiguous";
+}
+
+/**
+ * O cliente disse, com palavras, que acabou: "resolvido", "não preciso de
+ * mais nada", "pode encerrar". Só isso (ou o clique num botão) autoriza o
+ * encerramento decidido pelo modelo. "Ok", "certo", "beleza", 👍 depois de
+ * uma orientação são confirmação de leitura: o cliente pode voltar com a
+ * dúvida no minuto seguinte, e quem encerra nesse caso é a inatividade.
+ */
+const EXPLICIT_RESOLUTION_TERMS = [
+  "resolvido", "resolveu", "resolvi", "consegui", "funcionou", "deu certo", "esta resolvido",
+  "nao preciso", "nada mais", "mais nada", "so isso", "era so isso", "so agradecer",
+  "pode encerrar", "pode fechar", "pode finalizar", "tudo certo",
+];
+
+export function isExplicitResolution(message: string): boolean {
+  const text = foldText(message).replace(/\?/g, "").trim();
+  if (!text) return false;
+  // "não consegui" / "não funcionou" / "não resolveu" não são confirmação.
+  const withoutNegated = text.replace(/\bnao (?:consegui|funcionou|deu certo|resolveu|resolvido|entendi)\b/g, " ");
+  return hasTerm(withoutNegated, EXPLICIT_RESOLUTION_TERMS);
 }
 
 /**

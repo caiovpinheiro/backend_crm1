@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM node:22-bookworm-slim AS builder
+FROM public.ecr.aws/docker/library/node:22-bookworm-slim AS builder
 WORKDIR /app
 RUN apt-get update -y && apt-get install -y --no-install-recommends openssl ca-certificates && rm -rf /var/lib/apt/lists/*
 
@@ -36,7 +36,7 @@ RUN --mount=type=cache,target=/app/.next/cache \
 # Ver scripts/build-workers.mjs para os entry points compilados.
 RUN npm run build:workers
 
-FROM node:22-bookworm-slim AS runner
+FROM public.ecr.aws/docker/library/node:22-bookworm-slim AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
@@ -76,13 +76,16 @@ COPY --from=builder /app/dist/workers ./dist/workers
 # destrutivos não vão para produção — rode-os de um checkout com DATABASE_URL.
 # O .dockerignore já tira o resto do contexto de build.
 COPY --from=builder /app/scripts/healthcheck.mjs /app/scripts/ops-*.mjs /app/scripts/backfill-*.mjs ./scripts/
+# Helper de TLS dos backfills (`sslmode` do DATABASE_URL → objeto `ssl` do pg).
+COPY --from=builder /app/scripts/lib/pg-ssl.mjs ./scripts/lib/pg-ssl.mjs
 # Os backfills fazem `import { Client } from "pg"`. O `pg` já vem no standalone
 # (está em `serverExternalPackages`, então o Next copia o pacote inteiro, com
 # `esm/index.mjs` e as dependências); este RUN só falha o build se isso deixar
 # de ser verdade (ex.: `pg` sair de `serverExternalPackages`). `pgpass` é carregado só
-# na conexão sem senha; importá-lo aqui cobre o `split2`.
+# na conexão sem senha; importá-lo aqui cobre o `split2`. O import de
+# `./lib/pg-ssl.mjs` falha o build se o helper sair da imagem.
 RUN cd /app/scripts \
- && node --input-type=module -e 'import { Client } from "pg"; import "pgpass"; if (typeof Client !== "function") process.exit(1);'
+ && node --input-type=module -e 'import { Client } from "pg"; import "pgpass"; import { pgConnectionConfig } from "./lib/pg-ssl.mjs"; if (typeof Client !== "function" || typeof pgConnectionConfig !== "function") process.exit(1);'
 # CLI: não copiar só `node_modules/prisma` — `@prisma/config` exige `effect`, `c12`, … hoistados.
 ARG PRISMA_VERSION=6.19.3
 RUN mkdir -p /opt/prisma-cli \

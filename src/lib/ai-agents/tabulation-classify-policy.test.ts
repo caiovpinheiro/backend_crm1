@@ -9,6 +9,7 @@ import {
   classifyInboundIdleIntent,
   isAckOrGreetingText,
   isGreetingOnlyText,
+  isDeferralText,
   isIdleClosingText,
   isShortAckText,
   shouldFireConversationTabulatedTrigger,
@@ -59,6 +60,20 @@ describe("isGreetingOnlyText", () => {
     expect(
       isGreetingOnlyText("Gostaria de saber se meu filho deve algum valor"),
     ).toBe(false);
+  });
+});
+
+describe("isDeferralText", () => {
+  it("adiamento curto, inclusive com erro de digitação, é despedida temporária", () => {
+    for (const t of ["Estou no trabalho chamou depoos", "chamo depois", "Depois eu vejo isso", "amanhã te respondo", "agora não posso", "To ocupado, falo mais tarde", "Dps te chamo"]) {
+      expect(isDeferralText(t), t).toBe(true);
+      expect(isIdleClosingText(t), t).toBe(true);
+    }
+  });
+  it("pedido com 'depois' ou pergunta não é adiamento", () => {
+    for (const t of ["depois de pagar, como faço?", "estou no portal e não consigo entrar", "ok", "quero cancelar", "e depois do dia 25 pago quanto?"]) {
+      expect(isDeferralText(t), t).toBe(false);
+    }
   });
 });
 

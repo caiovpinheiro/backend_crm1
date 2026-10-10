@@ -10,7 +10,7 @@ import { evaluateV2Rules, isWithinV2BusinessHours, outsideHoursNote } from "./ru
 import { MESSAGE_MODEL_MIN_COVERAGE, announcesSending, introBeforeMaterial, messageModelCoverage, pickPromisedModelId } from "./sent-materials";
 import { getV2ThemeById } from "./themes";
 import { agentAskedQuestion, selectV2ThemeSemantic } from "./theme-semantic";
-import { actionValueAllowed, allowedActionTypes, allowedMessageModelIdsFor, humanRequestSubject, mentionsHumanRequest, normalizeAskOptions } from "./action-policy";
+import { actionValueAllowed, allowedActionTypes, allowedFlowIdsFor, allowedMessageModelIdsFor, humanRequestSubject, mentionsHumanRequest, normalizeAskOptions } from "./action-policy";
 import { noteV2Fact, peekV2Fact, traceStep } from "./trace";
 import { isGreetingOnlyMessage, keepOpenOnNewRequest } from "./closure";
 import { applyBoldPolicy, toWhatsAppText } from "./reply-format";
@@ -85,6 +85,7 @@ const ACTION_LABELS: Record<string, string> = {
   send_message_model: "Enviar mensagem pronta",
   send_product: "Enviar produto",
   send_whatsapp_template: "Enviar template oficial",
+  send_whatsapp_flow: "Enviar flow",
   send_material_attachment: "Enviar anexo do material",
   ask_with_options: "Perguntar com opções",
   close_conversation: "Encerrar conversa",
@@ -615,6 +616,7 @@ export async function simulateV2Turn(
   const activeTheme = getV2ThemeById(config, themeId ?? undefined);
   const allowedTools = allowedActionTypes(config, activeTheme);
   const allowedModelIds = allowedMessageModelIdsFor(config, activeTheme);
+  const allowedFlowIds = allowedFlowIdsFor(config);
   if (
     announcesSending(output.reply) &&
     !output.actions.some((a) => a.type === "send_message_model" || a.type === "send_material_attachment") &&
@@ -647,8 +649,9 @@ export async function simulateV2Turn(
       continue;
     }
     const modelNotAllowed = action.type === "send_message_model" && !allowedModelIds.includes(String((action as { modelId?: unknown }).modelId ?? ""));
+    const flowNotAllowed = action.type === "send_whatsapp_flow" && !allowedFlowIds.includes(String((action as { flowId?: unknown }).flowId ?? ""));
     const valueNotAllowed = !actionValueAllowed(config, action);
-    if (allowedTools.has(action.type) && !modelNotAllowed && !valueNotAllowed) {
+    if (allowedTools.has(action.type) && !modelNotAllowed && !flowNotAllowed && !valueNotAllowed) {
       executedActions.push({ action, label: actionLabel(action.type) });
     } else {
       discardedActions.push({
@@ -656,9 +659,11 @@ export async function simulateV2Turn(
         label: actionLabel(action.type),
         reason: modelNotAllowed
           ? "Esta mensagem pronta não está liberada para o agente/assunto."
-          : valueNotAllowed
-            ? "Etiqueta ou etapa fora das escolhidas em “O que ele pode fazer”."
-            : "A configuração do agente não libera esta ação.",
+          : flowNotAllowed
+            ? "Este flow não está liberado para o agente."
+            : valueNotAllowed
+              ? "Etiqueta ou etapa fora das escolhidas em “O que ele pode fazer”."
+              : "A configuração do agente não libera esta ação.",
       });
     }
   }

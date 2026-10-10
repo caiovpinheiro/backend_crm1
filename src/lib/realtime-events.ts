@@ -40,8 +40,10 @@
  * evento está na descrição do PR do contrato (P-12).
  *
  * Fora deste contrato (transporte): `sse_access_revoked` (o barramento
- * fecha as conexões do usuário, `sseBus.revokeUser`) e
- * `sse_connection_evicted` (teto de conexões, escrito pela rota SSE).
+ * fecha as conexões do usuário, `sseBus.revokeUser`),
+ * `sse_connection_evicted` (teto de conexões, escrito pela rota SSE) e
+ * `heartbeat` (keepalive da rota SSE, `data: {}`; o frontend usa para
+ * detectar conexão travada).
  */
 import type { EntityViewer } from "@/lib/entity-presence";
 import { sseBus, type SsePublishOptions } from "@/lib/sse-bus";

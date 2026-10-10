@@ -72,6 +72,7 @@ import {
 import { fireTrigger, buildMessageTriggerData, emitConversationCreated, openingMessageTriggerExtra } from "@/services/automation-triggers";
 import { resolveAdAndPersistAsync } from "@/services/meta-ad-resolver";
 import { onInboundMessageForAi } from "@/services/ai/turn-manager";
+import { resolvePostCloseInbound } from "@/services/post-close-return";
 import { ensureInboundAiAttendance } from "@/services/ai/first-attendance";
 import { ensureOpenDealForContact, findExistingContactOnPhone } from "@/services/auto-deals";
 import { sanitizeContactName } from "@/lib/display-name";
@@ -932,9 +933,13 @@ async function resolveWebhookContact(
   // não bloqueia a resposta ao webhook da Meta, que tem janela curta
   // de retry). Precisa acontecer ANTES do auto-deal para preservar a
   // ordem semântica (contato criado → deal criado).
+  // O canal do inbound vai no payload: o passo de envio do fluxo usa o
+  // número em que o cliente escreveu, não o fixo configurado no passo
+  // (sessão fechada no outro número → envio falhava).
+  const createdChannelId = (await findChannelByPhoneNumberId(phoneNumberId))?.id ?? null;
   fireTrigger("contact_created", {
     contactId: created.id,
-    data: { source: sourceName, channel: "WhatsApp" },
+    data: { source: sourceName, channel: "WhatsApp", ...(createdChannelId ? { channelId: createdChannelId } : {}) },
   }).catch((err) =>
     log.warn("Falha no gatilho contact_created:", err),
   );
@@ -1132,7 +1137,24 @@ async function findOrCreateConversation(
     }
   }
 
-  const inheritAssignee = await inheritContactAssigneeForNewTicket(contactId);
+  // Logo depois de um encerramento: cortesia fica na conversa encerrada
+  // (sem ticket, sem IA); conteúdo após atendimento de pessoa não herda o
+  // agente de IA do contato.
+  const postClose = await resolvePostCloseInbound({
+    contactId,
+    channel: "whatsapp",
+    channelId: targetChannelId,
+    text: opening?.content,
+    messageType: opening?.messageType,
+  });
+  if (postClose?.kind === "courtesy") {
+    const closed = await prisma.conversation.findUnique({ where: { id: postClose.conversation.id }, select: convSelect });
+    if (closed) {
+      return { ...closed, deferDistribution: true as const, postCloseCourtesy: true as const };
+    }
+  }
+  const returnToHuman = postClose?.kind === "return_to_human";
+  const inheritAssignee = returnToHuman ? null : await inheritContactAssigneeForNewTicket(contactId);
 
   try {
     const created = await withConversationNumberRetry((number) =>
@@ -1154,6 +1176,8 @@ async function findOrCreateConversation(
         conversationId: created.id,
         contactId,
         assignedToId: inheritAssignee,
+        // Voltou de atendimento de pessoa: a fila humana, não a IA.
+        skipAiFirstAttendance: returnToHuman,
       });
     }
     if (!deferDistribution) {
@@ -1169,7 +1193,7 @@ async function findOrCreateConversation(
         }),
       });
     }
-    return { ...created, deferDistribution };
+    return { ...created, deferDistribution, returnToHuman };
   } catch (err) {
     // Corrida: dois webhooks/mensagens simultaneos do mesmo numero. O
     // indice unico parcial rejeita o 2o create com P2002 — reusa o
@@ -3521,7 +3545,7 @@ export async function processMetaWebhookPayload(
             await touchInbound({ conversationId: conversation.id, at: inboundAt }).catch((err) =>
               warnTouchInboundFailed(err, {
                 conversationId: conversation.id,
-                channel: conversation.channel ?? "whatsapp",
+                channel: "whatsapp",
               }),
             );
 
@@ -3551,6 +3575,22 @@ export async function processMetaWebhookPayload(
             // Push notification ao operador (PWA — funciona com app
             // fechado). Disparado em background pra nao atrasar 200
             // OK do webhook (Meta tem janela de retry curta).
+            // Cortesia logo após o encerramento: registrada, e só. Sem push,
+            // sem fluxo, sem gatilho, sem IA — o atendimento acabou.
+            if ("postCloseCourtesy" in conversation && conversation.postCloseCourtesy) {
+              log.info(
+                {
+                  event: "skip_ai_inbound",
+                  conversationId: conversation.id,
+                  messageId: msgCreated.id,
+                  reason: "post_close_courtesy",
+                  messageType: inboundMsgType,
+                },
+                "[ai-turn] skip_ai_inbound",
+              );
+              continue;
+            }
+
             notifyInboundMessage({
               conversationId: conversation.id,
               contactId: contact.id,
@@ -3562,7 +3602,9 @@ export async function processMetaWebhookPayload(
             );
 
             if (
-              !("suppressInboundAutomations" in conversation && conversation.suppressInboundAutomations)
+              !("suppressInboundAutomations" in conversation && conversation.suppressInboundAutomations) &&
+              // Voltou de um atendimento de pessoa: a equipe atende, não a IA.
+              !("returnToHuman" in conversation && conversation.returnToHuman)
             ) {
             // 1º atendimento IA ANTES do salesbot/INICIO-PIPE (allowlist).
             try {
@@ -3657,6 +3699,19 @@ export async function processMetaWebhookPayload(
                 userMessage: parsed.text,
                 channel: "meta",
               });
+            } else {
+              // Sem isto a mensagem ficava sem resposta e sem nenhum rastro
+              // de por que a IA não foi chamada.
+              log.info(
+                {
+                  event: "skip_ai_inbound",
+                  conversationId: conversation.id,
+                  messageId: msgCreated.id,
+                  reason: isSystemMessage ? "system_message" : !parsed.text ? "no_text" : "automation_replied",
+                  messageType: inboundMsgType,
+                },
+                "[ai-turn] skip_ai_inbound",
+              );
             }
 
             log.info(`Mensagem de ${contact.name}: ${parsed.text.substring(0, 60)}`);

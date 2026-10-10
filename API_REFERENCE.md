@@ -126,8 +126,11 @@ todas as queries da request. O ctx é resolvido do Bearer/sessão.
   - `conversation_updated` — status, owner ou contadores mudaram.
   - `agent_status` — agente entrou/saiu (HUMAN).
   - `typing` — outro agente está digitando.
-- Reconecte sempre via header `Last-Event-ID` para evitar perdas. Heartbeats
-  vêm como comentário SSE a cada 30s.
+- Reconecte sempre via header `Last-Event-ID` para evitar perdas.
+- **Heartbeat** (transporte) a cada 25 s, em dois blocos: o comentário SSE
+  `: heartbeat` (keepalive para proxies) e o evento nomeado
+  `event: heartbeat` com `data: {}` (sem `id:`). Clientes `EventSource` podem
+  escutar `heartbeat` para detectar conexão travada; quem não escuta o ignora.
 
 > Para n8n, prefira chamar `GET /api/conversations` por polling a cada 15-30s
 > em vez de manter SSE aberto — webhooks de chegada de mensagem podem vir
@@ -934,6 +937,23 @@ Cada registro de `items` (log paginado) ganhou o campo aditivo `actor`, que diz 
 | `system` | O resto: encerramento em massa, integração, evento sem ator. | `null` | rótulo gravado ou `"Sistema"` |
 
 O tipo gravado no evento (`actorType`) manda sobre o `actorUserId`: dentro de uma automação ou de um turno de IA o `actorUserId` é só o usuário do contexto (pode ser o humano que mandou a mensagem, ou nulo). Por isso `actorUserId` e `actorName` continuam como antes (só o usuário gravado no evento, `null`/`"—"` para IA e automação) e o front deve usar `actor`.
+
+#### `GET /api/painel/deals` — `funnel.lostStage` (provisório)
+
+A seção `funnel` ganhou o campo aditivo `lostStage`, com a etapa "Perdido" (`isLost`) do(s) funil(is) selecionado(s). `stages` continua só com as etapas abertas.
+
+```json
+"lostStage": { "count": 120, "value": 45000.5, "sentInPeriod": 3 }
+```
+
+| Campo | Significado |
+|-------|-------------|
+| `count` / `value` | Negócios que estão **hoje** em etapas `isLost`, em **qualquer status** (igual à coluna do Kanban, incluindo os encerrados que o Kanban esconde por padrão), com os mesmos filtros estruturais do estoque (responsável, etiquetas, origem, etapa, funil). |
+| `sentInPeriod` | Negócios distintos movidos para uma etapa `isLost` no período (`deal_events` `STAGE_CHANGED` com `meta.to.id` numa etapa `isLost`), com os mesmos filtros das entradas (`entered`). Negócio criado direto em Perdido não conta. |
+
+Funil sem etapa `isLost`, ou sem etapas: `{ "count": 0, "value": 0, "sentInPeriod": 0 }`. Vários funis: soma de todos.
+
+**Provisório** até o backfill de status/closedAt dos negócios importados em Perdido (hoje com status `OPEN`): `count` é o estoque da coluna, não "negócios perdidos" pelo status. Depois do backfill a definição pode mudar para status `LOST`.
 
 #### Cabeçalho `Server-Timing`
 

@@ -21,7 +21,7 @@ import { prisma } from "@/lib/prisma";
 const log = getLogger("deal-panel-conversation");
 
 /** Não são mensagens de chat — mesmo recorte da prévia do card do board. */
-const NON_CHAT_MESSAGE_TYPES = ["note", "ai_draft", "whatsapp_call", "whatsapp_call_recording"];
+const NON_CHAT_MESSAGE_TYPES = ["note", "ai_draft", "ai_summary", "whatsapp_call", "whatsapp_call_recording"];
 
 type PanelConversation = {
   id: string;

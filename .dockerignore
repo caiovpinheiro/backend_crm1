@@ -18,3 +18,5 @@ scripts/*
 !scripts/healthcheck.mjs
 !scripts/ops-*.mjs
 !scripts/backfill-*.mjs
+# helper de TLS (sslmode → ssl do pg) importado pelos backfills
+!scripts/lib/pg-ssl.mjs

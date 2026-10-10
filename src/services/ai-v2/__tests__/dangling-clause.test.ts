@@ -21,6 +21,9 @@ describe("o que sobra de uma frase cortada fica de pé", () => {
     expect(withoutTransferClause("Não tenho informação segura sobre as regras da promoção; vou te passar para alguém da equipe."))
       .toBe("Não tenho informação segura sobre as regras da promoção.");
     expect(withoutTransferClause("Para concluir o cadastro, vou chamar alguém da equipe.")).toBe("");
+    // "chamar o time de X" também é aviso: a explicação fica, o aviso vira a mensagem configurada.
+    expect(handoffExplanation("Como o e-mail menciona uma data diferente do calendário e a avaliação não apareceu para você, vou chamar o time de Atendimento para verificar o caso."))
+      .toBe("O e-mail menciona uma data diferente do calendário e a avaliação não apareceu para você.");
     expect(withoutTransferClause("Para acessar sua conta, você precisa do e-mail cadastrado, então vou te passar para a equipe."))
       .toBe("Para acessar sua conta, você precisa do e-mail cadastrado.");
   });

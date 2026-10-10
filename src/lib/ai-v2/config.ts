@@ -65,6 +65,7 @@ const derivedFieldSchema = z.object({
         digitsOnly: z.boolean().optional(),
         charset: z.enum(["all", "digits", "letters"]).optional(),
         letterCase: z.enum(["keep", "upper", "lower", "capitalize"]).optional(),
+        accents: z.enum(["keep", "strip"]).optional(),
         text: z.string().optional(),
       }),
     )
@@ -230,9 +231,18 @@ const entryConfigSchema = z.object({
   confirmationMode: z.enum(["combined", "separate_turn"]).optional().default("combined"),
   automationVariablesMapping: z.record(z.string(), z.string()).optional().default({}),
   maxAttempts: z.number().int().min(1).optional().default(2),
+  /** Ao receber conversa de outro agente de IA: apresenta-se ou segue como se fosse o mesmo. */
+  onAiTransfer: z.enum(["present", "continue"]).optional().default("present"),
+});
+
+const summaryConfigSchema = z.object({
+  enabled: z.boolean().optional().default(false),
+  verbosity: z.enum(["minimal", "standard", "detailed"]).optional().default("standard"),
+  everyTurn: z.boolean().optional().default(false),
 });
 
 const closureConfigSchema = z.object({
+  summary: summaryConfigSchema.optional(),
   postCloseWindowHours: z.number().min(0).optional().default(6),
   courtesyBehavior: z.enum(["no_reply", "short_reply", "reopen_and_route", "ask_with_options", "handoff"]).optional().default("no_reply"),
   newDemandBehavior: z.enum(["no_reply", "short_reply", "reopen_and_route", "ask_with_options", "handoff"]).optional().default("reopen_and_route"),
@@ -389,6 +399,8 @@ export const v2AgentConfigSchema = z.object({
     .default({ maxCallsPerTurn: 6, maxRepeatsPerTool: 2 } as any),
   allowedKnowledgeDocIds: z.array(z.string()).optional().default([]),
   allowedMessageModelIds: z.array(z.string()).optional().default([]),
+  /** Flows publicados que o agente pode enviar. Vazio = nenhum. */
+  allowedFlowIds: z.array(z.string()).optional().default([]),
   allowedPhoneNumbers: z.array(z.string()).optional().default([]),
   responseLength: z.enum(["short", "medium", "long"]).optional().default("medium"),
   emojis: z.enum(["none", "light", "moderate"]).optional().default("none"),

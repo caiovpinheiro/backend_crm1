@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { isOrgOwnedStorageUrl } from "@/lib/storage/read-for-send";
 
-const ORG = "cmrmbn2lh0uz2nm016beqgbwb";
+const ORG = "org_test_storage";
 
 describe("isOrgOwnedStorageUrl", () => {
   it("aceita /api/storage da org", () => {

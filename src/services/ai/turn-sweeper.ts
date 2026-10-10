@@ -33,9 +33,12 @@
 import { prismaBase } from "@/lib/prisma-base";
 import {
   claimTurn,
+  expireTurn,
+  isTurnExpired,
   isTurnManagerEnabled,
   isTurnDue,
   promoteTurnToReady,
+  requeueProcessingTurn,
   runTurn,
   turnMaxAttempts,
   turnStaleMs,
@@ -50,6 +53,10 @@ export type SweepResult = {
   dispatched: number;
   reclaimed: number;
   failed: number;
+  /** Turnos descartados por idade (`AI_TURN_MAX_AGE_MS`). */
+  expired: number;
+  /** Itens que deram erro; o tick segue para os demais. */
+  errors: number;
 };
 
 function envInt(name: string, fallback: number): number {
@@ -61,6 +68,30 @@ function envInt(name: string, fallback: number): number {
 
 function logSweep(event: string, payload: Record<string, unknown>) {
   log.info({ event, ...payload }, `[ai-turn-sweep] ${event}`);
+}
+
+/**
+ * Um turno com erro não derruba o tick: registra e segue. Antes a exceção de
+ * um único turno abortava as três fases, e como o mesmo turno era sempre o
+ * primeiro da fila, nenhum turno preso era recuperado.
+ */
+async function eachTurn<T extends { id: string }>(
+  phase: string,
+  turns: T[],
+  result: SweepResult,
+  fn: (turn: T) => Promise<void>,
+): Promise<void> {
+  for (const turn of turns) {
+    try {
+      await fn(turn);
+    } catch (err) {
+      result.errors += 1;
+      log.error(
+        { phase, turnId: turn.id, err: err instanceof Error ? err.message : String(err) },
+        "[ai-turn-sweep] item falhou",
+      );
+    }
+  }
 }
 
 /**
@@ -77,6 +108,8 @@ export async function sweepConversationTurns(
     dispatched: 0,
     reclaimed: 0,
     failed: 0,
+    expired: 0,
+    errors: 0,
   };
 
   // ── 1. Stale reclaim ──────────────────────────────────────
@@ -90,8 +123,11 @@ export async function sweepConversationTurns(
     orderBy: { claimedAt: "asc" },
     take: limit,
   });
-  for (const turn of stale) {
-    if (opts.dryRun) continue;
+  await eachTurn("stale", opts.dryRun ? [] : stale, result, async (turn) => {
+    if (isTurnExpired(turn)) {
+      if (await expireTurn(turn, ["PROCESSING"])) result.expired += 1;
+      return;
+    }
     const attempts = turn.attempts + 1;
     if (attempts >= turnMaxAttempts()) {
       const res = await prismaBase.conversationTurn.updateMany({
@@ -108,26 +144,23 @@ export async function sweepConversationTurns(
         result.failed += 1;
         logSweep("stale_failed", { turnId: turn.id, attempts });
       }
-      continue;
+      return;
     }
-    const res = await prismaBase.conversationTurn.updateMany({
+    const ok = await requeueProcessingTurn({
       // `claimedAt` no where evita roubar um turno que o dono legítimo
       // acabou de renovar entre o SELECT e o UPDATE.
-      where: { id: turn.id, status: "PROCESSING", claimedAt: turn.claimedAt },
+      where: { id: turn.id, claimedAt: turn.claimedAt },
+      conversationId: turn.conversationId,
       data: {
-        status: "READY",
         attempts,
-        claimedBy: null,
-        claimedAt: null,
-        openKey: turn.conversationId,
         lastError: `stale reclaim: claim de ${turn.claimedBy ?? "?"} expirou`,
       },
     });
-    if (res.count === 1) {
+    if (ok) {
       result.reclaimed += 1;
       logSweep("stale_reclaimed", { turnId: turn.id, attempts });
     }
-  }
+  });
 
   // ── 2. Promoção de turnos vencidos ────────────────────────
   // Candidatos: turnos acumulando com pelo menos o PISO da janela de
@@ -149,15 +182,19 @@ export async function sweepConversationTurns(
     orderBy: { firstMessageAt: "asc" },
     take: limit,
   });
-  for (const turn of open) {
-    if (!isTurnDue(turn)) continue;
+  await eachTurn("promote", open, result, async (turn) => {
+    if (!isTurnDue(turn)) return;
     if (opts.dryRun) {
       result.promoted += 1;
-      continue;
+      return;
+    }
+    if (isTurnExpired(turn)) {
+      if (await expireTurn(turn, ["RECEIVING", "STABILIZING"])) result.expired += 1;
+      return;
     }
     const promoted = await promoteTurnToReady(turn.id, turn.organizationId);
     if (promoted) result.promoted += 1;
-  }
+  });
 
   // ── 3. Dispatch dos READY ─────────────────────────────────
   // Inclui os turnos promovidos acima E os que ficaram READY de um
@@ -167,22 +204,28 @@ export async function sweepConversationTurns(
     orderBy: { readyAt: "asc" },
     take: limit,
   });
-  for (const turn of ready) {
+  await eachTurn("dispatch", ready, result, async (turn) => {
     if (opts.dryRun) {
       result.dispatched += 1;
-      continue;
+      return;
+    }
+    if (isTurnExpired(turn)) {
+      if (await expireTurn(turn, ["READY"])) result.expired += 1;
+      return;
     }
     const claimed = await claimTurn(turn.id, turn.organizationId);
-    if (!claimed) continue;
+    if (!claimed) return;
     result.dispatched += 1;
     await runTurn(claimed);
-  }
+  });
 
   if (
     result.promoted ||
     result.dispatched ||
     result.reclaimed ||
-    result.failed
+    result.failed ||
+    result.expired ||
+    result.errors
   ) {
     logSweep("tick", { ...result, dryRun: Boolean(opts.dryRun) });
   }

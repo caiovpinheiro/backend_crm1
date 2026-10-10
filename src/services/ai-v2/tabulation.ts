@@ -165,8 +165,8 @@ export async function applyV2Tabulation(args: {
   contactId?: string | null;
   /** Agente (chave do modelo no modo "ai"). */
   agentId?: string;
-}): Promise<void> {
-  if (!tabulationAppliesAt(args.config, args.moment)) return;
+}): Promise<string | null> {
+  if (!tabulationAppliesAt(args.config, args.moment)) return null;
   try {
     let tabulationId: string | null = null;
     // De onde veio a folha (relatório de ações e passos).
@@ -190,7 +190,7 @@ export async function applyV2Tabulation(args: {
     }
     if (!tabulationId) {
       traceStep("tabulação", "Tabulação ligada, mas sem folha para este atendimento");
-      return;
+      return null;
     }
     const { applyConversationTabulation } = await import("@/services/ai/tabulation-classify");
     const res = await applyConversationTabulation({
@@ -203,7 +203,9 @@ export async function applyV2Tabulation(args: {
     });
     traceStep("tabulação", res.ok ? `Tabulada: "${res.tabulation.name}"` : `Não tabulada: ${res.error}`);
     if (res.ok && !res.alreadyApplied) noteV2Fact("tabulation", { name: res.tabulation.name, by });
+    return res.ok ? res.tabulation.name : null;
   } catch (err) {
     traceStep("tabulação", `Falhou: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
   }
 }

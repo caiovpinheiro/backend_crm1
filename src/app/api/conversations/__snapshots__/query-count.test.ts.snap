@@ -149,6 +149,7 @@ exports[`GET /api/conversations/:id/messages — contrato da resposta > extras: 
       "senderImageUrl": null,
       "senderName": "Cliente",
       "senderUserId": null,
+      "sharedContacts": null,
     },
     {
       "authorType": "human",
@@ -168,6 +169,7 @@ exports[`GET /api/conversations/:id/messages — contrato da resposta > extras: 
       "senderImageUrl": "https://cdn.example.test/u_member.png",
       "senderName": "Ana Lima",
       "senderUserId": null,
+      "sharedContacts": null,
       "status": "READ",
     },
     {
@@ -188,6 +190,7 @@ exports[`GET /api/conversations/:id/messages — contrato da resposta > extras: 
       "senderImageUrl": null,
       "senderName": "Cliente",
       "senderUserId": null,
+      "sharedContacts": null,
     },
     {
       "authorType": "human",
@@ -208,6 +211,7 @@ exports[`GET /api/conversations/:id/messages — contrato da resposta > extras: 
       "senderImageUrl": "https://cdn.example.test/u_member.png",
       "senderName": "Ana Lima",
       "senderUserId": null,
+      "sharedContacts": null,
       "status": "DELIVERED",
     },
     {
@@ -228,6 +232,7 @@ exports[`GET /api/conversations/:id/messages — contrato da resposta > extras: 
       "senderImageUrl": null,
       "senderName": "Sistema",
       "senderUserId": null,
+      "sharedContacts": null,
     },
     {
       "authorType": "human",
@@ -247,6 +252,7 @@ exports[`GET /api/conversations/:id/messages — contrato da resposta > extras: 
       "senderImageUrl": null,
       "senderName": "Cliente",
       "senderUserId": null,
+      "sharedContacts": null,
     },
     {
       "authorType": "human",
@@ -266,6 +272,7 @@ exports[`GET /api/conversations/:id/messages — contrato da resposta > extras: 
       "senderImageUrl": null,
       "senderName": "Cliente",
       "senderUserId": null,
+      "sharedContacts": null,
     },
     {
       "authorType": "human",
@@ -285,6 +292,7 @@ exports[`GET /api/conversations/:id/messages — contrato da resposta > extras: 
       "senderImageUrl": "https://cdn.example.test/u_member.png",
       "senderName": "Ana Lima",
       "senderUserId": null,
+      "sharedContacts": null,
       "status": "SENT",
     },
     {
@@ -305,6 +313,7 @@ exports[`GET /api/conversations/:id/messages — contrato da resposta > extras: 
       "senderImageUrl": null,
       "senderName": "Carla Dias",
       "senderUserId": "u_manager",
+      "sharedContacts": null,
     },
     {
       "authorType": "human",
@@ -325,6 +334,7 @@ exports[`GET /api/conversations/:id/messages — contrato da resposta > extras: 
       "senderImageUrl": null,
       "senderName": "Cliente",
       "senderUserId": null,
+      "sharedContacts": null,
     },
     {
       "authorType": "human",
@@ -344,6 +354,7 @@ exports[`GET /api/conversations/:id/messages — contrato da resposta > extras: 
       "senderImageUrl": null,
       "senderName": "Cliente",
       "senderUserId": null,
+      "sharedContacts": null,
     },
   ],
   "pinnedMessageIds": [
@@ -403,6 +414,7 @@ exports[`GET /api/conversations/:id/messages — contrato da resposta > históri
       "sendStatus": "sent",
       "senderName": "Cliente",
       "senderUserId": null,
+      "sharedContacts": null,
     },
     {
       "content": "{"number":101,"closedAt":null,"isCurrent":true,"openedAt":"2026-09-30T02:00:00.000Z","openedByName":"Sistema","openedByUserId":null}",
@@ -463,6 +475,7 @@ exports[`GET /api/conversations/:id/messages — contrato da resposta > primeira
       "senderImageUrl": null,
       "senderName": "Cliente",
       "senderUserId": null,
+      "sharedContacts": null,
     },
     {
       "authorType": "human",
@@ -482,6 +495,7 @@ exports[`GET /api/conversations/:id/messages — contrato da resposta > primeira
       "senderImageUrl": "https://cdn.example.test/u_member.png",
       "senderName": "Ana Lima",
       "senderUserId": null,
+      "sharedContacts": null,
       "status": "READ",
     },
     {
@@ -502,6 +516,7 @@ exports[`GET /api/conversations/:id/messages — contrato da resposta > primeira
       "senderImageUrl": null,
       "senderName": "Cliente",
       "senderUserId": null,
+      "sharedContacts": null,
     },
     {
       "authorType": "human",
@@ -522,6 +537,7 @@ exports[`GET /api/conversations/:id/messages — contrato da resposta > primeira
       "senderImageUrl": "https://cdn.example.test/u_member.png",
       "senderName": "Ana Lima",
       "senderUserId": null,
+      "sharedContacts": null,
       "status": "DELIVERED",
     },
     {
@@ -542,6 +558,7 @@ exports[`GET /api/conversations/:id/messages — contrato da resposta > primeira
       "senderImageUrl": null,
       "senderName": "Sistema",
       "senderUserId": null,
+      "sharedContacts": null,
     },
     {
       "authorType": "human",
@@ -561,6 +578,7 @@ exports[`GET /api/conversations/:id/messages — contrato da resposta > primeira
       "senderImageUrl": null,
       "senderName": "Cliente",
       "senderUserId": null,
+      "sharedContacts": null,
     },
   ],
   "pinnedMessageIds": [
@@ -614,6 +632,7 @@ exports[`GET /api/conversations/:id/messages — contrato da resposta > página 
       "senderImageUrl": null,
       "senderName": "Sistema",
       "senderUserId": null,
+      "sharedContacts": null,
     },
     {
       "authorType": "human",
@@ -633,6 +652,7 @@ exports[`GET /api/conversations/:id/messages — contrato da resposta > página 
       "senderImageUrl": null,
       "senderName": "Cliente",
       "senderUserId": null,
+      "sharedContacts": null,
     },
   ],
   "pinnedMessageIds": [
@@ -686,6 +706,7 @@ exports[`GET /api/conversations/:id/messages — contrato da resposta > página 
       "senderImageUrl": null,
       "senderName": "Cliente",
       "senderUserId": null,
+      "sharedContacts": null,
     },
     {
       "authorType": "human",
@@ -706,6 +727,7 @@ exports[`GET /api/conversations/:id/messages — contrato da resposta > página 
       "senderImageUrl": "https://cdn.example.test/u_member.png",
       "senderName": "Ana Lima",
       "senderUserId": null,
+      "sharedContacts": null,
       "status": "DELIVERED",
     },
   ],
@@ -760,6 +782,7 @@ exports[`GET /api/conversations/:id/messages — contrato da resposta > timeline
       "senderImageUrl": null,
       "senderName": "Cliente",
       "senderUserId": null,
+      "sharedContacts": null,
     },
     {
       "authorType": "human",
@@ -779,6 +802,7 @@ exports[`GET /api/conversations/:id/messages — contrato da resposta > timeline
       "senderImageUrl": null,
       "senderName": "Cliente",
       "senderUserId": null,
+      "sharedContacts": null,
     },
     {
       "authorType": "human",
@@ -798,6 +822,7 @@ exports[`GET /api/conversations/:id/messages — contrato da resposta > timeline
       "senderImageUrl": "https://cdn.example.test/u_member.png",
       "senderName": "Ana Lima",
       "senderUserId": null,
+      "sharedContacts": null,
       "status": "READ",
     },
     {
@@ -818,6 +843,7 @@ exports[`GET /api/conversations/:id/messages — contrato da resposta > timeline
       "senderImageUrl": null,
       "senderName": "Cliente",
       "senderUserId": null,
+      "sharedContacts": null,
     },
     {
       "authorType": "human",
@@ -838,6 +864,7 @@ exports[`GET /api/conversations/:id/messages — contrato da resposta > timeline
       "senderImageUrl": "https://cdn.example.test/u_member.png",
       "senderName": "Ana Lima",
       "senderUserId": null,
+      "sharedContacts": null,
       "status": "DELIVERED",
     },
     {
@@ -858,6 +885,7 @@ exports[`GET /api/conversations/:id/messages — contrato da resposta > timeline
       "senderImageUrl": null,
       "senderName": "Sistema",
       "senderUserId": null,
+      "sharedContacts": null,
     },
     {
       "authorType": "human",
@@ -877,6 +905,7 @@ exports[`GET /api/conversations/:id/messages — contrato da resposta > timeline
       "senderImageUrl": null,
       "senderName": "Cliente",
       "senderUserId": null,
+      "sharedContacts": null,
     },
   ],
   "pinnedMessageIds": [

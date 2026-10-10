@@ -133,6 +133,27 @@ export function findFirstMessageStepIndex(steps: { type: string }[]): number {
 }
 
 /** Gatilhos cuja mensagem/ticket já define o canal de envio. */
+/** Passos que falam com o cliente (mensagem, botões, lista, template, mídia, pergunta, espera, e-mail, produto). */
+export const CLIENT_FACING_STEP_TYPES = new Set([
+  "send_whatsapp_message",
+  "send_whatsapp_template",
+  "send_whatsapp_media",
+  "send_whatsapp_interactive",
+  "send_whatsapp_list",
+  "send_whatsapp_flow",
+  "send_email",
+  "send_product",
+  "question",
+  "wait_for_reply",
+  "closing_protocol",
+  "ask_ai_agent",
+]);
+
+/** O fluxo tem algum passo que fala com o cliente? Os só de CRM (etapa, tag, campo, nota) não. */
+export function automationTalksToClient(steps: ReadonlyArray<{ type: string }>): boolean {
+  return steps.some((s) => CLIENT_FACING_STEP_TYPES.has(s.type));
+}
+
 export const INBOUND_CHANNEL_TRIGGER_TYPES = new Set([
   "message_received",
   "message_sent",
@@ -852,7 +873,7 @@ export function defaultStepConfig(stepType: string): Record<string, unknown> {
       };
     case "wait_for_reply":
       return {
-        timeoutMs: 60_000, receivedGotoStepId: "", timeoutGotoStepId: "", saveToVariable: "",
+        timeoutMs: 60_000, receivedGotoStepId: "", timeoutGotoStepId: "", saveToVariable: "lastResponse",
       };
     case "closing_protocol":
       return {

@@ -186,7 +186,6 @@ Backend: **30 arquivos de teste** diretamente relacionados a IA.
 - `GET /api/ai-agents/product-fields`
 - `POST /api/ai-agents/[id]/message-rules/test`
 - `POST /api/ai-agents/drafts/[messageId]/approve|discard`
-- `POST /api/ai-agents/cockpit-embed-token`
 
 #### Status / presença / cockpit
 - `GET /api/agents/status`

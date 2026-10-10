@@ -20,6 +20,14 @@ export interface V2Counters {
   postCloseAsked?: boolean;
   /** Já perguntou uma vez o que a pessoa precisa (pedido de atendente sem assunto). */
   humanRequestAsked?: boolean;
+  /** Resumo corrente da conversa ("atualizar a cada resposta"). */
+  runningSummary?: string;
+  /** O agente já deu uma orientação (passo a passo, mensagem pronta, material) nesta conversa. */
+  guidanceGiven?: boolean;
+  /** Perguntou "o que você precisa?" ao pedido de atendente; a próxima mensagem transfere. */
+  humanRequestPending?: boolean;
+  /** Agente de IA que passou esta conversa para o atual — não devolver para ele (ping-pong). */
+  receivedFromAgentId?: string;
 }
 
 export function defaultV2Counters(): V2Counters {
@@ -43,11 +51,15 @@ export function parseV2Counters(raw: unknown): V2Counters {
     stalledExchanges: Number(r.stalledExchanges) || 0,
     nonsenseMessages: Number(r.nonsenseMessages) || 0,
     loopCount: Number(r.loopCount) || 0,
+    ...(typeof r.runningSummary === "string" && r.runningSummary ? { runningSummary: r.runningSummary } : {}),
     lastLoopMessage: typeof r.lastLoopMessage === "string" ? r.lastLoopMessage : undefined,
     aiTransferCount: Number(r.aiTransferCount) || 0,
     surveyPending: Boolean(r.surveyPending),
     ...(r.postCloseAsked === true ? { postCloseAsked: true } : {}),
     ...(r.humanRequestAsked === true ? { humanRequestAsked: true } : {}),
+    ...(r.guidanceGiven === true ? { guidanceGiven: true } : {}),
+    ...(r.humanRequestPending === true ? { humanRequestPending: true } : {}),
+    ...(typeof r.receivedFromAgentId === "string" && r.receivedFromAgentId ? { receivedFromAgentId: r.receivedFromAgentId } : {}),
     ...(Array.isArray(r.pendingOptions) && r.pendingOptions.length > 0
       ? { pendingOptions: r.pendingOptions.filter((o): o is string => typeof o === "string").slice(0, 10) }
       : {}),
@@ -64,6 +76,11 @@ export function shouldStopHelpOffer(config: V2AgentConfig, counters: V2Counters)
   return counters.helpOffers > 0 && counters.helpOffers >= config.limits.maxHelpOffers;
 }
 
+/**
+ * Trocas sem avanço: o agente só perguntou de novo (sem orientação, material,
+ * ação nem dado coletado) e o cliente respondeu. É decidido no fim do turno,
+ * olhando a resposta — no início bloquearia a resposta que resolveria.
+ */
 export function shouldStopStalled(config: V2AgentConfig, counters: V2Counters): boolean {
   return counters.stalledExchanges > 0 && counters.stalledExchanges >= config.limits.maxStalledExchanges;
 }
@@ -135,12 +152,7 @@ export function evaluateV2StopLimits(
       warn: config.limits.nonsenseAction !== "handoff" && counters.nonsenseMessages === config.limits.nonsenseLimit,
     };
   }
-  if (shouldStopStalled(config, counters)) {
-    return {
-      blocksReply: true,
-      action: config.limits.stalledExchangesAction,
-      reason: "limite de trocas sem avanço",
-    };
-  }
+  // Trocas sem avanço: avaliadas pelo motor depois da resposta do modelo
+  // (`shouldStopStalled`), não aqui.
   return { blocksReply: false, action: "none", reason: "" };
 }

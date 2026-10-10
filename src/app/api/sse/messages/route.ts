@@ -54,6 +54,17 @@ const denyAllInboxSseCards: InboxSseCardGate = () => false;
 const SSE_CARD_GATE_RETRY_MS = 15_000;
 
 /**
+ * Heartbeat de transporte (fora do contrato de eventos de negócio), a cada
+ * `SSE_HEARTBEAT_MS`. Vai em dois blocos num único enqueue:
+ * - comentário `: heartbeat` — mantém proxies/LB sem cortar a conexão ociosa;
+ * - evento nomeado `heartbeat` (`data: {}`) — o EventSource não entrega
+ *   comentários, então é este bloco que o `use-sse` do frontend escuta para
+ *   ligar a detecção de conexão travada (meio aberta). Sem `id:`, não mexe
+ *   no `Last-Event-ID`. Cliente sem listener de `heartbeat` o ignora.
+ */
+const SSE_HEARTBEAT_FRAME = ": heartbeat\n\nevent: heartbeat\ndata: {}\n\n";
+
+/**
  * Stream SSE de eventos do CRM.
  * Atendimento: filtro por organizationId da sessão (card por visibilidade).
  * Team-chat privado: audiência = membership (userId), sem bypass de super-admin.
@@ -347,7 +358,7 @@ export async function GET(request: Request) {
       heartbeat = setInterval(() => {
         if (closed) return;
         try {
-          controller.enqueue(encoder.encode(": heartbeat\n\n"));
+          controller.enqueue(encoder.encode(SSE_HEARTBEAT_FRAME));
         } catch {
           closeStream();
           return;

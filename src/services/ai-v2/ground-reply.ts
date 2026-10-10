@@ -149,19 +149,82 @@ function sameLineVariant(norm: string, lines: string[][]): boolean {
 const HEDGES = ["geralmente", "normalmente", "costuma", "costumam", "em geral", "provavelmente", "possivelmente"];
 
 /** A decisão do modelo diz que o material não traz o procedimento pedido. */
-const ADMITS_NO_PROCEDURE =
-  /\bn[aã]o (?:informa|traz|descreve|detalha|explica|mostra|cont[eé]m|tem|apresenta)\b[^.]{0,40}?\b(?:procedimento|passo|caminho|como)\b|\bsem (?:procedimento|passo a passo|orienta[cç][aã]o)\b/i;
+/**
+ * A decisão admite que o material não cobre o que o cliente pediu: "não
+ * informa o procedimento", "a possibilidade de X não está especificada",
+ * "não há informação sobre isso", "sem orientação", "o material não trata
+ * disso". Só formas que falam da cobertura do material — "não consta no
+ * cadastro", "não foi encontrado no portal" e "não está previsto" são fatos
+ * da situação do cliente ou do próprio material, não admissão.
+ */
+const ADMITS_MISSING = [
+  /\bn[aã]o (?:informa|traz|descreve|detalha|explica|mostra|cont[eé]m|apresenta|menciona|cita|cobre|aborda|especifica|esclarece|contempla|diz)\b[^.;]{0,40}?\b(?:procedimento|passo|caminho|como|possibilidade|op[cç][aã]o|forma|detalhe|informa[cç][aã]o|orienta[cç][aã]o|instru[cç][aã]o|men[cç][aã]o|nada)(?!\p{L})/iu,
+  /\bn[aã]o (?:est[aá]|é|foi|vem|aparece|se encontra)(?!\p{L})[^.;]{0,20}?\b(?:especificad|descrit|documentad|detalhad|mencionad|citad|abordad|cobert|esclarecid|explicad|contemplad|tratad)/iu,
+  /\bn[aã]o (?:h[aá]|existe|existem|encontrei|localizei|achei|tenho|temos)(?!\p{L})[^.;]{0,25}?\b(?:informa[cç]|material|men[cç][aã]o|orienta[cç]|detalhe|procedimento|conte[uú]do|base|fonte|refer[eê]ncia|instru[cç]|trecho|documento|nada)/iu,
+  /\bsem (?:informa[cç][aã]o|material|orienta[cç][aã]o|procedimento|passo a passo|refer[eê]ncia|instru[cç][aã]o|men[cç][aã]o|detalhe|conte[uú]do)(?!\p{L})/iu,
+  /\b(?:materia(?:l|is)|base|documentos?|fontes?|trechos?|conte[uú]do|orienta[cç][oõ]es|instru[cç][oõ]es)\b[^.;]{0,40}?\bn[aã]o (?:fala|trata|cobre|aborda|menciona|cita|informa|traz|descreve|especifica|prev[eê]|define|esclarece|confirma|indica|contempla|detalha|explica|mostra|responde|diz|tem)(?!\p{L})/iu,
+  /\b(?:fora|n[aã]o (?:consta|est[aá]|aparece|existe|encontrei|localizei|foi encontrad[oa]|cobert[oa]|respaldad[oa]|sustentad[oa])) (?:d|n|pel)(?:o|os|a|as) (?:materia(?:l|is)|base|documentos?|fontes?|trechos?|conte[uú]do|escopo)(?!\p{L})/iu,
+];
 /** Instrução de como fazer algo (verbo de ação no imperativo). */
-const INSTRUCTION = /\b(?:selecione|clique|acesse|escolha|inclua|anexe|toque|preencha|abra|digite|localize|v[aá] (?:em|at[eé]|para))\b/i;
+const INSTRUCTION =
+  /\b(?:selecione|clique|acesse|escolha|inclua|anexe|toque|preencha|abra|digite|localize|navegue|cadastre|gere|emita|baixe|instale|marque|desmarque|dirija-se|compare[cç]a|v[aá] (?:em|at[eé]|para)|entre (?:em|no|na|nos|nas)|(?:solicite|consulte|verifique|confira|procure) (?:em|no|na|nos|nas|pel[oa]s?|a (?:op[cç][aã]o|aba|se[cç][aã]o)|o (?:menu|item|bot[aã]o)))(?!\p{L})/iu;
+/** Palavras da admissão que são o vocabulário dela, não o assunto. */
+const ADMISSION_VOCAB = new Set([
+  "informa", "informacao", "informacoes", "informado", "informada", "material", "materiais", "base", "documento", "documentos", "fonte", "fontes", "trecho", "trechos",
+  "conteudo", "procedimento", "procedimentos", "passo", "passos", "caminho", "orientacao", "orientacoes", "instrucao", "instrucoes", "mencao", "detalhe", "detalhes",
+  "referencia", "nada", "isso", "esse", "essa", "este", "esta", "disso", "sobre", "escopo", "possibilidade", "opcao", "forma",
+  "especificado", "especificada", "especifica", "descrito", "descrita", "descreve", "documentado", "documentada", "detalhado", "detalhada", "detalha", "mencionado",
+  "mencionada", "menciona", "citado", "citada", "cita", "abordado", "abordada", "aborda", "coberto", "coberta", "cobre", "esclarecido", "esclarecida", "esclarece",
+  "explicado", "explicada", "explica", "contemplado", "contemplada", "contempla", "tratado", "tratada", "trata", "mostra", "traz", "apresenta", "define", "indica",
+  "confirma", "responde", "fala", "existe", "existem", "encontrei", "localizei", "achei", "tenho", "temos", "consta", "aparece", "encontrado", "encontrada",
+  "respaldado", "respaldada", "sustentado", "sustentada",
+  "cliente", "usuario", "decisao", "resposta", "modelo", "agente", "equipe", "setor", "pessoa", "humano", "atendente", "atendimento", "transferencia", "transferir",
+  "transfiro", "encaminhar", "encaminho", "encaminhamento", "encaminhei", "verificar", "verificacao", "confirmar", "confirmacao", "analise", "analisar", "depende",
+  "necessario", "necessaria", "precisa", "preciso", "portanto", "entao", "assim", "para", "pelo", "pela", "como", "pois", "porque", "ainda", "apenas", "somente",
+  "possivel", "pode", "podem", "deve", "devem", "caso", "situacao", "pedido", "duvida", "pergunta", "questao", "solicitacao", "geral",
+]);
+
+/** Oração da decisão que faz a admissão (antes de ", mas…", "; " ou "."). */
+function admissionClause(reason: string): string | null {
+  const parts = reason.split(/[.;:\n]+|,?\s+(?:mas|por[eé]m|contudo|entretanto|no entanto|embora|apesar)(?!\p{L})/iu);
+  return parts.find((p) => ADMITS_MISSING.some((re) => re.test(p))) ?? null;
+}
+
+/** O assunto da admissão: as palavras dela fora do vocabulário de admitir. */
+function subjectWords(clause: string): string[] {
+  return normalize(clause).split(/\s+/).filter((w) => w.length >= 4 && !ADMISSION_VOCAB.has(w));
+}
+
+/** Mesma palavra ou mesmo radical ("parcelamento"/"parcelar", "financeiro"/"financeira"). */
+function sameSubject(a: string, b: string): boolean {
+  return a === b || (a.length >= 6 && b.length >= 6 && a.slice(0, 5) === b.slice(0, 5));
+}
 
 /**
- * Passo a passo que o próprio modelo admite não estar no material: a
- * decisão diz "a base não informa o procedimento" e a resposta, mesmo
- * assim, manda selecionar, clicar, anexar. É procedimento montado a partir
- * de outro serviço ou do que aparece numa imagem.
+ * Frases de instrução que a própria decisão desautoriza: a decisão admite
+ * que o material não cobre o pedido e a resposta, mesmo assim, manda o
+ * cliente acessar, selecionar, anexar… sobre esse mesmo pedido ("a
+ * possibilidade de parcelamento não está especificada" + "acesse o portal
+ * e confira a opção de parcelamento"). É procedimento montado — de outro
+ * serviço, de uma imagem ou do que pareceu óbvio. Quando a admissão não
+ * nomeia o assunto ("não há informação sobre isso"), toda instrução conta.
+ * Instrução sobre outro assunto fica: o material pode cobrir esse.
  */
+export function admittedMissingInstructions(reply: string, reason: string | undefined): string[] {
+  const clause = reason ? admissionClause(reason) : null;
+  if (!clause) return [];
+  const sentences = reply
+    .split(/\r?\n|(?<=[.!?])\s+/)
+    .map((s) => s.trim())
+    .filter((s) => s && INSTRUCTION.test(s));
+  const subject = subjectWords(clause);
+  if (subject.length === 0) return sentences;
+  return sentences.filter((s) => normalize(s).split(/\s+/).some((w) => w.length >= 4 && subject.some((x) => sameSubject(w, x))));
+}
+
+/** Há instrução que a decisão desautoriza (ver `admittedMissingInstructions`). */
 export function procedureAdmittedMissing(reply: string, reason: string | undefined): boolean {
-  return !!reason && ADMITS_NO_PROCEDURE.test(reason) && INSTRUCTION.test(reply);
+  return admittedMissingInstructions(reply, reason).length > 0;
 }
 
 /**

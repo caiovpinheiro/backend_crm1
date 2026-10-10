@@ -56,6 +56,8 @@ export interface V2DerivedPart {
   charset?: "all" | "digits" | "letters";
   /** Maiúsculas/minúsculas do pedaço. */
   letterCase?: "keep" | "upper" | "lower" | "capitalize";
+  /** Acentos do pedaço: manter ou tirar (É → E, ç → c). Padrão: manter. */
+  accents?: "keep" | "strip";
   text?: string;
 }
 
@@ -273,6 +275,12 @@ export interface V2Rule {
 }
 
 export interface V2EntryConfig {
+  /**
+   * Ao receber conversa de outro agente de IA: "present" (padrão) apresenta-se
+   * normalmente; "continue" é transparente — quem transfere não avisa e este
+   * segue o atendimento sem se apresentar, como se fosse o mesmo assistente.
+   */
+  onAiTransfer?: "present" | "continue";
   /** Se a mensagem de abertura está habilitada. */
   openingEnabled?: boolean;
   /** Mensagem de abertura na primeira mensagem do cliente. */
@@ -321,7 +329,20 @@ export type V2PostCloseCaseBehavior =
   /** Transfere para a equipe (destino padrão), com a mensagem do caso. */
   | "handoff";
 
+export type V2SummaryVerbosity = "minimal" | "standard" | "detailed";
+
+/** "Começo e fim › Resumir o atendimento". */
+export interface V2SummaryConfig {
+  enabled: boolean;
+  /** mínimo: uma linha · padrão: cinco itens · detalhado: + dados e mensagens-chave. */
+  verbosity: V2SummaryVerbosity;
+  /** Refaz o resumo corrente a cada resposta (só no estado; sem nota no chat). */
+  everyTurn: boolean;
+}
+
 export interface V2ClosureConfig {
+  /** Resumo para a equipe e para o próximo atendente ao encerrar/transferir. */
+  summary?: V2SummaryConfig;
   /** Janela pós-encerramento em horas (padrão 6). */
   postCloseWindowHours: number;
   /** Comportamento quando a mensagem é cortesia/despedida. */
@@ -540,6 +561,8 @@ export interface V2AgentConfig {
   allowedKnowledgeDocIds?: string[];
   /** IDs globais dos modelos de mensagem permitidos. */
   allowedMessageModelIds?: string[];
+  /** Flows publicados (WhatsappFlowDefinition) que o agente pode enviar. */
+  allowedFlowIds?: string[];
   /** Telefones permitidos para resposta em modo de teste. Vazio = responde qualquer número. */
   allowedPhoneNumbers?: string[];
   /** Tamanho preferido das respostas. */
@@ -598,6 +621,7 @@ export type V2ActionType =
   | "send_message_model"
   | "send_product"
   | "send_whatsapp_template"
+  | "send_whatsapp_flow"
   | "send_material_attachment"
   | "ask_with_options"
   | "close_conversation"
@@ -623,6 +647,8 @@ export interface V2LLMOutput {
     adapt?: boolean;
     variables?: Record<string, string>;
   };
+  /** Flow publicado que o modelo pediu para enviar neste turno. */
+  flow?: { id: string };
   /** Ids de anexos dos materiais lidos no turno, para enviar depois da reply. */
   attachments?: string[];
   handoff: boolean;

@@ -78,6 +78,30 @@ export function effectiveReplyEnding(config: V2AgentConfig, theme?: V2Theme | nu
   return config.replyEnding;
 }
 
+/**
+ * Todas as frases de fecho configuradas (agente e assuntos). A trava
+ * anti-repetição do envio não as conta: o fecho se repete de propósito e,
+ * sendo longo, fazia duas respostas diferentes parecerem a mesma.
+ */
+export function replyEndingPhrases(config: Pick<V2AgentConfig, "replyEnding" | "themes">): string[] {
+  const out = new Set<string>();
+  const add = (ending?: V2ReplyEnding) => {
+    for (const rule of [ending?.procedure, ending?.info]) {
+      for (const p of rule?.phrases ?? []) if (p.trim()) out.add(p.trim());
+    }
+  };
+  add(config.replyEnding);
+  for (const theme of config.themes ?? []) add(theme.replyEnding);
+  return [...out];
+}
+
+/** O texto sem as frases de fecho (o conteúdo da resposta). */
+export function withoutReplyEndings(text: string, phrases: readonly string[]): string {
+  let out = text;
+  for (const p of phrases) out = out.split(p).join(" ");
+  return out.trim();
+}
+
 /** Há alguma frase configurada (o prompt então pede ao modelo que não crie o próprio fecho). */
 export function hasReplyEnding(ending: V2ReplyEnding | undefined): boolean {
   return !!ending && [ending.procedure, ending.info].some((r) => r?.enabled && r.phrases.some((p) => p.trim()));

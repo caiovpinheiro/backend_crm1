@@ -17,6 +17,7 @@ import {
 import { maybeDistributeNewInboundTicket } from "@/services/distribution";
 import { inheritContactAssigneeForNewTicket } from "@/services/ai/attendance-gate";
 import { onInboundMessageForAi } from "@/services/ai/turn-manager";
+import { resolvePostCloseInbound } from "@/services/post-close-return";
 import { ensureInboundAiAttendance } from "@/services/ai/first-attendance";
 import { processIncomingMessage as processSalesbotMessage } from "@/services/automation-context";
 import { notifyInboundMessage } from "@/lib/web-push";
@@ -345,7 +346,22 @@ async function findOrCreateConversation(
     return { ...orphan, channelId, waJid: rawJid };
   }
 
-  const inheritAssignee = await inheritContactAssigneeForNewTicket(contactId);
+  // Logo depois de um encerramento: cortesia fica na conversa encerrada
+  // (sem ticket, sem IA); conteúdo após atendimento de pessoa não herda o
+  // agente de IA do contato.
+  const postClose = await resolvePostCloseInbound({
+    contactId,
+    channel: "whatsapp",
+    channelId,
+    text: opening?.content,
+    messageType: opening?.messageType,
+  });
+  if (postClose?.kind === "courtesy") {
+    const closed = await prisma.conversation.findUnique({ where: { id: postClose.conversation.id }, select: CONV_SELECT });
+    if (closed) return { ...closed, postCloseCourtesy: true as const };
+  }
+  const returnToHuman = postClose?.kind === "return_to_human";
+  const inheritAssignee = returnToHuman ? null : await inheritContactAssigneeForNewTicket(contactId);
 
   try {
     const created = await withConversationNumberRetry((number) =>
@@ -366,6 +382,8 @@ async function findOrCreateConversation(
       conversationId: created.id,
       contactId,
       assignedToId: inheritAssignee,
+      // Voltou de atendimento de pessoa: a fila humana, não a IA.
+      skipAiFirstAttendance: returnToHuman,
     });
     emitConversationCreated({
       contactId,
@@ -378,7 +396,7 @@ async function findOrCreateConversation(
         messageType: opening?.messageType,
       }),
     });
-    return created;
+    return { ...created, returnToHuman };
   } catch (err) {
     // Corrida no mesmo número: o indice unico parcial rejeita o 2o
     // create com P2002. Reusa o vencedor desta conta.
@@ -751,7 +769,7 @@ export async function handleBaileysMessage(
     await touchInbound({ conversationId: conversation.id, at: inboundAt }).catch((err) =>
       warnTouchInboundFailed(err, {
         conversationId: conversation.id,
-        channel: conversation.channel ?? "whatsapp",
+        channel: "whatsapp",
       }),
     );
 
@@ -778,6 +796,16 @@ export async function handleBaileysMessage(
         : {}),
     });
 
+    // Cortesia logo após o encerramento: registrada, e só. Sem push,
+    // sem fluxo, sem gatilho, sem IA — o atendimento acabou.
+    if ("postCloseCourtesy" in conversation && conversation.postCloseCourtesy) {
+      log.info(
+        { event: "skip_ai_inbound", conversationId: conversation.id, messageId: msgCreated.id, reason: "post_close_courtesy", messageType: parsed.messageType },
+        "[ai-turn] skip_ai_inbound",
+      );
+      return;
+    }
+
     notifyInboundMessage({
       conversationId: conversation.id,
       contactId: contact.id,
@@ -787,10 +815,13 @@ export async function handleBaileysMessage(
     }).catch((err) => log.debug("Falha ao enviar push (não-fatal):", err));
 
     try {
-      await ensureInboundAiAttendance({
-        conversationId: conversation.id,
-        contactId: contact.id,
-      });
+      // Voltou de um atendimento de pessoa: a equipe atende, não a IA.
+      if (!("returnToHuman" in conversation && conversation.returnToHuman)) {
+        await ensureInboundAiAttendance({
+          conversationId: conversation.id,
+          contactId: contact.id,
+        });
+      }
     } catch (err) {
       log.error("Falha no ensureInboundAiAttendance:", err);
     }

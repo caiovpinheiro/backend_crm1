@@ -26,6 +26,7 @@ export type V2ExportNames = {
   stages: Record<string, string>;
   tags: Record<string, string>;
   channels?: Record<string, string>;
+  messageFlows?: Record<string, string>;
 };
 
 export const EMPTY_EXPORT_NAMES: V2ExportNames = {
@@ -667,6 +668,7 @@ export function buildAgentRulesMarkdown(args: {
     `- Trechos que ele lê: ${({ all: "todos", related: "só os relacionados", close: "só os muito parecidos" } as Record<string, string>)[c.knowledgeSearch?.preset ?? "all"]}`,
     `- Conferência das respostas: ${(c.groundingCheck ?? "model") === "model" ? "afirmação por afirmação" : "só números, datas e nomes"}`,
     `- Mensagens prontas gerais: ${list((c.allowedMessageModelIds ?? []).map((id) => names.messageModels[id] ?? `(não encontrada: ${id})`))} · adaptar à conversa: ${yesNo(c.messageModelAdapt)}`,
+    `- Flows que ele pode enviar: ${list((c.allowedFlowIds ?? []).map((id) => names.messageFlows?.[id] ?? `(não encontrado: ${id})`))}`,
     `- Negócio usado: ${c.dealSelection === "ask" ? "pergunta quando há mais de um" : "o mais recente"}`,
     ...(c.includeLostDeals ? ["- Negócio perdido: usa o mais recente quando o cliente não tem outro negócio"] : []),
     ...(c.productPolicy?.enabled ? [`- Catálogo: até ${c.productPolicy.maxItems} produto(s) · preço: ${yesNo(c.productPolicy.showPrice)} · link: ${yesNo(c.productPolicy.showLink)}${c.productPolicy.allowedProductIds?.length ? ` · ${c.productPolicy.allowedProductIds.length} produto(s) liberado(s)` : ""}`] : []),
@@ -682,7 +684,8 @@ export function buildAgentRulesMarkdown(args: {
         const what = p.charset === "digits" || p.digitsOnly ? "dígitos de " : p.charset === "letters" ? "letras de " : "";
         const take = p.take && p.take !== "all" ? `${p.take === "first" ? "primeiros" : "últimos"} ${p.count ?? ""} ` : "";
         const kase = p.letterCase && p.letterCase !== "keep" ? ` (${({ upper: "maiúsculas", lower: "minúsculas", capitalize: "primeira maiúscula" } as Record<string, string>)[p.letterCase]})` : "";
-        return `${take}${what}${fieldName(p.key, names)} (${p.entity === "deal" ? "negócio" : "contato"})${kase}`;
+        const acc = p.accents === "strip" ? " (sem acentos)" : "";
+        return `${take}${what}${fieldName(p.key, names)} (${p.entity === "deal" ? "negócio" : "contato"})${kase}${acc}`;
       }).join(" + ")}${d.mask && d.mask !== "none" ? ` · ${MASK[d.mask]}` : ""}`)
       : ["_(nenhuma)_"]),
     "", "**Calendário**",
@@ -745,6 +748,7 @@ export function buildAgentRulesMarkdown(args: {
   const onDeal = e?.onDealNotFound ?? "ask_identification";
   out.push(
     `- Boas-vindas: ${e?.openingEnabled ? (e.openingMessage?.trim() ? q(e.openingMessage) : "_(ligadas sem mensagem → nada é enviado)_") : "desligadas"}`,
+    `- Ao receber transferência de outro agente de IA: ${e?.onAiTransfer === "continue" ? "segue sem se apresentar (transparente — quem transfere não avisa)" : "apresenta-se normalmente"}`,
     `- Confirmar cadastro: ${yesNo(e?.confirmContact)}${e?.confirmContact ? ` (${e.confirmationMode === "separate_turn" ? "na mensagem seguinte" : "junto das boas-vindas"}) · campos: ${list((e.confirmationFields ?? []).map((f) => fieldName(f, names)))} · mensagem: ${q(e.confirmationMessage)}` : ""}`,
     `- Sem cadastro: ${({ ask_identification: "pede e-mail ou documento e passa para a equipe", create_deal: "cria negócio e segue", handoff: "passa para a equipe" } as Record<string, string>)[onDeal]}${onDeal === "ask_identification" ? ` · mensagem: ${q(e?.identificationMessage)} · tentativas: ${e?.maxAttempts ?? 2}` : ""}`,
     ...(Object.keys(e?.automationVariablesMapping ?? {}).length ? [`- Variáveis vindas da automação: ${Object.entries(e?.automationVariablesMapping ?? {}).map(([from, to]) => `${from} → ${to}`).join(", ")}`] : []),
@@ -781,7 +785,7 @@ export function buildAgentRulesMarkdown(args: {
     `- Sem material: ${qd(c.fallback?.noSource?.message, "transfere com a mensagem de transferência")}`,
     `- Cliente não entendeu: ${c.fallback?.confusion?.action === "handoff" ? "o agente decide" : "refaz a pergunta"}`,
     `- Erro: ${qd(c.fallback?.error?.message, c.handoff?.message || "mensagem de transferência")}`,
-    `- Limites: respostas a agradecimento depois de encerrar ${c.limits?.maxCourtesyReplies ?? "—"} · mensagens fora do assunto seguidas ${c.limits?.nonsenseLimit ?? "—"} (${c.limits?.nonsenseAction === "handoff" ? "transfere" : "avisa e silencia"}) · mesma mensagem repetida ${c.limits?.maxLoopCount ?? "—"} · transferências entre agentes de IA ${c.limits?.maxAiTransfers ?? "—"}`,
+    `- Limites: respostas a agradecimento depois de encerrar ${c.limits?.maxCourtesyReplies ?? "—"} · mensagens fora do assunto seguidas ${c.limits?.nonsenseLimit ?? "—"} (${c.limits?.nonsenseAction === "handoff" ? "transfere" : "avisa e silencia"}) · mesma mensagem repetida ${c.limits?.maxLoopCount ?? "—"} · transferências entre agentes de IA ${c.limits?.maxAiTransfers ?? "—"} · perguntas seguidas sem resolver ${c.limits?.maxStalledExchanges ?? "—"} (${c.limits?.stalledExchangesAction === "close" ? "encerra" : "sai pela saída do assunto"})`,
   );
 
   return out.join("\n").replace(/\n{3,}/g, "\n\n") + "\n";

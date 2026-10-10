@@ -51,6 +51,28 @@ const ACK_WORDS = new Set([
   "tchau",
   "flw",
   "falou",
+  // Abreviações e variações comuns de "está tudo bem, obrigado": "ta bm
+  // obrigado", "td certo", "joia", "ciente". Só contam quando a mensagem
+  // inteira é feita delas.
+  "bm",
+  "td",
+  "tb",
+  "tbm",
+  "bom",
+  "boa",
+  "otimo",
+  "otima",
+  "joia",
+  "legal",
+  "top",
+  "massa",
+  "certinho",
+  "entendido",
+  "ciente",
+  "anotado",
+  "grato",
+  "grata",
+  "agradeco",
 ]);
 
 /** Cumprimento solto: não é dúvida nem pedido. */
@@ -222,12 +244,45 @@ function matchesIdlePhrase(normalized: string): boolean {
   );
 }
 
-/** ok / obrigado / "está tudo certo" / despedida — sem dúvida nova. */
+const DEFERRAL_VERBS =
+  "(?:chamo|chamar|chamou|chama|ligo|ligar|falo|falar|vejo|ver|retorno|retornar|volto|voltar|respondo|responder|aviso|avisar|procuro|procurar|mando|mandar|te procuro|entro em contato)";
+const DEFERRAL_LATER =
+  "(?:depo\\w*|dps|mais tarde|outra hora|outro dia|amanha|em breve|a noite|de noite|semana que vem|quando der|quando puder)";
+/** "chamo depois", "depois eu vejo", "amanhã te respondo", "agora não". */
+const DEFERRAL_STRONG: RegExp[] = [
+  new RegExp(`\\b${DEFERRAL_VERBS}\\b[\\w\\s]{0,30}\\b${DEFERRAL_LATER}\\b`),
+  new RegExp(`\\b${DEFERRAL_LATER}\\b[\\w\\s]{0,30}\\b${DEFERRAL_VERBS}\\b`),
+  /^(?:depois|dps|mais tarde|outra hora|outro dia|amanha|agora nao|agora n)\b/,
+  /\b(?:agora|hoje|no momento) (?:nao|n) (?:posso|consigo|da|dou conta|tenho como|vou conseguir)\b/,
+];
+/** "estou no trabalho", "to ocupado": só vale sem sinal de pedido na mesma frase. */
+const DEFERRAL_WEAK: RegExp[] = [
+  /\b(?:to|tou|estou|estamos|tamo) (?:no trabalho|trabalhando|ocupad[oa]|em reuniao|dirigindo|na rua|em aula|no servico)\b/,
+  /\b(?:sem tempo|nao tenho tempo) (?:agora|hoje)\b/,
+];
+
+/**
+ * Adiamento: o cliente diz que vai falar depois / não pode agora. Não é
+ * pedido nem agradecimento — é despedida temporária. Curto e sem pergunta.
+ */
+export function isDeferralText(text: string | null | undefined): boolean {
+  const raw = (text ?? "").trim();
+  if (!raw || raw.includes("?")) return false;
+  const words = tokenizePromptText(raw);
+  if (words.length === 0 || words.length > 12) return false;
+  const n = words.join(" ");
+  if (DEFERRAL_STRONG.some((re) => re.test(n))) return true;
+  if (hasDemandHint(n)) return false;
+  return DEFERRAL_WEAK.some((re) => re.test(n));
+}
+
+/** ok / obrigado / "está tudo certo" / despedida (inclusive "chamo depois") — sem dúvida nova. */
 export function isIdleClosingText(text: string | null | undefined): boolean {
   if (isShortAckText(text)) return true;
   const n = joinedTokens(text ?? "");
   if (!n) return false;
   if (matchesIdlePhrase(n)) return true;
+  if (isDeferralText(text)) return true;
   return false;
 }
 

@@ -42,7 +42,12 @@ export function maskFieldValue(value: string, mask: V2FieldMask | undefined): st
   return [...v].map((c, i) => (hidden.has(i) ? "x" : c)).join("");
 }
 
-/** Pedaço de um campo: caracteres → quantidade → maiúsculas. */
+/** Tira acentos e cedilha mantendo a letra base (É → E, ç → c). */
+export function stripAccents(text: string): string {
+  return text.normalize("NFD").replace(/\p{M}/gu, "");
+}
+
+/** Pedaço de um campo: caracteres → quantidade → acentos → maiúsculas. */
 export function derivedPartText(raw: unknown, part: V2DerivedPart): string {
   let text = raw === null || raw === undefined ? "" : String(raw).trim();
   const charset = part.charset ?? (part.digitsOnly ? "digits" : "all");
@@ -52,6 +57,7 @@ export function derivedPartText(raw: unknown, part: V2DerivedPart): string {
   const n = Math.max(0, Math.floor(part.count ?? 0));
   if (part.take === "first" && n > 0) text = chars.slice(0, n).join("");
   else if (part.take === "last" && n > 0) text = chars.slice(-n).join("");
+  if (part.accents === "strip") text = stripAccents(text);
   switch (part.letterCase) {
     case "upper":
       return text.toLocaleUpperCase("pt-BR");

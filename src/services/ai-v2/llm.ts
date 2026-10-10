@@ -39,11 +39,11 @@ import {
 import { knowledgeDocTitleMapByIds } from "@/services/ai/knowledge-docs";
 import { describeV2MessageModels, type V2MessageModelSummary } from "./tools";
 import { knowledgeDocIdsFor } from "./themes";
-import { clientNamesBoundToFacts, hasSearchableQuestion, procedureAdmittedMissing, isNearDuplicateReply, repeatFallback, knowledgeChunkTexts, lookupResultTexts, unsupportedFacts, unsupportedFigures, unsupportedHedges, unsupportedMenuPaths, unsupportedQuotedTerms } from "./ground-reply";
+import { clientNamesBoundToFacts, hasSearchableQuestion, admittedMissingInstructions, isNearDuplicateReply, repeatFallback, knowledgeChunkTexts, lookupResultTexts, unsupportedFacts, unsupportedFigures, unsupportedHedges, unsupportedMenuPaths, unsupportedQuotedTerms } from "./ground-reply";
 import { noteV2Fact, traceStep } from "./trace";
 import { SensitiveVault } from "./sensitive";
 import { boldInstruction, breakInlineSteps } from "./reply-format";
-import { markPastDates } from "./dates";
+import { markPastDates, tenseMismatches } from "./dates";
 import { calendarPromptSection } from "./calendar";
 import { QUERY_TOOL_NAMES, themePromptText } from "./theme-prompt";
 import { REPLY_ENDING_PROMPT, effectiveReplyEnding, hasReplyEnding } from "./reply-ending";
@@ -53,7 +53,7 @@ import { checkClaimsWithModel, sameClaim, worthClaimCheck } from "./claim-check"
 import { isMutilated, onlyKeptSentences, trimUnsupportedSentences } from "./reply-trim";
 import { MATERIAL_ATTACHMENT_LIMITS, attachmentsForDocs, attachmentsPromptSection } from "./material-attachments";
 import { humanRequestTerms } from "@/lib/ai-v2/config";
-import { actionsGuide, allowedActionTypes, allowedMessageModelIdsFor, queryToolRestriction, repairMessageModelId, themeToolRestriction } from "./action-policy";
+import { actionsGuide, allowedActionTypes, allowedFlowIdsFor, allowedMessageModelIdsFor, queryToolRestriction, repairMessageModelId, themeToolRestriction } from "./action-policy";
 import { getLogger } from "@/lib/logger";
 
 const log = getLogger("ai-v2.llm");
@@ -366,6 +366,7 @@ const v2ActionSchema: z.ZodType<V2Action> = z.object({
     "send_message_model",
     "send_product",
     "send_whatsapp_template",
+    "send_whatsapp_flow",
     "ask_with_options",
     "close_conversation",
     "tabulate_conversation",
@@ -631,6 +632,20 @@ const v2LLMOutputSchema: z.ZodType<V2LLMOutput> = z.object({
         adapt: (v as { adapt?: boolean }).adapt ?? false,
         variables: (v as { variables?: Record<string, string> }).variables ?? {},
       };
+    }),
+  flow: z
+    .union([
+      z.object({
+        id: z.unknown().transform((v) => (typeof v === "string" && v.trim() ? v.trim() : null)),
+      }),
+      z.null(),
+    ])
+    .optional()
+    .transform((v) => {
+      if (!v || typeof v !== "object" || v === null) return undefined;
+      const id = (v as { id?: string | null }).id;
+      if (!id || typeof id !== "string") return undefined;
+      return { id };
     }),
   attachments: z
     .unknown()
@@ -918,7 +933,7 @@ export function currentDateLine(timezone: string | undefined, now: Date = new Da
   } catch {
     text = now.toISOString();
   }
-  return `Agora é ${text} (${tz}). Use esta data para interpretar "hoje", "próximo(a)", "este mês" e prazos. Datas marcadas "(já passou)", nos trechos ou no calendário, já aconteceram: não as apresente como próximas e só cite se o cliente perguntar por elas. Se a data pedida não está no calendário nem nos trechos, diga que não tem essa data; não deduza.`;
+  return `Agora é ${text} (${tz}). Use esta data para interpretar "hoje", "próximo(a)", "este mês" e prazos. Datas marcadas "(já passou)", nos trechos ou no calendário, já aconteceram: não as apresente como próximas e só cite se o cliente perguntar por elas. Data depois de hoje ainda vai acontecer: fale dela no futuro ("será", "acontece em"), nunca como já realizada. Se a data pedida não está no calendário nem nos trechos, diga que não tem essa data; não deduza.`;
 }
 
 /** Quanto emoji usar. Padrão "nenhum": era o comportamento antes do parâmetro. */
@@ -1009,6 +1024,9 @@ function buildV2SystemPrompt(
   nothingRelevant = false,
   attachmentsSection = "",
   humanRequestWithQuestion = false,
+  flows: Array<{ id: string; name: string }> = [],
+  priorSummary: { text: string; at?: Date | null; agent?: string | null; current?: boolean } | null = null,
+  transparentTransfer = false,
 ): string {
   const timezone = config.businessHours?.timezone || "America/Sao_Paulo";
   const lines: string[] = [];
@@ -1100,6 +1118,22 @@ function buildV2SystemPrompt(
     lines.push(JSON.stringify(collectedVariables));
   }
 
+  // Resumo do atendimento anterior (ou o corrente): contexto para entender
+  // uma resposta curta a uma pergunta antiga, sem repetir nada ao cliente.
+  if (priorSummary?.text) {
+    const when = priorSummary.at ? ` — ${priorSummary.at.toLocaleDateString("pt-BR", { timeZone: timezone })}` : "";
+    const who = priorSummary.agent ? ` · ${priorSummary.agent}` : "";
+    lines.push(priorSummary.current ? "# Resumo desta conversa até aqui" : `# Último atendimento deste cliente (resumo)${when}${who}`);
+    lines.push(priorSummary.text);
+    lines.push("Use este resumo só para entender o contexto. Não o repita ao cliente nem diga que leu um resumo. Se a mensagem atual responde a algo que ficou pendente ali, continue de onde parou.");
+  }
+
+  // Transferência transparente entre agentes: o cliente não percebe a troca.
+  if (transparentTransfer) {
+    lines.push("# Continuidade");
+    lines.push("Esta conversa veio de outro assistente da mesma equipe e o cliente não sabe disso. Continue o atendimento como se fosse o mesmo assistente: não se apresente, não cumprimente de novo, não diga que recebeu a conversa nem que ela foi transferida. Responda direto ao que o cliente pediu.");
+  }
+
   const calendar = calendarPromptSection(config.calendar?.events, new Date(), timezone);
   if (calendar) lines.push(calendar);
 
@@ -1128,6 +1162,11 @@ function buildV2SystemPrompt(
       lines.push(`- ${m.id}: ${m.name}${m.mediaKinds.length > 0 ? ` (inclui ${[...new Set(m.mediaKinds)].join(", ")})` : ""}`);
       if (m.content?.trim()) lines.push(`  Texto: ${m.content.trim().replace(/\s*\n\s*/g, " / ")}`);
     }
+  }
+  if (flows.length > 0) {
+    lines.push("# Formulários (Flows) que você pode enviar");
+    lines.push("São flows publicados no WhatsApp. Envie só quando o cliente precisar preencher esse formulário. Devolva flow: { \"id\": \"<id>\" }. A reply é uma frase curta avisando que o formulário vem em seguida; não peça no texto os dados que o formulário já coleta.");
+    for (const f of flows) lines.push(`- ${f.id}: ${f.name}`);
   }
   if (attachmentsSection) lines.push(attachmentsSection);
 
@@ -1164,6 +1203,7 @@ function buildV2SystemPrompt(
     reply: "texto para o cliente",
     ...(offerTheme ? { theme: null } : {}),
     messageModel: null,
+    ...(flows.length > 0 ? { flow: null } : {}),
     handoff: false,
     concluded: false,
     confirmed: null,
@@ -1176,6 +1216,7 @@ function buildV2SystemPrompt(
     "- handoff: true só quando precisa de uma pessoa (ver Fontes).",
     "- actions: ações deste turno; vazia quando não há.",
     "- messageModel: null ou { id: string, adapt?: boolean, variables?: {chave: valor} }. Nunca um objeto vazio.",
+    ...(flows.length > 0 ? ["- flow: null ou { id: string } com o id de um formulário da lista. Nunca um objeto vazio."] : []),
     ...(attachmentsSection ? ["- attachments: ids de \"Anexos dos materiais\" para enviar, ou []."] : []),
     "- collected: dados que o cliente informou neste turno; vazio se nenhum.",
     "- concluded: true só quando o cliente indicou que terminou (agradeceu, se despediu ou disse que era só isso) e não fez pedido novo nesta mensagem. Se ele perguntou algo, responda e deixe concluded=false.",
@@ -1206,6 +1247,15 @@ async function actionStageNames(config: V2AgentConfig, theme: ReturnType<typeof 
   }
 }
 
+async function describeAllowedFlows(ids: string[]): Promise<Array<{ id: string; name: string }>> {
+  const wanted = [...new Set(ids.map((id) => id.trim()).filter(Boolean))].slice(0, 50);
+  if (wanted.length === 0) return [];
+  const { listPublishedFlowDefinitions } = await import("@/services/whatsapp-flow-definitions");
+  const rows = await listPublishedFlowDefinitions();
+  const allow = new Set(wanted);
+  return rows.filter((r) => allow.has(r.id)).map((r) => ({ id: r.id, name: r.name }));
+}
+
 export async function callV2LLM(args: {
   agentId: string;
   config: V2AgentConfig;
@@ -1218,6 +1268,10 @@ export async function callV2LLM(args: {
   previousMessages?: Array<{ role: "user" | "assistant"; content: string }>;
   /** O cliente pediu uma pessoa e fez uma pergunta na mesma mensagem. */
   humanRequestWithQuestion?: boolean;
+  /** Resumo do atendimento anterior do contato (ou corrente desta conversa). */
+  priorSummary?: { text: string; at?: Date | null; agent?: string | null; current?: boolean } | null;
+  /** Conversa recebida de outro agente de IA em modo transparente: sem se apresentar. */
+  transparentTransfer?: boolean;
 }): Promise<{
   output: V2LLMOutput;
   inputTokens: number;
@@ -1233,11 +1287,12 @@ export async function callV2LLM(args: {
   const promptTheme = activeTheme(args.config, args.themeId);
   const promptDocIds = knowledgeDocIdsFor(args.config, promptTheme);
   const modelIds = allowedMessageModelIdsFor(args.config, promptTheme);
+  const flowIds = allowedFlowIdsFor(args.config);
   // Chave do fornecedor da resposta (Claude → Anthropic; a busca nos
   // materiais continua com a chave OpenAI), títulos dos materiais, mensagens
   // prontas e etapas: leituras independentes, em paralelo — em série cada
   // uma somava sua ida ao banco à espera do cliente.
-  const [chatKey, docTitleMap, messageModels, actionStages] = await Promise.all([
+  const [chatKey, docTitleMap, messageModels, actionStages, flows] = await Promise.all([
     getAgentChatKey(args.agentId, args.config.model, apiKey),
     // Títulos dos materiais permitidos: ajudam o modelo a decidir quando
     // chamar knowledge_search e a contextualizar a resposta.
@@ -1259,6 +1314,13 @@ export async function callV2LLM(args: {
       return [] as V2MessageModelSummary[];
     }),
     actionStageNames(args.config, promptTheme),
+    describeAllowedFlows(flowIds).catch((err) => {
+      log.warn(
+        { err: err instanceof Error ? err.message : err },
+        "[ai-v2] Erro ao carregar flows",
+      );
+      return [] as Array<{ id: string; name: string }>;
+    }),
   ]);
   const knowledgeDocTitles = promptDocIds.map((id) => docTitleMap.get(id)).filter((t): t is string => Boolean(t));
   // Texto das mensagens prontas só no modo "combinar" e só das 3 mais ligadas à
@@ -1339,6 +1401,9 @@ export async function callV2LLM(args: {
     prefetch.searched && (prefetch.chunks.length === 0 || (prefetch.best ?? 0) < WEAK_MATCH_SIMILARITY),
     attachmentsPromptSection(offeredAttachments),
     args.humanRequestWithQuestion === true,
+    flows,
+    args.priorSummary ?? null,
+    args.transparentTransfer === true,
   );
 
   const messages: Array<{ role: "user" | "assistant"; content: string }> = [
@@ -1501,6 +1566,17 @@ export async function callV2LLM(args: {
       return { ...a, modelId: fixed };
     });
 
+    if (output.flow?.id) {
+      const shownFlowIds = flows.map((f) => f.id);
+      const flowId = repairMessageModelId(output.flow.id, shownFlowIds);
+      if (flowId !== output.flow.id) {
+        traceStep("flow", `Id "${output.flow.id}" corrigido para "${flowId}" (erro de cópia do modelo)`);
+        output.flow = { id: flowId };
+      }
+      const already = output.actions.some((a) => a.type === "send_whatsapp_flow" && a.flowId === flowId);
+      if (!already) output.actions = [{ type: "send_whatsapp_flow", flowId }, ...output.actions];
+    }
+
     // Anexos pedidos: só os oferecidos neste turno; viram a ação de envio.
     const offeredIds = new Set(offeredAttachments.map((a) => a.id));
     const chosen = [...new Set((output.attachments ?? []).filter((id) => offeredIds.has(id)))];
@@ -1597,8 +1673,15 @@ export async function callV2LLM(args: {
     // valor que só o cliente disse ("é R$ 30, né?" → "isso") fica com a
     // checagem por modelo, que distingue os dois casos.
     type Unsupported = { label: string; text: string };
+    const tz = args.config.businessHours?.timezone || "America/Sao_Paulo";
     const unsupportedOf = (reply: string, reason?: string): Unsupported[] => [
-      ...(procedureAdmittedMissing(reply, reason) ? [{ label: "um passo a passo que o material não traz (a própria decisão diz que a base não informa esse procedimento)", text: "" }] : []),
+      // Tempo verbal que a data desmente e que não se conserta só no verbo
+      // ("já passou" com data que ainda vem): a frase sai.
+      ...tenseMismatches(reply, new Date(), tz).filter((t) => !t.fixed).map((t) => ({ label: `"${t.sentence}" (${t.why})`, text: t.sentence })),
+      // Instrução que a própria decisão desautoriza ("a possibilidade de X
+      // não está especificada" + "acesse o portal e confira a opção de X"):
+      // sai só essa frase; o reconhecimento e o resto da resposta ficam.
+      ...admittedMissingInstructions(reply, reason).map((s) => ({ label: `"${s}" (instrução sobre o que a própria decisão admite não estar no material)`, text: s })),
       ...clientNamesBoundToFacts(reply, clientTexts, factSources).map((n) => ({ label: `"${n}" (nome citado pelo cliente que não está nas fontes, ligado a data ou valor)`, text: n })),
       ...unsupportedQuotedTerms(reply, sources, factSources).map((t) => ({ label: `"${t}"`, text: t })),
       ...unsupportedMenuPaths(reply, sources, factSources).map((t) => ({ label: `"${t}"`, text: t })),
@@ -1640,7 +1723,11 @@ export async function callV2LLM(args: {
     const modelClaims = async (output: V2LLMOutput): Promise<Unsupported[]> => {
       // Transferência só com o aviso não tem o que conferir; com orientação
       // (que agora chega ao cliente antes do aviso), confere.
-      if ((args.config.groundingCheck ?? "model") !== "model" || (output.handoff && !answersBeforeHandoff(output.reply)) || !worthClaimCheck(output.reply)) return [];
+      if ((output.handoff && !answersBeforeHandoff(output.reply)) || !worthClaimCheck(output.reply)) return [];
+      if ((args.config.groundingCheck ?? "model") !== "model") {
+        traceStep("verificação", "Checagem por modelo desligada na configuração — só as regras fixas conferiram a resposta");
+        return [];
+      }
       // Apresentação curta de mensagem pronta/anexo: o conteúdo vem do
       // material; a frase só anuncia o envio ("vou te orientar…"). Conferir
       // a frase barrava o envio e transferia o cliente.
@@ -1679,6 +1766,7 @@ export async function callV2LLM(args: {
         traceStep("verificação", "Checagem por modelo indisponível e a resposta traz passo a passo, caminho ou link não conferido");
         return [{ label: "um passo a passo, caminho ou link que não pôde ser conferido nos materiais", text: "" }];
       }
+      if (!res.ok) traceStep("verificação", "Checagem por modelo indisponível (erro ou tempo) — só as regras fixas conferiram a resposta");
       if (res.unsupported.length > 0) traceStep("verificação", `Checagem por modelo: ${res.unsupported.length} afirmação(ões) sem fonte — ${res.unsupported.map((c) => `"${c}"`).join(", ")}`);
       else if (res.ok) traceStep("verificação", "Checagem por modelo: tudo sustentado pelos materiais");
       return res.unsupported.map((c) => ({ label: `"${c}" (afirmação que não está nos materiais)`, text: c }));
@@ -1686,6 +1774,14 @@ export async function callV2LLM(args: {
     const labelsOf = (list: Unsupported[]) => list.map((u) => u.label);
     const textsOf = (list: Unsupported[]) => list.map((u) => u.text).filter(Boolean);
 
+    // Tempo verbal x data: "as provas foram realizadas de 06/11 a 09/11"
+    // com 06/11 ainda por vir. Quando é só o verbo, conserta; senão a frase
+    // sai (regra em `unsupportedOf`).
+    for (const t of tenseMismatches(r.output.reply, new Date(), tz)) {
+      if (!t.fixed) continue;
+      r.output = { ...r.output, reply: r.output.reply.replace(t.sentence, t.fixed) };
+      traceStep("verificação", `Tempo verbal corrigido: ${t.why}`);
+    }
     let output = r.output;
     let flags = unsupportedOf(output.reply, output.reason);
     // A checagem por modelo já leu as frases que sobram? Depois dela, o

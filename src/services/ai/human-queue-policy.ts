@@ -620,6 +620,37 @@ export function normalizeForDedupe(raw: string): string {
   return normalizeMsg(raw).replace(/[^\p{L}\p{N}\s]/gu, "");
 }
 
+function dedupeKey(raw: string): string {
+  return normalizeForDedupe(raw).replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Igual a `isNearDuplicateBotText`, sem contar os trechos que se repetem de
+ * propósito (o fecho configurado: "Posso ajudar em algo mais?…"). Com o
+ * fecho dentro, duas respostas de conteúdo diferente passavam do limite só
+ * por terminarem igual, e a segunda era barrada.
+ */
+export function isNearDuplicateBotTextIgnoring(
+  candidate: string,
+  existing: string,
+  ignore: readonly string[],
+): boolean {
+  const keys = ignore.map(dedupeKey).filter((k) => k.length >= 12);
+  if (keys.length === 0) return isNearDuplicateBotText(candidate, existing);
+  const strip = (raw: string) => {
+    let key = dedupeKey(raw);
+    for (const k of keys) key = key.split(k).join(" ");
+    return key.replace(/\s+/g, " ").trim();
+  };
+  const a = strip(candidate);
+  const b = strip(existing);
+  // Só o fecho dos dois lados: o mesmo fecho sozinho continua repetição.
+  if (!a && !b) return isNearDuplicateBotText(candidate, existing);
+  // Um dos lados era só o fecho: não é a mesma informação.
+  if (!a || !b) return false;
+  return isNearDuplicateBotText(a, b);
+}
+
 /**
  * True se `candidate` é praticamente a mesma informação de `existing`
  * (template de fila/conexão ou overlap alto de tokens).

@@ -83,9 +83,22 @@ export function introBeforeMaterial(reply: string): string {
   return out.split(/\s+/).length >= 3 ? out : "";
 }
 
-/** A resposta anuncia um envio ("segue o vídeo", "vou te mandar", "abaixo"). */
+/**
+ * A resposta anuncia, em primeira pessoa, que o agente manda algo ("vou te
+ * enviar o passo a passo", "segue abaixo o tutorial", "estou te mandando").
+ * Palavra solta não vale: "envie um arquivo por vez" (ordem ao cliente),
+ * "abaixo de 1 MB", "a tela fica em 'Enviando…'" não são promessas — e
+ * disparavam uma mensagem pronta qualquer do assunto.
+ */
+const ANNOUNCES_SENDING: RegExp[] = [
+  /\b(?:vou|irei|posso) (?:te |lhe )?(?:enviar|mandar|encaminhar|passar|compartilhar)\b/i,
+  /\b(?:estou|tô|to) (?:te |lhe )?(?:enviando|mandando|encaminhando|passando)\b/i,
+  /\b(?:te|lhe) (?:envio|mando|encaminho|passo) (?:agora|abaixo|a seguir|em seguida|aqui|o|a|os|as|um|uma)\b/i,
+  /\bsegue(?:m)? (?:abaixo|em anexo|aqui|a seguir|o|a|os|as|um|uma)\b/i,
+  /\b(?:em anexo|anexei|segue anexo|enviei abaixo|mandei abaixo|logo abaixo|aqui embaixo)\b/i,
+];
 export function announcesSending(reply: string): boolean {
-  return /\b(?:segue|seguem|envio|enviei|enviando|mando|mandei|mandando|vou (?:te |lhe )?(?:enviar|mandar)|abaixo|anexo|anexei)\b/i.test(reply);
+  return ANNOUNCES_SENDING.some((re) => re.test(reply));
 }
 
 /**
@@ -99,14 +112,28 @@ export function pickPromisedModelId(
   models: Array<{ id: string; name: string; content?: string | null }>,
 ): string | null {
   if (!announcesSending(reply) || models.length === 0) return null;
-  if (models.length === 1) return models[0].id;
-  const hay = `${userMessage}\n${reply}`;
-  let best: { id: string; score: number } | null = null;
-  for (const model of models) {
-    const score = sharedContentWords(hay, `${model.name}\n${model.content ?? ""}`);
-    if (!best || score > best.score) best = { id: model.id, score };
-  }
-  return best && best.score > 0 ? best.id : null;
+  // O nome da mensagem pronta diz do que ela trata e tem que casar com o que
+  // a promessa anuncia ("vou te enviar o passo a passo das horas…") ou com
+  // o pedido — não com uma palavra qualquer da resposta ("atendimento"
+  // aparece em tudo e levava a mensagem de avaliação para o meio de um
+  // tutorial). O texto inteiro só conta com várias palavras em comum.
+  const promise = reply
+    .split(/(?<=[.!?\n])\s+/)
+    .filter((sentence) => ANNOUNCES_SENDING.some((re) => re.test(sentence)))
+    .join(" ") || reply;
+  const scored = models.map((model) => {
+    const name = sharedContentWords(`${userMessage}\n${promise}`, model.name);
+    const body = sharedContentWords(`${userMessage}\n${reply}`, model.content ?? "");
+    return { id: model.id, name, body, score: name * 3 + body };
+  });
+  scored.sort((a, b) => b.score - a.score);
+  const best = scored[0];
+  if (!best) return null;
+  const relevant = best.name >= 1 || best.body >= 3;
+  if (!relevant) return null;
+  // Empate entre duas: não chuta.
+  if (scored.length > 1 && scored[1].score === best.score) return null;
+  return best.id;
 }
 
 /** Erro do executor quando o texto da mensagem pronta foi barrado por repetir uma recente. */
@@ -138,6 +165,38 @@ export function sentMessageModelIds(rows: Array<{ executedActions: unknown }>): 
 export function resendWindowStart(now: number, lastReset: Date | null): Date {
   const windowStart = now - RESEND_WINDOW_MS;
   return new Date(lastReset ? Math.max(windowStart, lastReset.getTime()) : windowStart);
+}
+
+/** Ações de atalho que respondem ao cliente com texto fixo. */
+export const RULE_REPLY_ACTION_TYPES = new Set(["send_message", "send_message_model", "send_whatsapp_template"]);
+
+/** Ids dos atalhos cujos turnos registrados mandaram resposta fixa. */
+export function appliedRuleIdsFromRows(rows: Array<{ ruleId: string | null; executedActions: unknown }>): Set<string> {
+  const out = new Set<string>();
+  for (const row of rows) {
+    if (!row.ruleId || !Array.isArray(row.executedActions)) continue;
+    const replied = (row.executedActions as Array<Record<string, unknown>>).some((res) => {
+      const action = (res?.action ?? {}) as Record<string, unknown>;
+      return res?.ok === true && typeof action.type === "string" && RULE_REPLY_ACTION_TYPES.has(action.type);
+    });
+    if (replied) out.add(row.ruleId);
+  }
+  return out;
+}
+
+/**
+ * Atalhos com mensagem fixa que já responderam nesta conversa (desde o
+ * último reset de teste). Um atalho que casa pela palavra-chave casaria de
+ * novo em toda mensagem que a repete, mandando o mesmo texto várias vezes
+ * para dúvidas diferentes.
+ */
+export async function recentlyAppliedRuleIds(conversationId: string): Promise<Set<string>> {
+  const since = (await lastV2ResetAt(conversationId)) ?? new Date(0);
+  const rows = await db.$queryRawUnsafe<Array<{ ruleId: string | null; executedActions: unknown }>>(
+    `SELECT "contextSnapshot"->>'appliedRuleId' AS "ruleId", "executedActions" FROM "ai_simple_turn_logs" WHERE "conversationId"=$1 AND "createdAt" >= $2 AND "contextSnapshot"->>'appliedRuleId' IS NOT NULL ORDER BY "createdAt" DESC LIMIT 50`,
+    conversationId, since,
+  );
+  return appliedRuleIdsFromRows(rows);
 }
 
 /** Quais destas mensagens prontas já saíram na conversa dentro da janela. */
