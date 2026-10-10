@@ -278,7 +278,7 @@ export function evaluateResponsibleEligibility(
     !requested &&
     input.inDepartment !== true
   ) {
-    // Lead sem departamento: não sorteia quem é de um segmento (Acolhimento).
+    // Lead sem departamento: não sorteia quem é de um segmento (ex.: departamento de entrada).
     reasons.push("TYPE_INCOMPATIBLE");
   }
 

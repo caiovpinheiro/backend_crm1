@@ -18,7 +18,7 @@ import { maybeDistributeNewInboundTicket } from "@/services/distribution";
 import { inheritContactAssigneeForNewTicket } from "@/services/ai/attendance-gate";
 import { onInboundMessageForAi } from "@/services/ai/turn-manager";
 import { resolvePostCloseInbound } from "@/services/post-close-return";
-import { ensureInboundAiAttendance } from "@/services/ai/first-attendance";
+import { ensureInboundAiAttendance } from "@/services/ai-v2/first-attendance";
 import { processIncomingMessage as processSalesbotMessage } from "@/services/automation-context";
 import { notifyInboundMessage } from "@/lib/web-push";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";

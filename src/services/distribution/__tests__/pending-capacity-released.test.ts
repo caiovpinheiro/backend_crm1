@@ -61,7 +61,7 @@ vi.mock("@/lib/request-context", () => ({
   runWithContext: async (_ctx: unknown, fn: () => unknown) => fn(),
 }));
 
-vi.mock("@/services/ai/first-attendance", () => ({
+vi.mock("@/services/ai-v2/first-attendance", () => ({
   tryAssignFirstAttendanceAi: vi.fn(),
 }));
 

@@ -38,7 +38,7 @@ import {
 import { hasOrganizationWidget } from "@/services/organization-widgets";
 
 import { isAiAttendanceEnabled } from "@/services/ai/attendance-gate";
-import { tryAssignFirstAttendanceAi } from "@/services/ai/first-attendance";
+import { tryAssignFirstAttendanceAi } from "@/services/ai-v2/first-attendance";
 import { isHumanAttendanceWindowOpen } from "@/services/ai/human-queue-policy";
 import { isRetiredWhatsAppChannel } from "@/lib/channels/retired-whatsapp";
 import {
@@ -99,9 +99,9 @@ export interface PendingDistributionView {
  * Critério da fila = atendimentos ABERTOS SEM responsável (`assignedToId=null`)
  * em que o contato JÁ RESPONDEU pelo menos uma vez (`lastInboundAt` preenchido).
  *
- * Calouros que só receberam template "BV / Bem-vindo" e nunca responderam
+ * Leads novos que só receberam template "BV / Bem-vindo" e nunca responderam
  * NÃO entram na fila de espera nem na drenagem — só passam a contar quando
- * houver inbound real do aluno.
+ * houver inbound real do cliente.
  *
  * NÃO usamos `hasAgentReply` de propósito: uma resposta de AUTOMAÇÃO/IA marca
  * `hasAgentReply=true` e tiraria o lead da aba "Entrada", mas ele continua SEM

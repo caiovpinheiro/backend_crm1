@@ -624,7 +624,7 @@ export async function executeLeadsDistribution(
   }
 
   // Saudação pós-distribuição (paridade smart): humano assumindo com a
-  // janela Meta 24h aberta. Fora da janela, o aluno reabre ao responder.
+  // janela Meta 24h aberta. Fora da janela, o cliente reabre ao responder.
   if (target.conversationId) {
     try {
       const conv = await prisma.conversation.findUnique({

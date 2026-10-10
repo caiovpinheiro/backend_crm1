@@ -12,11 +12,29 @@ import {
   isWithinBusinessHours,
   normalizeBusinessHours,
   type BusinessHoursConfig,
-} from "@/lib/ai-agents/piloting";
-import {
-  DEFAULT_HUMAN_REQUEST_KEYWORDS,
-  type InboxPolicy,
-} from "@/lib/ai-agents/steering";
+} from "@/lib/business-hours";
+
+/** Campos de política de fila que este módulo lê (configuração por agente). */
+export type InboxPolicy = {
+  handoffMessage?: string | null;
+  humanAttendanceHours?: BusinessHoursConfig | null;
+  humanAttendancePreEndMinutes?: number | null;
+  queueMessage?: string | null;
+  assignedConsultantMessage?: string | null;
+  queueFollowUpMessage?: string | null;
+  audioHandoffMessage?: string | null;
+  humanRequestKeywords?: string[];
+};
+
+export const DEFAULT_HUMAN_REQUEST_KEYWORDS: string[] = [
+  "atendente",
+  "equipe",
+  "humano",
+  "consultor",
+  "humana",
+  "operador",
+  "suporte",
+];
 
 export type HumanQueueContext = {
   businessHours?: BusinessHoursConfig | null;

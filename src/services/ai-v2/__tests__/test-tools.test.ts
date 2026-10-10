@@ -48,10 +48,9 @@ vi.mock("@/services/ai/phone-allowlist", () => {
     },
   };
 });
-vi.mock("@/services/ai/test-mode", () => ({ resolveTestModeOperator: mocks.operator }));
 vi.mock("@/services/ai/turn-manager", () => ({ invalidateOpenTurns: mocks.invalidateOpenTurns }));
 vi.mock("@/services/ai/attendance-gate", () => ({ isAiAttendanceEnabled: mocks.attendance }));
-vi.mock("@/services/ai/piloting-actions", () => ({ sendAgentMessage: mocks.sendAgentMessage }));
+vi.mock("@/services/ai/send-agent-message", () => ({ sendAgentMessage: mocks.sendAgentMessage }));
 vi.mock("@/services/conversations", () => ({ resolveConversationsInline: mocks.resolveInline }));
 vi.mock("../log", () => ({ logV2Turn: mocks.logV2Turn }));
 vi.mock("../ensure-schema", () => ({ ensureV2AgentSchema: vi.fn().mockResolvedValue(undefined) }));

@@ -2,7 +2,7 @@
  * Contexto do último disparo (campanha / template WhatsApp) para o agente.
  *
  * A bolha no inbox muitas vezes grava só o rótulo
- * ("Modelo de mensagem enviado… Nome: calouros_agost0209") sem o corpo
+ * ("Modelo de mensagem enviado… Nome: promo_agost0209") sem o corpo
  * que o contato viu. Sem esse texto o LLM trata "como faço para ver?"
  * como conversa nova.
  *
@@ -136,7 +136,7 @@ function slugAlnum(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
-/** `calouros0209` casa `calouros_agost0209` (mesmo prefixo + sufixo numérico). */
+/** `promo0209` casa `promo_agost0209` (mesmo prefixo + sufixo numérico). */
 function tagMatchesTemplate(tag: string, candidate: string): boolean {
   const t = slugAlnum(tag);
   const c = slugAlnum(candidate);
@@ -185,11 +185,8 @@ async function resolveFromContactTags(
   const names = rows
     .map((r) => r.tag.name.trim())
     .filter((n) => n.length >= 4);
-  const ranked = [...names].sort((a, b) => {
-    const score = (n: string) =>
-      /calouro|prova|matric|acesso|inaugur/i.test(n) ? 0 : 1;
-    return score(a) - score(b) || b.length - a.length;
-  });
+  // Tag mais específica (mais longa) primeiro.
+  const ranked = [...names].sort((a, b) => b.length - a.length);
   const configs = await prisma.whatsAppTemplateConfig.findMany({
     where: { hiddenAt: null },
     select: { bodyPreview: true, metaTemplateName: true, label: true },

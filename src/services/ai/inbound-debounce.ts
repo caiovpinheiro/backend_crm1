@@ -29,10 +29,9 @@ import {
 } from "@/lib/request-context";
 import { getOrgSetting } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
-import {
-  DEFAULT_INBOUND_BATCH_WINDOW_MINUTES,
-  normalizeInboxPolicy,
-} from "@/lib/ai-agents/steering";
+
+/** Teto temporal do lote de mensagens não respondidas, em minutos. */
+const DEFAULT_INBOUND_BATCH_WINDOW_MINUTES = 15;
 import { isContactAllowedForAi } from "@/services/ai/phone-allowlist";
 import { getLogger } from "@/lib/logger";
 
@@ -110,8 +109,7 @@ export async function claimInboundMessageForAi(
  * Ponto ÚNICO de cancelamento: além do timer local e do generationId,
  * invalida os `ConversationTurn` acumulando da conversa. Todos os call
  * sites atuais (POST /messages, actions/assignee, halt-inbound-burst,
- * moveConversationAssignee, farewell do inbox-handler, `ai_only_close`
- * do vertical academic) ficam cobertos sem mudar nenhum deles.
+ * moveConversationAssignee) ficam cobertos sem mudar nenhum deles.
  */
 export function cancelAiReplyDebounce(
   conversationId: string,
@@ -142,174 +140,8 @@ export function cancelAiReplyDebounce(
 }
 
 /**
- * Agenda resposta do agente com debounce renovável.
- */
-export async function scheduleAiReply(
-  input: ScheduleAiReplyInput,
-): Promise<void> {
-  if (input.eligible === false) return;
-  if (!input.userMessage?.trim() && !input.messageId) return;
-
-  // Não processa via debounce se a conversa pertence ao motor v2.
-  const { isSimpleEngineConversation } = await import("@/services/ai-v2/agent-resolver");
-  if (await isSimpleEngineConversation(input.conversationId)) return;
-
-  // Allowlist (default aberto em produção). Se restricted, bloqueia.
-  try {
-    const allowed = await isContactAllowedForAi(input.contactId);
-    if (!allowed) {
-      logAi("debounce_skip_allowlist", {
-        conversationId: input.conversationId,
-        contactId: input.contactId,
-      });
-      return;
-    }
-  } catch (e) {
-    log.error({ err: e }, "[ai] phone allowlist check failed — blocking reply");
-    return;
-  }
-
-  const claimed = await claimInboundMessageForAi(input.messageId);
-  if (!claimed) return;
-
-  const orgId = getOrgIdOrNull();
-  const ctx = (await import("@/lib/request-context")).getRequestContext();
-  const userId = ctx?.userId ?? "system";
-
-  const generationId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-  await cache.set(`ai:gen:${input.conversationId}`, generationId, GEN_TTL_SEC);
-
-  let slot = pendingByConversation.get(input.conversationId);
-  if (slot?.timer) {
-    clearTimeout(slot.timer);
-    slot.timer = null;
-  }
-
-  const messageIds = [
-    ...(slot?.messageIds ?? []),
-    ...(input.messageId ? [input.messageId] : []),
-  ];
-
-  slot = {
-    generationId,
-    timer: null,
-    orgId,
-    userId,
-    contactId: input.contactId,
-    channel: input.channel,
-    messageIds,
-  };
-  pendingByConversation.set(input.conversationId, slot);
-
-  const delayMs = await resolveDebounceMs();
-  logAi("debounce_scheduled", {
-    conversationId: input.conversationId,
-    contactId: input.contactId,
-    channel: input.channel,
-    generationId,
-    delayMs,
-    pendingMessages: messageIds.length,
-  });
-
-  if (delayMs === 0) {
-    await flushDebounce(input.conversationId, generationId);
-    return;
-  }
-
-  slot.timer = setTimeout(() => {
-    void flushDebounce(input.conversationId, generationId);
-  }, delayMs);
-
-  if (typeof slot.timer === "object" && slot.timer && "unref" in slot.timer) {
-    try {
-      slot.timer.unref();
-    } catch {
-      /* ignore */
-    }
-  }
-}
-
-async function flushDebounce(
-  conversationId: string,
-  generationId: string,
-): Promise<void> {
-  const slot = pendingByConversation.get(conversationId);
-  if (!slot || slot.generationId !== generationId) {
-    logAi("debounce_stale", { conversationId, generationId });
-    return;
-  }
-  pendingByConversation.delete(conversationId);
-
-  const currentGen = await cache.get<string>(`ai:gen:${conversationId}`);
-  if (currentGen && currentGen !== generationId) {
-    logAi("debounce_superseded", {
-      conversationId,
-      generationId,
-      currentGen,
-    });
-    return;
-  }
-
-  const run = async () => {
-    const started = Date.now();
-    const batchText = await collectUnansweredInboundText(conversationId);
-    if (!batchText.trim()) {
-      logAi("debounce_empty_batch", { conversationId, generationId });
-      return;
-    }
-
-    const channel =
-      slot.channel === "messaging" ? "meta" : slot.channel;
-
-    const { maybeReplyAsAIAgent } = await import("@/services/ai/inbox-handler");
-    await maybeReplyAsAIAgent({
-      conversationId,
-      contactId: slot.contactId,
-      userMessage: batchText,
-      channel,
-      generationId,
-      inboundMessageIds: slot.messageIds,
-    });
-
-    logAi("debounce_flushed", {
-      conversationId,
-      generationId,
-      channel: slot.channel,
-      durationMs: Date.now() - started,
-      messageCount: slot.messageIds.length,
-    });
-  };
-
-  try {
-    if (slot.orgId) {
-      await runWithContext(
-        {
-          organizationId: slot.orgId,
-          userId: slot.userId,
-          isSuperAdmin: false,
-          actor: {
-            type: "AI",
-            label: "Agente IA",
-            sublabel: "inbound-debounce",
-          },
-        },
-        run,
-      );
-    } else {
-      await run();
-    }
-  } catch (err) {
-    log.error(
-      { conversationId, generationId, err: err instanceof Error ? err.message : String(err) },
-      "[ai-attend] flushDebounce failed",
-    );
-  }
-}
-
-/**
- * Depois de atribuir/transferir no inbox para um User type=AI: responde
- * inbound sem resposta, ou manda a saudação se o contato ainda não falou.
- * Fire-and-forget — o HTTP do assign não espera o LLM.
+ * Depois de atribuir a conversa a um agente de IA pela caixa de entrada:
+ * se há mensagem do cliente sem resposta, abre o turno com ela.
  */
 export function kickAiAfterInboxAssign(args: {
   conversationId: string;
@@ -338,19 +170,7 @@ export function kickAiAfterInboxAssign(args: {
           });
           return;
         }
-        const conv = await prisma.conversation.findUnique({
-          where: { id: args.conversationId },
-          select: { assignedToId: true },
-        });
-        if (!conv?.assignedToId) return;
-        const { triggerAgentOpeningForContact } = await import(
-          "@/services/ai/piloting-actions"
-        );
-        await triggerAgentOpeningForContact({
-          contactId: args.contactId,
-          agentUserId: conv.assignedToId,
-          channel: "meta",
-        });
+        // Sem mensagem pendente: o agente fala na próxima mensagem do cliente.
       } catch (e) {
         log.error({ err: e }, "[ai-attend] kickAiAfterInboxAssign failed");
       }
@@ -363,35 +183,8 @@ export function kickAiAfterInboxAssign(args: {
   })();
 }
 
-/**
- * Teto temporal do lote, em minutos, configurado no agente atribuído.
- * Sem agente IA (ou sem contexto) cai no default seguro.
- */
-async function resolveInboundBatchWindowMinutes(
-  conversationId: string,
-): Promise<number> {
-  try {
-    const conv = await prisma.conversation.findUnique({
-      where: { id: conversationId },
-      select: {
-        assignedTo: {
-          select: {
-            type: true,
-            aiAgentConfig: {
-              select: { inboxPolicy: true, verticalPack: true },
-            },
-          },
-        },
-      },
-    });
-    const cfg =
-      conv?.assignedTo?.type === "AI" ? conv.assignedTo.aiAgentConfig : null;
-    if (!cfg) return DEFAULT_INBOUND_BATCH_WINDOW_MINUTES;
-    return normalizeInboxPolicy(cfg.inboxPolicy, cfg.verticalPack)
-      .inboundBatchWindowMinutes;
-  } catch {
-    return DEFAULT_INBOUND_BATCH_WINDOW_MINUTES;
-  }
+async function resolveInboundBatchWindowMinutes(_conversationId: string): Promise<number> {
+  return DEFAULT_INBOUND_BATCH_WINDOW_MINUTES;
 }
 
 /**

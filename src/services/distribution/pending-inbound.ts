@@ -7,7 +7,7 @@ import { prisma } from "@/lib/prisma";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { hasOrganizationWidget } from "@/services/organization-widgets";
 import { isAiAttendanceEnabled } from "@/services/ai/attendance-gate";
-import { tryAssignFirstAttendanceAi } from "@/services/ai/first-attendance";
+import { tryAssignFirstAttendanceAi } from "@/services/ai-v2/first-attendance";
 import { isHumanAttendanceWindowOpen } from "@/services/ai/human-queue-policy";
 import { isRetiredWhatsAppChannel } from "@/lib/channels/retired-whatsapp";
 import {
@@ -76,7 +76,7 @@ async function systemInboundMayDistribute(
  *
  * Bug histórico (ago/2026): tratar qualquer assignee ≠ null como órfã
  * cancelava a fila no mesmo segundo em que a IA reassumia → centenas de
- * alunos ficavam na aba Automação “para sempre” após expediente.
+ * clientes ficavam na aba Automação “para sempre” após expediente.
  *
  * `resolvedUserId=null` marca que foi cleanup, não distribuição real.
  */
@@ -129,7 +129,7 @@ export async function cancelStalePendingOrphans(orgId: string): Promise<number> 
 
 /**
  * Remove da fila de espera (lista + DistributionPending) conversas OPEN sem
- * responsável em que o aluno nunca respondeu — tipicamente calouros que só
+ * responsável em que o cliente nunca respondeu — tipicamente leads novos que só
  * receberam template de bem-vindo. Chamada no GET da fila para limpar o
  * dashboard imediatamente, sem depender do cron de drenagem.
  */
@@ -182,7 +182,7 @@ export async function purgeUnansweredFromPendingQueue(): Promise<number> {
 }
 
 /**
- * Inbound do aluno (ticket novo OU conversa OPEN reusada): tenta
+ * Inbound do cliente (ticket novo OU conversa OPEN reusada): tenta
  * atribuir um consultor elegível; sem elegíveis, entra na fila de espera.
  *
  * Com o kill-switch de IA, o 1º atendimento não assume — o card não
@@ -203,7 +203,7 @@ export async function maybeDistributeNewInboundTicket(input: {
 }): Promise<void> {
   // Toggle desligado: o inbound não entra. O widget instalado não basta —
   // a reavaliação de expediente zerava o responsável da automação
-  // (DNA Work #66592) antes do gate que ficava no fim desta função.
+  // (caso real) antes do gate que ficava no fim desta função.
   if (!(await isDistributionEnabled())) {
     return;
   }
@@ -280,7 +280,7 @@ export async function maybeDistributeNewInboundTicket(input: {
   );
   // #endregion
 
-  // Automação encerrou e o aluno voltou: o consultor anterior continua.
+  // Automação encerrou e o cliente voltou: o consultor anterior continua.
   // Sem isso o 1º atendimento da IA tira o humano e ninguém responde.
   try {
     const keptHumanId = await keepHumanAfterAutomationClose({
@@ -513,7 +513,7 @@ export async function maybeDistributeNewInboundTicket(input: {
     );
     // #endregion
     if (!widgetActive) {
-      // IA off e sem widget: ainda assim o aluno não pode ficar sem fila,
+      // IA off e sem widget: ainda assim o cliente não pode ficar sem fila,
       // salvo com o toggle de inbound desligado.
       if (
         !(await isAiAttendanceEnabled()) &&

@@ -268,7 +268,7 @@ async function enqueuePending(input: ExecuteDistributionInput): Promise<void> {
   const hydrated = await hydrateDistributionIds(input);
   if (!hydrated.dealId && !hydrated.contactId) return;
   try {
-    // Sem inbound do aluno (ex.: só template BV/Bem-vindo) não entra na fila —
+    // Sem inbound do cliente (ex.: só template BV/Bem-vindo) não entra na fila —
     // exceto redistribuição MANUAL (operador mandou p/ departamento com fila
     // cheia): aí o lead precisa aparecer na espera mesmo sem novo inbound.
     const isManual = hydrated.triggerSource === "MANUAL";
@@ -280,7 +280,7 @@ async function enqueuePending(input: ExecuteDistributionInput): Promise<void> {
       if (!conv?.lastInboundAt) {
         log.info(
           { conversationId: hydrated.conversationId },
-          "[distribution] enqueuePending skip — sem inbound do aluno",
+          "[distribution] enqueuePending skip — sem inbound do cliente",
         );
         return;
       }
@@ -1165,36 +1165,12 @@ export async function executeDistribution(
     selectedIsHuman = false;
   }
 
-  if (
-    selectedIsHuman &&
-    (input.triggerSource === "AI_AGENT" ||
-      (input.triggerSource === "SYSTEM" && Boolean(input.departmentId)))
-  ) {
-    try {
-      // Funil operacional é refino de vertical: quem define é o pack do
-      // agente da conversa. Sem pack, o card não muda de etapa — nunca
-      // aplicamos o funil de uma organização em outra.
-      const { resolveAgentVerticalForConversation } = await import(
-        "@/services/ai/agent-vertical"
-      );
-      const { ops } = await resolveAgentVerticalForConversation(
-        input.conversationId ?? null,
-      );
-      await ops.moveOpenDealToEmAtendimento?.({
-        dealId: assignedDealId,
-        contactId: input.contactId ?? null,
-      });
-    } catch (e) {
-      log.error({ err: e }, "[distribution] moveOpenDealToEmAtendimento failed");
-    }
-  }
-
   // Saudação pós-distribuição (`lead_distributed`): HUMAN assumindo vindo
   // de IA/null. Não re-dispara em handoff humano→humano.
   //
   // Fora da janela Meta 24h a saudação em texto livre falha (131047) e marca
   // hasError — típico após disparo HSM em ticket antigo. Sem inbound recente
-  // NÃO dispara a automação; o aluno reabre a janela ao responder o template.
+  // NÃO dispara a automação; o cliente reabre a janela ao responder o template.
   const priorWasHuman = preAssignSnap?.assigneeType === "HUMAN";
   let sessionOpenForFreeText = true;
   if (input.conversationId) {

@@ -1,28 +1,12 @@
-﻿/**
- * Ações operacionais do agente de IA ("piloting") — lado do servidor.
- *
- * Reúnem duas primitivas compartilhadas entre o `inbox-handler`
- * (resposta a mensagens inbound) e o `ai-agent-inactivity-worker`
- * (varredura de silêncio do cliente):
- *
- *  - `sendAgentMessage`    — persiste + envia uma mensagem OUT pelo
- *    canal da conversa. Respeita `autonomyMode` (se DRAFT, grava como
- *    rascunho pro operador humano aprovar).
- *  - `executeAgentHandoff` — transfere a conversa para humano
- *    conforme o modo configurado (KEEP_OWNER / SPECIFIC_USER /
- *    UNASSIGN), registra activity + evento de deal e publica SSE.
- *
- * Mantemos isso FORA de `tools.ts` porque aqui o handoff é disparado
- * sem passar pelo LLM (evento determinístico).
+/**
+ * Envio de mensagem pelo agente de IA: marca como lida, "digitando…"
+ * proporcional ao texto, texto ou mensagem interativa (botões/lista),
+ * registro da mensagem e eventos da conversa. Usado pelo motor v2.
  */
 
 import type { AIAgentAutonomy } from "@prisma/client";
 
-import {
-  computeTypingDelayMs,
-  typingDelayWithinBudget,
-  renderTemplate,
-} from "@/lib/ai-agents/piloting";
+import { computeTypingDelayMs, typingDelayWithinBudget } from "@/lib/typing-delay";
 import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import { touchChatLastMessageAt } from "@/lib/conversation-last-message";
 import { prisma } from "@/lib/prisma";
@@ -45,14 +29,65 @@ async function aiSenderName(agentUserId: string): Promise<string> {
   });
   return u?.name?.trim() || "Agente IA";
 }
-import { createActivity } from "@/services/activities";
-import { logEvent } from "@/services/activity-log";
-import { createDealEvent } from "@/services/deals";
 import { createConversationEvent } from "@/services/conversation-events";
-import { rewriteMismatchedDaypartWish } from "@/services/ai/idle-followup";
+import { rewriteMismatchedDaypartWish } from "@/lib/daypart-wish";
+import { cache } from "@/lib/cache";
 import { getLogger } from "@/lib/logger";
 
-const log = getLogger("ai.piloting-actions");
+/**
+ * Confirma que a conversa ainda está com um agente IA ativo e que
+ * nenhum humano respondeu depois do início do processamento.
+ */
+export async function assertAiStillAuthorized(args: {
+  conversationId: string;
+  expectedAgentUserId: string;
+  generationId?: string;
+  since?: Date;
+}): Promise<{ ok: true } | { ok: false; reason: string }> {
+  if (args.generationId) {
+    const current = await cache.get<string>(`ai:gen:${args.conversationId}`);
+    if (current && current !== args.generationId) {
+      return { ok: false, reason: "generation_superseded" };
+    }
+  }
+
+  const conversation = await prisma.conversation.findUnique({
+    where: { id: args.conversationId },
+    select: {
+      assignedToId: true,
+      hasHumanReply: true,
+      assignedTo: { select: { type: true } },
+    },
+  });
+  if (!conversation?.assignedToId) {
+    return { ok: false, reason: "unassigned" };
+  }
+  if (conversation.assignedToId !== args.expectedAgentUserId) {
+    return { ok: false, reason: "assignee_changed" };
+  }
+  if (conversation.assignedTo?.type !== "AI") {
+    return { ok: false, reason: "assignee_not_ai" };
+  }
+
+  // Humano falou depois do início deste processamento?
+  if (args.since) {
+    const humanOut = await prisma.message.findFirst({
+      where: {
+        conversationId: args.conversationId,
+        direction: "out",
+        authorType: "human",
+        isPrivate: false,
+        createdAt: { gte: args.since },
+      },
+      select: { id: true },
+    });
+    if (humanOut) return { ok: false, reason: "human_replied_during_run" };
+  }
+
+  return { ok: true };
+}
+
+const log = getLogger("ai.send-agent-message");
 
 /**
  * Busca o wamid (externalId) da mensagem INBOUND mais recente da
@@ -82,43 +117,6 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/**
- * Despedida enviada → encerra o atendimento se o contato já havia fechado o
- * assunto. Fica aqui (e não só no inbox) porque a resposta pode sair pela
- * tool `send_message` ou pelo follow-up — todas passam por este envio.
- * Saudação e aviso de fora de horário nunca encerram.
- */
-async function closeAttendanceIfFarewell(args: {
-  conversationId: string;
-  contactId: string;
-  agentUserId?: string | null;
-  kind?: "text" | "greeting" | "farewell" | "off_hours";
-  text: string;
-}): Promise<void> {
-  if (args.kind === "greeting" || args.kind === "off_hours") return;
-  try {
-    // Pack do agente que está falando, não "academic" fixo. Sem vertical,
-    // o encerramento por despedida não se aplica.
-    const { resolveAgentVerticalByAgentUserId } = await import(
-      "@/services/ai/agent-vertical"
-    );
-    const { ops } = await resolveAgentVerticalByAgentUserId(
-      args.agentUserId ?? null,
-    );
-    const closeIfAgentFarewellEndsAttendance =
-      ops.closeIfAgentFarewellEndsAttendance;
-    await closeIfAgentFarewellEndsAttendance?.({
-      conversationId: args.conversationId,
-      contactId: args.contactId,
-      replyText: args.text,
-    });
-  } catch (e) {
-    log.warn(
-      { err: e instanceof Error ? e.message : e },
-      "[ai-piloting] encerramento pós-despedida falhou",
-    );
-  }
-}
 
 export type SendAgentMessageResult =
   | { status: "sent"; messageId: string }
@@ -275,9 +273,6 @@ export async function sendAgentMessage(args: {
 
   // Revalida autorização imediatamente antes de qualquer envio.
   if (!args.bypassAssigneeCheck) {
-    const { assertAiStillAuthorized } = await import(
-      "@/services/ai/inbox-handler"
-    );
     const auth = await assertAiStillAuthorized({
       conversationId: args.conversationId,
       expectedAgentUserId: args.agentUserId,
@@ -350,7 +345,7 @@ export async function sendAgentMessage(args: {
         } catch (err) {
           log.warn(
             { conv: args.conversationId, err: err instanceof Error ? err.message : err },
-            "[ai-piloting] markAsRead falhou",
+            "[ai-send] markAsRead falhou",
           );
         }
       }
@@ -367,9 +362,6 @@ export async function sendAgentMessage(args: {
     }
 
     if (!args.bypassAssigneeCheck) {
-      const { assertAiStillAuthorized } = await import(
-        "@/services/ai/inbox-handler"
-      );
       const auth2 = await assertAiStillAuthorized({
         conversationId: args.conversationId,
         expectedAgentUserId: args.agentUserId,
@@ -406,7 +398,7 @@ export async function sendAgentMessage(args: {
         // Recusado (janela, formato): as opções seguem numeradas no texto.
         log.warn(
           { conv: args.conversationId, err },
-          "[ai-piloting] envio interativo falhou. Enviando como texto.",
+          "[ai-send] envio interativo falhou. Enviando como texto.",
         );
       }
     }
@@ -423,7 +415,7 @@ export async function sendAgentMessage(args: {
       } catch (err) {
         log.error(
           { conv: args.conversationId, err },
-          "[ai-piloting] envio autônomo falhou. Gravando rascunho.",
+          "[ai-send] envio autônomo falhou. Gravando rascunho.",
         );
         return saveDraft(args.conversationId, args.agentUserId, text);
       }
@@ -465,13 +457,6 @@ export async function sendAgentMessage(args: {
       content: savedContent,
       timestamp: saved.createdAt,
     });
-    await closeAttendanceIfFarewell({
-      conversationId: args.conversationId,
-      contactId: args.contactId,
-      agentUserId: args.agentUserId,
-      kind: args.kind,
-      text,
-    });
     return { status: "sent", messageId: saved.id };
   }
 
@@ -490,9 +475,6 @@ export async function sendAgentMessage(args: {
       }
 
       if (!args.bypassAssigneeCheck) {
-        const { assertAiStillAuthorized } = await import(
-          "@/services/ai/inbox-handler"
-        );
         const authB = await assertAiStillAuthorized({
           conversationId: args.conversationId,
           expectedAgentUserId: args.agentUserId,
@@ -547,18 +529,11 @@ export async function sendAgentMessage(args: {
         content: text,
         timestamp: saved.createdAt,
       });
-      await closeAttendanceIfFarewell({
-        conversationId: args.conversationId,
-        contactId: args.contactId,
-        agentUserId: args.agentUserId,
-        kind: args.kind,
-        text,
-      });
       return { status: "sent", messageId: saved.id };
     } catch (err) {
       log.warn(
         { conv: args.conversationId, err: err instanceof Error ? err.message : err },
-        "[ai-piloting] Baileys send falhou",
+        "[ai-send] Baileys send falhou",
       );
       return saveDraft(args.conversationId, args.agentUserId, text);
     }
@@ -615,374 +590,3 @@ async function saveDraft(
  * eternamente após qualquer resposta anterior do agente, mesmo em
  * novas reatribuições.
  */
-export async function agentHasEverRepliedInConversation(
-  conversationId: string,
-  agentUserId: string,
-): Promise<boolean> {
-  const existing = await prisma.message.findFirst({
-    where: {
-      conversationId,
-      authorType: "bot",
-      aiAgentUserId: agentUserId,
-    },
-    select: { id: true },
-  });
-  return existing !== null;
-}
-
-/**
- * Retorna true se o agente IA já disparou a saudação na atribuição
- * ATUAL da conversa. Usa `Conversation.aiGreetedAt`, que é setada
- * quando a saudação é enviada e RESETADA quando a conversa muda
- * de `assignedToId`.
- */
-export async function hasAgentGreetedInCurrentAssignment(
-  conversationId: string,
-  opts?: { ignorePriorBotOutbound?: boolean },
-): Promise<boolean> {
-  const row = await prisma.conversation.findUnique({
-    where: { id: conversationId },
-    select: { aiGreetedAt: true },
-  });
-  if (row?.aiGreetedAt != null) return true;
-  // Handoff IA→IA: o aviso do orquestrador já é outbound bot. Se contar
-  // qualquer bot da thread, a abertura do destino nunca sai.
-  if (opts?.ignorePriorBotOutbound) return false;
-
-  // Fallback: qualquer outbound do bot nesta conversa conta como
-  // já saudou — evita reenviar openingMessage após handoff.
-  const botOut = await prisma.message.findFirst({
-    where: {
-      conversationId,
-      direction: "out",
-      authorType: "bot",
-      isPrivate: false,
-      messageType: { not: "note" },
-    },
-    select: { id: true },
-  });
-  return botOut != null;
-}
-
-/**
- * Marca que o agente IA cumprimentou nesta atribuição. Chamado logo
- * depois de `sendAgentMessage({ kind: "greeting" })` retornar com sucesso.
- */
-export async function markAgentGreetedNow(
-  conversationId: string,
-): Promise<void> {
-  await prisma.conversation
-    .update({
-      where: { id: conversationId },
-      data: { aiGreetedAt: new Date() },
-    })
-    .catch(() => null);
-}
-
-// ── Saudação proativa (handoff entrando) ───────────────────────
-
-export type TriggerOpeningResult =
-  | { status: "sent"; messageId: string; conversationId: string }
-  | { status: "draft"; messageId: string; conversationId: string }
-  | {
-      status: "skipped";
-      reason:
-        | "no_conversation"
-        | "not_ai_agent"
-        | "agent_inactive"
-        | "no_opening_message"
-        | "already_greeted"
-        | "attendance_in_progress"
-        | "off_hours"
-        | "no_contact"
-        | "tabulation_classifier"
-        | "farewell_closer"
-        | "replay_sandbox";
-    };
-
-/**
- * Dispara a mensagem de saudação do agente IA PROATIVAMENTE — sem
- * precisar esperar o cliente mandar algo. Usado pelo executor de
- * automações no passo `transfer_to_ai_agent`: assim que a conversa
- * é atribuída ao agente, ele já se apresenta no chat do cliente
- * (em vez de ficar mudo até a primeira inbound, que pode nunca vir).
- *
- * A função é idempotente via `Conversation.aiGreetedAt` — se já
- * cumprimentou na atribuição atual, retorna `already_greeted` e
- * não duplica.
- *
- * Respeita business hours: fora do horário, envia `offHoursMessage`
- * se configurada e NÃO marca `aiGreetedAt` (pra saudar de verdade
- * na volta ao horário, via próxima inbound do cliente).
- */
-export async function triggerAgentOpeningForContact(args: {
-  contactId: string;
-  agentUserId: string;
-  channel?: "meta" | "baileys" | null;
-  /// Após transferência entre IAs: não trate o aviso do orquestrador
-  /// como "já saudou". Só `aiGreetedAt` desta atribuição conta.
-  ignorePriorBotOutbound?: boolean;
-  /// Instante em que o handoff começou. Se o bot já tinha falado ANTES
-  /// disso, o atendimento estava em curso e quem recebe não se apresenta:
-  /// `ignorePriorBotOutbound` existe para não contar o aviso da própria
-  /// transferência, mas acabava liberando saudação no meio da conversa.
-  handoffStartedAt?: Date | null;
-}): Promise<TriggerOpeningResult> {
-  // Replay com handoff real: a saudação do agente que recebeu o handoff
-  // sairia pelo canal do contato.
-  if (isReplaySandboxActive()) {
-    recordBlockedEffect("outbound_send", `agent_opening:${args.contactId}`);
-    return { status: "skipped", reason: "replay_sandbox" };
-  }
-  // Usa a conversa aberta mais recente do contato. Na prática, o CRM
-  // mantém 1 conversa por contato para canais (Meta/Baileys), então
-  // isso resolve ao único canal ativo dele.
-  const conversation = await prisma.conversation.findFirst({
-    where: { contactId: args.contactId },
-    orderBy: { updatedAt: "desc" },
-    select: { id: true, assignedToId: true, aiGreetedAt: true },
-  });
-  if (!conversation) {
-    return { status: "skipped", reason: "no_conversation" };
-  }
-
-  const assignee = await prisma.user.findUnique({
-    where: { id: args.agentUserId },
-    select: {
-      id: true,
-      name: true,
-      type: true,
-      aiAgentConfig: {
-        select: {
-          active: true,
-          autonomyMode: true,
-          openingMessage: true,
-          openingDelayMs: true,
-          businessHours: true,
-          simulateTyping: true,
-          typingPerCharMs: true,
-          markMessagesRead: true,
-          archetype: true,
-          enabledTools: true,
-        },
-      },
-    },
-  });
-  if (!assignee || assignee.type !== "AI") {
-    return { status: "skipped", reason: "not_ai_agent" };
-  }
-  const cfg = assignee.aiAgentConfig;
-  if (!cfg?.active) {
-    return { status: "skipped", reason: "agent_inactive" };
-  }
-  const { isTabulationClassifier } = await import(
-    "@/lib/ai-agents/tabulation-classifier"
-  );
-  if (isTabulationClassifier(cfg)) {
-    return { status: "skipped", reason: "tabulation_classifier" };
-  }
-  const { isFarewellCloser } = await import("@/lib/ai-agents/farewell-closer");
-  if (isFarewellCloser({ ...cfg, name: assignee.name })) {
-    return { status: "skipped", reason: "farewell_closer" };
-  }
-  if (!cfg.openingMessage?.trim()) {
-    return { status: "skipped", reason: "no_opening_message" };
-  }
-  if (await hasAgentGreetedInCurrentAssignment(conversation.id, {
-    ignorePriorBotOutbound: Boolean(args.ignorePriorBotOutbound),
-  })) {
-    return { status: "skipped", reason: "already_greeted" };
-  }
-  if (args.handoffStartedAt) {
-    const spokeBefore = await prisma.message.findFirst({
-      where: {
-        conversationId: conversation.id,
-        direction: "out",
-        authorType: "bot",
-        isPrivate: false,
-        messageType: { not: "note" },
-        createdAt: { lt: args.handoffStartedAt },
-      },
-      select: { id: true },
-    });
-    if (spokeBefore) {
-      return { status: "skipped", reason: "attendance_in_progress" };
-    }
-  }
-
-  // Business hours gate — se fora, não dispara a saudação proativa.
-  // Preferimos ficar em silêncio até a volta ao horário (a mensagem
-  // offHours é pra RESPOSTA a inbound, não pra empurrar quando a
-  // automação plantou o contato na conversa).
-  const { isWithinBusinessHours, normalizeBusinessHours } = await import(
-    "@/lib/ai-agents/piloting"
-  );
-  const bh = normalizeBusinessHours(cfg.businessHours);
-  if (bh?.enabled && !isWithinBusinessHours(bh)) {
-    return { status: "skipped", reason: "off_hours" };
-  }
-
-  // Contexto pra template da saudação ({{contactName}}, {{dealTitle}},
-  // {{stageName}}). Reusa a MESMA mecânica do inbox-handler para que
-  // a saudação fique visualmente idêntica quando disparada pelos dois
-  // caminhos (automação vs. inbound).
-  const [contact, openDeal] = await Promise.all([
-    prisma.contact.findUnique({
-      where: { id: args.contactId },
-      select: { name: true },
-    }),
-    prisma.deal.findFirst({
-      where: { contactId: args.contactId, status: "OPEN" },
-      orderBy: { updatedAt: "desc" },
-      select: { title: true, stage: { select: { name: true } } },
-    }),
-  ]);
-  if (!contact) {
-    return { status: "skipped", reason: "no_contact" };
-  }
-
-  const greeting = renderTemplate(cfg.openingMessage, {
-    contactName: contact.name,
-    dealTitle: openDeal?.title ?? null,
-    stageName: openDeal?.stage?.name ?? null,
-  });
-
-  if (cfg.openingDelayMs > 0) {
-    await sleep(Math.min(cfg.openingDelayMs, 10_000));
-  }
-
-  const result = await sendAgentMessage({
-    conversationId: conversation.id,
-    contactId: args.contactId,
-    agentUserId: assignee.id,
-    autonomyMode: cfg.autonomyMode,
-    text: greeting,
-    channel: args.channel ?? "meta",
-    kind: "greeting",
-    humanBehavior: {
-      simulateTyping: cfg.simulateTyping,
-      typingPerCharMs: cfg.typingPerCharMs,
-      markMessagesRead: cfg.markMessagesRead,
-    },
-  });
-
-  if (result.status !== "skipped") {
-    await markAgentGreetedNow(conversation.id);
-  }
-
-  if (result.status === "sent") {
-    return {
-      status: "sent",
-      messageId: result.messageId,
-      conversationId: conversation.id,
-    };
-  }
-  if (result.status === "draft") {
-    return {
-      status: "draft",
-      messageId: result.messageId,
-      conversationId: conversation.id,
-    };
-  }
-  return { status: "skipped", reason: "no_contact" };
-}
-
-// ── Handoff ────────────────────────────────────────────────────
-
-export type HandoffMode = "KEEP_OWNER" | "SPECIFIC_USER" | "UNASSIGN";
-
-export type HandoffArgs = {
-  conversationId: string;
-  contactId: string | null;
-  dealId: string | null;
-  agentId: string;
-  agentUserId: string;
-  mode: HandoffMode;
-  specificUserId?: string | null;
-  reason: string;
-};
-
-/**
- * Executa o handoff determinístico. Retorna o userId que recebeu a
- * conversa (null se ficou em fila).
- */
-export async function executeAgentHandoff(
-  args: HandoffArgs,
-): Promise<{ assignedToId: string | null }> {
-  let newAssignee: string | null = null;
-
-  if (args.mode === "SPECIFIC_USER" && args.specificUserId) {
-    const exists = await prisma.user.findUnique({
-      where: { id: args.specificUserId },
-      select: { id: true, type: true },
-    });
-    if (exists && exists.type !== "AI") {
-      newAssignee = exists.id;
-    }
-  } else if (args.mode === "KEEP_OWNER" && args.dealId) {
-    const deal = await prisma.deal.findUnique({
-      where: { id: args.dealId },
-      select: { ownerId: true },
-    });
-    // Só mantém o dono se não for o próprio user IA (evita ficar em loop).
-    if (deal?.ownerId && deal.ownerId !== args.agentUserId) {
-      newAssignee = deal.ownerId;
-    }
-  }
-
-  await prisma.conversation.update({
-    where: { id: args.conversationId },
-    data: {
-      assignedToId: newAssignee,
-      // Reseta o marcador de saudação — se a conversa voltar pro
-      // agente IA depois, ele cumprimenta de novo.
-      aiGreetedAt: null,
-      updatedAt: new Date(),
-    },
-    select: { id: true },
-  });
-
-  if (args.contactId) {
-    await createActivity({
-      type: "NOTE",
-      title: "Transferência IA → humano",
-      description: args.reason,
-      completed: true,
-      contactId: args.contactId,
-      dealId: args.dealId ?? undefined,
-      userId: args.agentUserId,
-      createdById: args.agentUserId,
-    }).catch(() => null);
-  }
-
-  if (args.dealId) {
-    createDealEvent(args.dealId, args.agentUserId, "AI_AGENT_ACTION", {
-      action: "transferred_to_human",
-      agentId: args.agentId,
-      mode: args.mode,
-      assignedToId: newAssignee,
-      reason: args.reason,
-    }).catch(() => null);
-  }
-
-  publishConversationAssignment({
-    organizationId: getOrgIdOrNull(),
-    conversationId: args.conversationId,
-    contactId: args.contactId,
-    assignedToId: newAssignee,
-    reason: args.reason,
-  });
-
-  void logEvent({
-    type: "AI_AGENT_HANDOFF",
-    entityType: "CONVERSATION",
-    entityId: args.conversationId,
-    conversationId: args.conversationId,
-    contactId: args.contactId ?? null,
-    dealId: args.dealId ?? null,
-    meta: { mode: args.mode, assignedToId: newAssignee, reason: args.reason },
-    actor: { type: "AUTOMATION", label: "Agente IA" },
-  });
-
-  return { assignedToId: newAssignee };
-}

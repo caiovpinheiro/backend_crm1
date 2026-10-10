@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { executeV2Actions } from "../actions";
 import { prisma } from "@/lib/prisma";
-import { sendAgentMessage } from "@/services/ai/piloting-actions";
+import { sendAgentMessage } from "@/services/ai/send-agent-message";
 import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import type { V2Action, V2AgentConfig, V2LLMOutput } from "@/lib/ai-v2/types";
 
@@ -18,7 +18,7 @@ vi.mock("@/lib/prisma", () => ({
   },
 }));
 
-vi.mock("@/services/ai/piloting-actions", () => ({
+vi.mock("@/services/ai/send-agent-message", () => ({
   sendAgentMessage: vi.fn().mockResolvedValue(undefined),
 }));
 

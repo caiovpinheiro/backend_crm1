@@ -12,7 +12,7 @@ vi.mock("@/lib/prisma", () => ({
 }));
 // O logger estruturado lê o request-context; sem contexto ele só não anexa tenant.
 vi.mock("@/lib/request-context", () => ({ getOrgIdOrNull: () => "org-1", getOrgIdOrThrow: () => "org-1", getRequestContext: () => undefined }));
-vi.mock("@/services/ai/piloting-actions", () => ({ sendAgentMessage: mocks.sendAgentMessage }));
+vi.mock("@/services/ai/send-agent-message", () => ({ sendAgentMessage: mocks.sendAgentMessage }));
 vi.mock("@/services/ai/send-agent-media", () => ({ sendAgentFollowUpMedia: mocks.sendMedia, mediaNotSentTrace: (what: string) => `${what} não enviados` }));
 vi.mock("@/services/ai/message-models-retrieval", () => ({ mediaFromTemplateRow: mocks.mediaFromRow }));
 

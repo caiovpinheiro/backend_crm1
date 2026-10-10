@@ -4,7 +4,7 @@
  * O 1º atendimento da IA pode soltar um responsável humano "herdado" (que
  * veio do contato ou de um ticket antigo) para não bloquear o agente
  * acadêmico. Só que quem entrou NESTE ticket por distribuição/transferência
- * não é herança: soltá-lo devolve o aluno para a fila logo depois de o
+ * não é herança: soltá-lo devolve o cliente para a fila logo depois de o
  * consultor assumir (caso Ana Laura, 24/ago/26 — Larissa recebeu 16:08,
  * saudação automática 16:10, aluna respondeu 16:13 e o ticket ficou sem
  * responsável).
@@ -85,7 +85,7 @@ export async function humanWasAssignedInThisConversation(
     // `assign_owner` da automação grava OWNER_CHANGED no deal e propaga
     // o assignee no chat, mas não grava ASSIGNEE_CHANGED na conversa.
     // Sem isso o próximo inbound trata o consultor como herança e solta
-    // o dono (DNAWORK #66305: Ketly atribuída, imagem seguinte zerou).
+    // o dono (caso real: responsável atribuída, imagem seguinte zerou).
     const conv = await prisma.conversation.findUnique({
       where: { id: conversationId },
       select: { contactId: true, createdAt: true },

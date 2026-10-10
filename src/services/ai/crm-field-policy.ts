@@ -66,7 +66,7 @@ export type CrmFieldDescriptor = {
  *
  * Jargão de cliente (o nome que aquela organização dá ao registro dela) não
  * entra aqui — entra em `sensitiveTerms`, na configuração do agente. Foi
- * daí que saíram termos de faculdade que estavam neste array.
+ * daí que saíram termos de um produto específico que estavam neste array.
  */
 const GENERIC_SENSITIVE_TERMS = [
   "cpf",
@@ -475,7 +475,7 @@ export function matchFieldValues(
  * decidir usar a ferramenta, e é o mesmo texto servido ao operador em
  * `GET /api/ai-agents/crm-fields`.
  *
- * Vocabulário de produto, sem ramo: vale para o agente de uma faculdade, de
+ * Vocabulário de produto, sem ramo: vale para o agente de qualquer ramo, de
  * uma imobiliária ou de uma clínica. O que aquela organização chama de
  * "contato", "locatário" ou "paciente" é assunto do prompt e da base de
  * conhecimento dela, não desta orientação.

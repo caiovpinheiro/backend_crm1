@@ -1,10 +1,10 @@
 /**
  * Recuperação lexical dos modelos internos do CRM (`MessageTemplate`)
- * para enriquecer o prompt do agente ATENDIMENTO.
+ * para o agente citar procedimentos e enviar os anexos deles.
  *
- * Não envia o texto integral ao aluno — só injeta referência no system
- * prompt. Modelos de cancelamento/trancamento/retenção/transferência
- * são excluídos (handoff de Retenção continua nas regras do agente).
+ * Não envia o texto integral ao cliente — só injeta referência no prompt.
+ * Quais modelos o agente pode usar é configuração do agente, não regra
+ * daqui. Nenhum domínio de cliente.
  */
 
 import { prisma } from "@/lib/prisma";
@@ -32,10 +32,6 @@ export type RetrievedMessageModel = {
  * com o modelo certo escolhido. 3 ainda exige título + corpo.
  */
 export const FAQ_MEDIA_MIN_SCORE = 3;
-
-/** Títulos/conteúdos sensíveis — nunca entram no contexto do agente. */
-export const MESSAGE_MODEL_EXCLUDE_RE =
-  /cancel|tranc|desist|reten|transfer[eê]ncia|transferencia/i;
 
 const STOP = new Set([
   "o",
@@ -91,30 +87,6 @@ const MAX_CONTENT_CHARS = 1400;
 /** Score mínimo para injetar (evita falso positivo fraco). */
 const MIN_SCORE = 2.5;
 
-/** Expande a query com sinônimos de acesso (PC ≠ só "Duda celular"). */
-const ACCESS_SYNONYMS: Array<{ match: RegExp; extra: string }> = [
-  {
-    match: /computador|notebook|pc\b|navegador|browser|desktop|\bsite\b|portal/i,
-    extra:
-      "portal aluno acessar conteudo portal do aluno blackboard ava ambiente virtual site web novoportal",
-  },
-  {
-    match: /aula|aulas|conteudo|conteúdo|disciplina/i,
-    extra: "acesso conteudo portal duda blackboard ava",
-  },
-  {
-    match: /\bduda\b/i,
-    extra: "aplicativo duda app mobile",
-  },
-  {
-    match: /primeiro\s*acesso|nunca (acessei|entrei)|criar senha|senha inicial/i,
-    extra: "primeiro acesso portal aluno novoportal tutorial duda",
-  },
-  {
-    match: /esqueci|redefinir senha|alterar senha|trocar senha/i,
-    extra: "alterar senha duda esqueci senha sms",
-  },
-];
 
 function normalize(s: string): string {
   return s
@@ -132,30 +104,14 @@ export function tokenizeForModelMatch(s: string): string[] {
     .filter((t) => t.length > 2 && !STOP.has(t));
 }
 
-export function isExcludedMessageModel(parts: {
-  name: string;
-  content: string;
-  category?: string | null;
-}): boolean {
-  return MESSAGE_MODEL_EXCLUDE_RE.test(
-    `${parts.name}\n${parts.content}\n${parts.category ?? ""}`,
-  );
-}
 
 /** Score lexical: overlap + boost no título. */
-function expandQueryForAccess(query: string): string {
-  let expanded = query;
-  for (const { match, extra } of ACCESS_SYNONYMS) {
-    if (match.test(query)) expanded = `${expanded} ${extra}`;
-  }
-  return expanded;
-}
 
 export function scoreMessageModelMatch(
   query: string,
   model: { name: string; content: string; category?: string | null },
 ): number {
-  const qt = new Set(tokenizeForModelMatch(expandQueryForAccess(query)));
+  const qt = new Set(tokenizeForModelMatch(query));
   if (qt.size === 0) return 0;
   const titleTok = new Set(tokenizeForModelMatch(model.name));
   const bodyTok = new Set([
@@ -169,28 +125,6 @@ export function scoreMessageModelMatch(
     if (bodyTok.has(t)) bodyHits++;
   }
   let score = bodyHits + titleHits * 1.5;
-  // PC/navegador → prioriza modelo "portal do aluno" sobre só "Duda".
-  const wantsPc =
-    /computador|notebook|\bpc\b|navegador|browser|desktop|\bsite\b|portal/i.test(
-      query,
-    );
-  const nameN = normalize(model.name);
-  if (wantsPc && nameN.includes("portal")) score += 4;
-  if (wantsPc && nameN.includes("duda") && !nameN.includes("portal")) {
-    score -= 1.5;
-  }
-  const wantsFirstAccess =
-    /primeiro\s*acesso|nunca (acessei|entrei)|criar senha|senha inicial/i.test(
-      query,
-    );
-  if (wantsFirstAccess && nameN.includes("primeiro") && nameN.includes("acesso")) {
-    score += 5;
-  }
-  const wantsReset =
-    /esqueci|redefinir senha|alterar senha|trocar senha/i.test(query);
-  if (wantsReset && nameN.includes("senha") && nameN.includes("duda")) {
-    score += 5;
-  }
   return score;
 }
 
@@ -201,7 +135,7 @@ function truncateContent(content: string): string {
 }
 
 /**
- * Busca até `topK` modelos internos relevantes à mensagem do aluno.
+ * Busca até `topK` modelos internos relevantes à mensagem do cliente.
  * Escopo multi-tenant via Prisma extension + organizationId explícito.
  */
 export async function retrieveRelevantMessageModels(
@@ -234,7 +168,6 @@ export async function retrieveRelevantMessageModels(
 
   const scored: RetrievedMessageModel[] = [];
   for (const r of rows) {
-    if (isExcludedMessageModel(r)) continue;
     const score = scoreMessageModelMatch(q, r);
     if (score < MIN_SCORE) continue;
     scored.push({
@@ -269,11 +202,10 @@ export function formatMessageModelsBlock(
     "",
     "MODELOS INTERNOS DE REFERÊNCIA (procedimentos operacionais do time):",
     "- Use como FONTE da verdade. Resuma em poucas frases no WhatsApp e **envie os links/URLs** que aparecerem no modelo.",
-    "- Se o aluno pediu como fazer, pediu o site/link, ou confirmou (sim/pode ser/manda/envie): ENTREGUE passos + link agora. PROIBIDO só perguntar se ele quer o passo a passo de novo.",
+    "- Se o cliente pediu como fazer, pediu o site/link, ou confirmou (sim/pode ser/manda/envie): ENTREGUE passos + link agora. PROIBIDO só perguntar se ele quer o passo a passo de novo.",
     "- Se o modelo tiver TUTORIAL ANEXO, o sistema envia o arquivo depois do seu texto. Diga em 1 frase que segue o vídeo/print. PROIBIDO inventar URL de arquivo, escrever '[Envio do vídeo]' ou prometer um tutorial que o modelo não tem.",
     "- Sem anexo: oriente só em texto + links https do modelo.",
     "- NÃO copie o card inteiro com muitos passos numerados; 3–5 passos curtos + link bastam.",
-    "- NUNCA use (nem parafraseie) modelos de cancelamento/trancamento/desistência/retenção/transferência — nesses casos transfira para Retenção com as tools.",
     "- Se o modelo cobrir o assunto, tende a confiança ALTA (0.8+).",
     sections,
   ].join("\n");
