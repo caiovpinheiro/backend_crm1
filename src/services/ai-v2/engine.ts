@@ -2766,7 +2766,14 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     if (!opts.skipMessage) {
       // Mensagem do destino (assunto/regra) quando configurada; a tela já
       // tinha o campo, mas valia sempre a mensagem padrão.
-      const destinationMessage = typeof requested?.message === "string" ? requested.message.trim() : "";
+      // A mensagem do assunto só vale para o destino que ele pediu: com o
+      // destino trocado (ping-pong, autotransferência, limite), o texto dele
+      // anunciaria o lugar errado ("setor de X" com a conversa indo para Y).
+      const redirected = !!requested && (planned.type !== requested.type || (planned.id ?? null) !== (requested.id ?? null));
+      if (redirected && typeof requested?.message === "string" && requested.message.trim()) {
+        traceStep("transferência", "Destino trocado: a mensagem do assunto não vale — sai a mensagem padrão de transferência");
+      }
+      const destinationMessage = !redirected && typeof requested?.message === "string" ? requested.message.trim() : "";
       const handoffMsg = renderMessage(opts.message || destinationMessage || config.handoff.message, vars, defaultFormatter());
       // O aviso de transferência nunca passa pelo guarda de repetição: o
       // agente anterior (ou este, minutos antes) pode ter mandado o mesmo
