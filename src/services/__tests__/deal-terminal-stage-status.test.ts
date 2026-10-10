@@ -212,6 +212,20 @@ describe("buildNewDealStatusPatch (nascimento do card)", () => {
     });
   });
 
+  it("data da origem (importação) substitui o 'agora'; null deixa sem data", () => {
+    const original = new Date("2025-03-10T12:00:00Z");
+    expect(buildNewDealStatusPatch(WON_STAGE, { closedAt: original })).toEqual({
+      status: "WON",
+      closedAt: original,
+      lostReason: null,
+    });
+    expect(buildNewDealStatusPatch(LOST_STAGE, { closedAt: null })).toEqual({
+      status: "LOST",
+      closedAt: null,
+      lostReason: null,
+    });
+  });
+
   it("etapa comum (ou desconhecida) mantém o que o caller pediu", () => {
     expect(buildNewDealStatusPatch(PLAIN_STAGE, { status: "OPEN" })).toEqual({
       status: "OPEN",
@@ -245,6 +259,16 @@ describe("createDeal direto em etapa terminal", () => {
     await withOrg(() => createDeal({ title: "Fechado", contactId: "c1", stageId: "stage-won" }));
 
     expect(createdData()).toMatchObject({ status: "WON", closedAt: expect.any(Date), lostReason: null });
+  });
+
+  it("importação sem data de fechamento: nasce LOST/WON com closedAt nulo, não 'hoje'", async () => {
+    h.stageFindUnique.mockResolvedValue({ pipelineId: "pipe-a", ...LOST_STAGE });
+    await withOrg(() => createDeal({ title: "Importado", stageId: "stage-lost", closedAt: null }));
+    expect(createdData()).toMatchObject({ status: "LOST", closedAt: null });
+
+    h.stageFindUnique.mockResolvedValue({ pipelineId: "pipe-a", ...WON_STAGE });
+    await withOrg(() => createDeal({ title: "Importado", stageId: "stage-won", closedAt: null }));
+    expect(createdData(1)).toMatchObject({ status: "WON", closedAt: null });
   });
 
   it("etapa comum: status pedido e sem closedAt, como antes", async () => {

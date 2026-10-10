@@ -1,30 +1,37 @@
 -- Negócios com status/closedAt incoerentes com a etapa terminal (Ganho/Perdido)
--- e negócios fechados (WON/LOST) sem data de fechamento.
+-- e negócios fechados (WON/LOST) sem data de fechamento — SÓ COM EVIDÊNCIA no
+-- histórico (`deal_events`).
 --
 -- POR QUÊ: importação/migração, POST /api/deals, /api/leads, automação
 -- `create_deal`/`update_field` e ferramentas de IA gravavam `stageId` direto,
 -- sem o patch de status que o move do Kanban aplica. O código passou a
 -- sincronizar em todos os caminhos; esta migration acerta o legado. Os KPIs do
 -- painel (ganhos, receita, conversão, perdidos, ganhos por agente) contam
--- `status` + `closedAt` no período, então hoje subcontam muito.
+-- `status` + `closedAt` no período.
 --   Produção, etapa Ganho (isWon): OPEN sem closedAt 4.071 | WON sem closedAt
 --   1.365 | WON com closedAt 923 | LOST com closedAt 9.
 --   DEV, etapa Perdido (isLost): OPEN sem closedAt 1.805 | LOST ok 23.
 --
+-- SÓ COM EVIDÊNCIA (decisão de 10/10 após a simulação em produção): a primeira
+-- versão datava pelo "createdAt"/"updatedAt" quem não tinha histórico e tocava
+-- 62.703 linhas, ~48 mil LOST e ~5 mil WON caindo em setembro/2026. Esses
+-- negócios vieram da IMPORTAÇÃO de outro CRM ("createdAt" = data da
+-- importação), então a data seria um pico falso. Agora só entra quem tem um
+-- evento real de entrada na etapa ou de mudança de status. Os importados sem
+-- histórico FICAM COMO ESTÃO (OPEN em etapa terminal, ou WON/LOST sem data) e
+-- podem ser tratados depois, se a importação tiver a data original.
+--
 -- REGRAS (só UPDATE em "deals"; um UPDATE por regra):
 --
---   A) status = 'OPEN' numa etapa terminal:
---        etapa isWon  → status 'WON',  closedAt = entrada na etapa, lostReason = NULL
---        etapa isLost → status 'LOST', closedAt = entrada na etapa, lostReason mantido
+--   A) status = 'OPEN' numa etapa terminal E com `deal_events` STAGE_CHANGED
+--      para a etapa atual (destino `meta->'to'->>'id'`; o formato antigo com
+--      `meta->>'to'` = id da etapa também conta — a timeline normaliza os dois):
+--        etapa isWon  → status 'WON',  lostReason = NULL
+--        etapa isLost → status 'LOST', lostReason mantido
+--        closedAt = o ÚLTIMO desses STAGE_CHANGED (entrada na etapa).
 --      (etapa marcada isWon e isLost ao mesmo tempo vale como Ganho, igual ao
 --      `buildStatusSyncPatch`.)
---      Data de entrada na etapa, nesta ordem:
---        1) último `deal_events` STAGE_CHANGED cujo destino é a etapa atual
---           (`meta->'to'->>'id'`; o formato antigo com `meta->>'to'` = id da
---           etapa também conta — a timeline normaliza os dois);
---        2) se o negócio NUNCA mudou de etapa (nenhum STAGE_CHANGED), nasceu
---           nela: "createdAt" (caso da importação);
---        3) senão "updatedAt".
+--      Sem STAGE_CHANGED para a etapa atual: fica OPEN, sem data.
 --      NÃO converte LOST em etapa Ganho nem WON em etapa Perdido: alguém marcou
 --      de propósito (ex.: os 9 LOST na coluna Ganho em produção).
 --      NÃO toca negócio reaberto de propósito: STATUS_CHANGED com
@@ -39,20 +46,21 @@
 --           atual (é assim que move, PUT status, bulk, jobs e automação gravam:
 --           `type = 'STATUS_CHANGED'`, `meta = {from, to: 'WON'|'LOST'|'OPEN'}`);
 --        2) se a etapa atual é terminal (isWon/isLost): último STAGE_CHANGED para
---           ela;
---        3) senão "updatedAt".
+--           ela.
+--      Sem nenhum dos dois: fica sem data.
 --
 --   As duas regras não se sobrepõem (A só pega OPEN; B só WON/LOST) e são
 --   calculadas sobre o estado ANTERIOR, na tabela temporária
---   "_alvo_deals_terminal" (fonte única para o backup e para os UPDATEs).
+--   "_alvo_deals_terminal" (fonte única para o backup e para os UPDATEs). Toda
+--   linha do alvo tem data vinda de um evento; nenhuma usa createdAt/updatedAt.
 --
 -- "updatedAt" NÃO muda: é preenchido pelo Prisma (@updatedAt) no cliente, não
 -- por trigger, e nenhum SET abaixo o menciona.
 --
 -- IDEMPOTENTE: depois de rodar, todo negócio tocado por A está WON/LOST com
--- closedAt preenchido (createdAt/updatedAt nunca são nulos) e todo negócio de B
--- tem closedAt. Rodar de novo encontra alvo vazio; os reabertos de propósito
--- continuam excluídos pelo mesmo critério.
+-- closedAt preenchido e todo negócio de B tem closedAt. Rodar de novo encontra
+-- alvo vazio; reabertos e negócios sem evidência continuam fora pelo mesmo
+-- critério.
 --
 -- BACKUP E ROLLBACK: antes de qualquer UPDATE, os negócios do alvo são copiados
 -- (id, status, closedAt, lostReason, updatedAt) em "_bkp_deals_terminal_20261010".
@@ -79,27 +87,27 @@
 --   SELECT "regra", "novoStatus", date_trunc('month', "novoClosedAt") AS mes, count(*)
 --   FROM (<ALVO>) x GROUP BY 1,2,3 ORDER BY 1,2,3;
 --
---   -- OPEN em etapa terminal que fica de fora por ter sido reaberto de propósito
---   SELECT count(*) FROM deals d JOIN stages s ON s.id = d."stageId"
---   WHERE d.status = 'OPEN' AND (s."isWon" OR s."isLost")
---     AND EXISTS (SELECT 1 FROM deal_events e WHERE e."dealId" = d.id
---                   AND e.type = 'STATUS_CHANGED' AND e.meta->>'to' = 'OPEN'
---                   AND e."createdAt" > COALESCE((SELECT max(x."createdAt") FROM deal_events x
---                                                 WHERE x."dealId" = d.id AND x.type = 'STAGE_CHANGED'),
---                                                '-infinity'::timestamp));
+--   -- o que fica de fora por falta de evidência (importados sem histórico) ou
+--   -- por reabertura de propósito
+--   SELECT d.status, s."isWon", s."isLost", count(*) AS fica_como_esta
+--   FROM deals d JOIN stages s ON s.id = d."stageId"
+--   WHERE (d.status = 'OPEN' AND (s."isWon" OR s."isLost")
+--          OR d.status IN ('WON','LOST') AND d."closedAt" IS NULL)
+--     AND d.id NOT IN (SELECT x."id" FROM (<ALVO>) x)
+--   GROUP BY 1,2,3 ORDER BY 1,2,3;
 --
--- CONFERÊNCIA depois (Ganho: só WON/false e os LOST de propósito; Perdido: só
--- LOST/false, salvo reabertos):
+-- CONFERÊNCIA antes e depois:
 --
 --   SELECT s."isWon", s."isLost", d.status, (d."closedAt" IS NULL) AS sem_closed_at, count(*)
 --   FROM deals d JOIN stages s ON s.id = d."stageId"
 --   WHERE s."isWon" OR s."isLost" GROUP BY 1,2,3,4 ORDER BY 1,2,3,4;
 --
 -- DESEMPENHO E LOTES: cada negócio candidato custa alguns index scans em
--- deal_events pelo índice ("dealId","createdAt"). Produção espera ~5,5 mil
--- linhas: bem menos de 1 s dentro da transação do `migrate deploy` do boot.
--- Se o volume for muito maior, rode antes, fora do boot (psql), este mesmo
--- arquivo trocando o `CREATE TEMP TABLE ... AS <ALVO>` por
+-- deal_events pelo índice ("dealId","createdAt"). Produção espera ~10,8 mil
+-- linhas no alvo (de ~63 mil candidatos avaliados): poucos segundos no máximo,
+-- dentro da transação do `migrate deploy` do boot. Se o volume for muito
+-- maior, rode antes, fora do boot (psql), este mesmo arquivo trocando o
+-- `CREATE TEMP TABLE ... AS <ALVO>` por
 -- `CREATE TEMP TABLE ... AS SELECT * FROM (<ALVO>) x ORDER BY "id" LIMIT 2000`,
 -- um lote por transação, até os dois UPDATEs afetarem 0 linhas. O backup
 -- acumula as linhas de cada lote, e a migration, quando rodar no boot, não
@@ -113,16 +121,8 @@ SELECT
   d."id",
   'A_open_em_etapa_terminal'::text AS "regra",
   (CASE WHEN s."isWon" THEN 'WON' ELSE 'LOST' END)::text AS "novoStatus",
-  COALESCE(
-    entrada."em",
-    CASE WHEN ultima_troca."em" IS NULL THEN d."createdAt" END,
-    d."updatedAt"
-  ) AS "novoClosedAt",
-  (CASE
-     WHEN entrada."em" IS NOT NULL THEN 'STAGE_CHANGED'
-     WHEN ultima_troca."em" IS NULL THEN 'createdAt'
-     ELSE 'updatedAt'
-   END)::text AS "fonte"
+  entrada."em" AS "novoClosedAt",
+  'STAGE_CHANGED'::text AS "fonte"
 FROM "deals" d
 JOIN "stages" s ON s."id" = d."stageId"
 CROSS JOIN LATERAL (
@@ -137,12 +137,13 @@ CROSS JOIN LATERAL (
 ) ultima_troca
 WHERE d."status" = 'OPEN'
   AND (s."isWon" OR s."isLost")
+  AND entrada."em" IS NOT NULL
   AND NOT EXISTS (
     SELECT 1 FROM "deal_events" e
     WHERE e."dealId" = d."id"
       AND e."type" = 'STATUS_CHANGED'
       AND e."meta"->>'to' = 'OPEN'
-      AND e."createdAt" > COALESCE(ultima_troca."em", '-infinity'::timestamp)
+      AND e."createdAt" > ultima_troca."em"
   )
 UNION ALL
 SELECT
@@ -151,14 +152,9 @@ SELECT
   d."status"::text AS "novoStatus",
   COALESCE(
     fechamento."em",
-    CASE WHEN s."isWon" OR s."isLost" THEN entrada."em" END,
-    d."updatedAt"
+    CASE WHEN s."isWon" OR s."isLost" THEN entrada."em" END
   ) AS "novoClosedAt",
-  (CASE
-     WHEN fechamento."em" IS NOT NULL THEN 'STATUS_CHANGED'
-     WHEN (s."isWon" OR s."isLost") AND entrada."em" IS NOT NULL THEN 'STAGE_CHANGED'
-     ELSE 'updatedAt'
-   END)::text AS "fonte"
+  (CASE WHEN fechamento."em" IS NOT NULL THEN 'STATUS_CHANGED' ELSE 'STAGE_CHANGED' END)::text AS "fonte"
 FROM "deals" d
 JOIN "stages" s ON s."id" = d."stageId"
 CROSS JOIN LATERAL (
@@ -175,6 +171,10 @@ CROSS JOIN LATERAL (
 ) entrada
 WHERE d."status" IN ('WON', 'LOST')
   AND d."closedAt" IS NULL
+  AND (
+    fechamento."em" IS NOT NULL
+    OR ((s."isWon" OR s."isLost") AND entrada."em" IS NOT NULL)
+  )
 -- @alvo:fim
 ;
 

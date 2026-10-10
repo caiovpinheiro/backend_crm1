@@ -728,6 +728,12 @@ export async function processDealRow(
         status: statusRaw && isValidDealStatus(statusRaw) ? statusRaw : undefined,
         expectedClose,
         lostReason,
+        // Linha em etapa Ganho/Perdido nasce WON/LOST, mas a planilha não tem
+        // coluna de data de fechamento: `closedAt` fica nulo em vez de "hoje".
+        // Carimbar a data da importação jogava milhares de fechamentos antigos
+        // no mês da importação (pico falso no painel). Se a planilha ganhar
+        // essa coluna, a data dela entra aqui.
+        closedAt: null,
         contactId: contactId ?? undefined,
         ownerId,
       });
