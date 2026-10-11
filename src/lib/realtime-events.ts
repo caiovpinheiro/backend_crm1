@@ -296,6 +296,8 @@ export type TeamChatPayload = {
  */
 export type DealMovedCard = {
   id: string;
+  /** `Deal.number` (o "#49338" do card). Opcional: payload antigo não traz. */
+  number?: number;
   title: string;
   value?: number | string;
   status?: string;
