@@ -544,6 +544,23 @@ describe("GET /api/sse/messages — parada graciosa e gate fail-closed", () => {
     await reader.cancel().catch(() => undefined);
   });
 
+  it("sessão revogada (token marcado) → 401 JSON SESSION_REVOKED; sem sessão segue texto", async () => {
+    mocks.auth.mockResolvedValue({ revoked: true, revokedReason: "session_revoked" });
+    const res = await GET(new Request("https://api.test/api/sse/messages"));
+    expect(res.status).toBe(401);
+    expect(res.headers.get("Content-Type")).toMatch(/application\/json/);
+    expect(await res.json()).toEqual({
+      message: "Sessão expirada. Entre novamente.",
+      code: "SESSION_REVOKED",
+    });
+    expect(mocks.subscribe).not.toHaveBeenCalled();
+
+    mocks.auth.mockResolvedValue(null);
+    const none = await GET(new Request("https://api.test/api/sse/messages"));
+    expect(none.status).toBe(401);
+    expect(await none.text()).toBe("Não autorizado");
+  });
+
   it("SIGTERM: stream aberto recebe retry com jitter e fecha; conexão nova leva 503", async () => {
     const { next } = await open();
     const exit = vi.fn();

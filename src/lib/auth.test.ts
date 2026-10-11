@@ -93,6 +93,10 @@ type JwtCallback = (args: {
   session?: unknown;
 }) => Promise<Record<string, unknown>>;
 
+/** Token marcado pelo callback `jwt` (sem claims de sessão). */
+const REVOKED = { revoked: true, revokedReason: "session_revoked", revokedUserId: "u1" };
+const INVALID = { revoked: true, revokedReason: "session_invalid", revokedUserId: "u1" };
+
 function getAuthorize(): Authorize {
   const providers = mocks.captured.config?.providers as Array<{ authorize: Authorize }>;
   return providers[0].authorize;
@@ -218,18 +222,18 @@ describe("jwt — SS-2 cache do refresh", () => {
     expect(mocks.findUnique).toHaveBeenCalledTimes(2);
   });
 
-  it("usuario apagado / org suspensa: token vazio, e continua vazio no cache", async () => {
+  it("usuario apagado / org suspensa: token marcado session_invalid, e continua assim no cache", async () => {
     mocks.findUnique.mockResolvedValue({ ...DB_USER, isErased: true });
     const jwt = getJwt();
-    expect(await jwt({ token: { id: "u1", role: "MEMBER" } })).toEqual({});
-    expect(await jwt({ token: { id: "u1", role: "MEMBER" } })).toEqual({});
+    expect(await jwt({ token: { id: "u1", role: "MEMBER" } })).toEqual(INVALID);
+    expect(await jwt({ token: { id: "u1", role: "MEMBER" } })).toEqual(INVALID);
     expect(mocks.findUnique).toHaveBeenCalledTimes(1);
 
     mocks.findUnique.mockResolvedValue({
       ...DB_USER,
       organization: { status: "SUSPENDED", slug: "acme" },
     });
-    expect(await jwt({ token: { id: "u3" } })).toEqual({});
+    expect(await jwt({ token: { id: "u3" } })).toEqual({ ...INVALID, revokedUserId: "u3" });
   });
 
   it("invalidateAuthzForUser derruba o cache: proxima chamada consulta o banco", async () => {
@@ -298,14 +302,33 @@ describe("jwt — SV-1 versão da sessão", () => {
     expect(mocks.findUnique).toHaveBeenCalledTimes(1);
   });
 
-  it("banco incrementou (troca de senha / revoke-all): token cai (null)", async () => {
+  it("banco incrementou (troca de senha / revoke-all): token vira marcado (sem claims de sessão)", async () => {
     mocks.findUnique.mockResolvedValue({ ...DB_USER, sessionVersion: 1 });
     const jwt = getJwt();
     // Token antigo sem a claim (vale 0) e token com claim defasada.
-    expect(await jwt({ token: { id: "u1" } })).toBeNull();
-    expect(await jwt({ token: { id: "u1", sessionVersion: 0 } })).toBeNull();
+    expect(await jwt({ token: { id: "u1" } })).toEqual(REVOKED);
+    expect(await jwt({ token: { id: "u1", sessionVersion: 0 } })).toEqual(REVOKED);
     // Sessão nova, emitida depois do incremento, passa.
     expect(await jwt({ token: { id: "u1", sessionVersion: 1 } })).toMatchObject({ id: "u1" });
+  });
+
+  it("token marcado continua marcado sem tocar no banco (cookie reemitido não se reabilita)", async () => {
+    const jwt = getJwt();
+    expect(await jwt({ token: { ...REVOKED } })).toEqual(REVOKED);
+    expect(
+      await jwt({ token: { ...REVOKED }, trigger: "update", session: { sessionRenewal: "x" } }),
+    ).toEqual(REVOKED);
+    expect(mocks.findUnique).not.toHaveBeenCalled();
+  });
+
+  it("token marcado não tem id/sub/org/papel/versão", async () => {
+    mocks.findUnique.mockResolvedValue({ ...DB_USER, sessionVersion: 1 });
+    const t = await getJwt()({
+      token: { id: "u1", sub: "u1", role: "ADMIN", organizationId: "o", sessionVersion: 0 },
+    });
+    for (const k of ["id", "sub", "role", "organizationId", "organizationSlug", "isSuperAdmin", "sessionVersion"]) {
+      expect(t).not.toHaveProperty(k);
+    }
   });
 
   it("token sem a claim continua válido enquanto o banco está em 0 (deploy sem logout)", async () => {
@@ -323,15 +346,15 @@ describe("jwt — SV-1 versão da sessão", () => {
     mocks.findUnique.mockResolvedValue({ ...DB_USER, sessionVersion: 1 });
     invalidateSessionVersionCache("u1");
     clearJwtRefreshCacheForTests();
-    expect(await jwt({ token: { id: "u1" } })).toBeNull();
+    expect(await jwt({ token: { id: "u1" } })).toEqual(REVOKED);
     expect(mocks.findUnique).toHaveBeenCalledTimes(2);
   });
 
-  it("usuário não encontrado (hard delete): token vazio, e o estado fica em cache", async () => {
+  it("usuário não encontrado (hard delete): token marcado, e o estado fica em cache", async () => {
     mocks.findUnique.mockResolvedValue(null);
     const jwt = getJwt();
-    expect(await jwt({ token: { id: "u1", role: "MEMBER" } })).toEqual({});
-    expect(await jwt({ token: { id: "u1", role: "MEMBER" } })).toEqual({});
+    expect(await jwt({ token: { id: "u1", role: "MEMBER" } })).toEqual(INVALID);
+    expect(await jwt({ token: { id: "u1", role: "MEMBER" } })).toEqual(INVALID);
     expect(mocks.findUnique).toHaveBeenCalledTimes(1);
   });
 
@@ -386,7 +409,7 @@ describe("jwt — SV-2 renovação da sessão atual", () => {
     ]) {
       clearJwtRefreshCacheForTests();
       clearSessionVersionCacheForTests();
-      expect(await jwt({ token: { ...OLD_TOKEN }, trigger: "update", session })).toBeNull();
+      expect(await jwt({ token: { ...OLD_TOKEN }, trigger: "update", session })).toEqual(REVOKED);
     }
   });
 
@@ -396,7 +419,7 @@ describe("jwt — SV-2 renovação da sessão atual", () => {
     for (const forged of ["a".repeat(43), "4:u1", "x".repeat(4000)]) {
       expect(
         await jwt({ token: { ...OLD_TOKEN }, trigger: "update", session: { sessionRenewal: forged } }),
-      ).toBeNull();
+      ).toEqual(REVOKED);
     }
   });
 
@@ -421,16 +444,16 @@ describe("jwt — SV-2 renovação da sessão atual", () => {
     ).toMatchObject({ sessionVersion: 4 });
     expect(
       await jwt({ token: { ...OLD_TOKEN }, trigger: "update", session: { sessionRenewal: proof } }),
-    ).toBeNull();
+    ).toEqual(REVOKED);
   });
 
   it("a prova só vale no update: no GET da sessão (sem trigger) o token antigo cai", async () => {
     const proof = await proofFor();
     const jwt = getJwt();
-    expect(await jwt({ token: { ...OLD_TOKEN }, session: { sessionRenewal: proof } })).toBeNull();
+    expect(await jwt({ token: { ...OLD_TOKEN }, session: { sessionRenewal: proof } })).toEqual(REVOKED);
     expect(
       await jwt({ token: { ...OLD_TOKEN }, trigger: "signIn", session: { sessionRenewal: proof } }),
-    ).toBeNull();
+    ).toEqual(REVOKED);
   });
 
   it("token revogado antes (duas versões atrás) não se renova nem com prova válida", async () => {
@@ -442,7 +465,7 @@ describe("jwt — SV-2 renovação da sessão atual", () => {
         trigger: "update",
         session: { sessionRenewal: proof },
       }),
-    ).toBeNull();
+    ).toEqual(REVOKED);
   });
 
   it("prova de outro usuário não renova", async () => {
@@ -450,7 +473,7 @@ describe("jwt — SV-2 renovação da sessão atual", () => {
     const jwt = getJwt();
     expect(
       await jwt({ token: { ...OLD_TOKEN }, trigger: "update", session: { sessionRenewal: proof } }),
-    ).toBeNull();
+    ).toEqual(REVOKED);
   });
 
   it("reset administrativo depois da troca (banco em 5): a prova da versão 4 não vale", async () => {
@@ -459,7 +482,7 @@ describe("jwt — SV-2 renovação da sessão atual", () => {
     const jwt = getJwt();
     expect(
       await jwt({ token: { ...OLD_TOKEN }, trigger: "update", session: { sessionRenewal: proof } }),
-    ).toBeNull();
+    ).toEqual(REVOKED);
   });
 
   it("update() repetido depois de renovar não derruba a sessão já renovada", async () => {
@@ -496,7 +519,7 @@ describe("jwt — SV-2 renovação da sessão atual", () => {
     ).toMatchObject({ sessionVersion: 4 });
     expect(getCachedSessionVersion("u1")).toBe(4);
     // E a sessão antiga, sem prova, cai nesta réplica também.
-    expect(await jwt({ token: { ...OLD_TOKEN } })).toBeNull();
+    expect(await jwt({ token: { ...OLD_TOKEN } })).toEqual(REVOKED);
   });
 
   it("claim à frente do cache (sessão renovada em outra réplica): relê o banco e aceita", async () => {
@@ -515,6 +538,38 @@ describe("jwt — SV-2 renovação da sessão atual", () => {
   it("claim à frente do BANCO não passa (relê e confirma a divergência)", async () => {
     const jwt = getJwt();
     mocks.findUnique.mockResolvedValue({ ...DB_USER, sessionVersion: 3 });
-    expect(await jwt({ token: { id: "u1", sessionVersion: 9 } })).toBeNull();
+    expect(await jwt({ token: { id: "u1", sessionVersion: 9 } })).toEqual(REVOKED);
+  });
+});
+
+describe("session — token revogado não expõe usuário", () => {
+  type SessionCallback = (args: {
+    session: Record<string, unknown>;
+    token: Record<string, unknown>;
+  }) => Promise<Record<string, unknown>>;
+  const getSession = (): SessionCallback =>
+    (mocks.captured.config?.callbacks as { session: SessionCallback }).session;
+
+  it("token marcado: sem `user` (chave explícita) e com a marca + motivo", async () => {
+    const out = await getSession()({
+      session: { user: { name: null, email: null, image: null }, expires: "2026-11-10T00:00:00.000Z" },
+      token: { ...REVOKED },
+    });
+    expect(out).toEqual({
+      revoked: true,
+      revokedReason: "session_revoked",
+      expires: "2026-11-10T00:00:00.000Z",
+      user: undefined,
+    });
+    expect(Object.prototype.hasOwnProperty.call(out, "user")).toBe(true);
+  });
+
+  it("token válido: sessão normal com id e versão", async () => {
+    const out = await getSession()({
+      session: { user: { name: "Ana" }, expires: "2026-11-10T00:00:00.000Z" },
+      token: { id: "u1", role: "MEMBER", organizationId: "org1", sessionVersion: 2 },
+    });
+    expect(out.revoked).toBeUndefined();
+    expect(out.user).toMatchObject({ id: "u1", organizationId: "org1", sessionVersion: 2 });
   });
 });

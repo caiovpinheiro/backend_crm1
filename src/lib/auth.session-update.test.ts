@@ -6,7 +6,10 @@
  * atualização do next-auth mudar esse contrato, este teste quebra.
  *
  * Aqui roda o `Auth()` real (JWT cifrado de verdade, CSRF de verdade) com
- * os callbacks reais de `auth.ts`; só o banco e o Redis são mock.
+ * os callbacks reais de `auth.ts`; só o banco e o Redis são mock. Como a
+ * rota `api/auth/[...nextauth]`, a resposta passa por
+ * `sanitizeRevokedSessionResponse` (token revogado → corpo `null` + cookie
+ * apagado, o contrato de antes da marcação do token).
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -58,6 +61,7 @@ import { Auth, type AuthConfig } from "@auth/core";
 import { decode, encode } from "@auth/core/jwt";
 
 import "./auth";
+import { sanitizeRevokedSessionResponse } from "./auth/revoked-session";
 import { clearJwtRefreshCacheForTests } from "./auth/jwt-refresh-cache";
 import {
   clearSessionRenewalsForTests,
@@ -145,11 +149,15 @@ async function update(cookie: string, data: unknown): Promise<SessionResult> {
     }),
     config(),
   );
-  return read(res);
+  return read(await sanitizeRevokedSessionResponse(res));
 }
 
 async function getSession(cookie: string): Promise<SessionResult> {
-  return read(await Auth(new Request(`${BASE}/session`, { headers: { cookie } }), config()));
+  return read(
+    await sanitizeRevokedSessionResponse(
+      await Auth(new Request(`${BASE}/session`, { headers: { cookie } }), config()),
+    ),
+  );
 }
 
 async function proofFor(userId = "u1", newVersion = 4, tokenVersion = 3): Promise<string> {
@@ -231,9 +239,28 @@ describe("POST /api/auth/session (update) — renovação da sessão atual", () 
       }),
       config(),
     );
-    const noCsrf = await read(res);
+    const noCsrf = await read(await sanitizeRevokedSessionResponse(res));
     expect(noCsrf.body?.user?.sessionVersion).not.toBe(4);
     expect(noCsrf.reissued).toBeNull();
+  });
+
+  it("sem o filtro da rota, o core reemitiria o token MARCADO (sem id/sub/claims)", async () => {
+    const raw = await read(
+      await Auth(
+        new Request(`${BASE}/session`, { headers: { cookie: await sessionCookie(3) } }),
+        config(),
+      ),
+    );
+    expect(raw.body).toMatchObject({ revoked: true, revokedReason: "session_revoked" });
+    expect(raw.body?.user).toBeUndefined();
+    expect(raw.reissued).toMatchObject({ revoked: true, revokedUserId: "u1" });
+    for (const k of ["id", "sub", "name", "email", "sessionVersion"]) {
+      expect(raw.reissued).not.toHaveProperty(k);
+    }
+    // Pela rota (filtro aplicado): corpo null e cookie apagado.
+    const viaRoute = await getSession(await sessionCookie(3));
+    expect(viaRoute.body).toBeNull();
+    expect(viaRoute.cleared).toBe(true);
   });
 
   it("sessão válida: update() comum continua devolvendo a sessão", async () => {
