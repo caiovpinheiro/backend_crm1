@@ -1408,3 +1408,52 @@ describe("confirmação de identidade", () => {
     expect(system).toContain("pedido que ficou sem resposta");
   });
 });
+
+describe("callV2LLM — avisos temporários", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(makeLLMResponse(JSON.stringify({ reply: "ok", actions: [] })));
+  });
+
+  const hour = 3_600_000;
+  const notice = (over: Record<string, unknown> = {}) => ({
+    id: "n1",
+    title: "Sistema em manutenção",
+    message: "O sistema está em manutenção. Pagamentos em até 3 dias úteis depois da manutenção mantêm os descontos.",
+    startsAt: new Date(Date.now() - hour).toISOString(),
+    endsAt: new Date(Date.now() + hour).toISOString(),
+    when: ["sistema"],
+    ...over,
+  });
+  const run = (config: V2AgentConfig, userMessage = "oi", themeId?: string) =>
+    callV2LLM({ agentId: "agent-1", config, context: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields }, userMessage, stage: "active", themeId });
+
+  it("aviso em vigor entra no prompt com prioridade; vencido não entra", async () => {
+    const r = await run(baseConfig({ notices: [notice()] } as Partial<V2AgentConfig>));
+    expect(r.systemPrompt).toContain("# Avisos em vigor (prioridade)");
+    expect(r.systemPrompt).toContain("O sistema está em manutenção.");
+    const old = await run(baseConfig({ notices: [notice({ startsAt: new Date(Date.now() - 3 * hour).toISOString(), endsAt: new Date(Date.now() - 2 * hour).toISOString() })] } as Partial<V2AgentConfig>));
+    expect(old.systemPrompt).not.toContain("# Avisos em vigor");
+  });
+
+  it("aviso de outro assunto só entra quando a mensagem cita um gatilho dele", async () => {
+    const config = baseConfig({
+      themes: [{ id: "t1", name: "A", instructions: "x", when: ["a"], allowedTools: [] }, { id: "t2", name: "B", instructions: "x", when: ["b"], allowedTools: [] }],
+      notices: [notice({ themeIds: ["t2"] })],
+    } as unknown as Partial<V2AgentConfig>);
+    expect((await run(config, "quero ajuda", "t1")).systemPrompt).not.toContain("# Avisos em vigor");
+    expect((await run(config, "o sistema não abre", "t1")).systemPrompt).toContain("# Avisos em vigor");
+  });
+
+  it("o que o aviso afirma é fonte: o prazo dele não sai da resposta pela regra fixa", async () => {
+    const reply = "O sistema está em manutenção. Pagamentos em até 3 dias úteis depois da manutenção mantêm os descontos.";
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(makeLLMResponse(JSON.stringify({ reply, actions: [] })));
+    const withNotice = await run(baseConfig({ groundingCheck: "rules", notices: [notice()] } as Partial<V2AgentConfig>), "o sistema caiu, e o desconto?");
+    expect(withNotice.output.reply).toContain("3 dias úteis");
+    expect(withNotice.output.handoff).toBe(false);
+
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(makeLLMResponse(JSON.stringify({ reply, actions: [] })));
+    const without = await run(baseConfig({ groundingCheck: "rules" } as Partial<V2AgentConfig>), "o sistema caiu, e o desconto?");
+    expect(without.output.reply).not.toContain("3 dias úteis");
+  });
+});

@@ -26,6 +26,8 @@ export interface V2Counters {
   runningSummary?: string;
   /** O agente já deu uma orientação (passo a passo, mensagem pronta, material) nesta conversa. */
   guidanceGiven?: boolean;
+  /** Avisos temporários já ditos nesta conversa no lugar de uma transferência. */
+  noticesShown?: string[];
   /** Perguntou "o que você precisa?" ao pedido de atendente; a próxima mensagem transfere. */
   humanRequestPending?: boolean;
   /** Agente de IA que passou esta conversa para o atual — não devolver para ele (ping-pong). */
@@ -61,6 +63,7 @@ export function parseV2Counters(raw: unknown): V2Counters {
     ...(r.postCloseAsked === true ? { postCloseAsked: true } : {}),
     ...(r.humanRequestAsked === true ? { humanRequestAsked: true } : {}),
     ...(r.guidanceGiven === true ? { guidanceGiven: true } : {}),
+    ...(Array.isArray(r.noticesShown) ? { noticesShown: r.noticesShown.filter((x): x is string => typeof x === "string") } : {}),
     ...(r.humanRequestPending === true ? { humanRequestPending: true } : {}),
     ...(typeof r.receivedFromAgentId === "string" && r.receivedFromAgentId ? { receivedFromAgentId: r.receivedFromAgentId } : {}),
     ...(Array.isArray(r.pendingOptions) && r.pendingOptions.length > 0

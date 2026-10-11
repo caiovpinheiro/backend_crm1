@@ -9,6 +9,7 @@
  * `loadConfigValidationData`. Nenhum domínio de cliente.
  */
 
+import { NOTICE_DEFAULT_HOURS, noticeWindow } from "./notices";
 import { prisma } from "@/lib/prisma";
 import { getOrgSettingBool } from "@/lib/org-settings";
 import { normalizeV2Config } from "@/lib/ai-v2/config";
@@ -555,6 +556,32 @@ function monthsOfRange(start: string, end?: string): Set<number> {
 
 const MONTH_LABEL = ["", "janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"];
 
+/** Avisos temporários: vencido (sujeira), sem fim (vale 24 h), longo demais, assunto que não existe. */
+function validateNotices(c: V2AgentConfig, now: Date, add: (f: Omit<ValidationFinding, "agentId">) => void): void {
+  const tz = c.businessHours?.timezone || "America/Sao_Paulo";
+  const themeIds = new Set(c.themes.map((t) => t.id));
+  (c.notices ?? []).forEach((n, i) => {
+    const path = `notices[${i}]`;
+    const name = n.title?.trim() || n.message.slice(0, 60);
+    const w = noticeWindow(n, tz);
+    if (!w) {
+      add({ code: "aviso_sem_inicio", severity: "bloqueia", path, message: `Aviso ${q(name)} sem data e hora de início válidas: o motor não sabe quando ele vale.` });
+      return;
+    }
+    if (w.end.getTime() <= now.getTime()) {
+      add({ code: "aviso_vencido", severity: "avisa", path, message: `Aviso ${q(name)} já terminou: o motor não usa mais. Pode apagar.` });
+    } else if (w.endGuessed) {
+      add({ code: "aviso_sem_fim", severity: "avisa", path, message: `Aviso ${q(name)} sem data de fim: vale ${NOTICE_DEFAULT_HOURS} h depois do início. Ponha o fim se a situação durar mais ou menos.` });
+    } else if (w.end.getTime() - w.start.getTime() > 14 * 86_400_000) {
+      add({ code: "aviso_longo", severity: "avisa", path, message: `Aviso ${q(name)} vale mais de 14 dias. Situação permanente vai nos materiais ou nas regras, não em aviso temporário.` });
+    }
+    const missing = (n.themeIds ?? []).filter((id) => !themeIds.has(id));
+    if (missing.length > 0) {
+      add({ code: "aviso_assunto_inexistente", severity: "avisa", path: `${path}.themeIds`, message: `Aviso ${q(name)} aponta para ${missing.length} assunto(s) que não existe(m) mais: nesses, ele não vale.` });
+    }
+  });
+}
+
 function validateCalendar(c: V2AgentConfig, now: Date, add: (f: Omit<ValidationFinding, "agentId">) => void): void {
   const events = c.calendar?.events ?? [];
   if (events.length === 0) return;
@@ -771,6 +798,7 @@ export function validateAgentConfig(agentId: string, data: ConfigValidationData)
   validateRouting(agent, data, add);
   validateThemes(agent.config, add);
   validateCalendar(agent.config, data.now ?? new Date(), add);
+  validateNotices(agent.config, data.now ?? new Date(), add);
   validateFields(agent.config, add);
   validateTabulation(agent.config, data, add);
   validateAutomations(data, add);

@@ -2902,6 +2902,46 @@ describe("processV2Turn — decisões sem cobertura", () => {
     return config;
   }
 
+  it("aviso temporário em vigor explica o erro de tela depois da orientação: informa uma vez e não transfere; insistiu, transfere", async () => {
+    const hour = 3_600_000;
+    setConfig({
+      notices: [{ id: "n1", title: "Sistema em manutenção", message: "O sistema está em manutenção. Tente mais tarde.", startsAt: new Date(Date.now() - hour).toISOString(), endsAt: new Date(Date.now() + hour).toISOString(), themeIds: [], when: [], holdTransfers: true }],
+    } as unknown as Partial<V2AgentConfig>);
+    mocks.getState.mockResolvedValue(makeState("active", "agente", { guidanceGiven: true }));
+
+    const r = await run("Apareceu: ocorreu um erro, tente novamente mais tarde");
+
+    expect(r.handoff).toBe(false);
+    expect(mocks.simpleHandoff).not.toHaveBeenCalled();
+    expect(mocks.callLLM).not.toHaveBeenCalled();
+    expect(sentTexts()).toEqual(["O sistema está em manutenção. Tente mais tarde."]);
+    expect(mocks.upsertState.mock.calls.at(-1)![0].counters?.noticesShown).toEqual(["n1"]);
+    expect(mocks.logTurn).toHaveBeenCalledWith(expect.objectContaining({ prompt: "notice", reply: "O sistema está em manutenção. Tente mais tarde.", handoff: false }));
+
+    // Já disse o aviso nesta conversa e o cliente insiste: caminho normal (transfere).
+    mocks.sendText.mockClear();
+    mocks.getState.mockResolvedValue(makeState("active", "agente", { guidanceGiven: true, noticesShown: ["n1"] }));
+    const again = await run("continua dando erro, tente novamente mais tarde");
+    expect(again.handoff).toBe(true);
+    expect(mocks.simpleHandoff).toHaveBeenCalledTimes(1);
+  });
+
+  it("aviso vencido ou com segurar desligado: o erro de tela depois da orientação transfere como antes", async () => {
+    const hour = 3_600_000;
+    setConfig({
+      notices: [{ id: "n1", message: "Manutenção.", startsAt: new Date(Date.now() - 3 * hour).toISOString(), endsAt: new Date(Date.now() - 2 * hour).toISOString(), themeIds: [], when: [], holdTransfers: true }],
+    } as unknown as Partial<V2AgentConfig>);
+    mocks.getState.mockResolvedValue(makeState("active", "agente", { guidanceGiven: true }));
+    expect((await run("ocorreu um erro, tente novamente mais tarde")).handoff).toBe(true);
+
+    mocks.simpleHandoff.mockClear();
+    setConfig({
+      notices: [{ id: "n2", message: "Manutenção.", startsAt: new Date(Date.now() - hour).toISOString(), endsAt: new Date(Date.now() + hour).toISOString(), themeIds: [], when: [], holdTransfers: false }],
+    } as unknown as Partial<V2AgentConfig>);
+    expect((await run("ocorreu um erro, tente novamente mais tarde")).handoff).toBe(true);
+    expect(mocks.simpleHandoff).toHaveBeenCalledTimes(1);
+  });
+
   it("pós-encerramento: cortesia além do limite não responde, guarda o contador, reencerra e registra o turno", async () => {
     setConfig({ limits: { ...baseConfig().limits, maxCourtesyReplies: 1 } } as Partial<V2AgentConfig>);
     mocks.getState.mockResolvedValue({
