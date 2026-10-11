@@ -15,6 +15,7 @@ import { getLogger } from "@/lib/logger";
 import { prismaImport } from "@/lib/prisma-import";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { getCustomFields } from "@/services/custom-fields";
+import { DEAL_MOVED_BATCH_LIMIT } from "@/services/deals";
 import { readStoredFile } from "@/lib/storage/local";
 import {
   enqueueImportEtl,
@@ -183,6 +184,10 @@ export async function processDealsImport(
     dealCustomFieldMap,
     allowCreate,
     allowUpdate,
+    // Mesmo teto dos lotes: um `deal_moved` por negócio criado só em
+    // arquivo pequeno; acima dele, só a purga do board que o createDeal
+    // já faz por linha.
+    publishDealEvents: rows.length <= DEAL_MOVED_BATCH_LIMIT,
   };
 
   ctx.info(

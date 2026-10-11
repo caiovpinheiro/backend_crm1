@@ -120,6 +120,7 @@ vi.mock("@/lib/contact-avatar-fallback", () => ({
 
 import { runWithContext } from "@/lib/request-context";
 import {
+  createDeal,
   DEAL_MOVED_BATCH_LIMIT,
   getBoardData,
   moveDeal,
@@ -883,5 +884,99 @@ describe("syncBoardsAfterDealChanges — board depois de gravações fora do mov
     expect(out.published).toBe(1);
     expect(h.invalidateBoardData).toHaveBeenCalledWith("org-job", "pipe-1");
     expect(dealMovedEvents()[0]).toMatchObject({ organizationId: "org-job" });
+  });
+});
+
+describe("createDeal — negócio novo entra no board pelo deal_moved", () => {
+  const CREATED_AT = new Date("2026-10-10T12:00:00.000Z");
+
+  function createdRow(overrides: Record<string, unknown> = {}) {
+    return {
+      id: "deal-novo",
+      organizationId: ORG,
+      title: "Lead Ana",
+      value: 0,
+      status: "OPEN",
+      lostReason: null,
+      position: 7,
+      expectedClose: null,
+      createdAt: CREATED_AT,
+      updatedAt: CREATED_AT,
+      stageId: "stage-a",
+      ownerId: "user-9",
+      orgUnitId: null,
+      contact: { id: "contact-1", name: "Ana", email: null, phone: "5511", avatarUrl: null },
+      owner: { id: "user-9", name: "Bia", avatarUrl: null, type: "HUMAN" },
+      tags: [{ tag: { id: "tag-1", name: "quente", color: "#f00" } }],
+      stage: { id: "stage-a", pipelineId: "pipe-1" },
+      ...overrides,
+    };
+  }
+
+  function dealMovedEvents() {
+    return h.ssePublish.mock.calls.filter((c) => c[0] === "deal_moved").map((c) => c[1]);
+  }
+
+  beforeEach(() => {
+    h.prisma.deal.aggregate.mockResolvedValue({ _max: { position: 6 } });
+    h.prisma.deal.create.mockResolvedValue(createdRow());
+  });
+
+  it("publica 1 deal_moved com fromStageId null e o card, depois da purga do board", async () => {
+    await withOrg(ORG, () => createDeal({ title: "Lead Ana", stageId: "stage-a" }));
+
+    const events = dealMovedEvents();
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      organizationId: ORG,
+      dealId: "deal-novo",
+      fromPipelineId: "pipe-1",
+      toPipelineId: "pipe-1",
+      fromStageId: null,
+      toStageId: "stage-a",
+      position: 7,
+      updatedAt: CREATED_AT.toISOString(),
+      ownerId: "user-9",
+      card: {
+        id: "deal-novo",
+        title: "Lead Ana",
+        status: "OPEN",
+        position: 7,
+        contact: { id: "contact-1", name: "Ana" },
+        owner: { id: "user-9", name: "Bia" },
+        tags: [{ id: "tag-1", name: "quente", color: "#f00" }],
+      },
+    });
+    expect(h.invalidateBoardData).toHaveBeenCalledWith(ORG, "pipe-1");
+    expect(h.invalidateBoardData.mock.invocationCallOrder[0]!).toBeLessThan(
+      h.ssePublish.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it("publishBoardEvent false (importação grande): só purga, nenhum deal_moved", async () => {
+    await withOrg(ORG, () =>
+      createDeal({ title: "Lead Ana", stageId: "stage-a" }, { publishBoardEvent: false }),
+    );
+
+    expect(h.invalidateBoardData).toHaveBeenCalledWith(ORG, "pipe-1");
+    expect(dealMovedEvents()).toHaveLength(0);
+  });
+
+  it("linha sem etapa/funil não publica evento pela metade", async () => {
+    h.prisma.deal.create.mockResolvedValueOnce(createdRow({ stage: null }));
+
+    await withOrg(ORG, () => createDeal({ title: "Lead Ana", stageId: "stage-a" }));
+
+    expect(dealMovedEvents()).toHaveLength(0);
+  });
+
+  it("falha do barramento não derruba a criação", async () => {
+    h.ssePublish.mockImplementationOnce(() => {
+      throw new Error("redis down");
+    });
+
+    const deal = await withOrg(ORG, () => createDeal({ title: "Lead Ana", stageId: "stage-a" }));
+
+    expect(deal).toMatchObject({ id: "deal-novo" });
   });
 });

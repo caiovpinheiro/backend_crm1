@@ -1053,7 +1053,17 @@ async function insertNewDeal(
   });
 }
 
-export async function createDeal(data: CreateDealInput) {
+export type CreateDealOptions = {
+  /**
+   * Publica `deal_moved` (`fromStageId: null`) com o card novo. Default
+   * true. A importação em lote desliga acima de `DEAL_MOVED_BATCH_LIMIT`
+   * linhas: lá só a purga do board por linha, como antes.
+   */
+  publishBoardEvent?: boolean;
+};
+
+export async function createDeal(data: CreateDealInput, options?: CreateDealOptions) {
+  const publish = options?.publishBoardEvent !== false;
   const scope = await openCommercialCreateScope(data);
   if (scope) {
     const deal = await prisma.$transaction(
@@ -1084,12 +1094,14 @@ export async function createDeal(data: CreateDealInput) {
     );
     if (!wasReusedOpenDeal(deal)) {
       await invalidateBoardsForPipelines([deal.stage?.pipelineId]);
+      if (publish) publishDealCreated(deal);
     }
     return deal;
   }
 
   const created = await insertNewDeal(prisma, data);
   await invalidateBoardsForPipelines([created.stage?.pipelineId]);
+  if (publish) publishDealCreated(created);
   return created;
 }
 
@@ -1153,6 +1165,7 @@ export async function duplicateDeal(
     }),
   );
   await invalidateBoardsForPipelines([created.stage?.pipelineId]);
+  publishDealCreated(created);
   return created;
 }
 
@@ -2290,6 +2303,58 @@ function publishDealMovedAfterCacheBump(
     }
     publishDealMoved(event);
   })();
+}
+
+/**
+ * Negócio recém-criado: o mesmo `deal_moved` do move manual, com
+ * `fromStageId: null` e o `card` montado pelo mesmo projetor. Sem isso o
+ * lead novo só aparecia no Kanban quando uma mensagem do contato fazia o
+ * cliente refazer o board inteiro.
+ *
+ * Chamado DEPOIS da purga do board (o cliente que preferir refazer o GET não
+ * lê o board antigo). O gate por funil/dono da rota SSE
+ * (`projectDealMovedForViewer`) vale igual: `fromPipelineId` é o próprio
+ * funil destino, então quem não vê o funil não recebe o evento e quem não vê
+ * o dono recebe só ids. Best-effort: nunca derruba a criação.
+ */
+function publishDealCreated(deal: unknown): void {
+  try {
+    if (!deal || typeof deal !== "object") return;
+    const row = deal as Record<string, unknown>;
+    const stage = row.stage as { pipelineId?: unknown } | null | undefined;
+    const pipelineId = typeof stage?.pipelineId === "string" ? stage.pipelineId : null;
+    const orgId =
+      typeof row.organizationId === "string" ? row.organizationId : getOrgIdOrNull();
+    const position = Number(row.position);
+    if (
+      !orgId ||
+      !pipelineId ||
+      typeof row.id !== "string" ||
+      typeof row.stageId !== "string" ||
+      !Number.isFinite(position)
+    ) {
+      return;
+    }
+    const updatedAt = isoInstant(row.updatedAt);
+    const payload: DealMovedPayload = {
+      organizationId: orgId,
+      dealId: row.id,
+      fromPipelineId: pipelineId,
+      toPipelineId: pipelineId,
+      fromStageId: null,
+      toStageId: row.stageId,
+      position,
+      updatedAt,
+      ...dealMovedOwnership(row),
+    };
+    const card = toDealMovedCard(row, position, updatedAt);
+    publishDealMoved(card ? { ...payload, card } : payload);
+  } catch (err) {
+    log.warn(
+      { err: err instanceof Error ? err.message : String(err) },
+      "[deals.createDeal] deal_moved da criação falhou",
+    );
+  }
 }
 
 /** Select do `UPDATE` de etapa: a linha devolvida já é o estado gravado. */

@@ -87,6 +87,13 @@ export type DealImportOptions = {
    * em `updateExisting` (compat retroativa). `false` = modo "somente criar".
    */
   allowUpdate?: boolean;
+  /**
+   * Publicar `deal_moved` (`fromStageId: null`) por negócio criado. O job
+   * liga só quando o arquivo inteiro cabe em `DEAL_MOVED_BATCH_LIMIT`
+   * linhas; acima disso fica só a purga do board por linha (o quadro
+   * converge na próxima leitura). Ausente = não publica.
+   */
+  publishDealEvents?: boolean;
 };
 
 export type DealRowResult =
@@ -736,7 +743,7 @@ export async function processDealRow(
         closedAt: null,
         contactId: contactId ?? undefined,
         ownerId,
-      });
+      }, { publishBoardEvent: opts.publishDealEvents === true });
       dealId = (d as { id?: string })?.id ?? null;
       outcome = wasReusedOpenDeal(d) ? "updated" : "created";
     }

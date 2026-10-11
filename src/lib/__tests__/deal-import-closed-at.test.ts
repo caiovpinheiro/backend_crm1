@@ -74,3 +74,24 @@ describe("importação de negócios: data de fechamento", () => {
     expect(h.createDeal.mock.calls[0]![0]).toMatchObject({ stageId: "stage-won", closedAt: null });
   });
 });
+
+describe("importação de negócios: deal_moved da criação", () => {
+  const row = () => ({ title: "Lead", stage_id: "stage-a" });
+
+  it("arquivo grande (padrão): createDeal sem evento, só a purga do board", async () => {
+    await processDealRow(["title", "stage_id"], row(), OPTS, cacheWithStage("stage-a"));
+
+    expect(h.createDeal.mock.calls[0]![1]).toEqual({ publishBoardEvent: false });
+  });
+
+  it("arquivo dentro do teto do lote: um deal_moved por negócio criado", async () => {
+    await processDealRow(
+      ["title", "stage_id"],
+      row(),
+      { ...OPTS, publishDealEvents: true },
+      cacheWithStage("stage-a"),
+    );
+
+    expect(h.createDeal.mock.calls[0]![1]).toEqual({ publishBoardEvent: true });
+  });
+});

@@ -171,6 +171,48 @@ describe("projectDealMovedForViewer", () => {
     });
   });
 
+  describe("negócio criado (fromStageId null, fromPipelineId = destino)", () => {
+    const created = {
+      ...event,
+      dealId: "d9",
+      fromPipelineId: "pipe-b",
+      toPipelineId: "pipe-b",
+      fromStageId: null,
+      toStageId: "stage-b",
+      ownerId: "u-dono",
+      card: { id: "d9", title: "Lead novo", status: "OPEN" },
+    };
+    const onlyOwn = (me: string) => (d: { ownerId: string | null | undefined }) => d.ownerId === me;
+
+    it("quem vê o funil e o dono recebe o card", () => {
+      expect(projectDealMovedForViewer(created, ctx(), onlyOwn("u-dono"))).toBe(created);
+    });
+
+    it("quem não vê o funil não recebe o evento", () => {
+      expect(
+        projectDealMovedForViewer(created, ctx({ pipelineDeny: new Set(["pipe-b"]) })),
+      ).toBeNull();
+    });
+
+    it("etapa destino bloqueada: funil visível, evento sem card", () => {
+      const projected = projectDealMovedForViewer(
+        created,
+        ctx({ stageDeny: new Set(["stage-b"]) }),
+      ) as Record<string, unknown>;
+      expect(projected).not.toHaveProperty("card");
+    });
+
+    it("quem só vê os próprios e não é o dono recebe só ids", () => {
+      const projected = projectDealMovedForViewer(created, ctx(), onlyOwn("u-outro")) as Record<
+        string,
+        unknown
+      >;
+      expect(projected).not.toHaveProperty("card");
+      expect(projected).not.toHaveProperty("ownerId");
+      expect(JSON.stringify(projected)).not.toContain("Lead novo");
+    });
+  });
+
   it("payload legado só com pipelineId segue intacto para o gate genérico", () => {
     const legacy = { pipelineId: "pipe-a", dealId: "d1" };
     expect(projectDealMovedForViewer(legacy, ctx({ pipelineDeny: new Set(["pipe-a"]) }))).toBe(

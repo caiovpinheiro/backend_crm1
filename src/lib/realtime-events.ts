@@ -325,13 +325,19 @@ export type DealMovedCard = {
  * commitou. `position` é a posição fracionária gravada, não o índice
  * que o cliente pediu. `card` é opcional: sem ele, quem não tem o
  * negócio em cache espera o polling.
+ *
+ * Negócio NOVO sai pelo mesmo evento com `fromStageId: null` (não havia
+ * etapa de origem) e `fromPipelineId === toPipelineId`: o cliente insere o
+ * `card` na etapa destino. Cliente antigo trata como um move de um card que
+ * ainda não tem em cache — insere pelo `card` do mesmo jeito.
  */
 export type DealMovedPayload = {
   organizationId: OrgId;
   dealId: string;
   fromPipelineId: string;
   toPipelineId: string;
-  fromStageId: string;
+  /** `null` = negócio recém-criado (sem etapa de origem). */
+  fromStageId: string | null;
   toStageId: string;
   position: number;
   updatedAt: string;
@@ -481,7 +487,8 @@ export function publishConversationUpdated(
 
 /**
  * Board: um negócio já está na etapa/posição novas (ou trocou de dono, ou foi
- * a Ganho/Perdido). Publicado por `moveDeal`, pela automação e pelos lotes
+ * a Ganho/Perdido, ou acabou de ser criado — `fromStageId: null`, via
+ * `createDeal`/`duplicateDeal`). Publicado por `moveDeal`, pela automação e pelos lotes
  * pequenos (até `DEAL_MOVED_BATCH_LIMIT` negócios, via
  * `syncBoardsAfterDealChanges`); acima do teto só o cache do board é
  * invalidado e o quadro converge na próxima leitura. Mudança de dono sem
