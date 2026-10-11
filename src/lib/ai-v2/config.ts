@@ -497,6 +497,19 @@ export const v2AgentConfigSchema = z.object({
         .default([]),
       offHoursMessage: optionalText,
       outsideAction: z.enum(["message", "handoff", "silence"]).optional().default("message"),
+      /** Feriados nacionais sem expediente da equipe (o "próximo horário" pula o feriado). */
+      holidaysClosed: z.boolean().optional(),
+      /** Pausas da equipe (treinamento, convenção…): atendimento humano parado no período. */
+      closures: z.preprocess(
+        (v) =>
+          Array.isArray(v)
+            ? v
+                .filter((c) => c && typeof c === "object" && typeof c.startsAt === "string" && c.startsAt.trim() && typeof c.endsAt === "string" && c.endsAt.trim())
+                .map((c) => ({ ...c, id: typeof c.id === "string" && c.id ? c.id : `pausa-${String(c.startsAt)}` }))
+                .slice(0, 30)
+            : [],
+        z.array(z.object({ id: z.string(), label: optionalText, startsAt: z.string(), endsAt: z.string() })),
+      ),
     })
     .optional()
     .nullable()

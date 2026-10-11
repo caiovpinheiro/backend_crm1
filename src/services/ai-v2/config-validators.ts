@@ -9,7 +9,7 @@
  * `loadConfigValidationData`. Nenhum domínio de cliente.
  */
 
-import { NOTICE_DEFAULT_HOURS, noticeWindow } from "./notices";
+import { NOTICE_DEFAULT_HOURS, noticeInstant, noticeWindow } from "./notices";
 import { prisma } from "@/lib/prisma";
 import { getOrgSettingBool } from "@/lib/org-settings";
 import { normalizeV2Config } from "@/lib/ai-v2/config";
@@ -582,6 +582,30 @@ function validateNotices(c: V2AgentConfig, now: Date, add: (f: Omit<ValidationFi
   });
 }
 
+/** Pausas da equipe (treinamento, convenção): fim antes do início, já passou, longa demais. */
+function validateTeamClosures(c: V2AgentConfig, now: Date, add: (f: Omit<ValidationFinding, "agentId">) => void): void {
+  const bh = c.businessHours;
+  if (!bh) return;
+  (bh.closures ?? []).forEach((p, i) => {
+    const path = `businessHours.closures[${i}]`;
+    const name = p.label?.trim() || "sem motivo";
+    const start = noticeInstant(p.startsAt, bh.timezone);
+    const end = noticeInstant(p.endsAt, bh.timezone);
+    if (!start || !end || end.getTime() <= start.getTime()) {
+      add({ code: "pausa_invalida", severity: "bloqueia", path, message: `Pausa da equipe ${q(name)} com fim antes do início (ou data inválida): o motor não sabe quando a equipe para.` });
+      return;
+    }
+    if (end.getTime() <= now.getTime()) {
+      add({ code: "pausa_vencida", severity: "avisa", path, message: `Pausa da equipe ${q(name)} já terminou: o motor não usa mais. Pode apagar.` });
+    } else if (end.getTime() - start.getTime() > 30 * 86_400_000) {
+      add({ code: "pausa_longa", severity: "avisa", path, message: `Pausa da equipe ${q(name)} dura mais de 30 dias. Mudança permanente vai nos dias e horários da semana.` });
+    }
+    if (!bh.enabled) {
+      add({ code: "pausa_sem_horario", severity: "avisa", path, message: `Pausa da equipe ${q(name)} cadastrada, mas o horário de atendimento está desligado: a pausa só vale com ele ligado.` });
+    }
+  });
+}
+
 function validateCalendar(c: V2AgentConfig, now: Date, add: (f: Omit<ValidationFinding, "agentId">) => void): void {
   const events = c.calendar?.events ?? [];
   if (events.length === 0) return;
@@ -799,6 +823,7 @@ export function validateAgentConfig(agentId: string, data: ConfigValidationData)
   validateThemes(agent.config, add);
   validateCalendar(agent.config, data.now ?? new Date(), add);
   validateNotices(agent.config, data.now ?? new Date(), add);
+  validateTeamClosures(agent.config, data.now ?? new Date(), add);
   validateFields(agent.config, add);
   validateTabulation(agent.config, data, add);
   validateAutomations(data, add);

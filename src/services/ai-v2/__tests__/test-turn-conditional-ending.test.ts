@@ -112,7 +112,7 @@ describe("fecho e transferência condicional (paridade produção × teste)", ()
       const r = await simulateV2Turn("agent-1", cfg, "quero falar com alguém", [], undefined, undefined, undefined, "active", null, { skipEntry: true });
       expect(r.reply.startsWith("Vou transferir.")).toBe(true);
       expect(r.reply).toContain("Nossa equipe atende");
-      expect(r.reply).toContain("próximo horário");
+      expect(r.reply).toContain("seguimos com você na segunda-feira, 28/09, às 08:00");
     } finally {
       vi.useRealTimers();
     }

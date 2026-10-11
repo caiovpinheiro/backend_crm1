@@ -304,6 +304,25 @@ describe("3. calendário", () => {
     expect(validateAgentConfig("a", d).filter((f) => f.path?.startsWith("notices[5]"))).toEqual([]);
   });
 
+  it("pausas da equipe: fim antes do início bloqueia; vencida, longa e sem horário ligado avisam", () => {
+    const iso = (days: number) => new Date(NOW.getTime() + days * 86_400_000).toISOString();
+    const bh = (enabled: boolean, closures: unknown[]) => ({ enabled, timezone: "America/Sao_Paulo", weekdays: [{ day: 1, start: "08:00", end: "18:00" }], closures });
+    const d = data({
+      agents: [agent("a", { config: { channelIds: ["ch-1"], businessHours: bh(true, [
+        { id: "p-inv", label: "Invertida", startsAt: iso(2), endsAt: iso(1) },
+        { id: "p-old", label: "Antiga", startsAt: iso(-3), endsAt: iso(-2) },
+        { id: "p-long", label: "Longa", startsAt: iso(1), endsAt: iso(40) },
+        { id: "p-ok", label: "Treinamento", startsAt: iso(1), endsAt: iso(1.2) },
+      ]) } })],
+    });
+    expect(find(d, "pausa_invalida")).toEqual([expect.objectContaining({ severity: "bloqueia", path: "businessHours.closures[0]" })]);
+    expect(find(d, "pausa_vencida")).toEqual([expect.objectContaining({ severity: "avisa", path: "businessHours.closures[1]" })]);
+    expect(find(d, "pausa_longa")).toEqual([expect.objectContaining({ path: "businessHours.closures[2]" })]);
+    expect(validateAgentConfig("a", d).filter((f) => f.path?.startsWith("businessHours.closures[3]"))).toEqual([]);
+    const off = data({ agents: [agent("a", { config: { channelIds: ["ch-1"], businessHours: bh(false, [{ id: "p", label: "x", startsAt: iso(1), endsAt: iso(2) }]) } })] });
+    expect(find(off, "pausa_sem_horario")).toHaveLength(1);
+  });
+
   it("calendário só com datas passadas avisa; com uma futura, não", () => {
     const past = data({ agents: [agent("a", { config: { channelIds: ["ch-1"], calendar: { events: [{ id: "e1", start: "2026-09-01", end: "2026-09-10", title: "Inscrições" }] } } })] });
     expect(find(past, "calendario_so_passado")[0]).toMatchObject({ path: "calendar.events", severity: "avisa" });

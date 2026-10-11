@@ -406,6 +406,15 @@ export interface V2BusinessHoursSlot {
   end: string;
 }
 
+/** Pausa da equipe: atendimento humano parado no período (data e hora no fuso do horário). */
+export interface V2TeamClosure {
+  id: string;
+  /** Motivo dito ao cliente ("treinamento da equipe"). */
+  label?: string;
+  startsAt: string;
+  endsAt: string;
+}
+
 export interface V2BusinessHoursConfig {
   enabled: boolean;
   timezone: string;
@@ -413,6 +422,10 @@ export interface V2BusinessHoursConfig {
   offHoursMessage?: string;
   /** Ação quando chega mensagem fora do horário. */
   outsideAction?: "message" | "handoff" | "silence";
+  /** Feriados nacionais sem expediente da equipe. */
+  holidaysClosed?: boolean;
+  /** Pausas da equipe (treinamento, convenção…). */
+  closures?: V2TeamClosure[];
 }
 
 export interface V2MediaKindConfig {
