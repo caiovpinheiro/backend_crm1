@@ -47,6 +47,9 @@ export function standaloneClause(clause: string): string {
   const causal = body.match(CAUSAL_START);
   if (causal) {
     const rest = body.slice(causal[0].length);
+    // "Como você precisa dessa informação para seguir" sem o resto da frase:
+    // "dessa", "isso" apontavam para o que foi cortado. Sozinha, não diz nada.
+    if (/(?<![\p{L}])(?:d?ess[ae]s?|d?est[ae]s?|n?isso|n?isto|disso|disto|dele|dela)(?![\p{L}])/iu.test(rest)) return "";
     return vocative ? `${vocative[1]}, ${rest}` : rest.charAt(0).toUpperCase() + rest.slice(1);
   }
   return DEPENDENT_START.test(body) ? "" : s;

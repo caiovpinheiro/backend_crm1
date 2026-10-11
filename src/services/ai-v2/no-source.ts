@@ -89,7 +89,18 @@ export function answersBeforeHandoff(reply: string): boolean {
   return rest.split(/\s+/).filter(Boolean).length >= 10;
 }
 
-const TRANSFER_WORD = /\b(?:encaminh\w*|transfer(?:ir|irei|imos|e|o|indo)\b|transfir\w*|repass\w*|chamar (?:algu[eé]m|uma pessoa|a equipe))/i;
+// Mesmas formas que `announcesTransfer` reconhece como aviso: "acionar o
+// time", "chamar o setor", "passar para a equipe". Faltando aqui, "se o
+// erro continuar, será necessário acionar o time" não era vista como
+// condição e a resposta transferia na hora, com a instrução junto.
+const TRANSFER_WORD = new RegExp(
+  [
+    String.raw`\b(?:encaminh\w*|transfer(?:ir|irei|imos|e|o|indo)\b|transfir\w*|repass\w*)`,
+    String.raw`\b(?:chamar|acionar|envolver|direcionar)\s+(?:(?:voc[eê]|te|lhe)\s+)?(?:para\s+|pra\s+)?(?:algu[eé]m|uma pessoa|um(?:a)? (?:colega|atendente|especialista|respons[áa]vel)|o time|a equipe|o setor|o pessoal|o departamento|a [áa]rea|o suporte|o atendimento)`,
+    String.raw`\bpassar\s+(?:voc[eê]\s+|o caso\s+|o atendimento\s+)?(?:para|pra)\s+(?:o time|a equipe|o setor|o atendimento|algu[eé]m|uma pessoa|um atendente)`,
+  ].join("|"),
+  "i",
+);
 /** "se"/"caso" como condição: no começo da frase ou depois de vírgula, "e", "mas"… ("o seu caso" e "se aplica" não contam). */
 const CONDITION = /(?:^|[,;:(]\s*|\b(?:e|mas|ou|porém|porem|então|entao)\s+)(?:se|caso)(?![\p{L}])/iu;
 
