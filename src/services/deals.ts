@@ -2226,6 +2226,9 @@ function toDealMovedCard(
 
   return {
     id: row.id,
+    ...(typeof row.number === "number" && Number.isFinite(row.number)
+      ? { number: row.number }
+      : {}),
     title,
     value: plainDealValue(row.value),
     status: typeof row.status === "string" ? row.status : undefined,
@@ -2360,6 +2363,7 @@ function publishDealCreated(deal: unknown): void {
 /** Select do `UPDATE` de etapa: a linha devolvida já é o estado gravado. */
 export const activeDealMovedSelect = {
   id: true,
+  number: true,
   title: true,
   value: true,
   status: true,
@@ -2382,6 +2386,7 @@ export const activeDealMovedSelect = {
 /** Linha já gravada, o bastante para o mesmo `deal_moved` do move manual. */
 export type ActiveDealMovedRow = {
   id: string;
+  number?: number | null;
   title?: string | null;
   value?: unknown;
   status?: string | null;

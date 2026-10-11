@@ -231,6 +231,7 @@ const CASES: Case[] = [
         updatedAt: "2026-10-01T12:00:00.000Z",
         card: {
           id: "deal_1",
+          number: 49338,
           title: "Lead",
           status: "OPEN",
           position: 1.5,
@@ -247,6 +248,7 @@ const CASES: Case[] = [
       updatedAt: "2026-10-01T12:00:00.000Z",
       card: {
         id: "deal_1",
+        number: 49338,
         title: "Lead",
         status: "OPEN",
         position: 1.5,
@@ -296,7 +298,7 @@ const CASES: Case[] = [
         position: 3,
         updatedAt: "2026-10-10T12:00:00.000Z",
         ownerId: null,
-        card: { id: "deal_9", title: "Lead novo", status: "OPEN", position: 3 },
+        card: { id: "deal_9", number: 49339, title: "Lead novo", status: "OPEN", position: 3 },
       }),
     payload: {
       organizationId: ORG,
@@ -308,7 +310,7 @@ const CASES: Case[] = [
       position: 3,
       updatedAt: "2026-10-10T12:00:00.000Z",
       ownerId: null,
-      card: { id: "deal_9", title: "Lead novo", status: "OPEN", position: 3 },
+      card: { id: "deal_9", number: 49339, title: "Lead novo", status: "OPEN", position: 3 },
     },
   },
   {
