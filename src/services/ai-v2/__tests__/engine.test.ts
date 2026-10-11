@@ -2772,6 +2772,53 @@ describe("processV2Turn — correções do motor", () => {
     expect(mocks.simpleHandoff).toHaveBeenCalledTimes(1);
   });
 
+  it("pedido de pessoa com assunto, “tentar resolver antes”: o modelo responde e quer transferir → sai a resposta com a oferta, sem transferir; pediu de novo, transfere", async () => {
+    const config = baseConfig({
+      handoff: { ...baseConfig().handoff, humanRequestKeywords: ["falar com atendente"] },
+      rules: [{ id: "r-h", name: "Pedido de humano", order: 0, conditions: [{ type: "keywords", values: ["falar com atendente"] }], actions: [{ type: "handoff" }] }],
+    } as unknown as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.getState.mockResolvedValue(makeState("active"));
+    mocks.callLLM.mockResolvedValue(llmOut({
+      reply: "Para acessar a área de pedidos, abra o aplicativo, toque em Minha conta e depois em Pedidos para ver o andamento. Vou te passar para o time de atendimento.",
+      handoff: true,
+    }));
+
+    const r1 = await run("quero falar com atendente, como vejo meus pedidos?");
+
+    expect(r1.handoff).toBe(false);
+    expect(mocks.simpleHandoff).not.toHaveBeenCalled();
+    const sent = mocks.sendText.mock.calls.map((c) => (c[0] as { text: string }).text).join("\n");
+    expect(sent).toContain("toque em Minha conta");
+    expect(sent).toContain("me avise por aqui que eu te passo para alguém da equipe");
+    expect(sent).not.toContain("Vou te passar para o time");
+    expect(mocks.upsertState.mock.calls.at(-1)![0].counters.humanRequestOffered).toBe(true);
+
+    // Pediu pessoa de novo (mesmo com assunto): transfere.
+    mocks.callLLM.mockClear();
+    mocks.getState.mockResolvedValue(makeState("active", "agente", { humanRequestAsked: true, humanRequestOffered: true }));
+    const r2 = await run("quero falar com atendente, não achei meus pedidos");
+    expect(r2.handoff).toBe(true);
+    expect(mocks.callLLM).not.toHaveBeenCalled();
+    expect(mocks.simpleHandoff).toHaveBeenCalledTimes(1);
+  });
+
+  it("pedido de pessoa com assunto, “transferir direto”: transfere na hora, sem chamar o modelo nem mandar passo a passo", async () => {
+    const config = baseConfig({
+      handoff: { ...baseConfig().handoff, humanRequestKeywords: ["falar com atendente"], humanRequestWithSubject: "transfer" },
+      rules: [{ id: "r-h", name: "Pedido de humano", order: 0, conditions: [{ type: "keywords", values: ["falar com atendente"] }], actions: [{ type: "handoff" }] }],
+    } as unknown as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.getState.mockResolvedValue(makeState("active"));
+
+    const r = await run("quero falar com atendente, como vejo meus pedidos?");
+
+    expect(r.handoff).toBe(true);
+    expect(mocks.callLLM).not.toHaveBeenCalled();
+    expect(mocks.simpleHandoff).toHaveBeenCalledTimes(1);
+    expect(mocks.sendText.mock.calls.map((c) => (c[0] as { text: string }).text)).toEqual(["Vou transferir."]);
+  });
+
   it("nova tentativa do turno depois de falha: se a anterior já respondeu, não responde de novo", async () => {
     const config = baseConfig();
     mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
