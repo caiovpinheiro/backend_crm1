@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
+import { consumePresencePingSlot, presenceTabId } from "@/lib/presence-ping-limit";
 import { recordHeartbeatThrottled } from "@/services/system-presence";
 import { getLogger } from "@/lib/logger";
 
@@ -25,11 +26,31 @@ export const dynamic = "force-dynamic";
  *
  * Compatível com o frontend antigo: a rota permanece em `/api/agents/me/ping`
  * e responde 200 igual antes.
+ *
+ * Limite: no máximo 1 ping a cada 20 s por usuário e aba (header `x-tab-id`;
+ * sem ele, por usuário). Excedeu → 429 `{ retryAfterMs }` + `Retry-After`
+ * (segundos). Sessão revogada/expirada responde antes, 401 `SESSION_REVOKED`
+ * (`withOrgContext` → `requireAuth`). O ping NÃO conta como atividade real
+ * para a expiração por inatividade.
  */
-export async function POST() {
+export async function POST(request: Request) {
   return withOrgContext(async (session) => {
     const userId = session.user.id;
     const organizationId = session.user.organizationId;
+
+    const slot = await consumePresencePingSlot({
+      userId,
+      tabId: presenceTabId(request.headers),
+    });
+    if (!slot.ok) {
+      return NextResponse.json(
+        { retryAfterMs: slot.retryAfterMs },
+        {
+          status: 429,
+          headers: { "Retry-After": String(Math.max(1, Math.ceil(slot.retryAfterMs / 1000))) },
+        },
+      );
+    }
     if (!organizationId) {
       // Super-admin sem org não tem presença por org.
       return NextResponse.json({ ok: true, systemOnline: true });
