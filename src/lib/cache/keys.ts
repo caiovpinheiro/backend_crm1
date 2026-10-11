@@ -586,6 +586,38 @@ export function scheduleBoardInvalidation(
   );
 }
 
+/**
+ * Janela da purga do board disparada por MENSAGEM (`new_message`).
+ *
+ * O cliente não precisa mais do board recalculado para o card: aplica
+ * prévia/não lidas/ordem in-place pelo próprio evento, e negócio novo entra
+ * pelo `deal_moved`. A purga por mensagem só mantém a ORDEM do board em
+ * cache (última interação) — 1 por minuto por funil basta, e só quando
+ * houve mensagem (leading + trailing, como `scheduleBoardInvalidation`).
+ * O TTL do valor (45 s) continua limitando o quanto a ordem pode ficar velha.
+ *
+ * Janela própria (`board-msg:`): escrita de negócio (criar, mover, editar)
+ * segue purgando na hora por `invalidateBoardData`, sem esperar esta janela.
+ */
+export const BOARD_MESSAGE_INVALIDATION_WINDOW_MS = 60_000;
+
+/** Purga do board por mensagem: no máximo 1 a cada 60 s por funil (ou org). */
+export function scheduleBoardInvalidationForMessages(
+  orgId: string | null | undefined,
+  pipelineId?: string | null,
+): void {
+  if (!orgId) return;
+  const windowKey = pipelineId ? `${orgId}:${pipelineId}` : orgId;
+  scheduleCoalescedPurge(
+    `board-msg:${windowKey}`,
+    BOARD_MESSAGE_INVALIDATION_WINDOW_MS,
+    () =>
+      pipelineId
+        ? invalidateBoardData(orgId, pipelineId)
+        : invalidateOrgBoards(orgId),
+  );
+}
+
 // ── Origem de tenant confiável no CORS ──────────────────────────
 //
 // "`https://{slug}.{base}` pode receber CORS com credenciais?" — org
