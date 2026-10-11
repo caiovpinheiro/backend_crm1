@@ -2902,6 +2902,33 @@ describe("processV2Turn — decisões sem cobertura", () => {
     return config;
   }
 
+  it("identificação na conversa recém-recebida de outro agente: o aviso do anterior já cobriu — transfere sem repetir o aviso", async () => {
+    setConfig({ entry: { confirmContact: false, onDealNotFound: "ask_identification" } } as Partial<V2AgentConfig>);
+    // Chegou de outro agente já na etapa de identificação, com o mesmo documento.
+    mocks.getState.mockResolvedValue({ ...makeState("identifying", "pessoa"), agentId: "agent-0" });
+    mocks.loadContext.mockResolvedValue({ contact: { Nome: "[nome]" }, contactRaw: { id: "contact-1" }, deals: [], selectedDeal: null, dealId: undefined, contactId: "contact-1" });
+    mocks.messageFindMany.mockImplementation(async (args: { where?: { id?: { in?: string[] } } }) =>
+      args?.where?.id?.in ? [{ createdAt: new Date("2026-10-11T14:26:38Z") }] : [],
+    );
+    // O agente anterior já mandou "vou te passar para…" depois desta mensagem.
+    mocks.messageFindFirst.mockResolvedValue({ id: "m-notice" });
+
+    const r = await run("12345678909", { messageIds: ["m-doc"] });
+
+    expect(r.handoff).toBe(true);
+    expect(mocks.simpleHandoff).toHaveBeenCalledTimes(1);
+    expect(mocks.sendText).not.toHaveBeenCalled();
+    expect(mocks.logTurn.mock.calls.at(-1)![0]).not.toHaveProperty("reply");
+
+    // Sem aviso do anterior (chegou e o cliente escreveu de novo): avisa.
+    mocks.sendText.mockClear();
+    mocks.simpleHandoff.mockClear();
+    mocks.messageFindFirst.mockResolvedValue(null);
+    await run("12345678909", { messageIds: ["m-doc-2"] });
+    expect(sentTexts()).toEqual(["Vou transferir."]);
+    expect(mocks.simpleHandoff).toHaveBeenCalledTimes(1);
+  });
+
   it("aviso temporário em vigor explica o erro de tela depois da orientação: informa uma vez e não transfere; insistiu, transfere", async () => {
     const hour = 3_600_000;
     setConfig({
