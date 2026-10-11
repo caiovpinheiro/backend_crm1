@@ -3,13 +3,27 @@ import { NextResponse } from "next/server";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { sessionRevokedBody } from "@/lib/auth/revoked-session";
 import { parseLastInteractionAt, sessionIdleTimeoutMs } from "@/lib/auth/session-activity";
-import { consumePresencePingSlot, presenceTabId } from "@/lib/presence-ping-limit";
+import {
+  consumePresencePingSlot,
+  consumePresencePingUserSlot,
+  presenceTabId,
+} from "@/lib/presence-ping-limit";
 import { recordHeartbeatThrottled } from "@/services/system-presence";
 import { getLogger } from "@/lib/logger";
 
 const log = getLogger("api/agents/me/ping");
 
 export const dynamic = "force-dynamic";
+
+function tooManyPings(retryAfterMs: number): NextResponse {
+  return NextResponse.json(
+    { retryAfterMs },
+    {
+      status: 429,
+      headers: { "Retry-After": String(Math.max(1, Math.ceil(retryAfterMs / 1000))) },
+    },
+  );
+}
 
 async function readLastInteractionAt(request: Request, now: number): Promise<number | null> {
   let body: unknown;
@@ -42,7 +56,10 @@ async function readLastInteractionAt(request: Request, now: number): Promise<num
  *
  * Limite: no máximo 1 ping a cada 20 s por usuário e aba (header `x-tab-id`;
  * sem ele, por usuário). Excedeu → 429 `{ retryAfterMs }` + `Retry-After`
- * (segundos). Sessão revogada/expirada responde antes, 401 `SESSION_REVOKED`
+ * (segundos). Além disso, teto por usuário somando as abas:
+ * `PRESENCE_PING_USER_MAX_PER_MIN` (6) por janela de 60 s — só conta o ping
+ * que passou pelo limite da aba; excedeu → o mesmo 429. Sessão
+ * revogada/expirada responde antes, 401 `SESSION_REVOKED`
  * (`withOrgContext` → `requireAuth`). O ping NÃO conta como atividade real
  * para a expiração por inatividade.
  *
@@ -75,15 +92,9 @@ export async function POST(request: Request) {
       userId,
       tabId: presenceTabId(request.headers),
     });
-    if (!slot.ok) {
-      return NextResponse.json(
-        { retryAfterMs: slot.retryAfterMs },
-        {
-          status: 429,
-          headers: { "Retry-After": String(Math.max(1, Math.ceil(slot.retryAfterMs / 1000))) },
-        },
-      );
-    }
+    if (!slot.ok) return tooManyPings(slot.retryAfterMs);
+    const userSlot = await consumePresencePingUserSlot({ userId });
+    if (!userSlot.ok) return tooManyPings(userSlot.retryAfterMs);
     if (!organizationId) {
       // Super-admin sem org não tem presença por org.
       return NextResponse.json({ ok: true, systemOnline: true, sessionIdleMs });

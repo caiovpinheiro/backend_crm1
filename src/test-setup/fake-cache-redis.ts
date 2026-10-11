@@ -160,6 +160,18 @@ export function fakeIoredisModule(state: FakeRedisState) {
       ops.set(dirtyKey!, "1", "PX", Number(dirtyMs));
       return Math.max(0, ops.pttl(claimKey!));
     },
+    // Teto de ping por usuário: INCR + PEXPIRE na 1ª; -1 = cabe, senão PTTL.
+    "presence-ping-user-cap": ([key], [windowMs, max]) => {
+      const n = ops.incrby(key!, 1);
+      if (n === 1) ops.pexpire(key!, Number(windowMs));
+      if (n <= Number(max)) return -1;
+      let ttl = ops.pttl(key!);
+      if (ttl < 0) {
+        ops.pexpire(key!, Number(windowMs));
+        ttl = Number(windowMs);
+      }
+      return ttl;
+    },
   };
 
   class FakeMulti {

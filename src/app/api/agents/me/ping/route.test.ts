@@ -57,6 +57,7 @@ beforeEach(() => {
   h.recordHeartbeatThrottled.mockResolvedValue({ created: false, written: true });
   delete process.env.SESSION_IDLE_HOURS;
   delete process.env.SESSION_IDLE_TIMEOUT_HOURS;
+  delete process.env.PRESENCE_PING_USER_MAX_PER_MIN;
 });
 
 afterEach(() => {
@@ -168,5 +169,51 @@ describe("POST /api/agents/me/ping — lastInteractionAt (inatividade do cliente
     const res = await ping("aba-1", { lastInteractionAt: T0 - 2 * 60_000 });
     expect(res.status).toBe(200);
     expect((await res.json()).sessionIdleMs).toBe(180_000);
+  });
+});
+
+describe("POST /api/agents/me/ping — teto por usuário (todas as abas)", () => {
+  it("7º ping no mesmo minuto (abas diferentes) → 429 com retryAfterMs coerente; depois da janela → 200", async () => {
+    for (let i = 1; i <= 6; i++) {
+      vi.setSystemTime(T0 + (i - 1) * 5_000);
+      expect((await ping(`aba-${i}`)).status).toBe(200);
+    }
+    // 7º, 30 s depois do 1º: faltam 30 s da janela de 60 s.
+    vi.setSystemTime(T0 + 30_000);
+    const res = await ping("aba-7");
+    expect(res.status).toBe(429);
+    expect(await res.json()).toEqual({ retryAfterMs: 30_000 });
+    expect(res.headers.get("Retry-After")).toBe("30");
+    expect(h.recordHeartbeatThrottled).toHaveBeenCalledTimes(6);
+
+    // Outro usuário não é afetado.
+    h.user = { id: "u2", organizationId: "org1" };
+    expect((await ping("aba-1")).status).toBe(200);
+    h.user = { id: "u1", organizationId: "org1" };
+
+    // Janela vencida → volta a passar.
+    vi.setSystemTime(T0 + 60_000);
+    expect((await ping("aba-8")).status).toBe(200);
+  });
+
+  it("ping barrado pelo limite da aba não conta no teto do usuário", async () => {
+    expect((await ping("aba-1")).status).toBe(200);
+    for (let i = 0; i < 10; i++) expect((await ping("aba-1")).status).toBe(429);
+    for (let i = 2; i <= 6; i++) expect((await ping(`aba-${i}`)).status).toBe(200);
+    expect((await ping("aba-7")).status).toBe(429);
+  });
+
+  it("PRESENCE_PING_USER_MAX_PER_MIN muda o teto", async () => {
+    process.env.PRESENCE_PING_USER_MAX_PER_MIN = "2";
+    expect((await ping("aba-1")).status).toBe(200);
+    expect((await ping("aba-2")).status).toBe(200);
+    expect((await ping("aba-3")).status).toBe(429);
+  });
+
+  it("Redis fora ou ausente: fail-open", async () => {
+    state.down = true;
+    for (let i = 1; i <= 8; i++) expect((await ping(`aba-${i}`)).status).toBe(200);
+    h.client.current = null;
+    for (let i = 1; i <= 8; i++) expect((await ping(`aba-${i}`)).status).toBe(200);
   });
 });
