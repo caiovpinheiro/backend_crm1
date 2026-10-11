@@ -177,13 +177,23 @@ describe("recordHeartbeatThrottled", () => {
 });
 
 describe("POST /api/agents/me/ping", () => {
+  // Abas diferentes (`x-tab-id`): o limite de 1 ping/20 s por aba
+  // (`presence-ping-limit.ts`, coberto no teste da rota) não entra aqui.
+  const pingFromTab = (tabId: string) =>
+    POST(
+      new Request("https://api.test/api/agents/me/ping", {
+        method: "POST",
+        headers: { "x-tab-id": tabId },
+      }),
+    );
+
   it("responde 200 com o mesmo formato, gravando só no primeiro ping da janela", async () => {
-    const first = await POST();
+    const first = await pingFromTab("aba-1");
     expect(first.status).toBe(200);
     expect(await first.json()).toEqual({ ok: true, systemOnline: true, created: false });
 
     vi.setSystemTime(T0 + 5_000);
-    const second = await POST();
+    const second = await pingFromTab("aba-2");
     expect(second.status).toBe(200);
     expect(await second.json()).toEqual({ ok: true, systemOnline: true, created: false });
 

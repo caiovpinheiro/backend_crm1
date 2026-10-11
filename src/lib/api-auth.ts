@@ -6,6 +6,7 @@ import {
   isBearerAllowedOnThisProcess,
 } from "@/lib/api-public-access";
 import { auth } from "@/lib/auth";
+import { revokedReasonOf, sessionRevokedResponse } from "@/lib/auth/revoked-session";
 import { observeHttpRequest } from "@/lib/metrics";
 import { enforceOrgApiRateLimit } from "@/lib/org-rate-limit";
 import {
@@ -143,6 +144,13 @@ export async function authenticateApiRequest(
   }
 
   const session = await auth();
+  // Sessão revogada / expirada por inatividade: 401 SESSION_REVOKED (o
+  // frontend faz logout); "no_session" sem code só para quem não tem cookie.
+  const revokedReason = revokedReasonOf(session);
+  if (revokedReason) {
+    logApiAccessAuthReject(request, { reason: revokedReason, status: 401, via: "session" });
+    return { ok: false, response: sessionRevokedResponse() };
+  }
   if (!session?.user?.id) {
     logApiAccessAuthReject(request, { reason: "no_session", status: 401, via: "session" });
     return {

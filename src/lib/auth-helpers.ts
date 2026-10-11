@@ -11,6 +11,7 @@ import { observeHttpRequest } from "@/lib/metrics";
 import { enforceOrgApiRateLimit } from "@/lib/org-rate-limit";
 import { enforceSessionApiRateLimit } from "@/lib/rate-limit";
 import { auth } from "./auth";
+import { revokedReasonOf, sessionRevokedResponse } from "./auth/revoked-session";
 import { sessionVersionFromClaim } from "./auth/session-version";
 import { isSessionVersionCurrent } from "./auth/session-version-check";
 import {
@@ -58,6 +59,8 @@ export type AppSession = {
     image?: string | null;
     /// SV-1: claim do JWT. Ausente (token antigo) = 0.
     sessionVersion?: number;
+    /// Id estável da sessão (chave da inatividade). Ausente em token antigo.
+    sid?: string;
   };
 };
 
@@ -85,8 +88,18 @@ function sessionHumanActor(session: AppSession): ContextActor {
  * ```
  */
 export async function requireAuth(): Promise<AuthResult<AppSession>> {
-  const session = (await auth()) as AppSession | null;
-  // Token invalidado pelo callback `jwt` vira `{}` -> `user` sem `id`.
+  const raw: unknown = await auth();
+  // Token revogado (sessionVersion, usuário apagado/org suspensa) ou expirado
+  // por inatividade: o callback `jwt` / o wrapper de `auth()` marcam a
+  // sessão (`auth/revoked-session.ts`). 401 com `code: "SESSION_REVOKED"` —
+  // o frontend só faz logout com esse code.
+  const revokedReason = revokedReasonOf(raw);
+  if (revokedReason) {
+    await logApiAccessRequireAuthFail(revokedReason);
+    return { ok: false, response: sessionRevokedResponse() };
+  }
+  const session = raw as AppSession | null;
+  // Sem cookie (ou cookie ilegível): "no_session", sem `code`.
   if (!session?.user || typeof session.user.id !== "string" || !session.user.id) {
     await logApiAccessRequireAuthFail("no_session");
     return {
@@ -98,8 +111,8 @@ export async function requireAuth(): Promise<AuthResult<AppSession>> {
     };
   }
   // SV-1: sessão revogada (troca de senha, "sair de todos os dispositivos",
-  // erase). O callback `jwt` já derruba no mesmo processo; aqui é a rede
-  // para cache frio. Sem veredito (linha ausente/banco fora) deixa passar.
+  // erase). O callback `jwt` já marca o token no mesmo processo; aqui é a
+  // rede para cache frio. Sem veredito (linha ausente/banco fora) deixa passar.
   if (
     !(await isSessionVersionCurrent(
       session.user.id,
@@ -107,13 +120,7 @@ export async function requireAuth(): Promise<AuthResult<AppSession>> {
     ))
   ) {
     await logApiAccessRequireAuthFail("session_revoked");
-    return {
-      ok: false,
-      response: NextResponse.json(
-        { message: "Sessão expirada. Entre novamente.", code: "SESSION_REVOKED" },
-        { status: 401 },
-      ),
-    };
+    return { ok: false, response: sessionRevokedResponse() };
   }
   // Bloqueio defensivo: user nao-super-admin sem organizationId e
   // um estado corrompido (provavelmente migration manual incompleta).

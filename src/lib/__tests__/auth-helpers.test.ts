@@ -138,6 +138,43 @@ describe("requireAuth", () => {
     expect(h.userFindUnique).not.toHaveBeenCalled();
   });
 
+  it("token marcado pelo callback jwt (versão antiga) → 401 SESSION_REVOKED, sem banco nem rate limit", async () => {
+    // Saída do `auth()` para o token marcado: sem `user`.
+    h.auth.mockResolvedValue({ revoked: true, revokedReason: "session_revoked", expires: "x" });
+    const r = await fresh(() => requireAuth());
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error("unreachable");
+    expect(r.response.status).toBe(401);
+    expect(await bodyOf(r.response)).toEqual({
+      message: "Sessão expirada. Entre novamente.",
+      code: "SESSION_REVOKED",
+    });
+    expect(h.requireAuthFail).toHaveBeenCalledWith("session_revoked");
+    expect(h.userFindUnique).not.toHaveBeenCalled();
+    expect(h.sessionRpm).not.toHaveBeenCalled();
+    expect(enterRequestContext).not.toHaveBeenCalled();
+  });
+
+  it("usuário apagado / org suspensa (token marcado session_invalid) → 401 SESSION_REVOKED", async () => {
+    h.auth.mockResolvedValue({ revoked: true, revokedReason: "session_invalid" });
+    const r = await fresh(() => requireAuth());
+    if (r.ok) throw new Error("unreachable");
+    expect(r.response.status).toBe(401);
+    expect((await bodyOf(r.response)).code).toBe("SESSION_REVOKED");
+    expect(h.requireAuthFail).toHaveBeenCalledWith("session_invalid");
+  });
+
+  it("sem token → 401 `no_session` SEM code; versão atual → ok", async () => {
+    h.auth.mockResolvedValue(null);
+    const none = await fresh(() => requireAuth());
+    if (none.ok) throw new Error("unreachable");
+    expect(await bodyOf(none.response)).not.toHaveProperty("code");
+
+    h.userFindUnique.mockResolvedValue({ sessionVersion: 3 });
+    h.auth.mockResolvedValue(session({ id: "user-cur", sessionVersion: 3 }));
+    expect((await fresh(() => requireAuth())).ok).toBe(true);
+  });
+
   it("SV-1: banco incrementou sessionVersion → 401 `session_revoked` antes do rate limit", async () => {
     h.auth.mockResolvedValue(session({ id: "user-sv", sessionVersion: 1 }));
     h.userFindUnique.mockResolvedValue({ sessionVersion: 2 });

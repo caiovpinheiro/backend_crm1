@@ -13,6 +13,8 @@
  * Quando incrementar:
  *   - troca de senha (perfil, reset administrativo, "esqueci a senha");
  *   - "sair de todos os dispositivos" (`POST /api/me/sessions/revoke-all`);
+ *   - admin encerra as sessões de outro usuário
+ *     (`POST /api/users/[id]/sessions/revoke`);
  *   - desativação/erase do usuário e remoção da organização.
  *
  * Duas formas de uso:
@@ -41,7 +43,9 @@ export type SessionRevocationReason =
   | "password_reset"
   | "revoke_all"
   | "user_erased"
-  | "user_deleted";
+  | "user_deleted"
+  /** Admin da org encerrou as sessões de outro usuário (`POST /api/users/[id]/sessions/revoke`). */
+  | "admin_revoke";
 
 export type SessionRevocationArgs = {
   userId: string;
