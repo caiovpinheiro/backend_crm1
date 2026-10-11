@@ -107,7 +107,7 @@ describe("1. grafo de roteamento", () => {
     const f = find(bounce, "ciclo_entre_agentes")[0];
     expect(f).toMatchObject({ severity: "bloqueia", path: "themes[0].handoffDestination", evidence: "a → b → a" });
     expect(f.message).toContain("Outro assunto");
-    expect(f.message).toContain("“pagamento”");
+    expect(f.message).toContain("“pagamento atrasado”");
     // O mesmo ciclo aparece para B, no campo de B.
     expect(find(bounce, "ciclo_entre_agentes", "b")[0]).toMatchObject({ severity: "bloqueia", path: "themes[0].handoffDestination" });
 
@@ -127,6 +127,28 @@ describe("1. grafo de roteamento", () => {
       ],
     });
     expect(find(soft, "ciclo_entre_agentes")[0].severity).toBe("avisa");
+
+    // Uma palavra solta em comum ("não") não faz a mesma mensagem quicar: o
+    // motor só casa o gatilho com a frase inteira. Avisa, não bloqueia.
+    const solta = data({
+      agents: [
+        agent("a", { config: { channelIds: ["ch-1"], themes: [{ id: "t1", name: "Saída", instructions: "x", when: ["não quero mais", "quero cancelar"], directHandoff: true, handoffDestination: { type: "ai_agent", id: "b" } }] } }),
+        agent("b", { config: { themes: [{ id: "t9", name: "Outro assunto", instructions: "x", when: ["não consigo acessar", "segunda via"], directHandoff: true, handoffDestination: { type: "ai_agent", id: "a" } }] } }),
+      ],
+    });
+    const fs = find(solta, "ciclo_entre_agentes")[0];
+    expect(fs.severity).toBe("avisa");
+    expect(fs.message).not.toContain("quica");
+
+    // Frase inteira contida na outra ("cancelar" ⊂ "quero cancelar"): quica → bloqueia.
+    const phrase = data({
+      agents: [
+        agent("a", { config: { channelIds: ["ch-1"], themes: [{ id: "t1", name: "Saída", instructions: "x", when: ["quero cancelar"], directHandoff: true, handoffDestination: { type: "ai_agent", id: "b" } }] } }),
+        agent("b", { config: { themes: [{ id: "t9", name: "Outro assunto", instructions: "x", when: ["cancelar"], directHandoff: true, handoffDestination: { type: "ai_agent", id: "a" } }] } }),
+      ],
+    });
+    expect(find(phrase, "ciclo_entre_agentes")[0]).toMatchObject({ severity: "bloqueia" });
+    expect(find(phrase, "ciclo_entre_agentes")[0].message).toContain("“quero cancelar”");
   });
 
   it("ciclo de três agentes é avisado uma vez para cada participante", () => {

@@ -118,20 +118,31 @@ type DestinationRef = {
   themeId?: string;
 };
 
-/** Palavras dos gatilhos do assunto de origem de uma perna do ciclo; null quando a perna não é assunto (não dá para saber a mensagem). */
-function triggerWordsOf(agent: ValidationAgent | undefined, ref: DestinationRef): Set<string> | null {
+/** Gatilhos do assunto de origem de uma perna do ciclo, cada um com as suas palavras-chave; null quando a perna não é assunto (não dá para saber a mensagem). */
+function triggerPhrasesOf(agent: ValidationAgent | undefined, ref: DestinationRef): Array<{ raw: string; words: Set<string> }> | null {
   if (!agent || ref.kind !== "theme" || !ref.themeId) return null;
   const theme = agent.config.themes.find((t) => t.id === ref.themeId);
   if (!theme) return null;
-  return new Set((theme.when ?? []).flatMap((w) => themeKeyWords(w)));
+  return (theme.when ?? []).map((w) => ({ raw: w, words: new Set(themeKeyWords(w)) })).filter((p) => p.words.size > 0);
 }
 
-/** Gatilho presente nos assuntos de todas as pernas do ciclo (a mesma mensagem dá a volta). */
+/**
+ * Gatilho que faz a mesma mensagem casar nos assuntos de todas as pernas do
+ * ciclo. O motor casa um gatilho quando todas as palavras-chave da frase
+ * aparecem na mensagem (themes.matchV2Theme): uma mensagem que casa "pagamento
+ * atrasado" casa "pagamento" também — e dá a volta. Uma palavra solta em
+ * comum ("não" em "não quero mais" e em "não consigo acessar") não basta:
+ * nenhuma mensagem casa as duas frases inteiras.
+ */
 export function sharedTriggerWord(legs: Array<{ agent: ValidationAgent | undefined; ref: DestinationRef }>): string | null {
-  const sets = legs.map((l) => triggerWordsOf(l.agent, l.ref));
-  if (sets.some((x) => !x || x.size === 0)) return null;
-  const [first, ...rest] = sets as Set<string>[];
-  for (const w of first) if (rest.every((x) => x.has(w))) return w;
+  const sides = legs.map((l) => triggerPhrasesOf(l.agent, l.ref));
+  if (sides.some((x) => !x || x.length === 0)) return null;
+  const [first, ...rest] = sides as Array<Array<{ raw: string; words: Set<string> }>>;
+  const covers = (a: Set<string>, b: Set<string>) => [...b].every((w) => a.has(w));
+  for (const phrase of first) {
+    // A frase mais específica da perna de origem contém (ou é) uma frase de cada outra perna.
+    if (rest.every((side) => side.some((other) => covers(phrase.words, other.words) || covers(other.words, phrase.words)))) return phrase.raw;
+  }
   return null;
 }
 
