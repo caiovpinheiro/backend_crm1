@@ -428,6 +428,24 @@ export interface V2CalendarConfig {
   events: V2CalendarEvent[];
 }
 
+/** Aviso temporário: situação com início e fim que muda o que o agente diz enquanto dura. */
+export interface V2Notice {
+  id: string;
+  title?: string;
+  /** O fato e o que o cliente deve fazer, como a empresa quer que seja dito. */
+  message: string;
+  /** Data e hora no fuso do agente ("2026-10-11T08:00") ou ISO com fuso. */
+  startsAt: string;
+  /** Sem fim: vale 24 h depois do início. */
+  endsAt?: string;
+  /** Assuntos em que vale; vazio = todos. */
+  themeIds?: string[];
+  /** Palavras que ligam a mensagem ao aviso em qualquer assunto. */
+  when?: string[];
+  /** Falha relatada depois de uma orientação e explicada pelo aviso: informa em vez de transferir. Padrão: sim. */
+  holdTransfers?: boolean;
+}
+
 export interface V2MediaConfig {
   audio: V2MediaKindConfig;
   image: V2MediaKindConfig;
@@ -577,6 +595,8 @@ export interface V2AgentConfig {
   bold?: "auto" | "key" | "off";
   /** Datas e prazos oficiais (fora dos materiais). */
   calendar?: V2CalendarConfig;
+  /** Avisos temporários (manutenção, instabilidade, prazo prorrogado); expiram sozinhos. */
+  notices?: V2Notice[];
   /** Pede à API resposta sempre em JSON (modo JSON), em vez de só pedir no prompt. */
   structuredOutput?: boolean;
   /** Saídas quando o agente não soube, pediu pessoa, sem material ou deu erro. */

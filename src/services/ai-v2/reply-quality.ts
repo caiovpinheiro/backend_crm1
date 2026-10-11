@@ -40,6 +40,7 @@ import { getV2Agent } from "./agents";
 import { checkClaimsWithModel, worthClaimCheck } from "./claim-check";
 import { calendarPromptSection } from "./calendar";
 import { knowledgeChunkTexts, lookupResultTexts } from "./ground-reply";
+import { activeNotices, noticesPromptSection } from "./notices";
 import { currentDateLine } from "./llm";
 import { contactIdentityMasker } from "./log";
 import { businessHoursText } from "./rules";
@@ -232,6 +233,7 @@ export function turnSources(args: {
     .filter(Boolean);
   const fixed = [
     currentDateLine(tz, at),
+    noticesPromptSection(activeNotices(config, at), config),
     calendarPromptSection(config.calendar?.events, at, tz),
     businessHoursText(config),
     ...config.variables.map((v) => `${v.key}: ${v.value}`),

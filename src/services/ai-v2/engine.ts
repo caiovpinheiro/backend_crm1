@@ -45,6 +45,7 @@ import { applyReplyEnding, asksClient, classifyReply, effectiveReplyEnding, isGr
 import { hasSearchableQuestion, knowledgeChunkTexts, repeatFallback } from "./ground-reply";
 import { loadPriorV2Summary, summaryEnabled, updateRunningSummary, writeV2Summary, SUMMARY_MESSAGE_TYPE } from "./summary";
 import { looksLikeSystemError, saysTriedAndFailed } from "./retry-signal";
+import { noticeExplainingFailure } from "./notices";
 import { applyBoldPolicy } from "./reply-format";
 import { MESSAGE_MODEL_MIN_COVERAGE, MESSAGE_MODEL_REPEATED, announcesSending, introBeforeMaterial, lastV2ResetAt, mediaResendPlan, messageModelCoverage, pickPromisedModelId, recentMediaDeliveries, recentlySentMessageModels, resendWindowStart, saysNotReceived, recentlyAppliedRuleIds, RULE_REPLY_ACTION_TYPES } from "./sent-materials";
 import { attachmentsBlockedByResend } from "./material-attachments";
@@ -1450,6 +1451,21 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // ajuda". Repetir material ou menu é a pior resposta: transfere com o
   // contexto (o resumo, quando ligado, vai junto).
   const systemError = counters.guidanceGiven && looksLikeSystemError(input.userMessage);
+  // Aviso temporário em vigor explica a falha (sistema em manutenção, fora
+  // do ar): uma pessoa não resolve. Diz o aviso uma vez e espera; se o
+  // cliente insistir, segue o caminho normal (transfere).
+  if (counters.guidanceGiven && (systemError || saysTriedAndFailed(input.userMessage))) {
+    const notice = noticeExplainingFailure(config, { themeId, message: input.userMessage, alreadyShown: counters.noticesShown });
+    if (notice) {
+      counters.noticesShown = [...(counters.noticesShown ?? []), notice.id];
+      traceStep("aviso", `Aviso em vigor${notice.title ? ` "${notice.title}"` : ""} explica a falha relatada → informa e não transfere`);
+      await upsertV2ConversationState({
+        organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId,
+        owner, counters: counters as V2Counters, versionId,
+      });
+      return replyAndWait(notice.message, "notice");
+    }
+  }
   if (counters.guidanceGiven && (systemError || saysTriedAndFailed(input.userMessage) || (chosenOption && mentionsHumanRequest(config, chosenOption)))) {
     noteV2Fact("handoffCause", "tried_and_failed", { keepFirst: true });
     traceStep("transferência", chosenOption

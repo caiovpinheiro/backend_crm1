@@ -50,6 +50,7 @@ import { REPLY_ENDING_PROMPT, effectiveReplyEnding, hasReplyEnding } from "./rep
 import { CONFUSION_PROMPT } from "./confusion";
 import { MAIN_SOURCE_SIMILARITY, WEAK_MATCH_SIMILARITY, knowledgeMinSimilarity } from "./similarity-presets";
 import { checkClaimsWithModel, sameClaim, worthClaimCheck } from "./claim-check";
+import { activeNotices, noticesForTurn, noticesPromptSection } from "./notices";
 import { isMutilated, onlyKeptSentences, trimUnsupportedSentences } from "./reply-trim";
 import { MATERIAL_ATTACHMENT_LIMITS, attachmentsForDocs, attachmentsPromptSection } from "./material-attachments";
 import { humanRequestTerms } from "@/lib/ai-v2/config";
@@ -1027,6 +1028,8 @@ function buildV2SystemPrompt(
   flows: Array<{ id: string; name: string }> = [],
   priorSummary: { text: string; at?: Date | null; agent?: string | null; current?: boolean } | null = null,
   transparentTransfer = false,
+  /** Mensagem do cliente: liga um aviso temporário pelos gatilhos dele. */
+  userMessageForNotices = "",
 ): string {
   const timezone = config.businessHours?.timezone || "America/Sao_Paulo";
   const lines: string[] = [];
@@ -1053,6 +1056,9 @@ function buildV2SystemPrompt(
   const bold = boldInstruction(config.bold);
   if (bold) lines.push(`# Negrito\n${bold}`);
   lines.push(`# Data de hoje\n${currentDateLine(config.businessHours?.timezone)}`);
+  // Avisos temporários em vigor: logo depois da data, com prioridade sobre os materiais.
+  const notices = noticesPromptSection(noticesForTurn(config, { themeId, message: userMessageForNotices }), config);
+  if (notices) lines.push(notices);
   const hours = businessHoursText(config);
   if (hours) lines.push(`# Horário de atendimento da equipe\n${hours}\nUse quando o cliente perguntar o horário. Fora dele, diga que a equipe responde no próximo horário.`);
   if (mediaNote) lines.push(mediaNote);
@@ -1404,6 +1410,7 @@ export async function callV2LLM(args: {
     flows,
     args.priorSummary ?? null,
     args.transparentTransfer === true,
+    userMessage,
   );
 
   const messages: Array<{ role: "user" | "assistant"; content: string }> = [
@@ -1662,6 +1669,8 @@ export async function callV2LLM(args: {
       businessHoursText(args.config),
       // "Hoje é domingo", "o encontro de 19/09 já passou": vêm da data de hoje.
       currentDateLine(args.config.businessHours?.timezone),
+      // O que um aviso temporário em vigor afirma é fonte.
+      noticesPromptSection(activeNotices(args.config), args.config),
     ];
     // Fontes de fato: sem as mensagens da conversa (o que o cliente diz não
     // prova que a coisa existe).
@@ -1702,6 +1711,7 @@ export async function callV2LLM(args: {
       calendarPromptSection(args.config.calendar?.events, new Date(), args.config.businessHours?.timezone || "America/Sao_Paulo"),
       businessHoursText(args.config),
       currentDateLine(args.config.businessHours?.timezone),
+      noticesPromptSection(activeNotices(args.config), args.config),
       ...args.config.variables.map((v) => `${v.key}: ${v.value}`),
       args.themeInstructions ?? "",
       ...args.config.globalRules,

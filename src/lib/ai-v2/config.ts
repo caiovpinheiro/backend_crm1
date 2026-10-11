@@ -406,6 +406,29 @@ export const v2AgentConfigSchema = z.object({
   responseLength: z.enum(["short", "medium", "long"]).optional().default("medium"),
   emojis: z.enum(["none", "light", "moderate"]).optional().default("none"),
   bold: z.enum(["auto", "key", "off"]).optional(),
+  // Avisos temporários. Linha sem texto ou sem início (recém-adicionada na
+  // tela) é descartada em vez de recusar o rascunho inteiro.
+  notices: z.preprocess(
+    (v) =>
+      Array.isArray(v)
+        ? v
+            .filter((n) => n && typeof n === "object" && typeof n.message === "string" && n.message.trim() && typeof n.startsAt === "string" && n.startsAt.trim())
+            .map((n) => ({ ...n, message: n.message.trim(), id: typeof n.id === "string" && n.id ? n.id : `aviso-${String(n.startsAt)}` }))
+            .slice(0, 20)
+        : [],
+    z.array(
+      z.object({
+        id: z.string(),
+        title: optionalText,
+        message: z.string(),
+        startsAt: z.string(),
+        endsAt: optionalText,
+        themeIds: z.array(z.string()).optional().default([]),
+        when: z.array(z.string()).optional().default([]),
+        holdTransfers: z.boolean().optional().default(true),
+      }),
+    ),
+  ),
   calendar: z
     .object({
       // Linha incompleta (recém-adicionada na tela, sem descrição ou data)

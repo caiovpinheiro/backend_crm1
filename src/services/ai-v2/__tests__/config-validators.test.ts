@@ -284,6 +284,26 @@ describe("3. calendário", () => {
     expect(find(d, "calendario_evento_duplicado")).toEqual([expect.objectContaining({ path: "calendar.events[1]", evidence: "calendar.events[0]" })]);
   });
 
+  it("avisos temporários: vencido, sem fim, longo demais, sem início e assunto inexistente", () => {
+    const iso = (days: number) => new Date(NOW.getTime() + days * 86_400_000).toISOString();
+    const d = data({
+      agents: [agent("a", { config: { channelIds: ["ch-1"], themes: [{ id: "t1", name: "Pagamento", instructions: "x", when: ["pagamento"] }], notices: [
+        { id: "n-old", title: "Antigo", message: "x", startsAt: iso(-5), endsAt: iso(-4) },
+        { id: "n-open", title: "Sem fim", message: "x", startsAt: iso(-0.1) },
+        { id: "n-long", title: "Longo", message: "x", startsAt: iso(-1), endsAt: iso(20) },
+        { id: "n-bad", title: "Sem início", message: "x", startsAt: "amanhã" },
+        { id: "n-theme", title: "Assunto", message: "x", startsAt: iso(-1), endsAt: iso(1), themeIds: ["t1", "t-apagado"] },
+        { id: "n-ok", title: "Certo", message: "x", startsAt: iso(-1), endsAt: iso(1) },
+      ] } })],
+    });
+    expect(find(d, "aviso_vencido")).toEqual([expect.objectContaining({ severity: "avisa", path: "notices[0]" })]);
+    expect(find(d, "aviso_sem_fim")).toEqual([expect.objectContaining({ path: "notices[1]" })]);
+    expect(find(d, "aviso_longo")).toEqual([expect.objectContaining({ path: "notices[2]" })]);
+    expect(find(d, "aviso_sem_inicio")).toEqual([expect.objectContaining({ severity: "bloqueia", path: "notices[3]" })]);
+    expect(find(d, "aviso_assunto_inexistente")).toEqual([expect.objectContaining({ path: "notices[4].themeIds" })]);
+    expect(validateAgentConfig("a", d).filter((f) => f.path?.startsWith("notices[5]"))).toEqual([]);
+  });
+
   it("calendário só com datas passadas avisa; com uma futura, não", () => {
     const past = data({ agents: [agent("a", { config: { channelIds: ["ch-1"], calendar: { events: [{ id: "e1", start: "2026-09-01", end: "2026-09-10", title: "Inscrições" }] } } })] });
     expect(find(past, "calendario_so_passado")[0]).toMatchObject({ path: "calendar.events", severity: "avisa" });
