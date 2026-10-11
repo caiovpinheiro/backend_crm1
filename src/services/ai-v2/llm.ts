@@ -51,6 +51,7 @@ import { CONFUSION_PROMPT } from "./confusion";
 import { MAIN_SOURCE_SIMILARITY, WEAK_MATCH_SIMILARITY, knowledgeMinSimilarity } from "./similarity-presets";
 import { checkClaimsWithModel, sameClaim, worthClaimCheck } from "./claim-check";
 import { activeNotices, noticesForTurn, noticesPromptSection } from "./notices";
+import { brHolidayName, isBrazilTimezone, nextBrBusinessDay } from "@/lib/br-holidays";
 import { isMutilated, onlyKeptSentences, trimUnsupportedSentences } from "./reply-trim";
 import { MATERIAL_ATTACHMENT_LIMITS, attachmentsForDocs, attachmentsPromptSection } from "./material-attachments";
 import { humanRequestTerms } from "@/lib/ai-v2/config";
@@ -934,7 +935,38 @@ export function currentDateLine(timezone: string | undefined, now: Date = new Da
   } catch {
     text = now.toISOString();
   }
-  return `Agora é ${text} (${tz}). Use esta data para interpretar "hoje", "próximo(a)", "este mês" e prazos. Datas marcadas "(já passou)", nos trechos ou no calendário, já aconteceram: não as apresente como próximas e só cite se o cliente perguntar por elas. Data depois de hoje ainda vai acontecer: fale dela no futuro ("será", "acontece em"), nunca como já realizada. Se a data pedida não está no calendário nem nos trechos, diga que não tem essa data; não deduza.`;
+  return `Agora é ${text} (${tz}). Use esta data para interpretar "hoje", "próximo(a)", "este mês" e prazos. Datas marcadas "(já passou)", nos trechos ou no calendário, já aconteceram: não as apresente como próximas e só cite se o cliente perguntar por elas. Data depois de hoje ainda vai acontecer: fale dela no futuro ("será", "acontece em"), nunca como já realizada. Se a data pedida não está no calendário nem nos trechos, diga que não tem essa data; não deduza.${businessDayNote(tz, now)}`;
+}
+
+/**
+ * Próximo dia útil (fuso do Brasil): sem isso o modelo contava só sábado e
+ * domingo e mandava pagar num feriado ("próximo dia útil, 12/10").
+ */
+export function businessDayNote(tz: string, now: Date = new Date()): string {
+  if (!isBrazilTimezone(tz)) return "";
+  let today: string;
+  try {
+    today = new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(now);
+  } catch {
+    return "";
+  }
+  const next = nextBrBusinessDay(today);
+  const label = (isoDate: string) => {
+    const d = new Date(`${isoDate}T12:00:00Z`);
+    const weekday = new Intl.DateTimeFormat("pt-BR", { timeZone: "UTC", weekday: "long" }).format(d);
+    return `${weekday}, ${isoDate.slice(8, 10)}/${isoDate.slice(5, 7)}`;
+  };
+  // Feriados entre hoje e o próximo dia útil (o motivo de ele não ser amanhã).
+  const skipped: string[] = [];
+  for (let d = new Date(`${today}T12:00:00Z`); ; ) {
+    d = new Date(d.getTime() + 86_400_000);
+    const isoDate = d.toISOString().slice(0, 10);
+    if (isoDate >= next) break;
+    const name = brHolidayName(isoDate);
+    if (name) skipped.push(`${label(isoDate)} é feriado (${name})`);
+  }
+  const todayHoliday = brHolidayName(today);
+  return ` ${todayHoliday ? `Hoje é feriado (${todayHoliday}). ` : ""}Próximo dia útil: ${label(next)}${skipped.length ? ` — ${skipped.join("; ")}` : ""}. Para "próximo dia útil", use esta data; não calcule outra.`;
 }
 
 /** Quanto emoji usar. Padrão "nenhum": era o comportamento antes do parâmetro. */
