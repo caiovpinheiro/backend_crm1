@@ -4,10 +4,11 @@
  *
  * `lastMessage` / `unreadCount` dos cards são por contato (qualquer
  * conversa dele), então uma mensagem nova só muda o board dos pipelines
- * onde o contato tem deal. Os publicadores de `new_message` quase nunca
- * têm o conjunto completo de pipelines em mãos: ele sai de UMA consulta
- * pelo índice (organizationId, contactId, status) de `deals`, agrupada
- * por pipeline. Contato sem deal não invalida board nenhum.
+ * onde o contato tem deal ABERTO (o board padrão só mostra OPEN). Os
+ * publicadores de `new_message` quase nunca têm o conjunto completo de
+ * pipelines em mãos: ele sai de UMA consulta pelo índice
+ * (organizationId, contactId, status) de `deals`, agrupada por pipeline.
+ * Contato sem deal aberto não invalida board nenhum.
  *
  * A mesma consulta alimenta as duas coisas: a purga do cache do board e
  * os campos `pipelineIds` / `dealIds` que o barramento anexa ao evento
@@ -17,8 +18,11 @@
  * O resultado fica em memória por 60 s por processo
  * (`PIPELINES_CACHE_TTL_MS`): uma conversa ativa publica várias mensagens
  * por minuto em cada processo que publica (API, worker-meta-webhook,
- * worker-whatsapp, automação) e a janela de purga do board já é de 15 s,
- * então a consulta repetida não traz informação nova. Deal criado/movido
+ * worker-whatsapp, automação) e a purga do board por mensagem é coalescida
+ * em 1 a cada 60 s por funil (`scheduleBoardInvalidationForMessages`: o
+ * cliente aplica a mensagem no card pelo próprio evento; a purga só
+ * refresca a ordem do board em cache), então a consulta repetida não traz
+ * informação nova. Deal criado/movido
  * dentro desses 60 s já invalida o board no próprio write
  * (`invalidateBoardsForPipelines`); só a mensagem seguinte pode sair até
  * 60 s sem aquele pipeline/deal novo no escopo (o cliente continua
@@ -33,7 +37,7 @@
  */
 import { Prisma } from "@prisma/client";
 
-import { scheduleBoardInvalidation } from "@/lib/cache/keys";
+import { scheduleBoardInvalidationForMessages } from "@/lib/cache/keys";
 import { prismaBase } from "@/lib/prisma-base";
 import { getLogger } from "@/lib/logger";
 
@@ -54,10 +58,10 @@ export const BOARD_SCOPE_MAX_DEAL_IDS = 50;
 
 /** Quais boards/cards uma mensagem afeta. */
 export type MessageBoardScope = {
-  /** Pipelines onde o contato tem deal. Vazio = nenhum board afetado. */
+  /** Pipelines onde o contato tem deal OPEN. Vazio = nenhum board afetado. */
   pipelineIds: string[];
   /**
-   * Todos os deals do contato nesses pipelines. `null` = lista não
+   * Todos os deals OPEN do contato nesses pipelines. `null` = lista não
    * conhecida (chamador só informou o pipeline) ou grande demais.
    */
   dealIds: string[] | null;
@@ -130,6 +134,11 @@ async function findMessageBoardScope(
       )`;
   // Uma linha por pipeline: o volume da resposta não cresce com o número
   // de deals do contato (contato "genérico" de importação tem milhares).
+  // Só negócio OPEN — o mesmo critério do board padrão
+  // (`buildBoardDealWhere` em services/deals.ts). Negócio ganho/perdido
+  // não está no board: entrar no escopo fazia o cliente procurar um card
+  // que não existe e refazer o board a cada mensagem do contato. As três
+  // igualdades usam o índice (organizationId, contactId, status) inteiro.
   const rows = await prismaBase.$queryRaw<ScopeRow[]>`
     SELECT s."pipelineId" AS "pipelineId",
            COUNT(*)::int AS "dealCount",
@@ -137,6 +146,7 @@ async function findMessageBoardScope(
     FROM deals d
     INNER JOIN stages s ON s.id = d."stageId"
     WHERE d."organizationId" = ${orgId} AND ${contactMatch}
+      AND d.status = 'OPEN'::"DealStatus"
     GROUP BY s."pipelineId"
   `;
 
@@ -211,7 +221,7 @@ export async function scheduleBoardInvalidationForMessage(
     (nonEmpty(rec.pipelineId) ? [rec.pipelineId as string] : null);
   if (explicitPipelineIds) {
     for (const pipelineId of explicitPipelineIds) {
-      scheduleBoardInvalidation(orgId, pipelineId);
+      scheduleBoardInvalidationForMessages(orgId, pipelineId);
     }
     return { pipelineIds: explicitPipelineIds, dealIds: stringList(rec.dealIds) };
   }
@@ -219,7 +229,7 @@ export async function scheduleBoardInvalidationForMessage(
   const contactId = nonEmpty(rec.contactId);
   const conversationId = nonEmpty(rec.conversationId);
   if (!contactId && !conversationId) {
-    scheduleBoardInvalidation(orgId);
+    scheduleBoardInvalidationForMessages(orgId);
     return null;
   }
 
@@ -228,11 +238,11 @@ export async function scheduleBoardInvalidationForMessage(
     scope = await resolveMessageBoardScope(orgId, contactId, conversationId);
   } catch (err) {
     logScopeFailure(err);
-    scheduleBoardInvalidation(orgId);
+    scheduleBoardInvalidationForMessages(orgId);
     return null;
   }
   for (const pipelineId of scope.pipelineIds) {
-    scheduleBoardInvalidation(orgId, pipelineId);
+    scheduleBoardInvalidationForMessages(orgId, pipelineId);
   }
   return scope;
 }
