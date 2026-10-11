@@ -171,6 +171,72 @@ describe("projectDealMovedForViewer", () => {
     });
   });
 
+  describe("negócio criado (fromStageId null, fromPipelineId = destino)", () => {
+    const created = {
+      ...event,
+      dealId: "d9",
+      fromPipelineId: "pipe-b",
+      toPipelineId: "pipe-b",
+      fromStageId: null,
+      toStageId: "stage-b",
+      ownerId: "u-dono",
+      card: { id: "d9", title: "Lead novo", status: "OPEN" },
+    };
+    const onlyOwn = (me: string) => (d: { ownerId: string | null | undefined }) => d.ownerId === me;
+
+    it("quem vê o funil e o dono recebe o card", () => {
+      expect(projectDealMovedForViewer(created, ctx(), onlyOwn("u-dono"))).toBe(created);
+    });
+
+    it("quem não vê o funil não recebe o evento", () => {
+      expect(
+        projectDealMovedForViewer(created, ctx({ pipelineDeny: new Set(["pipe-b"]) })),
+      ).toBeNull();
+    });
+
+    it("etapa destino bloqueada: funil visível, mas a criação não é entregue", () => {
+      // Criação não tem origem: quem não vê a etapa destino não recebe
+      // nem o dealId/posição/dono.
+      expect(
+        projectDealMovedForViewer(created, ctx({ stageDeny: new Set(["stage-b"]) })),
+      ).toBeNull();
+      expect(
+        projectDealMovedForViewer(
+          created,
+          ctx({ stageDeny: new Set(["stage-b"]) }),
+          onlyOwn("u-dono"),
+        ),
+      ).toBeNull();
+    });
+
+    it("move com a mesma etapa destino bloqueada continua saindo sem card (via a origem)", () => {
+      const moved = { ...created, fromStageId: "stage-a" };
+      const projected = projectDealMovedForViewer(
+        moved,
+        ctx({ stageDeny: new Set(["stage-b"]) }),
+      ) as Record<string, unknown>;
+      expect(projected).not.toBeNull();
+      expect(projected.dealId).toBe("d9");
+      expect(projected).not.toHaveProperty("card");
+    });
+
+    it("etapa de outra coluna bloqueada não afeta a criação", () => {
+      expect(
+        projectDealMovedForViewer(created, ctx({ stageDeny: new Set(["stage-a"]) })),
+      ).toBe(created);
+    });
+
+    it("quem só vê os próprios e não é o dono recebe só ids", () => {
+      const projected = projectDealMovedForViewer(created, ctx(), onlyOwn("u-outro")) as Record<
+        string,
+        unknown
+      >;
+      expect(projected).not.toHaveProperty("card");
+      expect(projected).not.toHaveProperty("ownerId");
+      expect(JSON.stringify(projected)).not.toContain("Lead novo");
+    });
+  });
+
   it("payload legado só com pipelineId segue intacto para o gate genérico", () => {
     const legacy = { pipelineId: "pipe-a", dealId: "d1" };
     expect(projectDealMovedForViewer(legacy, ctx({ pipelineDeny: new Set(["pipe-a"]) }))).toBe(

@@ -23,6 +23,7 @@ const h = vi.hoisted(() => {
     conversationFindMany: vi.fn(),
     allocateOrgNumber: vi.fn(async () => 77),
     invalidateBoardData: vi.fn(async () => undefined),
+    ssePublish: vi.fn(),
   };
 });
 
@@ -67,7 +68,7 @@ vi.mock("@/lib/cache/keys", () => ({
   boardDataKey: () => "board",
   invalidateBoardData: h.invalidateBoardData,
 }));
-vi.mock("@/lib/sse-bus", () => ({ sseBus: { publish: vi.fn() } }));
+vi.mock("@/lib/sse-bus", () => ({ sseBus: { publish: h.ssePublish } }));
 vi.mock("@/services/activity-log", () => ({
   logEvent: vi.fn(),
   userIdForFk: vi.fn(),
@@ -106,6 +107,10 @@ import {
 } from "@/services/deals";
 
 const ORG = "org-dup";
+
+function dealMovedEvents() {
+  return h.ssePublish.mock.calls.filter((c) => c[0] === "deal_moved").map((c) => c[1]);
+}
 
 function withOrg<T>(fn: () => Promise<T>): Promise<T> {
   return runWithContext({ organizationId: ORG } as Parameters<typeof runWithContext>[0], fn) as Promise<T>;
@@ -251,6 +256,43 @@ describe("duplicateDeal", () => {
     expect(h.invalidateBoardData).toHaveBeenCalled();
   });
 
+  it("publica o deal_moved de criação com o card e o número da cópia", async () => {
+    h.dealFindUnique.mockResolvedValue({
+      id: "src",
+      title: "Administração",
+      contactId: "contact-1",
+      ownerId: "owner-1",
+      dealRole: "COMMERCIAL",
+    });
+    h.stageFindUnique.mockResolvedValue({
+      id: "stage-b",
+      pipelineId: "pipe-b",
+      isWon: false,
+      isLost: false,
+    });
+    h.pipelineFindUnique.mockResolvedValue({ id: "pipe-b", archivedAt: null });
+
+    await withOrg(() => duplicateDeal("src", { pipelineId: "pipe-b", stageId: "stage-b" }));
+
+    const events = dealMovedEvents();
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      organizationId: ORG,
+      dealId: "new-deal",
+      fromPipelineId: "pipe-b",
+      toPipelineId: "pipe-b",
+      fromStageId: null,
+      toStageId: "stage-b",
+      position: 1,
+      ownerId: "owner-1",
+      card: { id: "new-deal", number: 77, title: "Administração", status: "OPEN", position: 1 },
+    });
+    // Purga do board antes do evento.
+    expect(h.invalidateBoardData.mock.invocationCallOrder[0]!).toBeLessThan(
+      h.ssePublish.mock.invocationCallOrder[0]!,
+    );
+  });
+
   it("não cria em etapa Ganho", async () => {
     h.dealFindUnique.mockResolvedValue({
       id: "src",
@@ -296,12 +338,44 @@ describe("dedupe acidental", () => {
     );
 
     expect(wasReusedOpenDeal(created)).toBe(false);
+    expect(dealMovedEvents()).toHaveLength(1);
     expect(h.dealFindFirst).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({ intentionalDuplicate: false, status: "OPEN" }),
       }),
     );
     expect(h.dealCreate).toHaveBeenCalled();
+  });
+
+  it("negócio aberto reaproveitado não publica deal_moved nem purga o board", async () => {
+    h.stageFindUnique.mockResolvedValue({ pipelineId: "pipe-a" });
+    h.pipelineFindUnique.mockResolvedValue({ allowDuplicateDeals: false });
+    h.dealFindFirst.mockResolvedValue({
+      id: "open-1",
+      number: 12,
+      title: "Já aberto",
+      status: "OPEN",
+      position: 3,
+      stageId: "stage-a",
+      ownerId: null,
+      stage: { pipelineId: "pipe-a" },
+    });
+
+    const reused = await withOrg(() =>
+      createDeal({
+        title: "Novo",
+        contactId: "contact-1",
+        stageId: "stage-a",
+        status: "OPEN",
+        dealRole: "COMMERCIAL",
+      }),
+    );
+
+    expect(wasReusedOpenDeal(reused)).toBe(true);
+    expect(reused.id).toBe("open-1");
+    expect(h.dealCreate).not.toHaveBeenCalled();
+    expect(h.invalidateBoardData).not.toHaveBeenCalled();
+    expect(dealMovedEvents()).toHaveLength(0);
   });
 });
 

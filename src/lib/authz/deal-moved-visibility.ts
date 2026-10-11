@@ -8,6 +8,10 @@
  * - vê a origem e não o destino → sai sem `card` (só ids para tirar o card);
  * - vê o destino → sai com `card`, para inserir o negócio que não está em cache.
  *
+ * Negócio CRIADO (`fromStageId: null`) não tem origem: ninguém tinha o card
+ * para tirar. A origem vale o mesmo que o destino — quem não vê a etapa
+ * destino não recebe nada (nem `dealId`/`position`/dono), mesmo vendo o funil.
+ *
  * Além do funil, o `card` (título, contato, valor, dono) só vai a quem VÊ o
  * negócio pela posse (`canSeeDeal`, mesmo critério do GET /api/deals/:id):
  * quem não vê recebe o evento sem `card` e sem `ownerId`/`orgUnitId` — só ids
@@ -61,8 +65,10 @@ export function projectDealMovedForViewer(
   // Funil/etapa: só quando o usuário tem escopo restrito.
   let seeTo = true;
   if (ctx && funnelScopeOf(ctx) !== null) {
-    const seeFrom = canSeeSide(ctx, fromPipelineId, fromStageId);
     seeTo = canSeeSide(ctx, toPipelineId, toStageId);
+    // Criação: sem etapa de origem, `canSeeSide(funil, null)` só olharia o
+    // funil e deixaria passar quem não vê a etapa destino.
+    const seeFrom = fromStageId === null ? seeTo : canSeeSide(ctx, fromPipelineId, fromStageId);
     if (!seeFrom && !seeTo) return null;
   }
 
