@@ -52,6 +52,14 @@ describe("afirmação marcada que abrange duas frases", () => {
     expect(r?.reply).toContain("Como o sistema está em manutenção");
   });
 
+  it("trecho marcado termina em negrito: o fechamento sai junto, sem '*;' solto", () => {
+    const reply = "O *Painel* está em manutenção e pode ficar indisponível. O lote de outubro começou em *1º de outubro*; quando o painel voltar, confira de novo a sua lista de pedidos. Ele chega a abrir para você?";
+    const r = trimUnsupportedSentences(reply, ["O lote de outubro começou em *1º de outubro*"]);
+    expect(r?.reply).toBe("O *Painel* está em manutenção e pode ficar indisponível. Quando o painel voltar, confira de novo a sua lista de pedidos. Ele chega a abrir para você?");
+    const quoted = trimUnsupportedSentences("Abra o painel e confira os pedidos da semana com calma. O botão se chama “Pedidos antigos do mês” e fica no topo da tela.", ["O botão se chama Pedidos antigos do mês"]);
+    expect(quoted?.reply).not.toMatch(/[“”]/);
+  });
+
   it("frase seguinte a uma cortada que começa com conector de sequência perde o conector", async () => {
     const { trimUnsupportedSentences } = await import("../reply-trim");
     const reply = "Abra o sistema e vá na área de cadastro do seu perfil pessoal. Em seguida, confira se o seu e-mail principal está correto e atualizado no cadastro.";

@@ -123,6 +123,16 @@ function foldChars(s: string): { folded: string; map: number[] } {
   return { folded: out.join(""), map };
 }
 
+const WRAP_CHARS = "*_~`\"“”";
+const OPENER: Record<string, string> = { "”": "“" };
+const CLOSER: Record<string, string> = { "“": "”" };
+
+/** No trecho, a marca abriu sem fechar (ou fechou sem abrir). */
+function unmatchedWrap(span: string, open: string, close: string): boolean {
+  const count = (ch: string) => span.split(ch).length - 1;
+  return open === close ? count(open) % 2 === 1 : count(open) !== count(close);
+}
+
 /**
  * Tira só o trecho marcado de dentro da frase (a frase que trazia o link e
  * o passo 1 saía inteira por causa de uma oração sem fonte). Vale quando a
@@ -134,8 +144,12 @@ function removeSpan(unitText: string, flagged: string): string | null {
   const { folded, map } = foldChars(unitText);
   const idx = folded.indexOf(f);
   if (idx < 0) return null;
-  const start = map[idx];
-  const end = map[idx + f.length - 1] + 1;
+  let start = map[idx];
+  let end = map[idx + f.length - 1] + 1;
+  // Negrito/itálico/aspas ficam fora da busca: o fechamento ("*1º de outubro*")
+  // ficava para trás e a resposta saía com "*;" solto.
+  while (end < unitText.length && WRAP_CHARS.includes(unitText[end]) && unmatchedWrap(unitText.slice(start, end), OPENER[unitText[end]] ?? unitText[end], unitText[end])) end += 1;
+  while (start > 0 && WRAP_CHARS.includes(unitText[start - 1]) && unmatchedWrap(unitText.slice(start, end), unitText[start - 1], CLOSER[unitText[start - 1]] ?? unitText[start - 1])) start -= 1;
   let rest = `${unitText.slice(0, start)} ${unitText.slice(end)}`;
   rest = rest
     .replace(/\s+([.,;:!?])/g, "$1")
