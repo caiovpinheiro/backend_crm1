@@ -283,6 +283,35 @@ const CASES: Case[] = [
     },
   },
   {
+    name: "publishDealMoved — negócio criado (fromStageId null, mesmo funil)",
+    event: "deal_moved",
+    run: () =>
+      publishDealMoved({
+        organizationId: ORG,
+        dealId: "deal_9",
+        fromPipelineId: "pipe_1",
+        toPipelineId: "pipe_1",
+        fromStageId: null,
+        toStageId: "stage_a",
+        position: 3,
+        updatedAt: "2026-10-10T12:00:00.000Z",
+        ownerId: null,
+        card: { id: "deal_9", title: "Lead novo", status: "OPEN", position: 3 },
+      }),
+    payload: {
+      organizationId: ORG,
+      dealId: "deal_9",
+      fromPipelineId: "pipe_1",
+      toPipelineId: "pipe_1",
+      fromStageId: null,
+      toStageId: "stage_a",
+      position: 3,
+      updatedAt: "2026-10-10T12:00:00.000Z",
+      ownerId: null,
+      card: { id: "deal_9", title: "Lead novo", status: "OPEN", position: 3 },
+    },
+  },
+  {
     name: "publishConversationUpdated — atribuição/transferência",
     event: "conversation_updated",
     run: () =>
