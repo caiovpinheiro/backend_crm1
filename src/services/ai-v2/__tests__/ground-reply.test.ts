@@ -74,3 +74,29 @@ describe("clientNamesBoundToFacts", () => {
     expect(clientNamesBoundToFacts("Pinheiros: revisões de 6 a 9 de novembro.", ["pinheiros"], sources)).toEqual([]);
   });
 });
+
+describe("admittedMissingInstructions e procedureAdmittedMissing", () => {
+  it("instrução sobre o assunto que a própria decisão admite não ter no material é desautorizada; sobre outro assunto, fica", async () => {
+    const { admittedMissingInstructions, procedureAdmittedMissing } = await import("../ground-reply");
+    const reason = "A possibilidade de parcelamento não está especificada no material, mas dá para orientar o acesso.";
+    const reply = "Acesse o portal e confira a opção de parcelamento. Para ver a fatura, clique em Pagamentos.";
+    expect(admittedMissingInstructions(reply, reason)).toEqual(["Acesse o portal e confira a opção de parcelamento."]);
+    expect(procedureAdmittedMissing(reply, reason)).toBe(true);
+    expect(procedureAdmittedMissing("Para ver a fatura, clique em Pagamentos.", reason)).toBe(false);
+  });
+
+  it("admissão sem assunto nomeado desautoriza toda instrução; sem admissão, nada", async () => {
+    const { admittedMissingInstructions } = await import("../ground-reply");
+    expect(admittedMissingInstructions("Abra o aplicativo e toque em Perfil.", "Não há informação sobre isso nos materiais.")).toEqual(["Abra o aplicativo e toque em Perfil."]);
+    expect(admittedMissingInstructions("Abra o aplicativo e toque em Perfil.", "O material descreve o passo a passo do perfil.")).toEqual([]);
+    expect(admittedMissingInstructions("Abra o aplicativo e toque em Perfil.", undefined)).toEqual([]);
+  });
+
+  it("a admissão é reconhecida mesmo com acento logo depois do verbo (“não está”, “não há”) — o \b não casa depois de vogal acentuada", async () => {
+    const { procedureAdmittedMissing } = await import("../ground-reply");
+    expect(procedureAdmittedMissing("Acesse a área de cancelamento e selecione a opção.", "O procedimento de cancelamento não está descrito no material.")).toBe(true);
+    expect(procedureAdmittedMissing("Acesse a área de renovação e selecione a opção.", "Não há orientação sobre renovação na base.")).toBe(true);
+    // Fato da situação do cliente, não admissão sobre o material.
+    expect(procedureAdmittedMissing("Acesse a área de renovação e selecione a opção.", "A renovação não consta no cadastro do cliente.")).toBe(false);
+  });
+});
