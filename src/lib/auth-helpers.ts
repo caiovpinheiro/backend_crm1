@@ -96,7 +96,7 @@ export async function requireAuth(): Promise<AuthResult<AppSession>> {
   const revokedReason = revokedReasonOf(raw);
   if (revokedReason) {
     await logApiAccessRequireAuthFail(revokedReason);
-    return { ok: false, response: sessionRevokedResponse() };
+    return { ok: false, response: sessionRevokedResponse(revokedReason) };
   }
   const session = raw as AppSession | null;
   // Sem cookie (ou cookie ilegível): "no_session", sem `code`.

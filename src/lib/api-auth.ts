@@ -149,7 +149,7 @@ export async function authenticateApiRequest(
   const revokedReason = revokedReasonOf(session);
   if (revokedReason) {
     logApiAccessAuthReject(request, { reason: revokedReason, status: 401, via: "session" });
-    return { ok: false, response: sessionRevokedResponse() };
+    return { ok: false, response: sessionRevokedResponse(revokedReason) };
   }
   if (!session?.user?.id) {
     logApiAccessAuthReject(request, { reason: "no_session", status: 401, via: "session" });

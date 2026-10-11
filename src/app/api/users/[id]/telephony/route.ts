@@ -7,6 +7,7 @@ import {
   enableTelephony,
   disableTelephony,
   getProvisioningStatus,
+  TELEPHONY_STATUS_IDLE,
 } from "@/services/api4com/provisioning";
 
 type RouteContext = { params: Promise<{ id: string }> };
@@ -92,7 +93,8 @@ export async function PATCH(request: Request, context: RouteContext) {
 
 /**
  * GET /api/users/:id/telephony
- * Retorna status de provisionamento.
+ * Retorna status de provisionamento. A lista (`GET /api/users`) traz o
+ * mesmo objeto em `telephony`, com a mesma regra de acesso (só ADMIN).
  */
 export async function GET(_request: Request, context: RouteContext) {
   return withOrgContext(async (session) => {
@@ -108,9 +110,7 @@ export async function GET(_request: Request, context: RouteContext) {
 
     const status = await getProvisioningStatus(userId, target.organizationId);
     if (!status) {
-      return NextResponse.json(
-        { telephonyEnabled: false, provisioningStep: "IDLE", provisioningError: null, provisionedAt: null },
-      );
+      return NextResponse.json(TELEPHONY_STATUS_IDLE);
     }
     return NextResponse.json(status);
   });

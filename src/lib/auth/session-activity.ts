@@ -18,10 +18,14 @@
  * "expirada" tirado do cache é reconfirmado no Redis (outra réplica pode ter
  * registrado atividade nos últimos 30 s).
  *
- * Deploy: sessão SEM registro (Redis vazio no primeiro deploy, chave
- * expirada) NÃO expira — o registro é semeado com "agora" (`SET NX`) e ela
- * passa. Ninguém é deslogado no deploy; quem ficar 12 h sem atividade real
- * depois disso, cai.
+ * Sessão SEM registro no Redis (Redis vazio/limpo, chave expirada): o
+ * registro é semeado (`SET NX`) com a última atividade real do usuário no
+ * banco — `MAX(system_activity_sessions.lastActivityAt)`, ou o último login
+ * bem-sucedido (`login_attempts`) se for mais recente — numa consulta só,
+ * feita apenas nesse caso; depois o valor fica no Redis. Se a semente já
+ * passou do limite, a sessão expira. Usuário SEM nenhuma linha em
+ * `system_activity_sessions` (nunca mandou `/activity`, ex.: só usa o app
+ * mobile) é semeado com "agora" e passa. Banco fora: não semeia, passa.
  *
  * Redis fora / sem `REDIS_URL`: fail-open (não expira ninguém).
  *
@@ -29,7 +33,13 @@
  * (30 dias): uma sessão parada não "renasce" por a chave ter sumido e ser
  * semeada de novo. Sessão já expirada renova o TTL a cada verificação.
  */
+import { Prisma } from "@prisma/client";
+
 import { getCacheClient, noteFailure, noteSuccess } from "@/lib/cache/redis-client";
+import { getLogger } from "@/lib/logger";
+import { prismaBase } from "@/lib/prisma-base";
+
+const log = getLogger("auth/session-activity");
 
 export const SESSION_IDLE_TIMEOUT_DEFAULT_HOURS = 12;
 export const SESSION_ACTIVITY_CACHE_MS = 30_000;
@@ -41,6 +51,8 @@ export type SessionActivityRef = {
   userId: string;
   /** Claim `sid` do JWT; ausente em tokens emitidos antes deste deploy. */
   sid?: string | null;
+  /** Org da sessão: só restringe a consulta da semente (índice por org). */
+  organizationId?: string | null;
 };
 
 type Entry = {
@@ -54,13 +66,27 @@ type Entry = {
 
 const memory = new Map<string, Entry>();
 
-/** `SESSION_IDLE_TIMEOUT_HOURS` (horas, > 0; fração aceita). Padrão 12. */
+const IDLE_HOURS_ENV = ["SESSION_IDLE_HOURS", "SESSION_IDLE_TIMEOUT_HOURS"] as const;
+
+/**
+ * Limite de inatividade em ms. Env em horas (> 0; fração aceita — 0.05 =
+ * 3 min, para teste na DEV): `SESSION_IDLE_HOURS` (nome preferido) ou o
+ * alias antigo `SESSION_IDLE_TIMEOUT_HOURS`; vale o primeiro válido nessa
+ * ordem. Padrão 12.
+ */
 export function sessionIdleTimeoutMs(
   env: Record<string, string | undefined> = process.env,
 ): number {
-  const raw = Number(env.SESSION_IDLE_TIMEOUT_HOURS);
-  const hours =
-    Number.isFinite(raw) && raw > 0 ? raw : SESSION_IDLE_TIMEOUT_DEFAULT_HOURS;
+  let hours = SESSION_IDLE_TIMEOUT_DEFAULT_HOURS;
+  for (const name of IDLE_HOURS_ENV) {
+    const text = env[name]?.trim();
+    if (!text) continue;
+    const raw = Number(text);
+    if (Number.isFinite(raw) && raw > 0) {
+      hours = raw;
+      break;
+    }
+  }
   return Math.round(hours * 60 * 60_000);
 }
 
@@ -85,6 +111,43 @@ function parseMs(raw: string | null): number | null {
 }
 
 /**
+ * Semente para sessão sem registro no Redis: última atividade real do
+ * usuário no banco, numa consulta. `null` = nenhuma linha em
+ * `system_activity_sessions` (o chamador semeia com "agora"). O último
+ * login bem-sucedido só entra como piso (login conta como atividade real);
+ * sem linha de atividade, o login sozinho não arma a expiração.
+ * Lança se o banco falhar.
+ *
+ * `prismaBase`: roda no wrapper de `auth()`, antes do RequestContext; o
+ * filtro de org (quando há) vem da própria sessão.
+ */
+export async function lastRealActivityFromDb(
+  ref: SessionActivityRef,
+): Promise<number | null> {
+  const orgFilter = ref.organizationId
+    ? Prisma.sql`AND "organizationId" = ${ref.organizationId}`
+    : Prisma.empty;
+  const rows = await prismaBase.$queryRaw<
+    Array<{ lastActivityAt: Date | string | null; lastLoginAt: Date | string | null }>
+  >`
+    SELECT
+      (SELECT MAX("lastActivityAt") FROM "system_activity_sessions"
+        WHERE "userId" = ${ref.userId} ${orgFilter}) AS "lastActivityAt",
+      (SELECT MAX("createdAt") FROM "login_attempts"
+        WHERE "userId" = ${ref.userId} AND "outcome" = 'success') AS "lastLoginAt"
+  `;
+  const toMs = (v: Date | string | null | undefined): number | null => {
+    if (v === null || v === undefined) return null;
+    const ms = new Date(v).getTime();
+    return Number.isFinite(ms) ? ms : null;
+  };
+  const activity = toMs(rows[0]?.lastActivityAt);
+  if (activity === null) return null;
+  const login = toMs(rows[0]?.lastLoginAt);
+  return login === null ? activity : Math.max(activity, login);
+}
+
+/**
  * Registra atividade real agora (login ou `/api/agents/me/activity` com
  * pulsos > 0). Best-effort: nunca lança.
  */
@@ -105,9 +168,11 @@ export async function touchSessionActivity(
 }
 
 /**
- * `true` quando a última atividade real da sessão passou de
- * `SESSION_IDLE_TIMEOUT_HOURS`. Sem registro → semeia com `now` e devolve
- * `false`. Redis indisponível → `false` (fail-open).
+ * `true` quando a última atividade real da sessão passou do limite
+ * (`sessionIdleTimeoutMs`). Sem registro → semeia com a última atividade do
+ * banco (`lastRealActivityFromDb`; sem nenhuma, "agora"). Redis
+ * indisponível → `false` (fail-open). Nunca mexe em `sessionVersion`: só
+ * esta sessão expira, os outros dispositivos do usuário seguem.
  */
 export async function isSessionIdleExpired(
   ref: SessionActivityRef,
@@ -132,9 +197,23 @@ export async function isSessionIdleExpired(
     if (stored !== null) {
       last = stored;
     } else {
-      // Sem registro (deploy / Redis novo): semeia "agora" e deixa passar.
-      const seeded = await client.set(key, String(now), "PX", SESSION_ACTIVITY_TTL_MS, "NX");
-      last = seeded === "OK" ? now : (parseMs(await client.get(key)) ?? now);
+      // Sem registro (Redis novo/limpo): semeia com a última atividade real
+      // do banco; sem nenhuma, "agora". Banco fora: passa sem semear (tenta
+      // de novo quando o cache de 30 s vencer).
+      let seed: number;
+      try {
+        seed = Math.min(now, (await lastRealActivityFromDb(ref)) ?? now);
+      } catch (err) {
+        log.warn(
+          { err: err instanceof Error ? err.message : err },
+          "semente da inatividade: consulta falhou; sessão passa",
+        );
+        noteSuccess();
+        remember(key, { lastActivityAt: now, readAt: now, expired: false });
+        return false;
+      }
+      const seeded = await client.set(key, String(seed), "PX", SESSION_ACTIVITY_TTL_MS, "NX");
+      last = seeded === "OK" ? seed : (parseMs(await client.get(key)) ?? seed);
     }
     noteSuccess();
   } catch (err) {
@@ -150,6 +229,25 @@ export async function isSessionIdleExpired(
     client.pexpire(key, SESSION_ACTIVITY_TTL_MS).catch(() => undefined);
   }
   return expired;
+}
+
+/**
+ * `lastInteractionAt` do corpo (ISO 8601 ou epoch em ms) → ms. Ausente,
+ * ilegível ou no futuro → `null` (o campo é ignorado; vale a checagem por
+ * Redis de sempre).
+ */
+export function parseLastInteractionAt(raw: unknown, now = Date.now()): number | null {
+  let ms: number;
+  if (typeof raw === "number") {
+    ms = raw;
+  } else if (typeof raw === "string" && raw.trim()) {
+    const text = raw.trim();
+    ms = /^\d+$/.test(text) ? Number(text) : Date.parse(text);
+  } else {
+    return null;
+  }
+  if (!Number.isFinite(ms) || ms <= 0 || ms > now) return null;
+  return ms;
 }
 
 /** Só testes. */

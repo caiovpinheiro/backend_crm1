@@ -198,6 +198,57 @@ export async function getProvisioningStatus(
   return ext;
 }
 
+/** O que `GET /api/users/:id/telephony` devolve quando o usuário não tem ramal. */
+export const TELEPHONY_STATUS_IDLE: ProvisionStatus = {
+  telephonyEnabled: false,
+  provisioningStep: "IDLE",
+  provisioningError: null,
+  provisionedAt: null,
+};
+
+/**
+ * `getProvisioningStatus` em lote (uma consulta): status de cada usuário
+ * na org DELE (`organizationId` do alvo, como a rota por id). Usuário sem
+ * ramal vem com `TELEPHONY_STATUS_IDLE`; sem org fica de fora do mapa (a
+ * rota por id responde 404).
+ */
+export async function getProvisioningStatusMany(
+  users: ReadonlyArray<{ id: string; organizationId: string | null }>,
+): Promise<Map<string, ProvisionStatus>> {
+  const out = new Map<string, ProvisionStatus>();
+  const targets = users.filter(
+    (u): u is { id: string; organizationId: string } => Boolean(u.organizationId),
+  );
+  if (targets.length === 0) return out;
+  const rows = await prisma.sipExtension.findMany({
+    where: { userId: { in: targets.map((u) => u.id) } },
+    select: {
+      userId: true,
+      organizationId: true,
+      telephonyEnabled: true,
+      provisioningStep: true,
+      provisioningError: true,
+      provisionedAt: true,
+    },
+  });
+  const byOrgUser = new Map(rows.map((r) => [`${r.organizationId}:${r.userId}`, r]));
+  for (const u of targets) {
+    const ext = byOrgUser.get(`${u.organizationId}:${u.id}`);
+    out.set(
+      u.id,
+      ext
+        ? {
+            telephonyEnabled: ext.telephonyEnabled,
+            provisioningStep: ext.provisioningStep,
+            provisioningError: ext.provisioningError,
+            provisionedAt: ext.provisionedAt,
+          }
+        : { ...TELEPHONY_STATUS_IDLE },
+    );
+  }
+  return out;
+}
+
 // ── Máquina de estados interna ──────────────────────────────────────────────
 
 async function runFromStep(

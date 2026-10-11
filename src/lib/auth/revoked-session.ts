@@ -27,7 +27,7 @@ export const SESSION_REVOKED_MESSAGE = "Sessão expirada. Entre novamente.";
  * - `session_revoked`: `users.sessionVersion` incrementado (troca de senha,
  *   "sair de todos os dispositivos", admin encerrou as sessões);
  * - `session_invalid`: usuário apagado/erased ou org suspensa;
- * - `idle_timeout`: sem atividade real há mais de `SESSION_IDLE_TIMEOUT_HOURS`.
+ * - `idle_timeout`: sem atividade real há mais de `SESSION_IDLE_HOURS`.
  */
 export type SessionRevokedReason = "session_revoked" | "session_invalid" | "idle_timeout";
 
@@ -103,13 +103,27 @@ export function revokedReasonOf(session: unknown): SessionRevokedReason | null {
   return normalizeReason((session as { revokedReason?: unknown }).revokedReason);
 }
 
-export function sessionRevokedBody(): { message: string; code: string } {
-  return { message: SESSION_REVOKED_MESSAGE, code: SESSION_REVOKED_CODE };
+/** Valor de `reason` no corpo do 401 quando a sessão caiu por inatividade. */
+export const SESSION_IDLE_REASON = "idle";
+
+/**
+ * Corpo do 401. Inatividade (`idle_timeout`) leva também
+ * `reason: "idle"` (o frontend pode explicar o logout); os outros motivos
+ * seguem só com `message` + `code`.
+ */
+export function sessionRevokedBody(
+  reason?: SessionRevokedReason | null,
+): { message: string; code: string; reason?: string } {
+  return {
+    message: SESSION_REVOKED_MESSAGE,
+    code: SESSION_REVOKED_CODE,
+    ...(reason === "idle_timeout" ? { reason: SESSION_IDLE_REASON } : {}),
+  };
 }
 
 /** 401 que o frontend entende como "sessão encerrada → login". */
-export function sessionRevokedResponse(): NextResponse {
-  return NextResponse.json(sessionRevokedBody(), { status: 401 });
+export function sessionRevokedResponse(reason?: SessionRevokedReason | null): NextResponse {
+  return NextResponse.json(sessionRevokedBody(reason), { status: 401 });
 }
 
 const SESSION_COOKIE_RE = /^(?:__Secure-)?authjs\.session-token(?:\.\d+)?$/;

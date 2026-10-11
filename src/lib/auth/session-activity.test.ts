@@ -14,7 +14,10 @@ import {
 
 const h = vi.hoisted(() => ({
   client: { current: null as unknown },
+  queryRaw: vi.fn(),
 }));
+
+vi.mock("@/lib/prisma-base", () => ({ prismaBase: { $queryRaw: h.queryRaw } }));
 
 vi.mock("@/lib/cache/redis-client", () => ({
   getCacheClient: () => h.client.current,
@@ -24,6 +27,7 @@ vi.mock("@/lib/cache/redis-client", () => ({
 
 import {
   SESSION_ACTIVITY_CACHE_MS,
+  parseLastInteractionAt,
   SESSION_ACTIVITY_TTL_MS,
   clearSessionActivityCacheForTests,
   isSessionIdleExpired,
@@ -46,7 +50,20 @@ beforeEach(() => {
   h.client.current = new FakeRedis();
   clearSessionActivityCacheForTests();
   delete process.env.SESSION_IDLE_TIMEOUT_HOURS;
+  delete process.env.SESSION_IDLE_HOURS;
+  h.queryRaw.mockReset();
+  h.queryRaw.mockResolvedValue([{ lastActivityAt: null, lastLoginAt: null }]);
 });
+
+/** Linha da consulta de semente (`lastRealActivityFromDb`). */
+function dbRow(lastActivityAt: number | null, lastLoginAt: number | null = null) {
+  return [
+    {
+      lastActivityAt: lastActivityAt === null ? null : new Date(lastActivityAt),
+      lastLoginAt: lastLoginAt === null ? null : new Date(lastLoginAt),
+    },
+  ];
+}
 
 afterEach(() => {
   vi.useRealTimers();
@@ -60,6 +77,17 @@ describe("sessionIdleTimeoutMs / sessionActivityKey", () => {
     for (const v of ["0", "-3", "abc", ""]) {
       expect(sessionIdleTimeoutMs({ SESSION_IDLE_TIMEOUT_HOURS: v })).toBe(12 * HOUR);
     }
+  });
+
+  it("SESSION_IDLE_HOURS é o nome preferido; SESSION_IDLE_TIMEOUT_HOURS segue como alias", () => {
+    expect(sessionIdleTimeoutMs({ SESSION_IDLE_HOURS: "6" })).toBe(6 * HOUR);
+    expect(sessionIdleTimeoutMs({ SESSION_IDLE_TIMEOUT_HOURS: "4" })).toBe(4 * HOUR);
+    expect(sessionIdleTimeoutMs({ SESSION_IDLE_HOURS: "6", SESSION_IDLE_TIMEOUT_HOURS: "4" })).toBe(6 * HOUR);
+    // Nome novo inválido: cai no alias; os dois inválidos: padrão.
+    expect(sessionIdleTimeoutMs({ SESSION_IDLE_HOURS: "x", SESSION_IDLE_TIMEOUT_HOURS: "4" })).toBe(4 * HOUR);
+    expect(sessionIdleTimeoutMs({ SESSION_IDLE_HOURS: "0", SESSION_IDLE_TIMEOUT_HOURS: "-1" })).toBe(12 * HOUR);
+    // Fração: 0.05 h = 3 min (teste na DEV).
+    expect(sessionIdleTimeoutMs({ SESSION_IDLE_HOURS: "0.05" })).toBe(180_000);
   });
 
   it("chave por sid; token antigo sem sid cai no nível do usuário", () => {
@@ -162,5 +190,74 @@ describe("isSessionIdleExpired", () => {
     expect(await isSessionIdleExpired(REF, T0 + 13 * HOUR)).toBe(false);
     // Toque com Redis fora também não lança.
     await expect(touchSessionActivity(REF)).resolves.toBeUndefined();
+  });
+});
+
+describe("isSessionIdleExpired — semente do banco quando o Redis não tem registro", () => {
+  it("última atividade no banco há 13 h → expira e o Redis guarda esse valor (1 consulta só)", async () => {
+    h.queryRaw.mockResolvedValue(dbRow(T0 - 13 * HOUR));
+    expect(await isSessionIdleExpired({ ...REF, organizationId: "org1" }, T0)).toBe(true);
+    expect(fakeRedisRaw(state, sessionActivityKey(REF))).toBe(String(T0 - 13 * HOUR));
+    expect(h.queryRaw).toHaveBeenCalledTimes(1);
+    clearSessionActivityCacheForTests();
+    expect(await isSessionIdleExpired(REF, T0 + 1_000)).toBe(true);
+    expect(h.queryRaw).toHaveBeenCalledTimes(1);
+  });
+
+  it("última atividade no banco há 1 h → passa; semeado com ela, expira 11 h depois", async () => {
+    h.queryRaw.mockResolvedValue(dbRow(T0 - HOUR));
+    expect(await isSessionIdleExpired(REF, T0)).toBe(false);
+    expect(fakeRedisRaw(state, sessionActivityKey(REF))).toBe(String(T0 - HOUR));
+    clearSessionActivityCacheForTests();
+    expect(await isSessionIdleExpired(REF, T0 + 11 * HOUR + 1_000)).toBe(true);
+  });
+
+  it("login mais recente que a atividade conta como piso", async () => {
+    h.queryRaw.mockResolvedValue(dbRow(T0 - 20 * HOUR, T0 - 2 * HOUR));
+    expect(await isSessionIdleExpired(REF, T0)).toBe(false);
+    expect(fakeRedisRaw(state, sessionActivityKey(REF))).toBe(String(T0 - 2 * HOUR));
+  });
+
+  it("sem nenhuma linha de atividade (ex.: só app mobile) → semeia agora e passa, mesmo com login antigo", async () => {
+    h.queryRaw.mockResolvedValue(dbRow(null, T0 - 48 * HOUR));
+    expect(await isSessionIdleExpired(REF, T0)).toBe(false);
+    expect(fakeRedisRaw(state, sessionActivityKey(REF))).toBe(String(T0));
+  });
+
+  it("registro já no Redis → não consulta o banco", async () => {
+    await touchSessionActivity(REF, T0);
+    clearSessionActivityCacheForTests();
+    expect(await isSessionIdleExpired(REF, T0 + HOUR)).toBe(false);
+    expect(h.queryRaw).not.toHaveBeenCalled();
+  });
+
+  it("banco fora → passa sem semear; tenta de novo depois do cache", async () => {
+    h.queryRaw.mockRejectedValue(new Error("db down"));
+    expect(await isSessionIdleExpired(REF, T0)).toBe(false);
+    expect(fakeRedisRaw(state, sessionActivityKey(REF))).toBeNull();
+    expect(await isSessionIdleExpired(REF, T0 + 1_000)).toBe(false);
+    expect(h.queryRaw).toHaveBeenCalledTimes(1);
+    h.queryRaw.mockResolvedValue(dbRow(T0 - 13 * HOUR));
+    expect(await isSessionIdleExpired(REF, T0 + SESSION_ACTIVITY_CACHE_MS + 1)).toBe(true);
+  });
+
+  it("Redis fora → não consulta o banco (fail-open)", async () => {
+    state.down = true;
+    expect(await isSessionIdleExpired(REF, T0)).toBe(false);
+    h.client.current = null;
+    expect(await isSessionIdleExpired(REF, T0)).toBe(false);
+    expect(h.queryRaw).not.toHaveBeenCalled();
+  });
+});
+
+describe("parseLastInteractionAt", () => {
+  it("ISO, epoch ms (número ou texto); futuro, ilegível e ausente → null", () => {
+    expect(parseLastInteractionAt(new Date(T0 - HOUR).toISOString(), T0)).toBe(T0 - HOUR);
+    expect(parseLastInteractionAt(T0 - HOUR, T0)).toBe(T0 - HOUR);
+    expect(parseLastInteractionAt(String(T0 - HOUR), T0)).toBe(T0 - HOUR);
+    expect(parseLastInteractionAt(T0 + 1, T0)).toBeNull();
+    for (const v of [undefined, null, "", "ontem", -5, 0, Number.NaN, {}, true]) {
+      expect(parseLastInteractionAt(v, T0)).toBeNull();
+    }
   });
 });
