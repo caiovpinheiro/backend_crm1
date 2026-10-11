@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { standaloneClause, trimUnsupportedSentences } from "../reply-trim";
-import { handoffExplanation, withoutTransferClause } from "../no-source";
+import { conditionalHandoff, handoffExplanation, withoutTransferClause } from "../no-source";
 import { claimFoundInSources, sameClaim } from "../claim-check";
 import { repairMessageModelId } from "../action-policy";
 
@@ -98,3 +98,26 @@ describe("id de mensagem pronta copiado com erro", () => {
   });
 });
 
+
+describe("aviso de transferência: explicação que sobra e condição com “acionar o time”", () => {
+  it("causa que só apontava para o que foi cortado (“dessa informação”) não vira frase solta", () => {
+    expect(standaloneClause("Como você precisa dessa informação para seguir")).toBe("");
+    expect(standaloneClause("Como isso depende do cadastro")).toBe("");
+    // Causa com conteúdo próprio continua.
+    expect(standaloneClause("Como você quer cancelar o pedido")).toBe("Você quer cancelar o pedido");
+    // Sem a frase solta, sobra só cortesia: sai apenas o aviso configurado.
+    expect(handoffExplanation("Bom dia! Imagino como isso atrapalha. Como você precisa dessa informação para seguir, vou chamar alguém da equipe para orientar.")).toBe("");
+    // Com explicação de verdade antes, ela fica e a causa solta sai.
+    const kept = handoffExplanation("O sistema de pagamentos está em manutenção desde ontem e não aceita cobranças novas no momento. Como você precisa dessa informação para seguir, vou chamar alguém da equipe.");
+    expect(kept).toContain("está em manutenção desde ontem");
+    expect(kept).not.toContain("dessa informação");
+  });
+
+  it("transferência condicionada com “acionar o time” ou “passar para a equipe” espera o cliente; sem condição, não", () => {
+    const reply = "Para pagar, tente pelo site: 1. Entre na sua conta. 2. Toque em Pagamentos.\n\nSe o site também apresentar erro, será necessário acionar o time de Atendimento para analisar o caso.";
+    expect(conditionalHandoff(reply)).toBe(true);
+    expect(conditionalHandoff("Caso o código não chegue, vou te passar para a equipe.")).toBe(true);
+    expect(conditionalHandoff("Vou acionar o time para analisar o seu caso.")).toBe(false);
+    expect(conditionalHandoff("Se precisar, é só me chamar.")).toBe(false);
+  });
+});

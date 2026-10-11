@@ -210,6 +210,11 @@ export function notAFactClaim(claim: string): boolean {
   if (/\b(?:precisa|deve|tem que) ser (?:tratad|analisad|verificad|resolvid|feit|confirmad|avaliad)\w* (?:por|pela|pelo) (?:uma pessoa|alguem|a equipe|equipe|um atendente|atendente|setor|um consultor)/.test(c)) return true;
   // Pedido ao cliente ("para eu identificar o erro, envie…").
   if (/^para (?:eu|que eu|a gente) (?:identificar|verificar|entender|confirmar|analisar|te ajudar)\b/.test(c)) return true;
+  // Só a condição, sem a consequência ("se o sistema está fora do ar",
+  // "caso o código não chegue"): é hipótese — em geral o que o próprio
+  // cliente contou —, não afirma nada. Com a consequência junto ("se pagar
+  // até dia 10, tem 15% de desconto") ou número, continua sendo conferida.
+  if (/^(?:se|caso)\s/.test(c) && !/[,;:]/.test(c) && !/\d/.test(c)) return true;
   return isVagueClaim(claim);
 }
 

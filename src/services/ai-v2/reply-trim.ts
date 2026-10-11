@@ -47,6 +47,9 @@ export function standaloneClause(clause: string): string {
   const causal = body.match(CAUSAL_START);
   if (causal) {
     const rest = body.slice(causal[0].length);
+    // "Como você precisa dessa informação para seguir" sem o resto da frase:
+    // "dessa", "isso" apontavam para o que foi cortado. Sozinha, não diz nada.
+    if (/(?<![\p{L}])(?:d?ess[ae]s?|d?est[ae]s?|n?isso|n?isto|disso|disto|dele|dela)(?![\p{L}])/iu.test(rest)) return "";
     return vocative ? `${vocative[1]}, ${rest}` : rest.charAt(0).toUpperCase() + rest.slice(1);
   }
   return DEPENDENT_START.test(body) ? "" : s;
@@ -135,6 +138,11 @@ function removeSpan(unitText: string, flagged: string): string | null {
     .replace(/\s{2,}/g, " ")
     .replace(/(?:^|\s)(?:e|ou|mas)\s*([.!?])?\s*$/i, "$1")
     .trim();
+  // Marcação no começo da frase ("Se X, me diga…"): sobrava ", me diga…".
+  if (!/\p{L}/u.test(unitText.slice(0, start))) {
+    rest = rest.replace(/^[,;:.\s]+/, "");
+    rest = rest.charAt(0).toUpperCase() + rest.slice(1);
+  }
   // Marcação no fim da frase: o que sobra é o começo dela, que precisa ficar de pé.
   if (!/\p{L}/u.test(unitText.slice(end))) {
     const head = standaloneClause(rest.replace(/[,;:.!?\s]+$/, ""));
