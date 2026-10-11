@@ -3015,17 +3015,37 @@ async function handoffAndReply(
   counters: V2Counters,
   themeId?: string,
 ): Promise<void> {
-  const res = await sendV2TextMessage({
-    conversationId: input.conversationId,
-    contactId,
-    agentUserId: resolved!.userId,
-    text: message,
-    channel: input.channel,
-    autonomyMode: mapV2AutonomyToPrisma(config.autonomyMode),
-    humanBehavior: v2HumanBehavior(config),
-    // Aviso de transferência: nunca barrado como repetido.
-    bypassDuplicateGuard: true,
-  });
+  const fallbackDestination = resolveHandoffDestination(config, config.handoff.defaultDestination, counters, resolved.agentConfigId);
+  // Mesmas regras do aviso da transferência pedida pelo modelo
+  // (performHandoff): a identificação, o teto de custo, o "tentei e não
+  // deu" e o pedido de atendente passavam por aqui e avisavam sempre — o
+  // agente que recebia a conversa repetia "vou te passar para…" logo depois
+  // do aviso do anterior.
+  let skipNotice = false;
+  const receivedNow = !!stateRow && stateRow.agentId !== resolved.agentConfigId;
+  if (receivedNow && (await inboundAlreadyAnswered(input.conversationId, input.messageIds))) {
+    traceStep("transferência", "Transferência em cadeia logo após receber a conversa: o aviso do agente anterior já cobriu → sem novo aviso");
+    skipNotice = true;
+  } else if (fallbackDestination.type === "ai_agent" && fallbackDestination.id) {
+    const who = config.entry.onAiTransfer === "continue" ? "Este agente" : (await aiAgentReceivesTransparently(fallbackDestination.id)) ? "Agente de destino" : null;
+    if (who) {
+      traceStep("transferência", `${who} em modo transparente → sem aviso de transferência`);
+      skipNotice = true;
+    }
+  }
+  const res = skipNotice
+    ? { sent: false as const, reason: undefined as string | undefined }
+    : await sendV2TextMessage({
+        conversationId: input.conversationId,
+        contactId,
+        agentUserId: resolved!.userId,
+        text: message,
+        channel: input.channel,
+        autonomyMode: mapV2AutonomyToPrisma(config.autonomyMode),
+        humanBehavior: v2HumanBehavior(config),
+        // Aviso de transferência: nunca barrado como repetido.
+        bypassDuplicateGuard: true,
+      });
   // Uma pessoa assumiu a conversa enquanto isso: sem transferência.
   if ((!res.sent && res.reason && HUMAN_TOOK_OVER.has(res.reason)) || !(await assignedToAgent(input.conversationId, resolved.userId))) {
     traceStep("transferência", "Uma pessoa assumiu a conversa durante o turno → sem transferência");
@@ -3039,7 +3059,6 @@ async function handoffAndReply(
     });
     return;
   }
-  const fallbackDestination = resolveHandoffDestination(config, config.handoff.defaultDestination, counters, resolved.agentConfigId);
   if (fallbackDestination.type === "ai_agent") {
     counters.aiTransferCount += 1;
     rememberChainAgent(counters, resolved.agentConfigId);
@@ -3079,7 +3098,7 @@ async function handoffAndReply(
     },
     themeId,
     prompt: "handoff",
-    reply: message,
+    ...(skipNotice ? {} : { reply: message }),
     executedActions: [{ action: { type: "handoff" }, ok: true }],
     discardedActions: [],
     handoff: true,
