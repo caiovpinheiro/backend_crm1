@@ -9,6 +9,12 @@
  * Redis `SET <chave> 1 PX 20000 NX`: quem ganha a chave passa; quem não
  * ganha recebe o tempo restante (`PTTL`). Redis fora / ausente → fail-open
  * (presença é best-effort, nunca bloqueia por falha de infraestrutura).
+ *
+ * Teto por usuário (todas as abas somadas): no máximo
+ * `PRESENCE_PING_USER_MAX_PER_MIN` (padrão 6) pings aceitos pelo limite da
+ * aba numa janela fixa de 60 s (`consumePresencePingUserSlot`). Contador
+ * `INCR` + `PEXPIRE` no 1º ping da janela, num script Lua (atômico entre
+ * réplicas). Excedeu → `retryAfterMs` = o que falta da janela.
  */
 import { getCacheClient, noteFailure, noteSuccess } from "@/lib/cache/redis-client";
 
@@ -51,6 +57,65 @@ export async function consumePresencePingSlot(params: {
     return { ok: false, retryAfterMs };
   } catch (err) {
     noteFailure(err, key, "presence-ping-limit");
+    return { ok: true };
+  }
+}
+
+export const PRESENCE_PING_USER_WINDOW_MS = 60_000;
+export const PRESENCE_PING_USER_MAX_PER_MIN_DEFAULT = 6;
+const USER_KEY_PREFIX = "presence:ping-user:";
+
+/** `PRESENCE_PING_USER_MAX_PER_MIN` (inteiro ≥ 1). Padrão 6. */
+export function presencePingUserMaxPerMin(
+  env: Record<string, string | undefined> = process.env,
+): number {
+  const raw = Number(env.PRESENCE_PING_USER_MAX_PER_MIN?.trim() || NaN);
+  return Number.isInteger(raw) && raw >= 1 ? raw : PRESENCE_PING_USER_MAX_PER_MIN_DEFAULT;
+}
+
+export function presencePingUserKey(userId: string): string {
+  return `${USER_KEY_PREFIX}${userId}`;
+}
+
+/**
+ * Conta o ping e devolve -1 se cabe na janela; senão o PTTL (ms) da janela.
+ * Chave sem TTL (não deveria existir) ganha a janela de novo.
+ */
+const USER_CAP_SCRIPT = `-- crm:presence-ping-user-cap
+local n = redis.call("INCR", KEYS[1])
+if n == 1 then redis.call("PEXPIRE", KEYS[1], ARGV[1]) end
+if n <= tonumber(ARGV[2]) then return -1 end
+local ttl = redis.call("PTTL", KEYS[1])
+if ttl < 0 then
+  redis.call("PEXPIRE", KEYS[1], ARGV[1])
+  ttl = tonumber(ARGV[1])
+end
+return ttl`;
+
+/** Teto por usuário somando as abas. Redis fora / ausente → fail-open. */
+export async function consumePresencePingUserSlot(params: {
+  userId: string;
+}): Promise<PresencePingDecision> {
+  const client = getCacheClient();
+  if (!client) return { ok: true };
+  const key = presencePingUserKey(params.userId);
+  try {
+    const raw = await client.eval(
+      USER_CAP_SCRIPT,
+      1,
+      key,
+      String(PRESENCE_PING_USER_WINDOW_MS),
+      String(presencePingUserMaxPerMin()),
+    );
+    noteSuccess();
+    const ttl = Number(raw);
+    if (!Number.isFinite(ttl) || ttl < 0) return { ok: true };
+    return {
+      ok: false,
+      retryAfterMs: Math.max(1, Math.min(ttl, PRESENCE_PING_USER_WINDOW_MS)),
+    };
+  } catch (err) {
+    noteFailure(err, key, "presence-ping-user-cap");
     return { ok: true };
   }
 }
