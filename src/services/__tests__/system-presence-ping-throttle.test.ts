@@ -190,12 +190,22 @@ describe("POST /api/agents/me/ping", () => {
   it("responde 200 com o mesmo formato, gravando só no primeiro ping da janela", async () => {
     const first = await pingFromTab("aba-1");
     expect(first.status).toBe(200);
-    expect(await first.json()).toEqual({ ok: true, systemOnline: true, created: false });
+    expect(await first.json()).toEqual({
+      ok: true,
+      systemOnline: true,
+      created: false,
+      sessionIdleMs: 12 * 60 * 60_000,
+    });
 
     vi.setSystemTime(T0 + 5_000);
     const second = await pingFromTab("aba-2");
     expect(second.status).toBe(200);
-    expect(await second.json()).toEqual({ ok: true, systemOnline: true, created: false });
+    expect(await second.json()).toEqual({
+      ok: true,
+      systemOnline: true,
+      created: false,
+      sessionIdleMs: 12 * 60 * 60_000,
+    });
 
     expect(h.updateMany).toHaveBeenCalledTimes(1);
   });
