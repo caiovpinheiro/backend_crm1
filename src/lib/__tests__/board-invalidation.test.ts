@@ -2,7 +2,7 @@
  * `new_message` → invalidação do board, sem Redis (fallback em memória)
  * e com o banco falso. Só o pipeline onde o contato tem deal é invalidado
  * (versão do pipeline trocada — o valor antigo deixa de ser lido), no
- * máximo uma vez a cada 15 s por pipeline (leading + trailing).
+ * máximo uma vez a cada 60 s por pipeline (leading + trailing).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -26,10 +26,11 @@ import {
   PIPELINES_CACHE_TTL_MS,
 } from "@/lib/board-invalidation";
 import { cache } from "@/lib/cache";
-import { BOARD_INVALIDATION_WINDOW_MS, boardDataKey } from "@/lib/cache/keys";
+import { BOARD_MESSAGE_INVALIDATION_WINDOW_MS, boardDataKey } from "@/lib/cache/keys";
 import { sseBus } from "@/lib/sse-bus";
 
-const TTL = 45;
+// Bem acima da janela de 60 s: o que some do cache aqui é purga, não TTL.
+const TTL = 3_600;
 
 async function seedBoards(orgId: string, ...pipelineIds: string[]) {
   for (const p of pipelineIds) {
@@ -141,8 +142,8 @@ describe("board: invalidação por new_message", () => {
     expect(await cached("org-e", "pipe-2")).toBeUndefined();
   });
 
-  it("apaga no máximo uma vez a cada 15 s por pipeline (leading + trailing)", async () => {
-    expect(BOARD_INVALIDATION_WINDOW_MS).toBe(15_000);
+  it("apaga no máximo uma vez a cada 60 s por pipeline (leading + trailing)", async () => {
+    expect(BOARD_MESSAGE_INVALIDATION_WINDOW_MS).toBe(60_000);
     h.queryRaw.mockResolvedValue([{ pipelineId: "pipe-1" }]);
 
     await seedBoards("org-f", "pipe-1");
@@ -150,17 +151,53 @@ describe("board: invalidação por new_message", () => {
     await settle();
     expect(await cached("org-f", "pipe-1")).toBeUndefined();
 
-    // Board recalculado; mais mensagens dentro da janela não apagam na hora.
+    // Board recalculado; mais mensagens dentro da janela não apagam na hora
+    // (antes a janela era de 15 s e aqui já teria havido o trailing).
     await seedBoards("org-f", "pipe-1");
     newMessage("org-f");
     await vi.advanceTimersByTimeAsync(3_000);
     newMessage("org-f");
-    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.advanceTimersByTimeAsync(50_000);
     expect(await cached("org-f", "pipe-1")).toBeDefined();
 
     // Fim da janela: uma purga só, cobrindo as mensagens acumuladas.
-    await vi.advanceTimersByTimeAsync(2_000);
+    await vi.advanceTimersByTimeAsync(7_000);
     expect(await cached("org-f", "pipe-1")).toBeUndefined();
+  });
+
+  it("rajada de 3 min (1 mensagem a cada 2 s): ≤ 1 purga por minuto, e nenhuma depois que param", async () => {
+    h.queryRaw.mockResolvedValue([{ pipelineId: "pipe-1" }]);
+    await seedBoards("org-r", "pipe-1");
+
+    let purges = 0;
+    const checkPurge = async () => {
+      if ((await cached("org-r", "pipe-1")) === undefined) {
+        purges += 1;
+        await seedBoards("org-r", "pipe-1");
+      }
+    };
+
+    // 90 mensagens em 180 s.
+    for (let t = 0; t < 180_000; t += 2_000) {
+      newMessage("org-r", { content: `msg ${t}` });
+      await settle();
+      await checkPurge();
+      await vi.advanceTimersByTimeAsync(2_000);
+      await checkPurge();
+    }
+    // Leading em 0 s e trailing em 60/120/180 s. Com a janela de 15 s eram 12.
+    expect(purges).toBeLessThanOrEqual(4);
+
+    // Sem mensagem nova: no máximo o trailing pendente, depois nada.
+    for (let i = 0; i < 4; i += 1) {
+      await vi.advanceTimersByTimeAsync(BOARD_MESSAGE_INVALIDATION_WINDOW_MS);
+      await checkPurge();
+    }
+    expect(purges).toBeLessThanOrEqual(5);
+    const settled = purges;
+    await vi.advanceTimersByTimeAsync(5 * BOARD_MESSAGE_INVALIDATION_WINDOW_MS);
+    await checkPurge();
+    expect(purges).toBe(settled);
   });
 });
 
@@ -182,7 +219,7 @@ describe("board: cache contato → pipelines (60 s por processo)", () => {
     newMessage("org-g");
     await settle();
     expect(h.queryRaw).toHaveBeenCalledTimes(1);
-    await vi.advanceTimersByTimeAsync(BOARD_INVALIDATION_WINDOW_MS);
+    await vi.advanceTimersByTimeAsync(BOARD_MESSAGE_INVALIDATION_WINDOW_MS);
     expect(await cached("org-g", "pipe-1")).toBeUndefined();
 
     // Passados 60 s desde a consulta, o banco é consultado de novo.
@@ -230,7 +267,7 @@ describe("board: cache contato → pipelines (60 s por processo)", () => {
     expect(await cached("org-k", "pipe-2")).toBeUndefined();
 
     await seedBoards("org-k", "pipe-1", "pipe-2");
-    await vi.advanceTimersByTimeAsync(BOARD_INVALIDATION_WINDOW_MS + 1);
+    await vi.advanceTimersByTimeAsync(BOARD_MESSAGE_INVALIDATION_WINDOW_MS + 1);
     newMessage("org-k");
     await settle();
     expect(h.queryRaw).toHaveBeenCalledTimes(2);
