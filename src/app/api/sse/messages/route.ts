@@ -98,7 +98,7 @@ export async function GET(request: Request) {
   const revokedReason = revokedReasonOf(session);
   if (revokedReason) {
     metrics.sse.connectionsRejected.inc({ reason: "session_revoked" });
-    return sseError(request, JSON.stringify(sessionRevokedBody()), 401, {
+    return sseError(request, JSON.stringify(sessionRevokedBody(revokedReason)), 401, {
       "Content-Type": "application/json",
     });
   }

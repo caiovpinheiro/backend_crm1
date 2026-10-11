@@ -47,6 +47,8 @@ describe("authenticateApiRequest — sessão revogada", () => {
       expect(await r.response.json()).toEqual({
         message: "Sessão expirada. Entre novamente.",
         code: "SESSION_REVOKED",
+        // Inatividade leva `reason: "idle"`; os outros motivos, não.
+        ...(reason === "idle_timeout" ? { reason: "idle" } : {}),
       });
       expect(h.reject).toHaveBeenLastCalledWith(expect.anything(), {
         reason,

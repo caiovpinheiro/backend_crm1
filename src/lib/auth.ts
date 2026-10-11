@@ -553,10 +553,10 @@ export const { handlers, signIn, signOut } = nextAuth;
  * subsequente. Idempotente por design (nao sobrescreve worker ctx).
  *
  * Também aplica a expiração por inatividade: sessão sem atividade real há
- * mais de `SESSION_IDLE_TIMEOUT_HOURS` volta MARCADA (`idle_timeout`, sem
+ * mais de `SESSION_IDLE_HOURS` volta MARCADA (`idle_timeout`, sem
  * `user`) — `requireAuth`/`authenticateApiRequest`/SSE respondem 401
- * `SESSION_REVOKED` e as rotas que leem `session?.user` direto tratam como
- * deslogado.
+ * `SESSION_REVOKED` (`reason: "idle"`) e as rotas que leem `session?.user`
+ * direto tratam como deslogado.
  */
 export const auth: typeof nextAuth.auth = (async (
   ...args: Parameters<typeof nextAuth.auth>
@@ -567,12 +567,14 @@ export const auth: typeof nextAuth.auth = (async (
   const user = (session as { user?: Record<string, unknown> } | null)?.user;
   if (user && typeof user.id === "string") {
     // Expiração por inatividade real (`auth/session-activity.ts`): vale
-    // para toda rota que lê a sessão. Leitura barata (memória 30 s + Redis,
-    // sem Postgres); sem registro semeia "agora" e passa.
+    // para toda rota que lê a sessão. Leitura barata (memória 30 s + Redis);
+    // só sem registro no Redis consulta o banco uma vez para semear.
     if (
       await isSessionIdleExpired({
         userId: user.id,
         sid: typeof user.sid === "string" ? user.sid : null,
+        organizationId:
+          typeof user.organizationId === "string" ? user.organizationId : null,
       })
     ) {
       const expires = (session as { expires?: unknown }).expires;

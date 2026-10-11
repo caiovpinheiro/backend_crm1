@@ -25,7 +25,7 @@ export const dynamic = "force-dynamic";
  *
  * Também é o que mantém a sessão viva: cada chamada com pulsos renova o
  * registro de atividade real da sessão (`touchSessionActivity`); sem ele por
- * `SESSION_IDLE_TIMEOUT_HOURS` (12 h) a sessão expira (401
+ * `SESSION_IDLE_HOURS` (12 h) a sessão expira (401
  * `SESSION_REVOKED`). `interactionCount` ≤ 0 (ou `null`) NÃO é atividade:
  * responde `{ ok: true, recorded: false }` sem gravar nada. Corpo sem o
  * campo (cliente antigo) vale 1, como antes.

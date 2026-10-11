@@ -18,6 +18,9 @@ const h = vi.hoisted(() => {
     requireAuthFail: vi.fn().mockResolvedValue(undefined),
     recordHeartbeatThrottled: vi.fn().mockResolvedValue({ created: false, written: true }),
     recordSystemActivity: vi.fn().mockResolvedValue({}),
+    queryRaw: vi.fn(),
+    userUpdate: vi.fn(),
+    userUpdateMany: vi.fn(),
   };
 });
 
@@ -37,7 +40,16 @@ vi.mock("@auth/core/errors", () => ({
 }));
 vi.mock("bcryptjs", () => ({ compare: vi.fn() }));
 vi.mock("@/lib/prisma-base", () => ({
-  prismaBase: { user: { findUnique: vi.fn().mockResolvedValue(null), findMany: vi.fn() } },
+  prismaBase: {
+    user: {
+      findUnique: vi.fn().mockResolvedValue(null),
+      findMany: vi.fn(),
+      update: h.userUpdate,
+      updateMany: h.userUpdateMany,
+    },
+    // Semente da inatividade (`lastRealActivityFromDb`).
+    $queryRaw: h.queryRaw,
+  },
 }));
 vi.mock("@/lib/prisma", () => ({ prisma: {} }));
 vi.mock("@/lib/rate-limit", () => ({
@@ -132,7 +144,13 @@ function fresh<T>(fn: () => Promise<T>): Promise<T> {
   return requestContext.run(undefined as never, fn);
 }
 
-const pingReq = () => new Request("https://api.test/api/agents/me/ping", { method: "POST" });
+const pingReq = (body?: unknown) =>
+  new Request("https://api.test/api/agents/me/ping", {
+    method: "POST",
+    ...(body === undefined
+      ? {}
+      : { headers: { "content-type": "application/json" }, body: JSON.stringify(body) }),
+  });
 const activityReq = (body: unknown) =>
   new Request("https://api.test/api/agents/me/activity", {
     method: "POST",
@@ -146,6 +164,8 @@ beforeEach(() => {
   const { default: FakeRedis } = fakeIoredisModule(newFakeRedisState());
   h.client.current = new FakeRedis();
   delete process.env.SESSION_IDLE_TIMEOUT_HOURS;
+  delete process.env.SESSION_IDLE_HOURS;
+  h.queryRaw.mockResolvedValue([{ lastActivityAt: null, lastLoginAt: null }]);
   at(T0);
 });
 
@@ -167,8 +187,12 @@ describe("inatividade real de 12 h (requireAuth)", () => {
     expect(await r.response.json()).toEqual({
       message: "Sessão expirada. Entre novamente.",
       code: "SESSION_REVOKED",
+      reason: "idle",
     });
     expect(h.requireAuthFail).toHaveBeenCalledWith("idle_timeout");
+    // Inatividade não incrementa sessionVersion (não derruba outros dispositivos).
+    expect(h.userUpdate).not.toHaveBeenCalled();
+    expect(h.userUpdateMany).not.toHaveBeenCalled();
   });
 
   it("ping NÃO renova: pings de hora em hora e a sessão expira 12 h após a última atividade", async () => {
@@ -212,7 +236,16 @@ describe("inatividade real de 12 h (requireAuth)", () => {
     expect((await fresh(() => requireAuth())).ok).toBe(false);
   });
 
-  it("SESSION_IDLE_TIMEOUT_HOURS ajusta o limite", async () => {
+  it("SESSION_IDLE_HOURS (nome novo) ajusta o limite; fração vale", async () => {
+    process.env.SESSION_IDLE_HOURS = "0.05";
+    useSession(await login());
+    at(T0 + 2 * 60_000);
+    expect((await fresh(() => requireAuth())).ok).toBe(true);
+    at(T0 + 4 * 60_000);
+    expect((await fresh(() => requireAuth())).ok).toBe(false);
+  });
+
+  it("SESSION_IDLE_TIMEOUT_HOURS (alias) ajusta o limite", async () => {
     process.env.SESSION_IDLE_TIMEOUT_HOURS = "1";
     useSession(await login());
     at(T0 + 2 * HOUR);
@@ -223,6 +256,61 @@ describe("inatividade real de 12 h (requireAuth)", () => {
     useSession(await login());
     h.client.current = null;
     at(T0 + 48 * HOUR);
+    expect((await fresh(() => requireAuth())).ok).toBe(true);
+  });
+});
+
+describe("ping com lastInteractionAt", () => {
+  it("interação há 13 h → 401 reason idle, sem presença e sem sessionVersion; o outro dispositivo segue", async () => {
+    const sidA = await login();
+    const sidB = await login();
+    useSession(sidA);
+    at(T0 + HOUR);
+    const res = await ping(pingReq({ lastInteractionAt: T0 + HOUR - 13 * HOUR }));
+    expect(res.status).toBe(401);
+    expect(await res.json()).toMatchObject({ code: "SESSION_REVOKED", reason: "idle" });
+    expect(h.recordHeartbeatThrottled).not.toHaveBeenCalled();
+    expect(h.userUpdate).not.toHaveBeenCalled();
+    expect(h.userUpdateMany).not.toHaveBeenCalled();
+    // Outro dispositivo (outro sid) do mesmo usuário continua logado.
+    useSession(sidB);
+    expect((await fresh(() => requireAuth())).ok).toBe(true);
+  });
+
+  it("interação recente → 200 com sessionIdleMs; o ping não renova a sessão", async () => {
+    useSession(await login());
+    at(T0 + 11 * HOUR);
+    const res = await ping(pingReq({ lastInteractionAt: new Date(T0 + 11 * HOUR - 60_000).toISOString() }));
+    expect(res.status).toBe(200);
+    expect((await res.json()).sessionIdleMs).toBe(12 * HOUR);
+    // Só o /activity renova: 12 h depois do login a sessão cai mesmo assim.
+    at(T0 + 12 * HOUR + 60_000);
+    expect((await ping(pingReq())).status).toBe(401);
+  });
+});
+
+describe("cliente antigo (sem lastInteractionAt) e Redis sem registro: semente do banco", () => {
+  it("última atividade no banco há 13 h → ping 401 reason idle (sem presença)", async () => {
+    h.queryRaw.mockResolvedValue([{ lastActivityAt: new Date(T0 - 13 * HOUR), lastLoginAt: null }]);
+    useSession("sid-sem-registro");
+    const res = await ping(pingReq());
+    expect(res.status).toBe(401);
+    expect(await res.json()).toMatchObject({ code: "SESSION_REVOKED", reason: "idle" });
+    expect(h.recordHeartbeatThrottled).not.toHaveBeenCalled();
+    expect(h.queryRaw).toHaveBeenCalledTimes(1);
+  });
+
+  it("última atividade no banco há 1 h → ping 200", async () => {
+    h.queryRaw.mockResolvedValue([{ lastActivityAt: new Date(T0 - HOUR), lastLoginAt: null }]);
+    useSession("sid-sem-registro");
+    expect((await ping(pingReq())).status).toBe(200);
+    expect(h.recordHeartbeatThrottled).toHaveBeenCalledTimes(1);
+  });
+
+  it("nenhum registro no banco (ex.: só app mobile) → semeia agora e passa", async () => {
+    useSession("sid-sem-registro");
+    expect((await ping(pingReq())).status).toBe(200);
+    at(T0 + 11 * HOUR);
     expect((await fresh(() => requireAuth())).ok).toBe(true);
   });
 });

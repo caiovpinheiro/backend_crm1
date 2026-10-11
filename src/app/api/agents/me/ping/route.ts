@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
+import { sessionRevokedBody } from "@/lib/auth/revoked-session";
+import { parseLastInteractionAt, sessionIdleTimeoutMs } from "@/lib/auth/session-activity";
 import { consumePresencePingSlot, presenceTabId } from "@/lib/presence-ping-limit";
 import { recordHeartbeatThrottled } from "@/services/system-presence";
 import { getLogger } from "@/lib/logger";
@@ -8,6 +10,17 @@ import { getLogger } from "@/lib/logger";
 const log = getLogger("api/agents/me/ping");
 
 export const dynamic = "force-dynamic";
+
+async function readLastInteractionAt(request: Request, now: number): Promise<number | null> {
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return null; // sem corpo (cliente antigo) ou corpo inválido
+  }
+  if (!body || typeof body !== "object") return null;
+  return parseLastInteractionAt((body as { lastInteractionAt?: unknown }).lastInteractionAt, now);
+}
 
 /**
  * Heartbeat de PRESENÇA DE USO ("CRM aberto") enviado pelo cliente
@@ -32,11 +45,31 @@ export const dynamic = "force-dynamic";
  * (segundos). Sessão revogada/expirada responde antes, 401 `SESSION_REVOKED`
  * (`withOrgContext` → `requireAuth`). O ping NÃO conta como atividade real
  * para a expiração por inatividade.
+ *
+ * Inatividade informada pelo cliente: corpo opcional
+ * `{ lastInteractionAt: ISO | epoch ms }` (última interação real do
+ * usuário no navegador). Se `agora - lastInteractionAt` passou do limite
+ * (`SESSION_IDLE_HOURS`) → 401 `{ code: "SESSION_REVOKED", reason: "idle" }`
+ * sem gravar presença nenhuma e sem mexer em `sessionVersion` (os outros
+ * dispositivos do usuário seguem logados). Dentro do limite, o ping segue
+ * normal e NÃO renova a sessão (só `/api/agents/me/activity` renova). Valor
+ * no futuro ou ilegível → campo ignorado. Sem o campo (cliente antigo) vale
+ * só a checagem por Redis do `auth()`.
+ *
+ * Toda resposta 200 traz `sessionIdleMs` (o limite em ms) para a checagem
+ * local do frontend.
  */
 export async function POST(request: Request) {
   return withOrgContext(async (session) => {
     const userId = session.user.id;
     const organizationId = session.user.organizationId;
+    const sessionIdleMs = sessionIdleTimeoutMs();
+
+    const now = Date.now();
+    const lastInteractionAt = await readLastInteractionAt(request, now);
+    if (lastInteractionAt !== null && now - lastInteractionAt > sessionIdleMs) {
+      return NextResponse.json(sessionRevokedBody("idle_timeout"), { status: 401 });
+    }
 
     const slot = await consumePresencePingSlot({
       userId,
@@ -53,7 +86,7 @@ export async function POST(request: Request) {
     }
     if (!organizationId) {
       // Super-admin sem org não tem presença por org.
-      return NextResponse.json({ ok: true, systemOnline: true });
+      return NextResponse.json({ ok: true, systemOnline: true, sessionIdleMs });
     }
 
     try {
@@ -63,7 +96,7 @@ export async function POST(request: Request) {
         userId,
         organizationId,
       });
-      return NextResponse.json({ ok: true, systemOnline: true, created });
+      return NextResponse.json({ ok: true, systemOnline: true, created, sessionIdleMs });
     } catch (err) {
       // Não spamar log em produção — geralmente indica migration pendente.
       const isMigrationPending =
@@ -74,7 +107,7 @@ export async function POST(request: Request) {
         log.warn({ err: err instanceof Error ? err.message : err }, "[/api/agents/me/ping] falhou");
       }
       return NextResponse.json(
-        { ok: false, _migrationPending: true },
+        { ok: false, _migrationPending: true, sessionIdleMs },
         { status: 200 },
       );
     }
