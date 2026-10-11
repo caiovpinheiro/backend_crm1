@@ -16,7 +16,7 @@ export type TrimResult = { reply: string; removed: string[] };
 /** Começo de frase que é só cortesia (não conta como conteúdo). */
 const COURTESY = /^(?:oi|ol[aá]|bom dia|boa tarde|boa noite|tudo bem|obrigad|de nada|por nada|fico [àa] disposi|qualquer (?:d[úu]vida|coisa)|estou por aqui|[ée] s[óo] (?:me )?chamar|posso (?:te )?ajudar|precisa de (?:mais )?alguma coisa|se precisar|conte comigo|espero ter ajudado|disponha|entendi|entendo|perfeito|combinado|claro|certo)\b/i;
 /** Conector que fica órfão quando a frase anterior sai. */
-const ORPHAN_CONNECTOR = /^(?:al[ée]m disso|por isso|assim|dessa forma|desse modo|ou seja|tamb[ée]m|ent[ãa]o|por esse motivo|isso significa que|no entanto|mas|por[ée]m|e|sendo assim|nesse caso|com isso)[,:]?\s+/i;
+const ORPHAN_CONNECTOR = /^(?:al[ée]m disso|por isso|assim|dessa forma|desse modo|ou seja|tamb[ée]m|ent[ãa]o|por esse motivo|isso significa que|no entanto|mas|por[ée]m|e|sendo assim|nesse caso|com isso|depois(?: disso)?|em seguida|na sequ[êe]ncia|feito isso|ap[óo]s isso|por fim|por [úu]ltimo)[,:]?\s+/i;
 /** Resposta que começa no meio: condição ou continuação sem o que veio antes. */
 const CONTINUATION_START = /^(?:se|caso|depois|em seguida|ent[ãa]o|assim|tamb[ée]m|al[ée]m disso|por fim|agora|na sequ[êe]ncia|quando|feito isso|ap[óo]s|a[ií])\b/i;
 // Passo numerado: "1.", "1)", "1️⃣", "Passo 1:", marcador ou emoji de lista.
@@ -87,6 +87,11 @@ function unitMatches(unitNorm: string, flagged: string): boolean {
   const f = norm(flagged);
   if (!f) return false;
   if (unitNorm.includes(f.slice(0, 40))) return true;
+  // A marcação abrange várias frases ("Acesse X e toque em Y. Depois,
+  // selecione Z."): cada frase inteira dentro dela também sai — antes só a
+  // primeira saía e sobrava "Depois, selecione Z." solto.
+  const u = unitNorm.replace(/[.!?;:,\s]+$/, "").trim();
+  if (u.split(/\s+/).length >= 4 && f.includes(u)) return true;
   const words = contentWords(flagged);
   if (words.length < 2) return false;
   const vocab = new Set(contentWords(unitNorm));
