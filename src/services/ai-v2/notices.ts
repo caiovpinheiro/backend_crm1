@@ -101,23 +101,19 @@ export function noticesForTurn(config: Pick<V2AgentConfig, "notices" | "business
   return activeNotices(config, args.now).filter((n) => noticeCoversTheme(n, args.themeId) || noticeTriggered(n, args.message ?? ""));
 }
 
-function brDateTime(d: Date, timeZone: string): string {
-  return d.toLocaleString("pt-BR", { timeZone, day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }).replace(",", "");
-}
-
 /** Seção do prompt com os avisos em vigor. Vazia sem aviso. */
-export function noticesPromptSection(notices: V2Notice[], config: Pick<V2AgentConfig, "businessHours">): string {
+export function noticesPromptSection(notices: V2Notice[], _config?: Pick<V2AgentConfig, "businessHours">): string {
   if (notices.length === 0) return "";
-  const tz = tzOf(config);
+  // A validade do aviso NÃO vai junto do texto: "Título (até 11/10 23:59):"
+  // fazia o modelo dizer ao cliente que a situação acabava nesse horário.
+  // Ela é só quando o aviso deixa de valer, e o modelo não deve repassá-la.
   const lines = notices.map((n) => {
-    const w = noticeWindow(n, tz);
-    const until = w && !w.endGuessed ? ` (até ${brDateTime(w.end, tz)})` : "";
-    const title = n.title?.trim() ? `${n.title.trim()}${until}: ` : until ? `${until.trim()}: ` : "";
+    const title = n.title?.trim() ? `${n.title.trim()}: ` : "";
     return `- ${title}${n.message.trim().slice(0, NOTICE_LIMITS.messageChars)}`;
   });
   return [
     "# Avisos em vigor (prioridade)",
-    "Situações temporárias informadas pela empresa, válidas agora. Quando o pedido do cliente tiver relação com um aviso, o aviso vale acima dos materiais: explique a situação com suas palavras, diga o que o cliente deve fazer conforme o aviso e não transfira por causa da situação descrita no aviso. Não acrescente prazo, valor ou condição que o aviso não diz. Pedido sem relação com os avisos: ignore-os e não os mencione.",
+    "Situações temporárias informadas pela empresa, válidas agora. Quando o pedido do cliente tiver relação com um aviso, o aviso vale acima dos materiais: explique a situação com suas palavras, diga o que o cliente deve fazer conforme o aviso e não transfira por causa da situação descrita no aviso. Não acrescente prazo, previsão de retorno, valor ou condição que o texto do aviso não diz: se o cliente perguntar quando volta e o aviso não disser, diga que ainda não há previsão informada. Pedido sem relação com os avisos: ignore-os e não os mencione.",
     ...lines,
   ].join("\n");
 }
