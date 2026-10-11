@@ -4,10 +4,11 @@
  *
  * `lastMessage` / `unreadCount` dos cards são por contato (qualquer
  * conversa dele), então uma mensagem nova só muda o board dos pipelines
- * onde o contato tem deal. Os publicadores de `new_message` quase nunca
- * têm o conjunto completo de pipelines em mãos: ele sai de UMA consulta
- * pelo índice (organizationId, contactId, status) de `deals`, agrupada
- * por pipeline. Contato sem deal não invalida board nenhum.
+ * onde o contato tem deal ABERTO (o board padrão só mostra OPEN). Os
+ * publicadores de `new_message` quase nunca têm o conjunto completo de
+ * pipelines em mãos: ele sai de UMA consulta pelo índice
+ * (organizationId, contactId, status) de `deals`, agrupada por pipeline.
+ * Contato sem deal aberto não invalida board nenhum.
  *
  * A mesma consulta alimenta as duas coisas: a purga do cache do board e
  * os campos `pipelineIds` / `dealIds` que o barramento anexa ao evento
@@ -54,10 +55,10 @@ export const BOARD_SCOPE_MAX_DEAL_IDS = 50;
 
 /** Quais boards/cards uma mensagem afeta. */
 export type MessageBoardScope = {
-  /** Pipelines onde o contato tem deal. Vazio = nenhum board afetado. */
+  /** Pipelines onde o contato tem deal OPEN. Vazio = nenhum board afetado. */
   pipelineIds: string[];
   /**
-   * Todos os deals do contato nesses pipelines. `null` = lista não
+   * Todos os deals OPEN do contato nesses pipelines. `null` = lista não
    * conhecida (chamador só informou o pipeline) ou grande demais.
    */
   dealIds: string[] | null;
@@ -130,6 +131,11 @@ async function findMessageBoardScope(
       )`;
   // Uma linha por pipeline: o volume da resposta não cresce com o número
   // de deals do contato (contato "genérico" de importação tem milhares).
+  // Só negócio OPEN — o mesmo critério do board padrão
+  // (`buildBoardDealWhere` em services/deals.ts). Negócio ganho/perdido
+  // não está no board: entrar no escopo fazia o cliente procurar um card
+  // que não existe e refazer o board a cada mensagem do contato. As três
+  // igualdades usam o índice (organizationId, contactId, status) inteiro.
   const rows = await prismaBase.$queryRaw<ScopeRow[]>`
     SELECT s."pipelineId" AS "pipelineId",
            COUNT(*)::int AS "dealCount",
@@ -137,6 +143,7 @@ async function findMessageBoardScope(
     FROM deals d
     INNER JOIN stages s ON s.id = d."stageId"
     WHERE d."organizationId" = ${orgId} AND ${contactMatch}
+      AND d.status = 'OPEN'::"DealStatus"
     GROUP BY s."pipelineId"
   `;
 
