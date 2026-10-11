@@ -35,6 +35,7 @@ import {
   sessionRenewalProofFrom,
 } from "./auth/session-renewal";
 import { isRevokedToken, revokedSession, revokedToken } from "./auth/revoked-session";
+import { isSessionIdleExpired, touchSessionActivity } from "./auth/session-activity";
 import { getClientIp, withRateLimit } from "./rate-limit";
 import { runInBackground } from "@/lib/background";
 import { resendVerificationOnLogin } from "@/services/email-verification";
@@ -368,6 +369,13 @@ const nextAuth = NextAuth({
         token.sessionVersion = sessionVersionFromClaim(
           (user as { sessionVersion?: unknown }).sessionVersion,
         );
+        // Id estável da sessão (o `jti` do Auth.js muda a cada reemissão do
+        // cookie): chave da expiração por inatividade. Login conta como
+        // atividade real.
+        token.sid = crypto.randomUUID();
+        if (typeof user.id === "string" && user.id) {
+          await touchSessionActivity({ userId: user.id, sid: token.sid });
+        }
       } else if (isRevokedToken(token)) {
         // Token já marcado (cookie reemitido com a marca): continua
         // revogado — nada o reabilita; só um login novo.
@@ -515,6 +523,10 @@ const nextAuth = NextAuth({
         // SV-1: o `requireAuth` compara esta claim com o banco.
         (session.user as { sessionVersion?: number }).sessionVersion =
           sessionVersionFromClaim(token.sessionVersion);
+        // Inatividade: chave do registro de atividade (ausente = token antigo).
+        if (typeof token.sid === "string" && token.sid) {
+          (session.user as { sid?: string }).sid = token.sid;
+        }
       }
       return session;
     },
@@ -539,6 +551,12 @@ export const { handlers, signIn, signOut } = nextAuth;
  * Aqui, como este `auth()` eh executado na mesma continuation do
  * handler, o `enterRequestContext` propaga pra todo `await prisma.*`
  * subsequente. Idempotente por design (nao sobrescreve worker ctx).
+ *
+ * Também aplica a expiração por inatividade: sessão sem atividade real há
+ * mais de `SESSION_IDLE_TIMEOUT_HOURS` volta MARCADA (`idle_timeout`, sem
+ * `user`) — `requireAuth`/`authenticateApiRequest`/SSE respondem 401
+ * `SESSION_REVOKED` e as rotas que leem `session?.user` direto tratam como
+ * deslogado.
  */
 export const auth: typeof nextAuth.auth = (async (
   ...args: Parameters<typeof nextAuth.auth>
@@ -548,6 +566,18 @@ export const auth: typeof nextAuth.auth = (async (
   );
   const user = (session as { user?: Record<string, unknown> } | null)?.user;
   if (user && typeof user.id === "string") {
+    // Expiração por inatividade real (`auth/session-activity.ts`): vale
+    // para toda rota que lê a sessão. Leitura barata (memória 30 s + Redis,
+    // sem Postgres); sem registro semeia "agora" e passa.
+    if (
+      await isSessionIdleExpired({
+        userId: user.id,
+        sid: typeof user.sid === "string" ? user.sid : null,
+      })
+    ) {
+      const expires = (session as { expires?: unknown }).expires;
+      return revokedSession("idle_timeout", typeof expires === "string" ? expires : undefined);
+    }
     enterRequestContext({
       organizationId:
         (user.organizationId as string | null | undefined) ?? null,

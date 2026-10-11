@@ -59,6 +59,8 @@ export type AppSession = {
     image?: string | null;
     /// SV-1: claim do JWT. Ausente (token antigo) = 0.
     sessionVersion?: number;
+    /// Id estável da sessão (chave da inatividade). Ausente em token antigo.
+    sid?: string;
   };
 };
 
