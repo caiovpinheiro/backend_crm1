@@ -311,6 +311,14 @@ export interface V2HandoffConfig {
   /** Palavras-chave que disparam pedido de humano. */
   humanRequestKeywords: string[];
   /**
+   * O cliente pede uma pessoa e já diz o assunto. "answer_first" (padrão):
+   * o agente responde e oferece passar para a equipe se não resolver — não
+   * responde e transfere no mesmo turno; se o cliente voltar dizendo que
+   * não resolveu ou pedindo de novo, transfere. "transfer": transfere na
+   * hora, sem tentar responder (o assunto vai no resumo para a equipe).
+   */
+  humanRequestWithSubject?: "answer_first" | "transfer";
+  /**
    * Cliente escreve enquanto espera na fila depois da transferência e a
    * conversa volta ao agente. "notify" (padrão): avisa que está na fila,
    * sem responder nem transferir de novo. "answer": responde normalmente;

@@ -361,6 +361,8 @@ export const v2AgentConfigSchema = z.object({
     defaultDestination: destinationSchema,
     message: optionalText.default("Vou transferir para um atendente."),
     humanRequestKeywords: z.array(z.string()).optional().default(["humano", "pessoa", "atendente", "consultor"]),
+    /** Pediu uma pessoa e já disse o assunto: tenta resolver antes (padrão) ou transfere direto. */
+    humanRequestWithSubject: z.enum(["answer_first", "transfer"]).optional(),
     whileQueued: z.enum(["notify", "answer"]).optional(),
     queuedMessage: optionalText,
   }).optional().default({

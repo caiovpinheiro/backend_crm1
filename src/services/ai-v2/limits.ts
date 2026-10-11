@@ -22,6 +22,8 @@ export interface V2Counters {
   postCloseAsked?: boolean;
   /** Já perguntou uma vez o que a pessoa precisa (pedido de atendente sem assunto). */
   humanRequestAsked?: boolean;
+  /** Pediu pessoa com assunto, o agente respondeu e ofereceu a equipe: o próximo pedido transfere. */
+  humanRequestOffered?: boolean;
   /** Resumo corrente da conversa ("atualizar a cada resposta"). */
   runningSummary?: string;
   /** O agente já deu uma orientação (passo a passo, mensagem pronta, material) nesta conversa. */
@@ -63,6 +65,7 @@ export function parseV2Counters(raw: unknown): V2Counters {
     ...(r.postCloseAsked === true ? { postCloseAsked: true } : {}),
     ...(r.humanRequestAsked === true ? { humanRequestAsked: true } : {}),
     ...(r.guidanceGiven === true ? { guidanceGiven: true } : {}),
+    ...(r.humanRequestOffered === true ? { humanRequestOffered: true } : {}),
     ...(Array.isArray(r.noticesShown) ? { noticesShown: r.noticesShown.filter((x): x is string => typeof x === "string") } : {}),
     ...(r.humanRequestPending === true ? { humanRequestPending: true } : {}),
     ...(typeof r.receivedFromAgentId === "string" && r.receivedFromAgentId ? { receivedFromAgentId: r.receivedFromAgentId } : {}),

@@ -38,7 +38,7 @@ import { noteV2Fact, peekV2Fact, runWithV2Trace, traceStep, v2TraceWasLogged } f
 import { evaluateV2StopLimits, parseV2Counters, shouldStopStalled, type V2Counters } from "./limits";
 import { answerToPostCloseQuestion, classifyPostCloseMessage, getPostCloseBehavior, isGreetingOnlyMessage, keepOpenOnNewRequest, postCloseHandoffMessage, postCloseQuestion, postCloseShortReply, isExplicitResolution } from "./closure";
 import { isConfusionMessage, rephraseAfterConfusion } from "./confusion";
-import { applyNoSourceGuard, conditionalHandoff, handoffExplanation, type V2PrefetchFact } from "./no-source";
+import { answersBeforeHandoff, applyNoSourceGuard, conditionalHandoff, handoffExplanation, type V2PrefetchFact } from "./no-source";
 import { NONSENSE_LIMIT_REASON } from "./limits";
 import { applyV2Tabulation } from "./tabulation";
 import { applyReplyEnding, asksClient, classifyReply, effectiveReplyEnding, isGreetingOnlyReply, replyEndingButtons, replyEndingPhrases, withoutReplyEndings } from "./reply-ending";
@@ -1570,7 +1570,13 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     // primeiro e só transfere se não conseguir (ou se o cliente insistir).
     // Só o pedido, sem assunto: pergunta uma vez o que a pessoa precisa e
     // transfere na mensagem seguinte.
-    if (ruleHandoff && mentionsHumanRequest(config, input.userMessage)) {
+    const humanRequestMode = config.handoff.humanRequestWithSubject ?? "answer_first";
+    if (ruleHandoff && mentionsHumanRequest(config, input.userMessage) && counters.humanRequestOffered) {
+      // Já respondeu e ofereceu a equipe; o cliente pediu de novo: transfere.
+      traceStep("regra", "Pediu pessoa de novo depois da resposta e da oferta → transfere");
+    } else if (ruleHandoff && mentionsHumanRequest(config, input.userMessage) && humanRequestMode === "transfer" && humanRequestSubject(config, input.userMessage)) {
+      traceStep("regra", "Pedido de pessoa junto com o assunto → transfere direto (configurado: transferir sem tentar responder)");
+    } else if (ruleHandoff && mentionsHumanRequest(config, input.userMessage)) {
       if (humanRequestSubject(config, input.userMessage)) {
         humanRequestWithSubject = true;
         counters.humanRequestAsked = true;
@@ -2162,6 +2168,22 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     conditionalWait = true;
     traceStep("transferência", "A resposta condiciona a transferência (“se … encaminho”) → espera o cliente responder");
   }
+  // Pediu pessoa com o assunto e a configuração é "tentar resolver antes":
+  // o modelo respondia E transferia no mesmo turno (passo a passo seguido
+  // de "vou te passar para o time"). Responde, oferece a equipe e espera.
+  let humanRequestOffer = false;
+  if (wantsHandoff && humanRequestWithSubject && answersBeforeHandoff(llmOutput.reply)) {
+    const kept = handoffExplanation(llmOutput.reply);
+    if (kept) {
+      wantsHandoff = false;
+      requestedDestination = undefined;
+      llmOutput.handoff = false;
+      llmOutput.reply = `${kept}\n\n${renderMessage(systemMessage(config, "humanRequestOffer"), vars, defaultFormatter())}`;
+      counters.humanRequestOffered = true;
+      humanRequestOffer = true;
+      traceStep("transferência", "Pediu pessoa com o assunto: respondeu primeiro e ofereceu a equipe se não resolver → não transfere agora");
+    }
+  }
 
   // Sentimento
   const sentiment = detectV2Sentiment(config, input.userMessage);
@@ -2463,7 +2485,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // coisa?" com botões: o cliente acabou de dizer que não precisa.
   if (replyText.trim() && classifyReply(replyText) === "procedure") counters.guidanceGiven = true;
   const courtesyInbound = isShortAckText(input.userMessage);
-  const endingAllowed = !anyHandoff && !anyClose && askOptions.length === 0 && (stage as V2Stage) !== "confirming" && !llmOutput.outOfScope && !noSourceApplied && !conditionalWait && !courtesyInbound;
+  const endingAllowed = !anyHandoff && !anyClose && askOptions.length === 0 && (stage as V2Stage) !== "confirming" && !llmOutput.outOfScope && !noSourceApplied && !conditionalWait && !courtesyInbound && !humanRequestOffer;
   if (endingAllowed && !materialFollows && replyText.trim()) {
     const ending = applyReplyEnding({
       reply: replyText,
