@@ -225,3 +225,26 @@ describe("headers de segurança", () => {
     expectSecurityHeaders(await middleware(request("/api/me")));
   });
 });
+
+describe("cookie com token revogado (marcado pelo callback jwt)", () => {
+  it("/api/* → 401 SESSION_REVOKED (não AUTH_REQUIRED); nunca passa como logado", async () => {
+    getToken.mockResolvedValue({ revoked: true, revokedReason: "session_revoked", revokedUserId: "u1" });
+    const res = await middleware(request("/api/agents/me/ping", { method: "POST" }));
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({
+      message: "Sessão expirada. Entre novamente.",
+      code: "SESSION_REVOKED",
+    });
+    // /api/admin também cai no 401 (não chega ao 403 de "logado sem super-admin").
+    expect((await middleware(request("/api/admin/organizations"))).status).toBe(401);
+  });
+
+  it("rotas públicas continuam abertas e sem cookie segue AUTH_REQUIRED", async () => {
+    getToken.mockResolvedValue({ revoked: true, revokedReason: "session_revoked" });
+    expect((await middleware(request("/api/health"))).status).not.toBe(401);
+    getToken.mockResolvedValue(null);
+    expect(await (await middleware(request("/api/me"))).json()).toMatchObject({
+      code: "AUTH_REQUIRED",
+    });
+  });
+});

@@ -17,6 +17,9 @@ declare module "next-auth" {
     sessionVersion?: number;
   }
   interface Session {
+    /// Token revogado/expirado (ver `auth/revoked-session.ts`): sem `user`.
+    revoked?: boolean;
+    revokedReason?: string;
     user: {
       id: string;
       name: string;
@@ -52,6 +55,11 @@ declare module "next-auth/jwt" {
     /// SV-1: versão da sessão no login. Nunca é atualizada no refresh —
     /// a comparação com o banco é o que invalida o token.
     sessionVersion?: number;
+    /// Token marcado como revogado pelo callback `jwt` (sem claims de
+    /// sessão; ver `auth/revoked-session.ts`).
+    revoked?: boolean;
+    revokedReason?: string;
+    revokedUserId?: string;
   }
 }
 
