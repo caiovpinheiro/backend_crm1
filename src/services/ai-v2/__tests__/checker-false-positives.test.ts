@@ -34,3 +34,12 @@ describe("checagem — marcações que não são afirmação de fato", () => {
     expect(unsupportedFacts("Selecione a opção de 18 horas.", ["o pedido"], ["enviei nessa de 10 a 14 e foi"])).toEqual(["18 horas"]);
   });
 });
+
+describe("checagem — condição sozinha não é afirmação", () => {
+  it("“se X” sem consequência e sem número é hipótese; com consequência ou número continua conferida", () => {
+    expect(notAFactClaim("Se o sistema do cliente está em manutenção")).toBe(true);
+    expect(notAFactClaim("Caso o código não chegue")).toBe(true);
+    expect(notAFactClaim("Se você pagar até o dia 10, tem desconto")).toBe(false);
+    expect(notAFactClaim("Se pagar até 10/11 o desconto é mantido")).toBe(false);
+  });
+});

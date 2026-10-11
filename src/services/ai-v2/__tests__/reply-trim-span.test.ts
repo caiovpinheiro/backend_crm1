@@ -32,3 +32,12 @@ describe("corte — só o trecho marcado, sem mutilar a resposta", () => {
     expect(isMutilated("Se quiser, faça assim.", "Se quiser, faça assim.")).toBe(false);
   });
 });
+
+describe("trecho cortado do começo da frase", () => {
+  it("“Se X, me diga…” sem X vira “Me diga…”, sem vírgula órfã nem minúscula", async () => {
+    const { trimUnsupportedSentences } = await import("../reply-trim");
+    const reply = "Maria, entendo. Se o sistema do cliente está em manutenção, me diga qual atividade você precisa fazer agora para eu orientar a melhor alternativa.";
+    const r = trimUnsupportedSentences(reply, ["Se o sistema do cliente está em manutenção"]);
+    expect(r?.reply).toBe("Maria, entendo. Me diga qual atividade você precisa fazer agora para eu orientar a melhor alternativa.");
+  });
+});
