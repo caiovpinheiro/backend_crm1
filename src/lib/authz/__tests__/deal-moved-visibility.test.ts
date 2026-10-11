@@ -194,12 +194,36 @@ describe("projectDealMovedForViewer", () => {
       ).toBeNull();
     });
 
-    it("etapa destino bloqueada: funil visível, evento sem card", () => {
+    it("etapa destino bloqueada: funil visível, mas a criação não é entregue", () => {
+      // Criação não tem origem: quem não vê a etapa destino não recebe
+      // nem o dealId/posição/dono.
+      expect(
+        projectDealMovedForViewer(created, ctx({ stageDeny: new Set(["stage-b"]) })),
+      ).toBeNull();
+      expect(
+        projectDealMovedForViewer(
+          created,
+          ctx({ stageDeny: new Set(["stage-b"]) }),
+          onlyOwn("u-dono"),
+        ),
+      ).toBeNull();
+    });
+
+    it("move com a mesma etapa destino bloqueada continua saindo sem card (via a origem)", () => {
+      const moved = { ...created, fromStageId: "stage-a" };
       const projected = projectDealMovedForViewer(
-        created,
+        moved,
         ctx({ stageDeny: new Set(["stage-b"]) }),
       ) as Record<string, unknown>;
+      expect(projected).not.toBeNull();
+      expect(projected.dealId).toBe("d9");
       expect(projected).not.toHaveProperty("card");
+    });
+
+    it("etapa de outra coluna bloqueada não afeta a criação", () => {
+      expect(
+        projectDealMovedForViewer(created, ctx({ stageDeny: new Set(["stage-a"]) })),
+      ).toBe(created);
     });
 
     it("quem só vê os próprios e não é o dono recebe só ids", () => {
