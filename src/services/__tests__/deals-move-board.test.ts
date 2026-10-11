@@ -120,6 +120,7 @@ vi.mock("@/lib/contact-avatar-fallback", () => ({
 
 import { runWithContext } from "@/lib/request-context";
 import {
+  activeDealMovedSelect,
   createDeal,
   DEAL_MOVED_BATCH_LIMIT,
   getBoardData,
@@ -254,7 +255,14 @@ describe("moveDeal", () => {
       // Leitura final do move (include): linha completa do negócio.
       return args.select
         ? row
-        : { ...row, title: "Lead", ownerId: "user-7", orgUnitId: "unit-1", owner: { id: "user-7", name: "Ana" } };
+        : {
+            ...row,
+            number: 49338,
+            title: "Lead",
+            ownerId: "user-7",
+            orgUnitId: "unit-1",
+            owner: { id: "user-7", name: "Ana" },
+          };
     });
 
     await withOrg(ORG, () => moveDeal("deal-1", "stage-b", 0));
@@ -265,7 +273,8 @@ describe("moveDeal", () => {
       dealId: "deal-1",
       ownerId: "user-7",
       orgUnitId: "unit-1",
-      card: { id: "deal-1", owner: { id: "user-7" } },
+      // `number` é o "#49338" do card; sem ele o front mostra o prefixo do id.
+      card: { id: "deal-1", number: 49338, owner: { id: "user-7" } },
     });
   });
 
@@ -280,6 +289,8 @@ describe("moveDeal", () => {
     await flushMovePublish();
     expect(h.ssePublish.mock.calls[0]![1]).toHaveProperty("ownerId", null);
     expect(h.ssePublish.mock.calls[0]![1]).not.toHaveProperty("orgUnitId");
+    // Linha sem `number`: o card não inventa um.
+    expect((h.ssePublish.mock.calls[0]![1] as { card: object }).card).not.toHaveProperty("number");
 
     // Linha sem informação de dono: não inventa "sem dono".
     h.ssePublish.mockClear();
@@ -665,6 +676,7 @@ const MOVED_AT = new Date("2026-10-06T12:00:01.000Z");
 function activeMovedDeal(overrides: Record<string, unknown> = {}) {
   return {
     id: "deal-1",
+    number: 501,
     title: "Lead",
     value: 10,
     status: "OPEN",
@@ -729,7 +741,7 @@ describe("syncBoardsAfterDealChanges — board depois de gravações fora do mov
       toStageId: "stage-novo",
       position: 4,
       updatedAt: MOVED_AT.toISOString(),
-      card: { id: "deal-caio", title: "Caio", status: "OPEN", position: 4 },
+      card: { id: "deal-caio", number: 501, title: "Caio", status: "OPEN", position: 4 },
     });
     expect(h.invalidateBoardData).toHaveBeenCalledWith(ORG, "pipe-1");
     // Cache primeiro, evento depois.
@@ -811,8 +823,15 @@ describe("syncBoardsAfterDealChanges — board depois de gravações fora do mov
     expect(h.prisma.deal.findMany).toHaveBeenCalledTimes(1);
     expect(h.prisma.deal.findMany.mock.calls[0]![0]).toMatchObject({
       where: { id: { in: ["d1", "d2"] } },
+      // O select do lote/automação lê o número do card.
+      select: { number: true },
     });
     expect(out.published).toBe(2);
+    expect(dealMovedEvents()[0]).toMatchObject({ card: { number: 501 } });
+  });
+
+  it("o select do UPDATE de etapa (lote, automação) lê o número do card", () => {
+    expect(activeDealMovedSelect).toMatchObject({ id: true, number: true, title: true });
   });
 
   it("até o teto publica um evento por negócio; acima só invalida o board", async () => {
@@ -894,6 +913,7 @@ describe("createDeal — negócio novo entra no board pelo deal_moved", () => {
     return {
       id: "deal-novo",
       organizationId: ORG,
+      number: 49338,
       title: "Lead Ana",
       value: 0,
       status: "OPEN",
@@ -939,6 +959,7 @@ describe("createDeal — negócio novo entra no board pelo deal_moved", () => {
       ownerId: "user-9",
       card: {
         id: "deal-novo",
+        number: 49338,
         title: "Lead Ana",
         status: "OPEN",
         position: 7,
