@@ -79,13 +79,13 @@ describe("avisos em vigor", () => {
     const c = config([maintenance]);
     const s = noticesPromptSection(activeNotices(c, NOW), c);
     expect(s).toContain("# Avisos em vigor (prioridade)");
-    expect(s).toContain("- Sistema em manutenção (até 13/10 08:00): O sistema está em manutenção.");
+    expect(s).toContain("- Sistema em manutenção: O sistema está em manutenção.");
     expect(s).toContain("não transfira por causa da situação descrita no aviso");
-    expect(s).toContain("Não acrescente prazo, valor ou condição que o aviso não diz");
+    expect(s).toContain("Não acrescente prazo, previsão de retorno, valor ou condição que o texto do aviso não diz");
+    expect(s).toContain("diga que ainda não há previsão informada");
+    // A validade do aviso não aparece: o modelo a repassava como previsão de fim.
+    expect(s).not.toContain("13/10");
     expect(noticesPromptSection([], c)).toBe("");
-    // Sem fim informado: sem "até".
-    const open = config([{ ...maintenance, endsAt: undefined }]);
-    expect(noticesPromptSection(activeNotices(open, NOW), open)).toContain("- Sistema em manutenção: O sistema");
   });
 
   it("aviso que explica a falha: só com segurar ligado, do assunto ou citado, e uma vez por conversa", () => {
