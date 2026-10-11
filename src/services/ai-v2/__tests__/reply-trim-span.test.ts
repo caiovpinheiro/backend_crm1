@@ -41,3 +41,21 @@ describe("trecho cortado do começo da frase", () => {
     expect(r?.reply).toBe("Maria, entendo. Me diga qual atividade você precisa fazer agora para eu orientar a melhor alternativa.");
   });
 });
+
+describe("afirmação marcada que abrange duas frases", () => {
+  it("as duas saem; a frase com “Depois,” não fica solta", async () => {
+    const { trimUnsupportedSentences } = await import("../reply-trim");
+    const reply = "Entendi. Para localizar a fatura de setembro, abra o sistema e toque em Pagamentos. Depois, selecione a fatura de setembro para pagar.\n\nComo o sistema está em manutenção, tente novamente no próximo dia útil, mantendo as mesmas condições combinadas.";
+    const r = trimUnsupportedSentences(reply, ["Para localizar a fatura de setembro, abra o sistema e toque em Pagamentos. Depois, selecione a fatura de setembro para pagar."]);
+    expect(r?.reply).not.toContain("Depois");
+    expect(r?.reply).not.toContain("selecione a fatura");
+    expect(r?.reply).toContain("Como o sistema está em manutenção");
+  });
+
+  it("frase seguinte a uma cortada que começa com conector de sequência perde o conector", async () => {
+    const { trimUnsupportedSentences } = await import("../reply-trim");
+    const reply = "Abra o sistema e vá na área de cadastro do seu perfil pessoal. Em seguida, confira se o seu e-mail principal está correto e atualizado no cadastro.";
+    const r = trimUnsupportedSentences(reply, ["Abra o sistema e vá na área de cadastro do seu perfil pessoal."]);
+    expect(r?.reply).toBe("Confira se o seu e-mail principal está correto e atualizado no cadastro.");
+  });
+});
