@@ -32,6 +32,12 @@ const mocks = vi.hoisted(() => ({
   messageFindFirst: vi.fn(async (): Promise<{ id: string } | null> => null),
   conversationUpdateMany: vi.fn(async () => ({ count: 1 })),
   turnFindUnique: vi.fn(async (): Promise<{ status: string; claimedAt: Date | null } | null> => null),
+  pipelineFindFirst: vi.fn(async (): Promise<{ id: string } | null> => null),
+  stageFindFirst: vi.fn(async (): Promise<{ id: string } | null> => null),
+  closureFieldUpdates: vi.fn(async (): Promise<unknown[]> => []),
+  continueAutomation: vi.fn(async () => undefined),
+  costCap: vi.fn(async (): Promise<{ allowed: boolean; reason?: string }> => ({ allowed: true })),
+  enrichMedia: vi.fn(async (args: { userMessage: string }): Promise<{ userMessage: string; understood: number; failed: number }> => ({ userMessage: args.userMessage, understood: 0, failed: 0 })),
 }));
 
 vi.mock("../sent-materials", async (importOriginal) => ({
@@ -48,6 +54,8 @@ vi.mock("@/lib/prisma", () => ({
     message: { findMany: mocks.messageFindMany, findFirst: mocks.messageFindFirst },
     messageTemplate: { findMany: mocks.templateFindMany },
     conversationTurn: { findUnique: mocks.turnFindUnique },
+    pipeline: { findFirst: mocks.pipelineFindFirst },
+    stage: { findFirst: mocks.stageFindFirst },
   },
 }));
 
@@ -67,6 +75,7 @@ vi.mock("../context", async (importOriginal) => {
 vi.mock("../actions", () => ({
   sendV2TextMessage: mocks.sendText,
   executeV2Actions: mocks.executeActions,
+  applyV2ClosureFieldUpdates: mocks.closureFieldUpdates,
   v2HumanBehavior: (config: { simulateTyping?: boolean; typingPerCharMs?: number; markMessagesRead?: boolean } = {}) => ({
     simulateTyping: config.simulateTyping !== false,
     typingPerCharMs: typeof config.typingPerCharMs === "number" && config.typingPerCharMs >= 0 ? config.typingPerCharMs : 25,
@@ -106,7 +115,16 @@ vi.mock("../llm", () => ({
 vi.mock("../automation-bridge", () => ({
   loadV2AutomationBridge: mocks.loadBridge,
   mapAutomationVariables: mocks.mapBridgeVars,
-  continueV2AutomationOnClose: vi.fn(),
+  continueV2AutomationOnClose: mocks.continueAutomation,
+}));
+
+vi.mock("../cost-guard", () => ({
+  checkV2CostCap: mocks.costCap,
+}));
+
+vi.mock("../media-turn", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../media-turn")>()),
+  enrichTurnWithMedia: mocks.enrichMedia,
 }));
 
 vi.mock("@/services/deals", () => ({
@@ -2821,5 +2839,435 @@ describe("processV2Turn — correções do motor", () => {
 
     expect(r.sentReply).toBe("Estou por aqui! Me conta o que você precisa que eu te ajudo.");
     expect(mocks.sendText).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * Decisões do motor que não tinham teste: cada saída (encerramento,
+ * transferência, espera) com o rastro e o registro que a acompanham.
+ */
+describe("processV2Turn — decisões sem cobertura", () => {
+  const sentTexts = () => mocks.sendText.mock.calls.map((c) => (c[0] as { text: string }).text);
+  const outboundTypes = () => mocks.executeActions.mock.calls.flatMap((c) => c[0] as Array<{ type: string }>).map((a) => a.type);
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.resolveAgent.mockResolvedValue({ userId: "user-1", agentConfigId: "agent-1", wasAssigned: false });
+    mocks.prismaConversationFindUnique.mockResolvedValue({ contactId: "contact-1", organizationId: "org-1", contact: { phone: "5511999999999" } });
+    mocks.loadBridge.mockResolvedValue({ variables: {} });
+    mocks.mapBridgeVars.mockReturnValue({});
+    mocks.getState.mockResolvedValue(makeState("active"));
+    mocks.executeActions.mockImplementation(async (actions: Array<{ type: string }>) => ({
+      results: actions.map((a) => ({ action: a, ok: true })),
+      anyHandoff: false,
+      anyClose: actions.some((a) => a.type === "close_conversation"),
+    }));
+    mocks.sendText.mockResolvedValue({ sent: true });
+    mocks.simpleHandoff.mockResolvedValue(undefined);
+    mocks.upsertState.mockResolvedValue(undefined);
+    mocks.logTurn.mockResolvedValue(undefined);
+    mocks.attendanceEnabled.mockResolvedValue(true);
+    mocks.findInherited.mockResolvedValue(null);
+    mocks.writeSummary.mockResolvedValue(null);
+    mocks.loadPriorSummary.mockResolvedValue(null);
+    mocks.appliedRules.mockResolvedValue(new Set());
+    mocks.updateRunningSummary.mockResolvedValue(null);
+    mocks.resolveInline.mockResolvedValue({ updated: 1, missing: 0 });
+    mocks.distributeNewInbound.mockResolvedValue(undefined);
+    mocks.messageFindMany.mockResolvedValue([]);
+    mocks.templateFindMany.mockResolvedValue([]);
+    mocks.costCap.mockResolvedValue({ allowed: true });
+    mocks.enrichMedia.mockImplementation(async (args: { userMessage: string }) => ({ userMessage: args.userMessage, understood: 0, failed: 0 }));
+    mocks.pipelineFindFirst.mockResolvedValue(null);
+    mocks.stageFindFirst.mockResolvedValue(null);
+    mocks.closureFieldUpdates.mockResolvedValue([]);
+    mocks.continueAutomation.mockResolvedValue(undefined);
+    mocks.loadContext.mockResolvedValue({ ...CONTEXT_WITH_DEAL, contactId: "contact-1" });
+    mocks.callLLM.mockResolvedValue(llmOut());
+    // Implementações fixadas por testes anteriores (clearAllMocks não as limpa).
+    mocks.recentlySent.mockResolvedValue(new Set());
+    mocks.pendingFindFirst.mockResolvedValue(null);
+    mocks.messageFindFirst.mockResolvedValue(null);
+    mocks.turnFindUnique.mockResolvedValue(null);
+  });
+
+  async function run(userMessage: string, extra: Record<string, unknown> = {}) {
+    const { processV2Turn } = await import("../engine");
+    return processV2Turn({ conversationId: "conv-1", channel: "meta", userMessage, ...extra });
+  }
+
+  function setConfig(overrides: Partial<V2AgentConfig> = {}) {
+    const config = baseConfig(overrides);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    return config;
+  }
+
+  it("pós-encerramento: cortesia além do limite não responde, guarda o contador, reencerra e registra o turno", async () => {
+    setConfig({ limits: { ...baseConfig().limits, maxCourtesyReplies: 1 } } as Partial<V2AgentConfig>);
+    mocks.getState.mockResolvedValue({
+      ...makeState("closed", "ninguem", { courtesyReplies: 1 }),
+      postCloseWindowEndAt: new Date(Date.now() + 60 * 60 * 1000),
+    });
+
+    const r = await run("Valeu de novo!");
+
+    expect(r).toEqual({ handoff: false, closed: true });
+    expect(mocks.sendText).not.toHaveBeenCalled();
+    expect(mocks.callLLM).not.toHaveBeenCalled();
+    expect(mocks.upsertState.mock.calls.some((c) => c[0].counters?.courtesyReplies === 2)).toBe(true);
+    expect(mocks.resolveInline).toHaveBeenCalledWith(expect.objectContaining({ ids: ["conv-1"], keepAgent: true }));
+    expect(mocks.logTurn).toHaveBeenCalledWith(expect.objectContaining({ prompt: "", handoff: false, inputTokens: 0 }));
+  });
+
+  it("áudio que o agente tenta entender e não consegue: pede para escrever (mensagem configurada) e espera, sem modelo", async () => {
+    setConfig({ media: { ...baseConfig().media, audio: { action: "transcribe", notUnderstoodMessage: "Não entendi o áudio, pode escrever?" } } } as Partial<V2AgentConfig>);
+    mocks.messageFindMany.mockImplementation(async (args: { where?: { id?: { in?: string[] } } }) =>
+      args?.where?.id?.in ? [{ messageType: "audio", createdAt: new Date("2026-09-26T12:00:00Z") }] : [],
+    );
+    mocks.enrichMedia.mockResolvedValue({ userMessage: "[Áudio]", understood: 0, failed: 1 });
+
+    const r = await run("[Áudio]", { messageIds: ["m-1"], messageType: "audio" });
+
+    expect(r.handoff).toBe(false);
+    expect(mocks.callLLM).not.toHaveBeenCalled();
+    expect(sentTexts()).toContain("Não entendi o áudio, pode escrever?");
+    expect(mocks.simpleHandoff).not.toHaveBeenCalled();
+    mocks.messageFindMany.mockReset();
+  });
+
+  it("áudio entendido: o texto transcrito entra no lugar do marcador e o modelo responde", async () => {
+    setConfig({ media: { ...baseConfig().media, audio: { action: "transcribe" } } } as Partial<V2AgentConfig>);
+    mocks.messageFindMany.mockImplementation(async (args: { where?: { id?: { in?: string[] } } }) =>
+      args?.where?.id?.in ? [{ messageType: "audio", createdAt: new Date("2026-09-26T12:00:00Z") }] : [],
+    );
+    mocks.enrichMedia.mockResolvedValue({ userMessage: "[Áudio transcrito]: quero a segunda via da fatura", understood: 1, failed: 0 });
+
+    await run("[Áudio]", { messageIds: ["m-1"], messageType: "audio" });
+
+    expect(mocks.callLLM).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(mocks.callLLM.mock.calls[0])).toContain("segunda via da fatura");
+    mocks.messageFindMany.mockReset();
+  });
+
+  it("limite de parada com atalho de resposta e ação 'transferir': a resposta do atalho não sai, transfere sem modelo", async () => {
+    setConfig({
+      limits: { ...baseConfig().limits, maxLoopCount: 3, nonsenseAction: "handoff" },
+      rules: [{ id: "r1", name: "Atalho", order: 1, conditions: [{ type: "contact_tag", values: ["VIP"] }], actions: [{ type: "send_message", message: "Resposta fixa." }] }],
+    } as unknown as Partial<V2AgentConfig>);
+    mocks.loadContext.mockResolvedValue({ contact: { Nome: "João" }, contactRaw: { name: "João", tags: ["VIP"] }, deals: [], selectedDeal: null, dealId: undefined, contactId: "contact-1" });
+    mocks.getState.mockResolvedValue(makeState("active", "agente", { loopCount: 2, lastLoopMessage: "oi" }));
+
+    const r = await run("Oi");
+
+    expect(r.handoff).toBe(true);
+    expect(mocks.callLLM).not.toHaveBeenCalled();
+    expect(sentTexts()).not.toContain("Resposta fixa.");
+    expect(outboundTypes()).not.toContain("send_message");
+    expect(mocks.simpleHandoff).toHaveBeenCalledTimes(1);
+    expect(mocks.upsertState.mock.calls.at(-1)![0].owner).toBe("pessoa");
+  });
+
+  it("atalho com transferência para destino próprio: avisa o cliente, transfere para o destino do atalho e registra com o atalho aplicado", async () => {
+    setConfig({
+      rules: [{ id: "r-dep", name: "Direto", order: 1, conditions: [{ type: "contact_tag", values: ["VIP"] }], actions: [{ type: "handoff", destination: { type: "department", id: "dep-9" } }] }],
+    } as unknown as Partial<V2AgentConfig>);
+    mocks.loadContext.mockResolvedValue({ contact: { Nome: "João" }, contactRaw: { name: "João", tags: ["VIP"] }, deals: [], selectedDeal: null, dealId: undefined, contactId: "contact-1" });
+
+    const r = await run("Preciso de ajuda com a fatura");
+
+    expect(r.handoff).toBe(true);
+    expect(mocks.callLLM).not.toHaveBeenCalled();
+    expect(sentTexts()).toContain("Vou transferir.");
+    expect(mocks.simpleHandoff).toHaveBeenCalledWith(expect.objectContaining({ destination: expect.objectContaining({ type: "department", id: "dep-9" }) }));
+    expect(mocks.logTurn).toHaveBeenCalledWith(expect.objectContaining({ prompt: "rule", handoff: true, appliedRuleId: "r-dep" }));
+    expect(mocks.upsertState.mock.calls.at(-1)![0].owner).toBe("pessoa");
+  });
+
+  it("atalho que encerra: encerra pelo motor com motivo 'rule', sem modelo, e registra encerrado", async () => {
+    setConfig({
+      rules: [{ id: "r-close", name: "Encerrar", order: 1, conditions: [{ type: "contact_tag", values: ["VIP"] }], actions: [{ type: "send_message", message: "Tudo certo, até logo." }, { type: "close_conversation" }] }],
+    } as unknown as Partial<V2AgentConfig>);
+    mocks.loadContext.mockResolvedValue({ contact: { Nome: "João" }, contactRaw: { name: "João", tags: ["VIP"] }, deals: [], selectedDeal: null, dealId: undefined, contactId: "contact-1" });
+
+    const r = await run("ok");
+
+    expect(r).toEqual({ handoff: false, closed: true });
+    expect(mocks.callLLM).not.toHaveBeenCalled();
+    expect(mocks.simpleHandoff).not.toHaveBeenCalled();
+    expect(mocks.writeSummary).toHaveBeenCalledWith(expect.objectContaining({ moment: "close", reason: "rule" }));
+    expect(mocks.resolveInline).toHaveBeenCalledWith(expect.objectContaining({ ids: ["conv-1"] }));
+    expect(mocks.logTurn).toHaveBeenCalledWith(expect.objectContaining({ prompt: "rule", closed: true, appliedRuleId: "r-close" }));
+  });
+
+  it("sem negócio e 'criar negócio': cria no funil padrão, recarrega o contexto com ele e segue para o modelo", async () => {
+    setConfig({ entry: { confirmContact: false, onDealNotFound: "create_deal" } } as Partial<V2AgentConfig>);
+    mocks.getState.mockResolvedValue(null);
+    mocks.loadContext
+      .mockResolvedValueOnce({ contact: { Nome: "João" }, contactRaw: { id: "contact-1", name: "João" }, deals: [], selectedDeal: null, dealId: undefined, contactId: "contact-1" })
+      .mockResolvedValue({ ...CONTEXT_WITH_DEAL, dealId: "deal-new", selectedDealRaw: { id: "deal-new", title: "Novo atendimento" }, contactId: "contact-1" });
+    mocks.pipelineFindFirst.mockResolvedValue({ id: "pipe-1" });
+    mocks.stageFindFirst.mockResolvedValue({ id: "stage-1" });
+    mocks.createDeal.mockResolvedValue({ id: "deal-new" });
+
+    const r = await run("Quero contratar");
+
+    expect(r.handoff).toBe(false);
+    expect(mocks.createDeal).toHaveBeenCalledWith(expect.objectContaining({ contactId: "contact-1", stageId: "stage-1", status: "OPEN" }));
+    expect(mocks.loadContext).toHaveBeenCalledWith(expect.objectContaining({ selectedDealId: "deal-new" }));
+    expect(mocks.callLLM).toHaveBeenCalledTimes(1);
+    expect(mocks.simpleHandoff).not.toHaveBeenCalled();
+  });
+
+  it("sem negócio e 'criar negócio' sem funil/etapa para criar: transfere em vez de falhar o turno", async () => {
+    setConfig({ entry: { confirmContact: false, onDealNotFound: "create_deal" } } as Partial<V2AgentConfig>);
+    mocks.getState.mockResolvedValue(null);
+    mocks.loadContext.mockResolvedValue({ contact: { Nome: "João" }, contactRaw: { id: "contact-1", name: "João" }, deals: [], selectedDeal: null, dealId: undefined, contactId: "contact-1" });
+
+    const r = await run("Quero contratar");
+
+    expect(r.handoff).toBe(true);
+    expect(mocks.createDeal).not.toHaveBeenCalled();
+    expect(mocks.callLLM).not.toHaveBeenCalled();
+    expect(sentTexts()).toContain("Vou transferir.");
+    expect(mocks.simpleHandoff).toHaveBeenCalledTimes(1);
+  });
+
+  it("boas-vindas configuradas saem antes da confirmação do cadastro e antes do pedido de identificação", async () => {
+    setConfig({ entry: { confirmContact: true, onDealNotFound: "ask_identification", openingEnabled: true, openingMessage: "Olá, eu sou a assistente virtual." } } as Partial<V2AgentConfig>);
+    mocks.getState.mockResolvedValue(null);
+    mocks.loadContext.mockResolvedValue({ contact: { Nome: "João" }, contactRaw: { id: "contact-1", name: "João" }, deals: [{ id: "deal-1" }], selectedDeal: { Negócio: "Contrato" }, selectedDealRaw: { id: "deal-1" }, dealId: "deal-1", contactId: "contact-1" });
+
+    await run("Oi");
+    expect(sentTexts()[0]).toMatch(/^Olá, eu sou a assistente virtual\.\n\n\S/);
+    expect(mocks.logTurn).toHaveBeenCalledWith(expect.objectContaining({ prompt: "confirmation" }));
+
+    mocks.sendText.mockClear();
+    setConfig({ entry: { confirmContact: false, onDealNotFound: "ask_identification", openingEnabled: true, openingMessage: "Olá, eu sou a assistente virtual.", identificationMessage: "Me passa o seu e-mail?" } } as Partial<V2AgentConfig>);
+    mocks.loadContext.mockResolvedValue({ contact: { Nome: "João" }, contactRaw: { id: "contact-1", name: "João" }, deals: [], selectedDeal: null, dealId: undefined, contactId: "contact-1" });
+    await run("Oi");
+    expect(sentTexts()[0]).toBe("Olá, eu sou a assistente virtual.\n\nMe passa o seu e-mail?");
+    expect(mocks.upsertState.mock.calls.some((c) => c[0].stage === "identifying")).toBe(true);
+  });
+
+  it("onboarding: passo não concluído no limite de tentativas transfere para o destino do passo", async () => {
+    setConfig({
+      flow: "onboarding",
+      entry: { confirmContact: false, onDealNotFound: "ask_identification" },
+      onboarding: {
+        steps: [{ id: "s1", name: "Contato", goal: "Confirmar o e-mail", collectFields: [], completionCriteria: { type: "field_filled", field: "Email" }, allowedTools: [], knowledgeDocIds: [], messageModelIds: [], handoffOnStuck: { type: "department", id: "dep-onb" }, maxAttempts: 1, reminderHours: 24 }],
+        onEmptyDeal: "ask", trackProgress: true, finalActions: [],
+      },
+    } as unknown as Partial<V2AgentConfig>);
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "Qual é o seu e-mail?" }));
+
+    const r = await run("oi, tudo bem");
+
+    expect(r.handoff).toBe(true);
+    expect(mocks.simpleHandoff).toHaveBeenCalledWith(expect.objectContaining({ destination: expect.objectContaining({ type: "department", id: "dep-onb" }) }));
+    const saved = mocks.upsertState.mock.calls.at(-1)![0];
+    expect(saved.owner).toBe("pessoa");
+    expect(saved.collectedVariables?.onboarding_state).toMatchObject({ stepAttempts: { s1: 1 } });
+    expect(mocks.logTurn).toHaveBeenCalledWith(expect.objectContaining({ handoff: true, owner: "pessoa" }));
+  });
+
+  it("onboarding: passo concluído avança o estado e a resposta do modelo sai", async () => {
+    setConfig({
+      flow: "onboarding",
+      entry: { confirmContact: false, onDealNotFound: "ask_identification" },
+      onboarding: {
+        steps: [
+          { id: "s1", name: "Contato", goal: "Confirmar o e-mail", collectFields: [], completionCriteria: { type: "field_filled", field: "Email" }, allowedTools: [], knowledgeDocIds: [], messageModelIds: [], handoffOnStuck: { type: "department" }, maxAttempts: 2, reminderHours: 24 },
+          { id: "s2", name: "Preferências", goal: "Horário", collectFields: [], completionCriteria: { type: "client_reply" }, allowedTools: [], knowledgeDocIds: [], messageModelIds: [], handoffOnStuck: { type: "department" }, maxAttempts: 2, reminderHours: 24 },
+        ],
+        onEmptyDeal: "ask", trackProgress: true, finalActions: [],
+      },
+    } as unknown as Partial<V2AgentConfig>);
+    mocks.loadContext.mockResolvedValue({ ...CONTEXT_WITH_DEAL, contact: { Nome: "João", Email: "joao@exemplo.com" }, contactId: "contact-1" });
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "E-mail confirmado. Qual horário prefere?" }));
+
+    const r = await run("é joao@exemplo.com");
+
+    expect(r.handoff).toBe(false);
+    expect(mocks.simpleHandoff).not.toHaveBeenCalled();
+    expect(sentTexts()).toContain("E-mail confirmado. Qual horário prefere?");
+    const saved = mocks.upsertState.mock.calls.at(-1)![0];
+    expect(saved.collectedVariables?.onboarding_state).toMatchObject({ completedStepIds: ["s1"], currentStepId: "s2" });
+  });
+
+  it("teto de custo atingido: transfere com a mensagem de transferência, sem chamar o modelo", async () => {
+    setConfig({ dailyTokenCap: 1000 } as Partial<V2AgentConfig>);
+    mocks.costCap.mockResolvedValue({ allowed: false, reason: "Teto diário de tokens atingido" });
+
+    const r = await run("quanto custa?");
+
+    expect(r.handoff).toBe(true);
+    expect(mocks.costCap).toHaveBeenCalledWith(expect.objectContaining({ agentId: "agent-1", organizationId: "org-1" }));
+    expect(mocks.callLLM).not.toHaveBeenCalled();
+    expect(sentTexts()).toContain("Vou transferir.");
+    expect(mocks.simpleHandoff).toHaveBeenCalledTimes(1);
+    expect(mocks.upsertState.mock.calls.at(-1)![0].owner).toBe("pessoa");
+  });
+
+  it("transferência condicionada na resposta (“se … encaminho”): responde e espera o cliente, sem transferir", async () => {
+    setConfig();
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "Confira o valor no aplicativo. Se continuar divergente, encaminho para a equipe.", handoff: true }));
+
+    const r = await run("o valor está diferente");
+
+    expect(r.handoff).toBe(false);
+    expect(mocks.simpleHandoff).not.toHaveBeenCalled();
+    expect(sentTexts().join("|")).toContain("Confira o valor no aplicativo.");
+    expect(mocks.upsertState.mock.calls.at(-1)![0].owner).not.toBe("pessoa");
+  });
+
+  it("prometeu enviar e não escolheu mensagem pronta: sai a liberada cujo nome casa com o pedido", async () => {
+    setConfig({ allowedMessageModelIds: ["mm-horarios", "mm-fatura"] } as Partial<V2AgentConfig>);
+    mocks.templateFindMany.mockResolvedValue([
+      { id: "mm-horarios", name: "Horários de atendimento", content: "Atendemos de segunda a sexta." },
+      { id: "mm-fatura", name: "Segunda via da fatura", content: "Passo a passo para emitir a segunda via da fatura." },
+    ]);
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "Claro! Vou te enviar o passo a passo da segunda via da fatura." }));
+
+    await run("como tiro a segunda via da fatura?");
+
+    const outbound = mocks.executeActions.mock.calls.flatMap((c) => c[0] as Array<{ type: string; modelId?: string }>);
+    expect(outbound.some((a) => a.type === "send_message_model" && a.modelId === "mm-fatura")).toBe(true);
+    expect(outbound.some((a) => a.modelId === "mm-horarios")).toBe(false);
+  });
+
+  it("limite de parada no caminho do modelo com ação 'transferir': transfere em vez de avisar", async () => {
+    setConfig({ limits: { ...baseConfig().limits, nonsenseLimit: 1, nonsenseAction: "handoff" } } as Partial<V2AgentConfig>);
+    mocks.callLLM.mockResolvedValue(llmOut({ outOfScope: true, reply: "Isso não é comigo." }));
+
+    const r = await run("quanto é 2+2");
+
+    expect(r.handoff).toBe(true);
+    expect(mocks.simpleHandoff).toHaveBeenCalledTimes(1);
+    expect(sentTexts()).not.toContain("Isso não é comigo.");
+    expect(sentTexts().some((t) => t.includes("só consigo ajudar"))).toBe(false);
+  });
+
+  it("trocas sem avanço no limite: a próxima pergunta não sai e a conversa encerra (ação 'encerrar') ou transfere (padrão)", async () => {
+    setConfig({ limits: { ...baseConfig().limits, maxStalledExchanges: 2, stalledExchangesAction: "close" } } as Partial<V2AgentConfig>);
+    mocks.getState.mockResolvedValue(makeState("active", "agente", { stalledExchanges: 2 }));
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "Você já tentou pelo aplicativo?" }));
+
+    const r = await run("não deu certo");
+
+    expect(r.closed).toBe(true);
+    expect(sentTexts()).not.toContain("Você já tentou pelo aplicativo?");
+    expect(mocks.writeSummary).toHaveBeenCalledWith(expect.objectContaining({ moment: "close" }));
+
+    vi.clearAllMocks();
+    mocks.resolveAgent.mockResolvedValue({ userId: "user-1", agentConfigId: "agent-1", wasAssigned: false });
+    mocks.prismaConversationFindUnique.mockResolvedValue({ contactId: "contact-1", organizationId: "org-1", contact: { phone: "5511999999999" } });
+    mocks.loadBridge.mockResolvedValue({ variables: {} });
+    mocks.mapBridgeVars.mockReturnValue({});
+    mocks.executeActions.mockResolvedValue({ results: [], anyHandoff: false, anyClose: false });
+    mocks.sendText.mockResolvedValue({ sent: true });
+    mocks.appliedRules.mockResolvedValue(new Set());
+    mocks.messageFindMany.mockResolvedValue([]);
+    mocks.templateFindMany.mockResolvedValue([]);
+    mocks.costCap.mockResolvedValue({ allowed: true });
+    mocks.attendanceEnabled.mockResolvedValue(true);
+    mocks.resolveInline.mockResolvedValue({ updated: 1, missing: 0 });
+    mocks.loadContext.mockResolvedValue({ ...CONTEXT_WITH_DEAL, contactId: "contact-1" });
+    setConfig({ limits: { ...baseConfig().limits, maxStalledExchanges: 2, stalledExchangesAction: "handoff" } } as Partial<V2AgentConfig>);
+    mocks.getState.mockResolvedValue(makeState("active", "agente", { stalledExchanges: 2 }));
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "Você já tentou pelo aplicativo?" }));
+
+    const h = await run("não deu certo");
+
+    expect(h.handoff).toBe(true);
+    expect(mocks.simpleHandoff).toHaveBeenCalledTimes(1);
+    expect(sentTexts()).not.toContain("Você já tentou pelo aplicativo?");
+    expect(mocks.upsertState.mock.calls.at(-1)![0].counters?.stalledExchanges).toBe(0);
+  });
+
+  it("trocas sem avanço: pergunta seguida a uma mensagem que não era pergunta conta; orientação ou dado novo zera", async () => {
+    setConfig({ limits: { ...baseConfig().limits, maxStalledExchanges: 3 } } as Partial<V2AgentConfig>);
+    mocks.getState.mockResolvedValue(makeState("active", "agente", { stalledExchanges: 1 }));
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "Você já tentou pelo aplicativo?" }));
+    await run("não deu certo");
+    expect(mocks.upsertState.mock.calls.at(-1)![0].counters?.stalledExchanges).toBe(2);
+
+    mocks.upsertState.mockClear();
+    mocks.getState.mockResolvedValue(makeState("active", "agente", { stalledExchanges: 2 }));
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "Entendi. Abra o aplicativo, toque em Pagamentos e escolha a fatura aberta. O código aparece na tela.", collected: { tentou_app: "sim" } }));
+    await run("não deu certo");
+    expect(mocks.upsertState.mock.calls.at(-1)![0].counters?.stalledExchanges).toBe(0);
+  });
+
+  it("mensagem pronta anunciada que não saiu (erro de envio): transfere; barrada só por repetição, não", async () => {
+    setConfig({ allowedMessageModelIds: ["mm-1"] } as Partial<V2AgentConfig>);
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "Segue o passo a passo:", actions: [{ type: "send_message_model", modelId: "mm-1" }] as never }));
+    mocks.executeActions.mockImplementation(async (actions: Array<{ type: string }>) => ({
+      results: actions.map((a) => ({ action: a, ok: a.type !== "send_message_model", error: a.type === "send_message_model" ? "Arquivo não encontrado" : undefined })),
+      anyHandoff: false,
+      anyClose: false,
+    }));
+
+    const r = await run("me manda o passo a passo");
+    expect(r.handoff).toBe(true);
+    expect(mocks.simpleHandoff).toHaveBeenCalledTimes(1);
+
+    mocks.simpleHandoff.mockClear();
+    mocks.executeActions.mockImplementation(async (actions: Array<{ type: string }>) => ({
+      results: actions.map((a) => ({ action: a, ok: a.type !== "send_message_model", error: a.type === "send_message_model" ? "repeated_recently" : undefined })),
+      anyHandoff: false,
+      anyClose: false,
+    }));
+    const { MESSAGE_MODEL_REPEATED } = await import("../sent-materials");
+    mocks.executeActions.mockImplementation(async (actions: Array<{ type: string }>) => ({
+      results: actions.map((a) => ({ action: a, ok: a.type !== "send_message_model", error: a.type === "send_message_model" ? MESSAGE_MODEL_REPEATED : undefined })),
+      anyHandoff: false,
+      anyClose: false,
+    }));
+    const r2 = await run("me manda o passo a passo de novo");
+    expect(r2.handoff).toBe(false);
+    expect(mocks.simpleHandoff).not.toHaveBeenCalled();
+  });
+
+  it("resumo corrente ligado: atualiza a cada turno respondido e guarda no estado", async () => {
+    setConfig({ closure: { summary: { enabled: true, everyTurn: true } } } as unknown as Partial<V2AgentConfig>);
+    mocks.updateRunningSummary.mockResolvedValue("Cliente pediu a segunda via; orientado pelo aplicativo.");
+
+    await run("como tiro a segunda via?");
+
+    expect(mocks.updateRunningSummary).toHaveBeenCalledWith(expect.objectContaining({ conversationId: "conv-1", agentId: "agent-1" }));
+    expect(mocks.upsertState.mock.calls.at(-1)![0].counters?.runningSummary).toBe("Cliente pediu a segunda via; orientado pelo aplicativo.");
+  });
+
+  it("encerramento pelo modelo: aplica as atualizações de campo configuradas e retoma o fluxo de automação na etapa seguinte", async () => {
+    setConfig({
+      closure: { fieldUpdates: [{ entity: "contact", key: "status", value: "atendido" }], nextAutomationStepId: "step-z" },
+    } as unknown as Partial<V2AgentConfig>);
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "Resolvido! Até a próxima.", concluded: true }));
+
+    const r = await run("era só isso, obrigado");
+
+    expect(r.closed).toBe(true);
+    expect(mocks.closureFieldUpdates).toHaveBeenCalledWith(
+      expect.objectContaining({ closure: expect.objectContaining({ fieldUpdates: [{ entity: "contact", key: "status", value: "atendido" }] }) }),
+      "contact-1",
+      "deal-1",
+    );
+    expect(mocks.continueAutomation).toHaveBeenCalledWith(expect.objectContaining({ contactId: "contact-1" }));
+    expect(mocks.writeSummary).toHaveBeenCalledWith(expect.objectContaining({ moment: "close", reason: "resolved" }));
+  });
+
+  it("uma pessoa assumiu a conversa antes do aviso de transferência: o aviso saiu, mas não transfere e o dono vira pessoa", async () => {
+    setConfig();
+    mocks.prismaConversationFindUnique.mockImplementation(async (args: { select?: { assignedToId?: boolean } }) =>
+      args?.select?.assignedToId ? { assignedToId: "human-7" } : { contactId: "contact-1", organizationId: "org-1", contact: { phone: "5511999999999" } },
+    );
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "Esse caso precisa de análise. Vou te transferir.", handoff: true }));
+
+    const r = await run("quero falar com alguém");
+
+    expect(r.handoff).toBe(true);
+    expect(mocks.simpleHandoff).not.toHaveBeenCalled();
+    expect(mocks.upsertState.mock.calls.at(-1)![0].owner).toBe("pessoa");
+    expect(mocks.logTurn).toHaveBeenCalledWith(expect.objectContaining({ handoff: true }));
   });
 });

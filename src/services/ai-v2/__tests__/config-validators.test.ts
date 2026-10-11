@@ -107,7 +107,7 @@ describe("1. grafo de roteamento", () => {
     const f = find(bounce, "ciclo_entre_agentes")[0];
     expect(f).toMatchObject({ severity: "bloqueia", path: "themes[0].handoffDestination", evidence: "a → b → a" });
     expect(f.message).toContain("Outro assunto");
-    expect(f.message).toContain("“pagamento”");
+    expect(f.message).toContain("“pagamento atrasado”");
     // O mesmo ciclo aparece para B, no campo de B.
     expect(find(bounce, "ciclo_entre_agentes", "b")[0]).toMatchObject({ severity: "bloqueia", path: "themes[0].handoffDestination" });
 
@@ -127,6 +127,28 @@ describe("1. grafo de roteamento", () => {
       ],
     });
     expect(find(soft, "ciclo_entre_agentes")[0].severity).toBe("avisa");
+
+    // Uma palavra solta em comum ("não") não faz a mesma mensagem quicar: o
+    // motor só casa o gatilho com a frase inteira. Avisa, não bloqueia.
+    const solta = data({
+      agents: [
+        agent("a", { config: { channelIds: ["ch-1"], themes: [{ id: "t1", name: "Saída", instructions: "x", when: ["não quero mais", "quero cancelar"], directHandoff: true, handoffDestination: { type: "ai_agent", id: "b" } }] } }),
+        agent("b", { config: { themes: [{ id: "t9", name: "Outro assunto", instructions: "x", when: ["não consigo acessar", "segunda via"], directHandoff: true, handoffDestination: { type: "ai_agent", id: "a" } }] } }),
+      ],
+    });
+    const fs = find(solta, "ciclo_entre_agentes")[0];
+    expect(fs.severity).toBe("avisa");
+    expect(fs.message).not.toContain("quica");
+
+    // Frase inteira contida na outra ("cancelar" ⊂ "quero cancelar"): quica → bloqueia.
+    const phrase = data({
+      agents: [
+        agent("a", { config: { channelIds: ["ch-1"], themes: [{ id: "t1", name: "Saída", instructions: "x", when: ["quero cancelar"], directHandoff: true, handoffDestination: { type: "ai_agent", id: "b" } }] } }),
+        agent("b", { config: { themes: [{ id: "t9", name: "Outro assunto", instructions: "x", when: ["cancelar"], directHandoff: true, handoffDestination: { type: "ai_agent", id: "a" } }] } }),
+      ],
+    });
+    expect(find(phrase, "ciclo_entre_agentes")[0]).toMatchObject({ severity: "bloqueia" });
+    expect(find(phrase, "ciclo_entre_agentes")[0].message).toContain("“quero cancelar”");
   });
 
   it("ciclo de três agentes é avisado uma vez para cada participante", () => {
@@ -405,5 +427,55 @@ describe("ordem e mapa de roteamento", () => {
       ["theme", "Entrega", "department:dep-sumiu", false],
       ["rule", "Pessoa", "distribution_rule:dr-1", true],
     ]);
+  });
+});
+
+describe("7. mensagens x configuração", () => {
+  it("atalho com mensagem própria e sem destino avisa (vai para o destino padrão)", () => {
+    const d = data({ agents: [agent("a", { config: { channelIds: ["ch-1"], rules: [
+      { id: "r1", name: "Saída", when: ["sair"], actions: [{ type: "handoff", message: "Vou te passar para o setor de Entregas." }] },
+    ] } })] });
+    const out = find(d, "transferencia_mensagem_sem_destino");
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ path: "rules[0].actions[0].destination", severity: "avisa" });
+    expect(out[0].message).toContain("Vendas");
+  });
+
+  it("mensagem de transferência cita outro lugar que não o destino avisa; mesmo nome (ou parte dele) não", () => {
+    const d = data({ agents: [
+      agent("a", { config: { channelIds: ["ch-1"],
+        handoff: { defaultDestination: { type: "department", id: DEPT }, message: "Vou te passar para o time de Entregas." },
+        themes: [{ id: "t1", name: "Entrega", instructions: "x", handoffDestination: { type: "ai_agent", id: "b", message: "Vou te passar para o Entregas, que cuida disso." } }],
+      } }),
+      agent("b", { name: "Entregas" }),
+    ] });
+    const out = find(d, "mensagem_cita_outro_lugar");
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ path: "handoff.message", severity: "avisa" });
+    expect(out[0].message).toContain("“Entregas”");
+    expect(out[0].message).toContain("“Vendas”");
+  });
+
+  it("texto que promete encerrar em N minutos avisa quando a inatividade está desligada ou em outro valor", () => {
+    const off = data({ agents: [agent("a", { config: { channelIds: ["ch-1"], closure: { goodbyeMessage: "Se eu não receber resposta em 30 minutos, vou encerrar por aqui." } } })] });
+    expect(find(off, "fecho_promete_minutos")[0].message).toContain("desligado");
+    const other = data({ agents: [agent("a", { config: { channelIds: ["ch-1"], inactivity: { enabled: true, closeAfter: 1440 }, closure: { goodbyeMessage: "Se eu não receber resposta em 30 minutos, vou encerrar por aqui." } } })] });
+    expect(find(other, "fecho_promete_minutos")[0].message).toContain("1440 min");
+    const ok = data({ agents: [agent("a", { config: { channelIds: ["ch-1"], inactivity: { enabled: true, closeAfter: 30 }, closure: { goodbyeMessage: "Se eu não receber resposta em 30 minutos, vou encerrar por aqui." } } })] });
+    expect(find(ok, "fecho_promete_minutos")).toHaveLength(0);
+  });
+
+  it("rascunho que muda transferências sem publicar avisa; sem mudança, não", () => {
+    const published = cfg({ themes: [{ id: "t1", name: "X", instructions: "x", when: ["pagamento"], handoffDestination: { type: "department", id: DEPT } }] });
+    const changed = data({ agents: [agent("a", { publishedConfig: published, config: { channelIds: ["ch-1"], themes: [{ id: "t1", name: "X", instructions: "x", when: ["pagamento"], handoffDestination: { type: "ai_agent", id: "b" } }] } }), agent("b")] });
+    expect(find(changed, "rascunho_nao_publicado")[0].message).toContain("assuntos");
+    const same = data({ agents: [agent("a", { publishedConfig: cfg({ channelIds: ["ch-1"] }), config: { channelIds: ["ch-1"] } })] });
+    expect(find(same, "rascunho_nao_publicado")).toHaveLength(0);
+  });
+
+  it("checagem por modelo desligada avisa", () => {
+    const d = data({ agents: [agent("a", { config: { channelIds: ["ch-1"], groundingCheck: "rules" } })] });
+    expect(find(d, "checagem_modelo_desligada")).toHaveLength(1);
+    expect(find(data({ agents: [agent("a", { config: { channelIds: ["ch-1"] } })] }), "checagem_modelo_desligada")).toHaveLength(0);
   });
 });
