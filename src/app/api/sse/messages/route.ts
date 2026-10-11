@@ -5,6 +5,7 @@ import {
 } from "@/lib/api-shutdown";
 import type { AppUserRole } from "@/lib/auth-types";
 import { auth } from "@/lib/auth";
+import { revokedReasonOf, sessionRevokedBody } from "@/lib/auth/revoked-session";
 import {
   loadAuthzContext,
   canViewPipeline,
@@ -91,6 +92,16 @@ export async function GET(request: Request) {
   }
 
   const session = await auth();
+  // Sessão revogada / expirada por inatividade: JSON com `code` — o
+  // `use-sse` do frontend lê o corpo do handshake e faz logout em vez de
+  // reconectar em loop.
+  const revokedReason = revokedReasonOf(session);
+  if (revokedReason) {
+    metrics.sse.connectionsRejected.inc({ reason: "session_revoked" });
+    return sseError(request, JSON.stringify(sessionRevokedBody()), 401, {
+      "Content-Type": "application/json",
+    });
+  }
   if (!session?.user) {
     return sseError(request, "Não autorizado", 401);
   }

@@ -34,6 +34,8 @@ import {
   renewSessionVersion,
   sessionRenewalProofFrom,
 } from "./auth/session-renewal";
+import { isRevokedToken, revokedSession, revokedToken } from "./auth/revoked-session";
+import { isSessionIdleExpired, touchSessionActivity } from "./auth/session-activity";
 import { getClientIp, withRateLimit } from "./rate-limit";
 import { runInBackground } from "@/lib/background";
 import { resendVerificationOnLogin } from "@/services/email-verification";
@@ -367,6 +369,17 @@ const nextAuth = NextAuth({
         token.sessionVersion = sessionVersionFromClaim(
           (user as { sessionVersion?: unknown }).sessionVersion,
         );
+        // Id estável da sessão (o `jti` do Auth.js muda a cada reemissão do
+        // cookie): chave da expiração por inatividade. Login conta como
+        // atividade real.
+        token.sid = crypto.randomUUID();
+        if (typeof user.id === "string" && user.id) {
+          await touchSessionActivity({ userId: user.id, sid: token.sid });
+        }
+      } else if (isRevokedToken(token)) {
+        // Token já marcado (cookie reemitido com a marca): continua
+        // revogado — nada o reabilita; só um login novo.
+        return token;
       } else if (token.id) {
         const userId = token.id as string;
         // Refresh role + avatarUrl + organizationId/slug do banco — garante
@@ -428,9 +441,10 @@ const nextAuth = NextAuth({
         }
         if (snapshot) {
           if (snapshot.invalid) {
-            // Forca logout no proximo getServerSession. Deixamos o
-            // token vazio — middleware redireciona pra /login.
-            return {};
+            // Usuário apagado / org suspensa: token marcado (sem claims de
+            // sessão) — quem lê a sessão responde 401 SESSION_REVOKED e o
+            // frontend vai para o login.
+            return revokedToken(userId, "session_invalid");
           }
           token.role = snapshot.role ?? undefined;
           token.organizationId = snapshot.organizationId;
@@ -460,7 +474,9 @@ const nextAuth = NextAuth({
         // SV-1: token emitido antes do último `revokeUserSessions` (troca
         // de senha, "sair de todos os dispositivos", erase). Só o cache
         // deste processo — primado logo acima; frio apenas quando o banco
-        // falhou (fail-open, como o refresh). `null` limpa o cookie.
+        // falhou (fail-open, como o refresh). Devolve o token MARCADO (não
+        // `null`): o `requireAuth` precisa distinguir "revogado" (401
+        // SESSION_REVOKED → frontend sai) de "sem cookie" (401 sem code).
         // Claim à frente do cache (sessão renovada em outra réplica): relê
         // o banco em vez de derrubar uma sessão válida.
         const tokenVersion = sessionVersionFromClaim(token.sessionVersion);
@@ -474,12 +490,21 @@ const nextAuth = NextAuth({
             ),
           )
         ) {
-          return null;
+          return revokedToken(userId, "session_revoked");
         }
       }
       return token;
     },
     async session({ session, token }) {
+      // Token revogado: nenhum dado de usuário sai daqui (nem para o
+      // `auth()` do servidor, nem para o `useSession` do cliente).
+      if (isRevokedToken(token)) {
+        const expires: unknown = session.expires;
+        return revokedSession(
+          token.revokedReason,
+          expires instanceof Date ? expires.toISOString() : typeof expires === "string" ? expires : undefined,
+        ) as unknown as typeof session;
+      }
       if (session.user) {
         session.user.id = token.id as string;
         (session.user as { role?: unknown }).role = token.role;
@@ -498,6 +523,10 @@ const nextAuth = NextAuth({
         // SV-1: o `requireAuth` compara esta claim com o banco.
         (session.user as { sessionVersion?: number }).sessionVersion =
           sessionVersionFromClaim(token.sessionVersion);
+        // Inatividade: chave do registro de atividade (ausente = token antigo).
+        if (typeof token.sid === "string" && token.sid) {
+          (session.user as { sid?: string }).sid = token.sid;
+        }
       }
       return session;
     },
@@ -522,6 +551,12 @@ export const { handlers, signIn, signOut } = nextAuth;
  * Aqui, como este `auth()` eh executado na mesma continuation do
  * handler, o `enterRequestContext` propaga pra todo `await prisma.*`
  * subsequente. Idempotente por design (nao sobrescreve worker ctx).
+ *
+ * Também aplica a expiração por inatividade: sessão sem atividade real há
+ * mais de `SESSION_IDLE_TIMEOUT_HOURS` volta MARCADA (`idle_timeout`, sem
+ * `user`) — `requireAuth`/`authenticateApiRequest`/SSE respondem 401
+ * `SESSION_REVOKED` e as rotas que leem `session?.user` direto tratam como
+ * deslogado.
  */
 export const auth: typeof nextAuth.auth = (async (
   ...args: Parameters<typeof nextAuth.auth>
@@ -531,6 +566,18 @@ export const auth: typeof nextAuth.auth = (async (
   );
   const user = (session as { user?: Record<string, unknown> } | null)?.user;
   if (user && typeof user.id === "string") {
+    // Expiração por inatividade real (`auth/session-activity.ts`): vale
+    // para toda rota que lê a sessão. Leitura barata (memória 30 s + Redis,
+    // sem Postgres); sem registro semeia "agora" e passa.
+    if (
+      await isSessionIdleExpired({
+        userId: user.id,
+        sid: typeof user.sid === "string" ? user.sid : null,
+      })
+    ) {
+      const expires = (session as { expires?: unknown }).expires;
+      return revokedSession("idle_timeout", typeof expires === "string" ? expires : undefined);
+    }
     enterRequestContext({
       organizationId:
         (user.organizationId as string | null | undefined) ?? null,

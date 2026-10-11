@@ -11,6 +11,7 @@ import {
   resolveBrowserApiCorsOrigin,
   writeBrowserApiCorsHeaders,
 } from "@/lib/browser-api-cors";
+import { sessionRevokedBody } from "@/lib/auth/revoked-session";
 import {
   CORS_LOOKUP_PATH,
   lookupTenantOriginFromEdge,
@@ -36,9 +37,14 @@ const AUTH_SECRET = process.env.AUTH_SECRET ?? process.env.NEXTAUTH_SECRET;
  * porta ou o host da barra de endereço diferirem (ex. :3001, 127.0.0.1), a
  * sessão vinha vazia e o utilizador era mandado para /login após entrar.
  */
+type RequestAuth =
+  | { user: { id: string; isSuperAdmin?: boolean }; revoked?: false }
+  /** Cookie com token marcado como revogado (`auth/revoked-session.ts`). */
+  | { revoked: true; user?: undefined };
+
 async function readAuthFromRequestCookie(
   req: NextRequest,
-): Promise<{ user?: { id: string; isSuperAdmin?: boolean } } | null> {
+): Promise<RequestAuth | null> {
   if (!AUTH_SECRET) return null;
   // O cookie é emitido pelo frontend (HTTPS → `__Secure-authjs.session-token`).
   // Este serviço só API recebe o header Cookie via rewrite. Se NEXTAUTH_URL
@@ -58,6 +64,8 @@ async function readAuthFromRequestCookie(
       });
       if (!token || typeof token !== "object") continue;
       const rec = token as Record<string, unknown>;
+      // Token marcado: não tem `id`/`sub` — nunca vale como logado.
+      if (rec.revoked === true) return { revoked: true };
       const id =
         typeof rec.id === "string"
           ? rec.id
@@ -220,9 +228,12 @@ export async function middleware(req: NextRequest) {
     return withSecurityHeaders(new NextResponse(null, { status: 204 }), req);
   }
 
-  let reqAuth: { user?: { id: string; isSuperAdmin?: boolean } } | null = null;
+  let reqAuth: { user: { id: string; isSuperAdmin?: boolean } } | null = null;
+  let cookieRevoked = false;
   try {
-    reqAuth = await readAuthFromRequestCookie(req);
+    const cookieAuth = await readAuthFromRequestCookie(req);
+    if (cookieAuth?.revoked) cookieRevoked = true;
+    else reqAuth = cookieAuth;
     const { pathname, search } = req.nextUrl;
 
     if (pathname.startsWith("/uploads/")) {
@@ -288,10 +299,14 @@ export async function middleware(req: NextRequest) {
       // Este backend é só API: /login não existe (404 HTML). O frontend
       // faz rewrite same-origin → se redirecionássemos, o fetch recebia
       // HTML e a UI mascarava como "Servidor temporariamente indisponível".
+      // Cookie com token revogado: mesmo 401 das rotas (`SESSION_REVOKED`),
+      // para o frontend sair em vez de repetir a chamada.
       if (pathname.startsWith("/api/")) {
         return withSecurityHeaders(
           NextResponse.json(
-            { message: "Unauthorized", code: "AUTH_REQUIRED" },
+            cookieRevoked
+              ? sessionRevokedBody()
+              : { message: "Unauthorized", code: "AUTH_REQUIRED" },
             { status: 401 },
           ),
           req,

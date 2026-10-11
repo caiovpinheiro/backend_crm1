@@ -1,6 +1,7 @@
 import type { NextAuthConfig } from "next-auth";
 
 import type { AppUserRole } from "./auth-types";
+import { isRevokedToken, revokedSession } from "./auth/revoked-session";
 import { getAuthCookieDomain, getTenantBaseDomain, getTenantProtocol } from "./tenant-url";
 
 function apexLoginUrl(): string {
@@ -72,6 +73,14 @@ export default {
       return token;
     },
     async session({ session, token }) {
+      // Token marcado como revogado (callback `jwt` de `auth.ts`): sem usuário.
+      if (isRevokedToken(token)) {
+        const expires: unknown = session.expires;
+        return revokedSession(
+          token.revokedReason,
+          typeof expires === "string" ? expires : undefined,
+        ) as unknown as typeof session;
+      }
       if (session.user) {
         session.user.id = token.id as string;
         (session.user as { role?: unknown }).role = token.role;

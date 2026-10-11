@@ -17,6 +17,9 @@ declare module "next-auth" {
     sessionVersion?: number;
   }
   interface Session {
+    /// Token revogado/expirado (ver `auth/revoked-session.ts`): sem `user`.
+    revoked?: boolean;
+    revokedReason?: string;
     user: {
       id: string;
       name: string;
@@ -38,6 +41,9 @@ declare module "next-auth" {
       /// SV-1: claim do token. `requireAuth` compara com o banco (cache 60 s)
       /// e responde 401 quando a sessão foi revogada. Ausente = 0.
       sessionVersion?: number;
+      /// Id estável da sessão (claim `sid`) — chave da expiração por
+      /// inatividade. Ausente em tokens emitidos antes dela.
+      sid?: string;
     };
   }
 }
@@ -52,6 +58,13 @@ declare module "next-auth/jwt" {
     /// SV-1: versão da sessão no login. Nunca é atualizada no refresh —
     /// a comparação com o banco é o que invalida o token.
     sessionVersion?: number;
+    /// Token marcado como revogado pelo callback `jwt` (sem claims de
+    /// sessão; ver `auth/revoked-session.ts`).
+    revoked?: boolean;
+    revokedReason?: string;
+    revokedUserId?: string;
+    /// Id estável da sessão, criado no login (o `jti` muda a cada reemissão).
+    sid?: string;
   }
 }
 
