@@ -126,9 +126,62 @@ describe("new_message: escopo do board no evento", () => {
     const sql = strings.join("?");
     expect(sql).toContain("FROM deals d");
     expect(sql).toContain('GROUP BY s."pipelineId"');
+    // Mesmo critério do board padrão (só OPEN), pelo índice
+    // (organizationId, contactId, status).
+    expect(sql).toContain(`d.status = 'OPEN'::"DealStatus"`);
     expect(sql).toContain(`[1:${BOARD_SCOPE_DEAL_IDS_PER_PIPELINE}]`);
     expect(JSON.stringify(values)).toContain("org-s2");
     expect(JSON.stringify(values)).toContain("contact-1");
+  });
+
+  it("só negócio OPEN entra no escopo: LOST no funil A e OPEN no B → pipelineIds [B]", async () => {
+    // Banco falso que respeita o WHERE que a consulta de fato manda: sem o
+    // filtro de status, o negócio perdido punha o funil A no escopo e o
+    // cliente refazia o board de A a cada mensagem do contato.
+    const deals = [
+      { id: "deal-lost", pipelineId: "pipe-A", status: "LOST" },
+      { id: "deal-won", pipelineId: "pipe-A", status: "WON" },
+      { id: "deal-open", pipelineId: "pipe-B", status: "OPEN" },
+    ];
+    h.queryRaw.mockImplementationOnce(async (strings: TemplateStringsArray) => {
+      const sql = strings.join("?");
+      const onlyOpen = /d\.status = 'OPEN'::"DealStatus"/.test(sql);
+      const byPipeline = new Map<string, string[]>();
+      for (const d of deals) {
+        if (onlyOpen && d.status !== "OPEN") continue;
+        byPipeline.set(d.pipelineId, [...(byPipeline.get(d.pipelineId) ?? []), d.id]);
+      }
+      return [...byPipeline].map(([pipelineId, ids]) => ({
+        pipelineId,
+        dealCount: ids.length,
+        dealIds: ids,
+      }));
+    });
+    const got = listen("org-s12");
+    await seedBoards("org-s12", "pipe-A", "pipe-B");
+
+    newMessage("org-s12");
+    await settle();
+
+    expect(got[0].pipelineIds).toEqual(["pipe-B"]);
+    expect(got[0].dealIds).toEqual(["deal-open"]);
+    // Board de A (só negócio fechado do contato) não é purgado.
+    expect(await cached("org-s12", "pipe-A")).toBeDefined();
+    expect(await cached("org-s12", "pipe-B")).toBeUndefined();
+  });
+
+  it("contato só com negócios fechados: pipelineIds vazio", async () => {
+    h.queryRaw.mockImplementationOnce(async (strings: TemplateStringsArray) =>
+      /d\.status = 'OPEN'/.test(strings.join("?"))
+        ? []
+        : [{ pipelineId: "pipe-A", dealCount: 1, dealIds: ["deal-won"] }],
+    );
+    const got = listen("org-s13");
+
+    newMessage("org-s13");
+    await settle();
+
+    expect(got[0].pipelineIds).toEqual([]);
   });
 
   it("hit: 10 mensagens do mesmo contato = 1 consulta, todas com o escopo", async () => {
