@@ -1882,6 +1882,32 @@ describe("processV2Turn — correções do motor", () => {
     expect(order).toEqual(["texto:Vou te enviar um tutorial rápido.", "ações:send_message_model", "texto:Me avisa se funcionou."]);
   });
 
+  it("passo a passo terminando em “aplicativo ou site?”: a pergunta sai e o fecho de passo a passo vai depois do arquivo", async () => {
+    const config = baseConfig({
+      allowedMessageModelIds: ["mm-1"],
+      replyEnding: { procedure: { enabled: true, phrases: ["Me avisa se funcionou."] }, info: { enabled: true, phrases: ["Posso ajudar em algo mais?"] } },
+    } as unknown as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    const order: string[] = [];
+    mocks.sendText.mockImplementation(async (a: { text: string }) => { order.push(`texto:${a.text}`); return { sent: true }; });
+    mocks.executeActions.mockImplementation(async (actions: Array<{ type: string }>) => {
+      if (actions.length) order.push(`ações:${actions.map((a) => a.type).join(",")}`);
+      return { results: actions.map((a) => ({ action: { ...a, filesOnly: true }, ok: true })), anyHandoff: false, anyClose: false };
+    });
+    mocks.callLLM.mockResolvedValue(llmOut({
+      reply: "No aplicativo, faça assim:\n\n1️⃣ Abra o aplicativo e toque em Pedidos.\n2️⃣ Escolha o pedido.\n\nVocê está usando o aplicativo ou o site?",
+      actions: [{ type: "send_message_model", modelId: "mm-1" }] as any,
+    }));
+
+    await run("não encontro meus pedidos");
+
+    expect(order).toEqual([
+      "texto:No aplicativo, faça assim:\n\n1️⃣ Abra o aplicativo e toque em Pedidos.\n2️⃣ Escolha o pedido.",
+      "ações:send_message_model",
+      "texto:Me avisa se funcionou.",
+    ]);
+  });
+
   it("mesma mensagem pronta pedida de novo logo depois: não reenvia e aponta a de cima", async () => {
     const config = baseConfig({ allowedMessageModelIds: ["mm-1"] } as Partial<V2AgentConfig>);
     mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });

@@ -72,6 +72,26 @@ export function classifyReply(reply: string): V2ReplyKind {
   return steps >= 2 || PROCEDURE_WORDS.test(reply) ? "procedure" : "info";
 }
 
+/**
+ * Passo a passo que termina perguntando qual caminho o cliente usa ("Você
+ * está pelo aplicativo ou pelo site?"), depois de já ter dado os passos: a
+ * pergunta tirava o fecho "deu certo? / preciso de ajuda" e o cliente ficava
+ * com os passos e uma escolha que não muda nada. Sai só esse último
+ * parágrafo — pergunta curta de escolha ("A ou B?") depois do último passo.
+ * Pedido de dado ou pergunta sem escolha fica.
+ */
+export function withoutChoiceQuestionAfterSteps(reply: string): string | null {
+  if (classifyReply(reply) !== "procedure") return null;
+  const paragraphs = reply.split(/\n\s*\n/);
+  const last = (paragraphs[paragraphs.length - 1] ?? "").trim();
+  if (paragraphs.length < 2 || !last.endsWith("?") || last.includes("\n") || STEP_LINE.test(last)) return null;
+  if (last.split(/\s+/).length > 25 || (last.match(/\?/g) ?? []).length > 1) return null;
+  if (!/\bou\b/i.test(last) || ASKS_CLIENT.test(last) || REQUESTS_DATA.test(last)) return null;
+  const before = paragraphs.slice(0, -1).join("\n\n").trim();
+  if (!before.split(/\n/).some((l) => STEP_LINE.test(l))) return null;
+  return before;
+}
+
 /** Regras valendo: as do assunto quando ele tem as próprias, senão as do agente. */
 export function effectiveReplyEnding(config: V2AgentConfig, theme?: V2Theme | null): V2ReplyEnding | undefined {
   if (theme?.replyEnding && theme.replyEnding.inherit === false) return theme.replyEnding;

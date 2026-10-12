@@ -1034,7 +1034,7 @@ const WRITING_GUIDE = [
 ].join("\n");
 
 const PROCEDURE_GUIDE =
-  "Quando o cliente precisa fazer algo e a fonte traz um procedimento, entregue o passo a passo numerado, um passo por linha, com todos os passos na ordem da fonte, começando por como e onde acessar; se o procedimento está em mais de um trecho, junte na ordem certa. Listas (datas, opções, documentos) também vão um item por linha. Se o cliente diz que não entendeu, que está perdido ou pergunta por onde começar, recomece do primeiro passo com mais detalhe em vez de mandá-lo reler as mensagens anteriores.";
+  "Quando o cliente precisa fazer algo e a fonte traz um procedimento, entregue o passo a passo numerado, um passo por linha, com todos os passos na ordem da fonte, começando por como e onde acessar; se o procedimento está em mais de um trecho, junte na ordem certa. Depois do passo a passo, não pergunte por qual caminho ou canal o cliente está: se o caminho muda conforme o canal, traga os dois; o pedido de retorno (“deu certo?”) é acrescentado depois. Listas (datas, opções, documentos) também vão um item por linha. Se o cliente diz que não entendeu, que está perdido ou pergunta por onde começar, recomece do primeiro passo com mais detalhe em vez de mandá-lo reler as mensagens anteriores.";
 
 /**
  * Ordem: quem é o agente e como responde no topo, dados no meio, formato
