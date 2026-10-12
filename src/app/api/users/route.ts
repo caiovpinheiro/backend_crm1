@@ -5,6 +5,10 @@ import { requireAdmin, requireAuth, userOrgFilter } from "@/lib/auth-helpers";
 import { syncUserRoleAssignment } from "@/lib/authz/sync-user-role";
 import { prisma } from "@/lib/prisma";
 import { nextUserNumber } from "@/lib/public-id";
+import {
+  getProvisioningStatusMany,
+  type ProvisionStatus,
+} from "@/services/api4com/provisioning";
 import { getSystemPresenceMap } from "@/services/system-presence";
 import { getLogger } from "@/lib/logger";
 
@@ -45,6 +49,8 @@ export async function GET(request: Request) {
         type: true,
         avatarUrl: true,
         phone: true,
+        // Só para achar o ramal na org do usuário (telefonia); sai da resposta.
+        organizationId: true,
         // Roles RBAC atribuídas (modelo novo). Usado pela tela de Equipe
         // para exibir a "função" como role customizada (mantendo só ADMIN
         // como preset). NÃO substitui `role` legado — coexistem.
@@ -79,15 +85,32 @@ export async function GET(request: Request) {
       }
     }
 
+    // Telefonia de cada usuário (evita 1 GET /api/users/:id/telephony por
+    // linha na tela de Equipe). Mesma regra da rota por id: só ADMIN lê; os
+    // demais recebem a lista SEM o campo `telephony`. Para ADMIN o campo é o
+    // mesmo objeto da rota por id, ou `null` onde ela daria 404 (usuário sem
+    // org). Uma consulta para a lista inteira.
+    const canReadTelephony = r.session.user.role === "ADMIN";
+    let telephony: Map<string, ProvisionStatus> | null = null;
+    if (canReadTelephony) {
+      try {
+        telephony = await getProvisioningStatusMany(users);
+      } catch (err) {
+        // Falha na telefonia não derruba a lista: o front cai na rota por id.
+        log.warn({ err }, "GET: telefonia em lote falhou");
+      }
+    }
+
     // Achata `roleAssignments` em `assignedRoles` (lista limpa pra UI).
     const shaped = users.map((u) => {
-      const { roleAssignments, ...rest } = u;
+      const { roleAssignments, organizationId: _organizationId, ...rest } = u;
       const p = presence.get(u.id);
       return {
         ...rest,
         assignedRoles: roleAssignments.map((a) => a.role),
         systemOnline: p?.systemOnline ?? false,
         lastSeenAt: p?.lastSeenAt ? p.lastSeenAt.toISOString() : null,
+        ...(telephony ? { telephony: telephony.get(u.id) ?? null } : {}),
       };
     });
 
