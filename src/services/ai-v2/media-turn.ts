@@ -1,7 +1,7 @@
 /**
- * Áudio e imagem do turno viram texto no que o agente recebe, conforme a
- * política de mídia do agente ("transcrever"/"descrever"). Nenhum domínio
- * de cliente.
+ * Áudio, imagem e documento do turno viram texto no que o agente recebe,
+ * conforme a política de mídia do agente ("transcrever"/"ler"). Nenhum
+ * domínio de cliente.
  */
 
 import { v2AuxModel } from "@/lib/ai-v2/models";
@@ -14,7 +14,7 @@ import { mediaTextLine, understandMedia, understoodKindOf, type MediaMessage, ty
 
 /** Política do agente para este tipo: entende (transcreve/descreve) ou não. */
 export function shouldUnderstand(config: V2AgentConfig, kind: UnderstoodKind): boolean {
-  const action = kind === "audio" ? config.media.audio.action : config.media.image.action;
+  const action = kind === "audio" ? config.media.audio.action : kind === "image" ? config.media.image.action : config.media.document?.action;
   return action === "transcribe" || action === "describe";
 }
 
@@ -34,8 +34,9 @@ export function composeTurnText(
       placeholdersRemoved++;
       continue;
     }
-    // Legenda de imagem sai do texto solto: volta junto da descrição.
-    if (items.some((i) => i.kind === "image" && i.content && !isMediaPlaceholderText(i.content) && i.content.trim() === line.trim())) continue;
+    // Legenda de imagem (ou nome do documento) sai do texto solto: volta
+    // junto do conteúdo.
+    if (items.some((i) => i.kind !== "audio" && i.content && !isMediaPlaceholderText(i.content) && i.content.trim() === line.trim())) continue;
     kept.push(line);
   }
   return [...kept.filter((l) => l.trim()), ...items.map((i) => mediaTextLine(i.kind, i.text, i.content))].join("\n");
@@ -75,7 +76,7 @@ export async function enrichTurnWithMedia(args: {
       model: v2AuxModel(args.config.model),
       apiKey,
     });
-    const label = kind === "audio" ? "Áudio" : "Imagem";
+    const label = kind === "audio" ? "Áudio" : kind === "image" ? "Imagem" : "Documento";
     if (r.text) {
       items.push({ kind, text: r.text, content: m.content });
       traceStep("mídia", `${label} ${kind === "audio" ? "transcrito" : "lido"}${r.cached ? " (já estava salvo)" : ""}: "${r.text.slice(0, 80)}${r.text.length > 80 ? "…" : ""}"`);

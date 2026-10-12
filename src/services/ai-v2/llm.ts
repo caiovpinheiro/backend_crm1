@@ -39,7 +39,7 @@ import {
 import { knowledgeDocTitleMapByIds } from "@/services/ai/knowledge-docs";
 import { describeV2MessageModels, type V2MessageModelSummary } from "./tools";
 import { knowledgeDocIdsFor } from "./themes";
-import { clientNamesBoundToFacts, hasSearchableQuestion, admittedMissingInstructions, isNearDuplicateReply, repeatFallback, knowledgeChunkTexts, lookupResultTexts, unsupportedFacts, unsupportedFigures, unsupportedHedges, unsupportedMenuPaths, unsupportedQuotedTerms } from "./ground-reply";
+import { clientNamesBoundToFacts, hasSearchableQuestion, admittedMissingInstructions, isNearDuplicateReply, repeatFallback, knowledgeChunkTexts, lookupResultTexts, moneyDerivations, unsupportedFacts, unsupportedFigures, unsupportedHedges, unsupportedMenuPaths, unsupportedQuotedTerms } from "./ground-reply";
 import { noteV2Fact, traceStep } from "./trace";
 import { SensitiveVault } from "./sensitive";
 import { boldInstruction, breakInlineSteps } from "./reply-format";
@@ -49,7 +49,7 @@ import { QUERY_TOOL_NAMES, themePromptText } from "./theme-prompt";
 import { REPLY_ENDING_PROMPT, effectiveReplyEnding, hasReplyEnding } from "./reply-ending";
 import { CONFUSION_PROMPT } from "./confusion";
 import { MAIN_SOURCE_SIMILARITY, WEAK_MATCH_SIMILARITY, knowledgeMinSimilarity } from "./similarity-presets";
-import { checkClaimsWithModel, sameClaim, worthClaimCheck } from "./claim-check";
+import { checkClaimsWithModel, clientDocumentTexts, sameClaim, worthClaimCheck } from "./claim-check";
 import { activeNotices, noticesForTurn, noticesPromptSection } from "./notices";
 import { brHolidayName, isBrazilTimezone, nextBrBusinessDay } from "@/lib/br-holidays";
 import { isMutilated, onlyKeptSentences, trimUnsupportedSentences } from "./reply-trim";
@@ -1775,7 +1775,12 @@ export async function callV2LLM(args: {
       // a frase barrava o envio e transferia o cliente.
       const presentsMaterial = !!output.messageModel?.id || (output.attachments?.length ?? 0) > 0;
       if (presentsMaterial && output.reply.trim().split(/\s+/).length <= 40) return [];
-      const checkArgs = { model: v2FastAuxModel(args.config.model), apiKey, reply: output.reply, sources: claimSources, clientTexts, agentHistory, citableValues };
+      // Documento/imagem do cliente é fonte sobre o caso dele; conta certa
+      // com valores das fontes ("documento menos desconto") vai conferida.
+      const clientDocuments = clientDocumentTexts(clientTexts);
+      const derivedAmounts = moneyDerivations(output.reply, sources).map((d) => `${d.token} = ${d.expr}`);
+      if (derivedAmounts.length > 0) traceStep("verificação", `Conta conferida: ${derivedAmounts.join("; ")}`);
+      const checkArgs = { model: v2FastAuxModel(args.config.model), apiKey, reply: output.reply, sources: claimSources, clientTexts, agentHistory, citableValues, clientDocuments, derivedAmounts };
       let res = await checkClaimsWithModel(checkArgs);
       r.inputTokens += res.inputTokens;
       r.outputTokens += res.outputTokens;
