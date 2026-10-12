@@ -27,7 +27,7 @@ import { getOrgSetting } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
 import { prismaBase } from "@/lib/prisma-base";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
-import { resolveV2AgentForConversation } from "@/services/ai-v2/agent-resolver";
+import { queueOnlyV2Agent, resolveV2AgentForConversation } from "@/services/ai-v2/agent-resolver";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { withSystemContext } from "@/lib/webhook-context";
 import { isContactAllowedForAi } from "@/services/ai/phone-allowlist";
@@ -944,7 +944,10 @@ async function runTurnInner(turn: RunnableTurn): Promise<void> {
           return;
         }
 
-        const simple = await isSimpleEngineTurn(turn.conversationId);
+        // Conversa transferida esperando na fila (sem responsável): o agente
+        // que transferiu só manda o aviso de fila (ver o resolver).
+        const simple = (await isSimpleEngineTurn(turn.conversationId))
+          || !!(await queueOnlyV2Agent(turn.conversationId));
         if (simple) {
           const { processV2Turn } = await import("@/services/ai-v2/engine");
           await processV2Turn({

@@ -29,6 +29,7 @@ const mocks = vi.hoisted(() => ({
   distributeNewInbound: vi.fn(),
   recentlySent: vi.fn(async (): Promise<Set<string>> => new Set()),
   pendingFindFirst: vi.fn(async (): Promise<{ id: string } | null> => null),
+  turnLogFindFirst: vi.fn(async (): Promise<{ reply: string | null } | null> => null),
   messageFindFirst: vi.fn(async (): Promise<{ id: string } | null> => null),
   conversationUpdateMany: vi.fn(async () => ({ count: 1 })),
   turnFindUnique: vi.fn(async (): Promise<{ status: string; claimedAt: Date | null } | null> => null),
@@ -51,6 +52,7 @@ vi.mock("@/lib/prisma", () => ({
     aIAgentConfig: { findUnique: mocks.prismaAIAgentFindUnique },
     conversation: { findUnique: mocks.prismaConversationFindUnique, updateMany: mocks.conversationUpdateMany },
     distributionPending: { findFirst: mocks.pendingFindFirst },
+    aISimpleTurnLog: { findFirst: mocks.turnLogFindFirst },
     message: { findMany: mocks.messageFindMany, findFirst: mocks.messageFindFirst },
     messageTemplate: { findMany: mocks.templateFindMany },
     conversationTurn: { findUnique: mocks.turnFindUnique },
@@ -1423,6 +1425,46 @@ describe("processV2Turn — correções do motor", () => {
     for (const m of ["como assim?", "não sei", "oi", "dia 12"]) expect(looksLikeIdentification(m)).toBe(false);
   });
 
+  it("fora do horário da equipe: toda transferência para pessoas leva o horário (identificação e cadeia sem aviso)", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-12T15:09:00Z")); // segunda, feriado nacional, 12:09 em Brasília
+    try {
+      const businessHours = { enabled: true, timezone: "America/Sao_Paulo", holidaysClosed: true, weekdays: [1, 2, 3, 4, 5].map((day) => ({ day, start: "08:00", end: "22:00" })) };
+      // Identificação: o aviso padrão leva o horário.
+      const ident = baseConfig({ businessHours, entry: { confirmContact: false, onDealNotFound: "ask_identification", maxAttempts: 3 } } as unknown as Partial<V2AgentConfig>);
+      mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: ident, active: true });
+      mocks.loadContext.mockResolvedValue({ contact: { Nome: "João" }, contactRaw: { id: "contact-1" }, deals: [], selectedDeal: null, dealId: undefined });
+      mocks.getState.mockResolvedValue({ ...makeState("identifying"), identificationAttempts: 1 });
+      await run("meu documento é 123.456.789-00");
+      const identSent = mocks.sendText.mock.calls.map((c) => (c[0] as { text: string }).text).join("|");
+      expect(identSent).toContain("Vou transferir.");
+      expect(identSent).toContain("Segunda-feira, 12/10 é feriado");
+      expect(identSent).toContain("terça-feira, 13/10, às 08:00");
+
+      // Cadeia: o agente anterior já falou, sem aviso de transferência — o horário sai sozinho.
+      mocks.sendText.mockClear();
+      mocks.loadContext.mockResolvedValue(CONTEXT_WITH_DEAL);
+      const chain = baseConfig({ businessHours } as unknown as Partial<V2AgentConfig>);
+      mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: chain, active: true });
+      mocks.getState.mockResolvedValue({ ...makeState("active", "pessoa"), agentId: "agent-0" });
+      mocks.messageFindMany.mockImplementation(async (args: { where?: { id?: { in?: string[] } } }) =>
+        args?.where?.id?.in ? [{ createdAt: new Date("2026-10-12T15:08:00Z") }] : [],
+      );
+      mocks.messageFindFirst.mockResolvedValue({ id: "m-prev" });
+      mocks.callLLM.mockResolvedValue(llmOut({ reply: "", handoff: true, outOfScope: true, actions: [{ type: "handoff", destination: { type: "department" } }] as any }));
+      await run("Quero saber os valores do plano", { messageIds: ["m-cur"] });
+      const chainSent = mocks.sendText.mock.calls.map((c) => (c[0] as { text: string }).text);
+      expect(chainSent.join("|")).not.toContain("Vou transferir");
+      expect(chainSent.join("|")).toContain("Segunda-feira, 12/10 é feriado");
+    } finally {
+      vi.useRealTimers();
+      mocks.messageFindFirst.mockReset();
+      mocks.messageFindFirst.mockImplementation(async () => null);
+      mocks.messageFindMany.mockReset();
+      mocks.messageFindMany.mockResolvedValue([]);
+    }
+  });
+
   it("identificação: 2ª tentativa com outro texto e depois transfere", async () => {
     const config = baseConfig({ entry: { confirmContact: false, onDealNotFound: "ask_identification", maxAttempts: 2 } } as Partial<V2AgentConfig>);
     mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
@@ -1689,6 +1731,51 @@ describe("processV2Turn — correções do motor", () => {
     expect(mocks.simpleHandoff).not.toHaveBeenCalled();
     expect(mocks.sendText.mock.calls.map((c) => c[0].text as string).join("|")).toContain("fila");
     expect(mocks.conversationUpdateMany).toHaveBeenCalled();
+  });
+
+  it("conversa na fila sem responsável: o agente só manda o aviso de fila, sem a trava de responsável; fora da fila, nada", async () => {
+    const config = baseConfig({ handoff: { ...baseConfig().handoff, whileQueued: "answer" } } as unknown as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.resolveAgent.mockResolvedValue({ userId: "user-1", agentConfigId: "agent-1", wasAssigned: false, queueOnly: true });
+    mocks.getState.mockResolvedValue(makeState("active", "pessoa"));
+    mocks.pendingFindFirst.mockResolvedValueOnce({ id: "pend-1" });
+    await run("Quero saber a data prevista");
+    expect(mocks.callLLM).not.toHaveBeenCalled();
+    expect(mocks.sendText).toHaveBeenCalledTimes(1);
+    expect(mocks.sendText.mock.calls[0][0]).toMatchObject({ queueNotice: true });
+    expect((mocks.sendText.mock.calls[0][0] as { text: string }).text).toContain("fila");
+
+    mocks.sendText.mockClear();
+    mocks.pendingFindFirst.mockResolvedValueOnce(null);
+    await run("alguém?");
+    expect(mocks.sendText).not.toHaveBeenCalled();
+    expect(mocks.callLLM).not.toHaveBeenCalled();
+  });
+
+  it("cadeia: o agente anterior passou a conversa sem avisar → este avisa a transferência", async () => {
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: baseConfig(), active: true });
+    mocks.getState.mockResolvedValue({ ...makeState("active", "pessoa"), agentId: "agent-0" });
+    mocks.messageFindMany.mockImplementation(async (args: { where?: { id?: { in?: string[] } } }) =>
+      args?.where?.id?.in ? [{ createdAt: new Date("2026-01-01T10:00:00Z") }] : [],
+    );
+    // Depois da mensagem houve fala do agente anterior (uma pergunta), mas a transferência dele foi sem texto.
+    mocks.messageFindFirst.mockResolvedValue({ id: "m-pergunta" });
+    mocks.turnLogFindFirst.mockResolvedValue({ reply: null });
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "", handoff: true, outOfScope: true, actions: [{ type: "handoff", destination: { type: "department" } }] as any }));
+    await run("Não recebi o produto", { messageIds: ["m-cur"] });
+    expect(mocks.sendText.mock.calls.map((c) => (c[0] as { text: string }).text).join("|")).toContain("Vou transferir");
+
+    // Com aviso do anterior, continua sem repetir.
+    mocks.sendText.mockClear();
+    mocks.turnLogFindFirst.mockResolvedValue({ reply: "Vou te passar para a equipe." });
+    await run("Não recebi o produto", { messageIds: ["m-cur"] });
+    expect(mocks.sendText.mock.calls.map((c) => (c[0] as { text: string }).text).join("|")).not.toContain("Vou transferir");
+    mocks.messageFindFirst.mockReset();
+    mocks.messageFindFirst.mockImplementation(async () => null);
+    mocks.messageFindMany.mockReset();
+    mocks.messageFindMany.mockResolvedValue([]);
+    mocks.turnLogFindFirst.mockReset();
+    mocks.turnLogFindFirst.mockResolvedValue(null);
   });
 
   it("cliente na fila, modo responder: responde; se transferir de novo, o aviso é o de fila", async () => {

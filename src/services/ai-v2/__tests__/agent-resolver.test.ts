@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
   userFindFirst: vi.fn(),
   stateFindUnique: vi.fn(),
   attendanceEnabled: vi.fn(),
+  pendingFindFirst: vi.fn(async (): Promise<{ id: string } | null> => null),
 }));
 
 vi.mock("@/lib/prisma-base", () => ({
@@ -19,6 +20,7 @@ vi.mock("@/lib/prisma-base", () => ({
       },
     },
     aISimpleConversationState: { findUnique: mocks.stateFindUnique },
+    distributionPending: { findFirst: mocks.pendingFindFirst },
   },
 }));
 
@@ -160,5 +162,22 @@ describe("pickAgentForConversation", () => {
     const { pickAgentForConversation } = await import("../agent-resolver");
     const agents = [ag("teste", { allowedPhoneNumbers: ["5511911112222"] }), ag("geral")];
     expect(pickAgentForConversation(agents, null, "5511999999999")?.id).toBe("geral");
+  });
+});
+
+describe("conversa transferida esperando na fila", () => {
+  it("o agente que transferiu volta só para o aviso de fila, sem assumir; sem fila, ninguém", async () => {
+    mocks.attendanceEnabled.mockResolvedValue(true);
+    mocks.conversationUpdateMany.mockReset();
+    mocks.conversationFindUnique.mockResolvedValue({ id: "conv-9", organizationId: "org-1", assignedToId: null, closedAt: null, channelId: null, contact: { phone: "5511900000000" }, assignedTo: null });
+    mocks.stateFindUnique.mockResolvedValue({ owner: "pessoa", updatedAt: new Date(), agentId: "cfg-1" });
+    mocks.pendingFindFirst.mockResolvedValueOnce({ id: "pend-1" });
+    mocks.userFindFirst.mockResolvedValueOnce({ id: "ai-user-1", aiAgentConfig: { id: "cfg-1" } });
+    const r = await resolveV2AgentForConversation("conv-9");
+    expect(r).toEqual({ userId: "ai-user-1", agentConfigId: "cfg-1", wasAssigned: false, queueOnly: true });
+    expect(mocks.conversationUpdateMany).not.toHaveBeenCalled();
+
+    mocks.pendingFindFirst.mockResolvedValueOnce(null);
+    expect(await resolveV2AgentForConversation("conv-9")).toBeNull();
   });
 });
