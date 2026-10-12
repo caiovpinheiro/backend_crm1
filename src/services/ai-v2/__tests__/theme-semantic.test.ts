@@ -158,3 +158,17 @@ describe("resposta a uma pergunta do agente fica no assunto em andamento", () =>
     expect(agentAskedQuestion("Seu pedido saiu hoje.", config)).toBe(false);
   });
 });
+
+describe("resposta curta a uma pergunta, sem assunto ainda", () => {
+  it("escolhe o assunto junto com a mensagem anterior do cliente", async () => {
+    const { themeTextForSelection } = await import("../theme-semantic");
+    const base = { message: "Já sou cliente", previousClientMessage: "quero fazer a troca de um produto que veio com defeito", answeringQuestion: true, hasCurrentTheme: false, shortMessageWords: 3 };
+    expect(themeTextForSelection(base)).toEqual({ text: "quero fazer a troca de um produto que veio com defeito\nJá sou cliente", combined: true });
+    // Já tem assunto, não respondia pergunta, mensagem longa ou troca de assunto: fica só a mensagem.
+    expect(themeTextForSelection({ ...base, hasCurrentTheme: true }).combined).toBe(false);
+    expect(themeTextForSelection({ ...base, answeringQuestion: false }).combined).toBe(false);
+    expect(themeTextForSelection({ ...base, message: "quero saber como trocar a forma de pagamento do pedido" }).combined).toBe(false);
+    expect(themeTextForSelection({ ...base, message: "outro assunto" }).combined).toBe(false);
+    expect(themeTextForSelection({ ...base, previousClientMessage: null }).combined).toBe(false);
+  });
+});

@@ -52,7 +52,7 @@ import { MAIN_SOURCE_SIMILARITY, WEAK_MATCH_SIMILARITY, knowledgeMinSimilarity }
 import { checkClaimsWithModel, clientDocumentTexts, sameClaim, worthClaimCheck } from "./claim-check";
 import { activeNotices, noticesForTurn, noticesPromptSection } from "./notices";
 import { brHolidayName, isBrazilTimezone, nextBrBusinessDay } from "@/lib/br-holidays";
-import { isMutilated, onlyKeptSentences, trimUnsupportedSentences } from "./reply-trim";
+import { isMutilated, onlyKeptSentences, trimDroppedTheAnswer, trimUnsupportedSentences } from "./reply-trim";
 import { MATERIAL_ATTACHMENT_LIMITS, attachmentsForDocs, attachmentsPromptSection } from "./material-attachments";
 import { humanRequestTerms } from "@/lib/ai-v2/config";
 import { actionsGuide, allowedActionTypes, allowedFlowIdsFor, allowedMessageModelIdsFor, queryToolRestriction, repairMessageModelId, themeToolRestriction } from "./action-policy";
@@ -1857,6 +1857,12 @@ export async function callV2LLM(args: {
     for (let round = 0; round < 2 && flags.length > 0 && textsOf(flags).length === flags.length; round += 1) {
       const trimmed = trimUnsupportedSentences(output.reply, textsOf(flags));
       if (!trimmed) break;
+      // O que sobrou não fala mais do que o cliente perguntou: não sai como
+      // se fosse resposta; vai para a reescrita só com o material.
+      if (trimDroppedTheAnswer(userMessage, output.reply, trimmed.reply)) {
+        traceStep("verificação", "O corte tiraria a parte que respondia a pergunta → reescreve em vez de mandar o resto");
+        break;
+      }
       const candidate: V2LLMOutput = { ...output, reply: trimmed.reply };
       let still = unsupportedOf(candidate.reply, candidate.reason);
       if (still.length === 0 && !modelChecked) {

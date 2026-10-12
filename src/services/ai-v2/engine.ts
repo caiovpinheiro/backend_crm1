@@ -15,7 +15,7 @@ import { loadV2Context, buildAskDealMessage, describeV2ContextForTrace, tryParse
 import { detectV2Sentiment, shouldActOnSentiment } from "./sentiment";
 import { evaluateV2Rules, isWithinV2BusinessHours, outsideHoursNote } from "./rules";
 import { getV2ThemeById } from "./themes";
-import { agentAskedQuestion, selectV2ThemeSemantic, type V2ThemeSelection } from "./theme-semantic";
+import { themeTextForSelection, themeThresholds as themeThresholdsOf, agentAskedQuestion, selectV2ThemeSemantic, type V2ThemeSelection } from "./theme-semantic";
 import { tryGetAgentApiKey } from "@/services/ai/agent-key";
 import { detectV2MediaKinds, evaluateV2Media } from "./media";
 import { enrichTurnWithMedia } from "./media-turn";
@@ -1740,8 +1740,12 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
         }
         const parts: string[] = [];
         if (asked === 0) {
-          if (config.entry.openingEnabled && config.entry.openingMessage) {
+          // A resposta fixa de um atalho já foi o primeiro contato: as
+          // boas-vindas no meio da conversa pareciam um recomeço.
+          if (config.entry.openingEnabled && config.entry.openingMessage && !counters.guidanceGiven) {
             parts.push(renderMessage(config.entry.openingMessage, vars, defaultFormatter()));
+          } else if (counters.guidanceGiven) {
+            traceStep("entrada", "O agente já respondeu nesta conversa (atalho) → pede a identificação sem as boas-vindas");
           }
           parts.push(renderMessage(config.entry.identificationMessage ?? "Preciso confirmar seus dados. Qual o seu e-mail ou CPF?", vars, defaultFormatter()));
         } else {
@@ -1819,7 +1823,9 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       if (dispatchReply?.body) {
         traceStep("entrada", "Resposta a um disparo → segue sem boas-vindas");
       } else if (config.entry.openingEnabled && config.entry.openingMessage?.trim()) {
-        if (!isGreetingOnlyMessage(input.userMessage)) {
+        if (counters.guidanceGiven) {
+          traceStep("entrada", "O agente já respondeu nesta conversa (atalho) → segue sem as boas-vindas");
+        } else if (!isGreetingOnlyMessage(input.userMessage)) {
           traceStep("entrada", "Primeira mensagem já traz o pedido → responde direto, sem as boas-vindas");
         } else {
           const superseded = await newerInboundArrived(input.conversationId, input.messageIds);
@@ -1940,25 +1946,53 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
 
     // Atalho > gatilho > significado > assunto atual (ver theme-semantic).
     // Resposta a uma pergunta do agente fica no assunto em andamento.
-    const lastOut = themeId && !themeFromRule
+    const lastOut = !themeFromRule
       ? await Promise.resolve()
           .then(() =>
             prisma.message.findFirst({
               where: { conversationId: input.conversationId, direction: "out", isPrivate: false, messageType: { not: "note" } },
               orderBy: { createdAt: "desc" },
-              select: { content: true },
+              select: { content: true, createdAt: true },
             }),
           )
           .catch(() => null)
       : null;
+    const answeringQuestion = agentAskedQuestion(lastOut?.content ?? null, config);
+    // Resposta curta ("Sim", "o segundo") a uma pergunta, sem assunto ainda: escolhe
+    // junto com a mensagem do cliente que veio antes da pergunta.
+    let themeText = input.userMessage;
+    if (!themeFromRule && !themeId && answeringQuestion && lastOut?.createdAt) {
+      const prevIn = await Promise.resolve()
+        .then(() =>
+          prisma.message.findFirst({
+            where: {
+              conversationId: input.conversationId, direction: "in", isPrivate: false, messageType: { not: "note" },
+              createdAt: { lt: lastOut.createdAt },
+              ...(input.messageIds?.length ? { id: { notIn: input.messageIds } } : {}),
+            },
+            orderBy: { createdAt: "desc" },
+            select: { content: true },
+          }),
+        )
+        .catch(() => null);
+      const prevText = prevIn?.content && !isMediaPlaceholderText(prevIn.content) ? prevIn.content : null;
+      const t = themeTextForSelection({
+        message: input.userMessage, previousClientMessage: prevText, answeringQuestion, hasCurrentTheme: false,
+        shortMessageWords: themeThresholdsOf(config).shortMessageWords,
+      });
+      if (t.combined) {
+        themeText = t.text;
+        traceStep("assunto", "Resposta curta a uma pergunta → assunto escolhido junto com a mensagem anterior do cliente");
+      }
+    }
     const selection: V2ThemeSelection = themeFromRule
       ? { theme: getV2ThemeById(config, themeId), method: "kept" }
       : await selectV2ThemeSemantic({
           config,
-          message: input.userMessage,
+          message: themeText,
           currentThemeId: themeId,
           apiKey: await tryGetAgentApiKey(resolved.agentConfigId),
-          answeringQuestion: agentAskedQuestion(lastOut?.content ?? null, config),
+          answeringQuestion: !!themeId && answeringQuestion,
         });
     themeId = selection.theme?.id ?? themeId;
     traceStep("assunto", selection.theme
