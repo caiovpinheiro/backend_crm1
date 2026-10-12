@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { V2AgentConfig, V2LLMOutput } from "@/lib/ai-v2/types";
 
@@ -196,6 +196,12 @@ function makeState(stage: string, owner = "agente", counters: Record<string, unk
 }
 
 describe("processV2Turn", () => {
+  // O primeiro teste pagava o carregamento do motor (módulo grande) e, com a
+  // suíte inteira rodando em paralelo, passava dos 5 s e falhava por tempo.
+  beforeAll(async () => {
+    await import("../engine");
+  }, 60_000);
+
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.resolveAgent.mockResolvedValue({
