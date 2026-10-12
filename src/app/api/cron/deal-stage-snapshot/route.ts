@@ -6,7 +6,12 @@
  *
  * Autenticação: `Authorization: Bearer ${CRON_SECRET}` (`?secret=` ainda aceito, DEPRECADO — ver `requireCronSecret`).
  *
- * EasyPanel > Scheduled Service:
+ * Agendamento: o worker-meta-webhook já grava às 03:05 de São Paulo
+ * (`services/deal-stage-snapshot-sweeper.ts`, `DEAL_STAGE_SNAPSHOT_WORKER=0`
+ * desliga). Esta rota continua servindo para rodar à mão ou por agendador externo
+ * — é idempotente (upsert por org + etapa + dia):
+ *
+ * EasyPanel > Scheduled Service (opcional):
  *   Schedule: `5 3 * * *` (03:05 America/Sao_Paulo — ajuste o TZ do worker)
  *   Command:  curl -fsS -H "Authorization: Bearer $CRON_SECRET" "https://backend/api/cron/deal-stage-snapshot"
  */
