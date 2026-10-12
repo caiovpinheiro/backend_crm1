@@ -7,15 +7,23 @@
  * atual + logs de distribuição — não só quem finalizou.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
+
 import { Prisma } from "@prisma/client";
 
 import { analyticsClient, isReplicaConnectionError, tripReplica } from "@/lib/analytics";
 import { NON_CHAT_MESSAGE_TYPES } from "@/lib/conversation-last-message";
 import { isReplicaActive, isReplicaTripped } from "@/lib/prisma-replica";
 import { localTs } from "@/lib/local-time-sql";
+import type { ScopedTx } from "@/lib/prisma";
+import type { ReportCacheStatus } from "@/lib/report-cache";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { getPainelAgora, type PainelAgora } from "@/services/painel-agora";
 import { loadPainelHours } from "@/services/painel-hours";
+import {
+  cachedOnPrimary,
+  isPainelPrimaryFallbackEnabled,
+} from "@/services/painel-primary-fallback";
 import {
   DEFAULT_NO_REPLY_HOURS,
   PAINEL_MAX_RANGE_MS,
@@ -45,9 +53,13 @@ const log = getLogger("painel-service");
  * Motivo (aditivo) de um bloco `ok:false`. Ausente = bloco não pedido
  * (`error: "omitido"`) ou falha de execução (`error` genérico, detalhe no log).
  *  - `no_replica`: bloco pedido, mas pulado porque este bloco só roda na réplica
- *    de leitura (`DATABASE_URL_REPLICA`) e ela está ausente ou derrubada.
+ *    de leitura (`DATABASE_URL_REPLICA`) e ela está ausente ou derrubada (e o
+ *    fallback para o primário, `PAINEL_PRIMARY_FALLBACK`, está desligado).
+ *  - `primary_timeout`: sem réplica e com o fallback ligado, o cálculo no banco
+ *    principal estourou o `statement_timeout`/teto da transação, falhou, ou a
+ *    org já tinha outro cálculo em curso até o fim da espera.
  */
-export type PainelBlockReason = "no_replica";
+export type PainelBlockReason = "no_replica" | "primary_timeout";
 
 export type PainelBlock<T> =
   | { ok: true; data: T }
@@ -55,6 +67,9 @@ export type PainelBlock<T> =
 
 /** Mensagem do bloco `no_replica` (o front pode ramificar por `reason`, não por texto). */
 export const PAINEL_NO_REPLICA_MESSAGE = "Indisponível sem réplica de leitura";
+/** Mensagem do bloco `primary_timeout`. */
+export const PAINEL_PRIMARY_TIMEOUT_MESSAGE =
+  "Cálculo demorou demais sem réplica de leitura; tente de novo em instantes";
 /** Mensagem do bloco que falhou: o erro do banco fica só no log estruturado. */
 export const PAINEL_BLOCK_ERROR = "Falha ao carregar este bloco.";
 
@@ -247,9 +262,21 @@ const SUBSEQUENT_OUT_CAP = 3_000;
 const FIRST_REPLY_CONV_CAP = 3_000;
 const CLOSED_ROWS_CAP = 4_000;
 
-/** Replica when healthy; primary if unset or tripped after a connect timeout. */
-function db() {
-  return analyticsClient();
+/**
+ * Transação do fallback no primário (`PAINEL_PRIMARY_FALLBACK`): dentro dela,
+ * `db()` devolve o `tx` (com `statement_timeout` local) em vez do cliente de
+ * analytics.
+ */
+const primaryTx = new AsyncLocalStorage<ScopedTx>();
+
+/**
+ * Replica when healthy; primary if unset or tripped after a connect timeout.
+ * Inside the primary fallback: the transaction client.
+ */
+function db(): ReturnType<typeof analyticsClient> {
+  const tx = primaryTx.getStore();
+  // O `tx` é o mesmo cliente com escopo de org, só sem os métodos de conexão/transação.
+  return tx ? (tx as unknown as ReturnType<typeof analyticsClient>) : analyticsClient();
 }
 
 function openWhere(): Prisma.ConversationWhereInput {
@@ -1500,6 +1527,85 @@ export function parseServiceSections(raw: string | null): PainelServiceSection[]
   return next.length ? next : [...SERVICE_SECTIONS];
 }
 
+/** Blocos que só rodam na réplica (ou, com o fallback ligado, no primário). */
+const REPLICA_ONLY_SECTIONS = [
+  "tempo",
+  "heatmap",
+  "byDepartment",
+  "connections",
+  "attendants",
+  "channels",
+] as const satisfies readonly PainelServiceSection[];
+type ReplicaOnlySection = (typeof REPLICA_ONLY_SECTIONS)[number];
+type ReplicaOnlyBlocks = Partial<Record<ReplicaOnlySection, PainelBlock<unknown>>>;
+
+function primaryTimeout<T>(block: ReplicaOnlySection, timing?: ServerTiming): PainelBlock<T> {
+  timing?.describe(`q-${block}`, "primary_timeout");
+  return { ok: false, error: PAINEL_PRIMARY_TIMEOUT_MESSAGE, reason: "primary_timeout" };
+}
+
+/**
+ * Fallback sem réplica (`PAINEL_PRIMARY_FALLBACK`): calcula os blocos pedidos
+ * numa única transação no primário, com `statement_timeout` local, cache por
+ * org + período + relógio + blocos (60 s + 120 s vencido) e 1 cálculo por org
+ * (ver `painel-primary-fallback.ts`). Qualquer falha — timeout, erro do banco,
+ * espera pelo lock esgotada — vira `primary_timeout` em TODOS os blocos pedidos
+ * (a transação abortada não serve para os demais) e não vai para o cache.
+ * Devolve `null` nesse caso.
+ */
+async function loadReplicaBlocksOnPrimary(
+  range: PainelRange,
+  clock: ClockMode,
+  blocks: ReplicaOnlySection[],
+  timing?: ServerTiming,
+): Promise<ReplicaOnlyBlocks | null> {
+  const orgId = getOrgIdOrThrow();
+  const asked = new Set(blocks);
+  const needShared =
+    asked.has("tempo") || asked.has("byDepartment") || asked.has("attendants") || asked.has("channels");
+  const waitStart = performance.now();
+  try {
+    return await cachedOnPrimary<ReplicaOnlyBlocks>(
+      "service",
+      orgId,
+      { from: range.from, to: range.to, clock, blocks: [...asked] },
+      (tx) =>
+        primaryTx.run(tx, async () => {
+          // Sequencial: a transação usa uma conexão só.
+          const shared = needShared ? await loadSharedServiceMetrics(range) : null;
+          const out: ReplicaOnlyBlocks = {};
+          const ok = <T,>(data: T): PainelBlock<T> => ({ ok: true, data });
+          if (shared && asked.has("tempo")) out.tempo = ok(await getPainelTempo(range, clock, shared));
+          if (shared && asked.has("byDepartment")) {
+            out.byDepartment = ok(await getPainelByDepartment(range, clock, shared));
+          }
+          if (shared && asked.has("attendants")) {
+            out.attendants = ok(await getPainelAttendants(range, clock, shared));
+          }
+          if (shared && asked.has("channels")) {
+            out.channels = ok(await getPainelChannels(range, clock, shared));
+          }
+          if (asked.has("heatmap")) out.heatmap = ok(await getPainelHeatmap(range));
+          if (asked.has("connections")) out.connections = ok(await getPainelConnections(range));
+          return out;
+        }),
+      timing
+        ? {
+            onStatus: (status: ReportCacheStatus) =>
+              timing.describeCache(
+                new Map([["primary", status]]),
+                performance.now() - waitStart,
+              ),
+          }
+        : undefined,
+    );
+  } catch (e) {
+    log.error({ err: e, blocks }, "[painel/service] fallback no primário falhou");
+    for (const block of blocks) primaryTimeout(block, timing);
+    return null;
+  }
+}
+
 export async function getPainelService(
   range: PainelRange,
   clock: ClockMode,
@@ -1511,7 +1617,9 @@ export async function getPainelService(
   // se a réplica caiu e o bloco repetiu) e `q-shared` para a carga compartilhada
   // por tempo/atendentes/departamento/canais. Seções rodam em paralelo: as fases
   // se sobrepõem e a soma passa do `total`. Seção pulada por falta de réplica
-  // leva `desc = no_replica` e dur 0; seção não pedida não aparece.
+  // leva `desc = no_replica` e dur 0; seção não pedida não aparece. Com o
+  // fallback no primário: `q-primary` (cálculo ou espera pelo cache/lock),
+  // `cache` com hit|miss|stale e `desc = primary_timeout` na seção que falhou.
   const timed = <T,>(phase: string, fn: () => Promise<T>): Promise<T> =>
     timing ? timing.time(phase, fn) : fn();
   // Seção NÃO pedida: sempre "omitido", sem `reason`.
@@ -1529,6 +1637,16 @@ export async function getPainelService(
     wrap(block, () => timed(`q-${block}`, fn));
 
   const replicaOk = isReplicaActive() && !isReplicaTripped();
+  const replicaWanted = REPLICA_ONLY_SECTIONS.filter((s) => want.has(s));
+  // Sem réplica e com `PAINEL_PRIMARY_FALLBACK` ligado: os blocos da réplica
+  // rodam no primário (transação com timeout, cache e 1 cálculo por org).
+  const onPrimary =
+    !replicaOk && replicaWanted.length > 0 && isPainelPrimaryFallbackEnabled()
+      ? timed("q-primary", () => loadReplicaBlocksOnPrimary(range, clock, replicaWanted, timing))
+      : null;
+  const fromPrimary = <T,>(block: ReplicaOnlySection): Promise<PainelBlock<T>> =>
+    onPrimary!.then((out) => (out ? (out[block] as PainelBlock<T>) : primaryTimeout<T>(block)));
+
   const needReplyMetrics =
     replicaOk &&
     (want.has("tempo") ||
@@ -1540,10 +1658,11 @@ export async function getPainelService(
     : Promise.resolve(null);
 
   const withShared = <T,>(
-    block: PainelServiceSection,
+    block: ReplicaOnlySection,
     fn: (shared: SharedServiceMetrics) => Promise<T>,
   ): Promise<PainelBlock<T>> => {
     if (!want.has(block)) return Promise.resolve(omit<T>());
+    if (onPrimary) return fromPrimary<T>(block);
     return sharedPromise.then(
       (shared) => (shared ? run(block, () => fn(shared)) : Promise.resolve(noReplica<T>(block))),
       (e): PainelBlock<T> => {
@@ -1551,6 +1670,11 @@ export async function getPainelService(
         return { ok: false, error: PAINEL_BLOCK_ERROR };
       },
     );
+  };
+  const replicaOnly = <T,>(block: ReplicaOnlySection, fn: () => Promise<T>): Promise<PainelBlock<T>> => {
+    if (!want.has(block)) return Promise.resolve(omit<T>());
+    if (onPrimary) return fromPrimary<T>(block);
+    return replicaOk ? run(block, fn) : Promise.resolve(noReplica<T>(block));
   };
 
   const agora = want.has("agora")
@@ -1562,19 +1686,11 @@ export async function getPainelService(
   const [tempo, heatmap, byDepartment, connections, attendants, channels, exceptions] =
     await Promise.all([
       withShared("tempo", (shared) => getPainelTempo(range, clock, shared)),
-      !want.has("heatmap")
-        ? Promise.resolve(omit<PainelHeatmap>())
-        : replicaOk
-          ? run("heatmap", () => getPainelHeatmap(range))
-          : Promise.resolve(noReplica<PainelHeatmap>("heatmap")),
+      replicaOnly("heatmap", () => getPainelHeatmap(range)),
       withShared("byDepartment", (shared) =>
         getPainelByDepartment(range, clock, shared),
       ),
-      !want.has("connections")
-        ? Promise.resolve(omit<PainelConnections>())
-        : replicaOk
-          ? run("connections", () => getPainelConnections(range))
-          : Promise.resolve(noReplica<PainelConnections>("connections")),
+      replicaOnly("connections", () => getPainelConnections(range)),
       withShared("attendants", (shared) =>
         getPainelAttendants(range, clock, shared),
       ),
