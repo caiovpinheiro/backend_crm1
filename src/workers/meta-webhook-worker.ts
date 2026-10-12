@@ -20,6 +20,10 @@ import {
   startDbRetentionSweeper,
   stopDbRetentionSweeper,
 } from "@/services/db-retention-sweeper";
+import {
+  startDealStageSnapshotSweeper,
+  stopDealStageSnapshotSweeper,
+} from "@/services/deal-stage-snapshot-sweeper";
 import { installGracefulShutdown, type ShutdownStep } from "@/workers/graceful-shutdown";
 
 const log = getLogger("worker.meta-webhook");
@@ -115,6 +119,9 @@ export function startMetaWebhookWorker() {
   // Retenção diária de meta_webhook_events (só processados, janela por env).
   // Uma instância por dia ganha a trava no Redis. `DB_RETENTION_WORKER=0` desliga.
   startDbRetentionSweeper();
+  // Snapshot diário do estoque por etapa (Evolução diária do Painel), 03:05 de
+  // São Paulo. Uma instância por dia (trava no Redis). `DEAL_STAGE_SNAPSHOT_WORKER=0` desliga.
+  startDealStageSnapshotSweeper();
 
   log.info({ concurrency }, "worker-meta-webhook iniciado");
   return worker;
@@ -129,6 +136,7 @@ function metaWebhookShutdownSteps(worker: Pick<Worker, "close">): ShutdownStep[]
         stopAiTurnSweeper();
         stopListenSweeper();
         stopDbRetentionSweeper();
+        stopDealStageSnapshotSweeper();
       },
     },
     // Turnos da IA em execução: esperam até AI_TURN_SHUTDOWN_DRAIN_MS e os

@@ -1,58 +1,56 @@
 import { NextResponse } from "next/server";
 
-import { Prisma } from "@prisma/client";
-
 import { withOrgContext } from "@/lib/auth-helpers";
-import { localTs } from "@/lib/local-time-sql";
-import { prisma } from "@/lib/prisma";
+import { getLogger } from "@/lib/logger";
+import { cachedReport, type ReportCacheStatus } from "@/lib/report-cache";
 import { getOrgIdOrThrow } from "@/lib/request-context";
+import { ServerTiming } from "@/lib/server-timing";
+import { timedJson } from "@/lib/server-timing-response";
+import {
+  loadActivityFeedStats,
+  parseActivityStatsWindow,
+} from "@/services/activity-feed-stats";
+
+const log = getLogger("api/activity-feed/stats");
+
+export const dynamic = "force-dynamic";
 
 /**
  * GET /api/activity-feed/stats
  *
- * Agregacoes sobre `activity_events` org-scoped. Suporta um window
- * (default 30 dias). Usa $queryRawUnsafe pra agregacoes Postgres que
- * o Prisma Client nao expoe nativamente (date_trunc).
+ * Agregações sobre `activity_events` da org (ADMIN/MANAGER).
  *
- * Query params:
- *   - dateFrom  ISO (default: now() - 30 dias)
- *   - dateTo    ISO (default: now())
+ * Janela (precedência nesta ordem):
+ *   - from / to          ISO 8601 ou AAAA-MM-DD (dia civil de São Paulo).
+ *                        `dateFrom` / `dateTo` continuam aceitos (mesmo sentido).
+ *                        Só from: até agora. Só to: os 30 dias antes dele.
+ *   - period             today | yesterday | last_7 | last_30 | this_month |
+ *                        last_month | custom (+ startDate/endDate AAAA-MM-DD),
+ *                        igual a /api/painel/*.
+ *   - nada               últimos 30 dias (contrato antigo).
+ *   Teto de 366 dias (mantém o fim; `rangeClamped: true` quando corta).
+ *   Data ou period inválido, ou from > to: 400.
+ *
+ * Cache por org + janela (ao minuto): 60 s fresco + 120 s vencido enquanto
+ * recalcula (`cachedReport`). `Server-Timing`: auth, cache (hit|miss|stale),
+ * query (só quando calculou), serialize, total.
  *
  * Resposta:
  *   {
- *     totals: { total, byActorType: {...}, byEntityType: {...}, byType: [{ type, count }] },
- *     timeline: [{ day: "2026-06-05", count }],
+ *     window: { from, to },
+ *     totals: { total, byActorType: {...}, byEntityType: {...}, byType: [{ type, count }] (top 20) },
+ *     timeline: [{ day: "2026-06-05", count }],          // dia civil de São Paulo
  *     timelineByActor: [{ day, HUMAN, AI, AUTOMATION, INTEGRATION, SYSTEM }],
- *     hourly: [{ hour: 0..23, count }]
+ *     hourly: [{ hour: 0..23, count }]                    // hora de São Paulo
  *   }
  */
 export async function GET(req: Request) {
   // Stats de logs: restrito a gestão (ADMIN/MANAGER). O contexto vem de
   // withOrgContext (runWithContext) — com requireManager, que usa enterWith,
   // o getOrgIdOrThrow() do handler explodia em produção.
-  return withOrgContext((session) => handle(req, session));
-}
-
-/** A session achatada de auth-helpers não é exportada; deriva do helper. */
-type OrgSession = Parameters<Parameters<typeof withOrgContext>[0]>[0];
-
-function eachUtcDay(from: Date, to: Date): string[] {
-  const days: string[] = [];
-  const cursor = new Date(
-    Date.UTC(from.getUTCFullYear(), from.getUTCMonth(), from.getUTCDate()),
-  );
-  const end = new Date(
-    Date.UTC(to.getUTCFullYear(), to.getUTCMonth(), to.getUTCDate()),
-  );
-  while (cursor <= end) {
-    days.push(cursor.toISOString().slice(0, 10));
-    cursor.setUTCDate(cursor.getUTCDate() + 1);
-  }
-  return days;
-}
-
-async function handle(req: Request, session: OrgSession) {
-  try {
+  const timing = new ServerTiming();
+  return withOrgContext(async (session) => {
+    timing.add("auth", timing.totalMs());
     const role = session.user.role;
     if (role !== "ADMIN" && role !== "MANAGER") {
       return NextResponse.json(
@@ -61,146 +59,35 @@ async function handle(req: Request, session: OrgSession) {
       );
     }
 
-    const orgId = getOrgIdOrThrow();
-    const url = new URL(req.url);
-    const dateFromRaw = url.searchParams.get("dateFrom");
-    const dateToRaw = url.searchParams.get("dateTo");
-    const dateTo = dateToRaw ? new Date(dateToRaw) : new Date();
-    const dateFrom = dateFromRaw
-      ? new Date(dateFromRaw)
-      : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-
-    const [byActor, byEntity, byType, timelineRows, hourlyRows, totalRow] =
-      await Promise.all([
-        prisma.activityEvent.groupBy({
-          by: ["actorType"],
-          where: {
-            organizationId: orgId,
-            occurredAt: { gte: dateFrom, lte: dateTo },
-          },
-          _count: { _all: true },
-        }),
-        prisma.activityEvent.groupBy({
-          by: ["entityType"],
-          where: {
-            organizationId: orgId,
-            occurredAt: { gte: dateFrom, lte: dateTo },
-          },
-          _count: { _all: true },
-        }),
-        prisma.activityEvent.groupBy({
-          by: ["type"],
-          where: {
-            organizationId: orgId,
-            occurredAt: { gte: dateFrom, lte: dateTo },
-          },
-          _count: { _all: true },
-          orderBy: { _count: { type: "desc" } },
-          take: 20,
-        }),
-        prisma.$queryRaw<{ day: Date; actorType: string; count: bigint }[]>(
-          Prisma.sql`
-        SELECT date_trunc('day', "occurredAt") AS day,
-               "actorType",
-               COUNT(*)::bigint AS count
-        FROM "activity_events"
-        WHERE "organizationId" = ${orgId}
-          AND "occurredAt" >= ${dateFrom}
-          AND "occurredAt" <= ${dateTo}
-        GROUP BY 1, 2
-        ORDER BY 1 ASC
-      `,
-        ),
-        prisma.$queryRaw<{ hour: number; count: bigint }[]>(Prisma.sql`
-        SELECT EXTRACT(HOUR FROM ${localTs('"occurredAt"')})::int AS hour,
-               COUNT(*)::bigint AS count
-        FROM "activity_events"
-        WHERE "organizationId" = ${orgId}
-          AND "occurredAt" >= ${dateFrom}
-          AND "occurredAt" <= ${dateTo}
-        GROUP BY 1
-        ORDER BY 1
-      `),
-        prisma.activityEvent.count({
-          where: {
-            organizationId: orgId,
-            occurredAt: { gte: dateFrom, lte: dateTo },
-          },
-        }),
-      ]);
-
-    const ACTORS = [
-      "HUMAN",
-      "AI",
-      "AUTOMATION",
-      "INTEGRATION",
-      "SYSTEM",
-    ] as const;
-
-    const byDay = new Map<string, Record<(typeof ACTORS)[number], number>>();
-    for (const row of timelineRows) {
-      const day = row.day.toISOString().slice(0, 10);
-      const actor = (ACTORS as readonly string[]).includes(row.actorType)
-        ? (row.actorType as (typeof ACTORS)[number])
-        : "SYSTEM";
-      const bucket =
-        byDay.get(day) ??
-        ({
-          HUMAN: 0,
-          AI: 0,
-          AUTOMATION: 0,
-          INTEGRATION: 0,
-          SYSTEM: 0,
-        } satisfies Record<(typeof ACTORS)[number], number>);
-      bucket[actor] += Number(row.count);
-      byDay.set(day, bucket);
+    const parsed = parseActivityStatsWindow(new URL(req.url).searchParams);
+    if (!parsed.ok) {
+      return NextResponse.json({ message: parsed.message }, { status: 400 });
     }
+    const { from, to, rangeClamped } = parsed.window;
 
-    const emptyActors = () => ({
-      HUMAN: 0,
-      AI: 0,
-      AUTOMATION: 0,
-      INTEGRATION: 0,
-      SYSTEM: 0,
-    });
-
-    const timelineByActor = eachUtcDay(dateFrom, dateTo).map((day) => {
-      const counts = byDay.get(day) ?? emptyActors();
-      return { day, ...counts };
-    });
-
-    const hourlyMap = new Map(
-      hourlyRows.map((r) => [Number(r.hour), Number(r.count)]),
-    );
-    const hourly = Array.from({ length: 24 }, (_, hour) => ({
-      hour,
-      count: hourlyMap.get(hour) ?? 0,
-    }));
-
-    return NextResponse.json({
-      window: { from: dateFrom.toISOString(), to: dateTo.toISOString() },
-      totals: {
-        total: totalRow,
-        byActorType: Object.fromEntries(
-          byActor.map((r) => [r.actorType, r._count._all]),
-        ),
-        byEntityType: Object.fromEntries(
-          byEntity.map((r) => [r.entityType, r._count._all]),
-        ),
-        byType: byType.map((r) => ({ type: r.type, count: r._count._all })),
-      },
-      timeline: timelineByActor.map((r) => ({
-        day: r.day,
-        count:
-          r.HUMAN + r.AI + r.AUTOMATION + r.INTEGRATION + r.SYSTEM,
-      })),
-      timelineByActor,
-      hourly,
-    });
-  } catch (e) {
-    return NextResponse.json(
-      { message: e instanceof Error ? e.message : "Erro." },
-      { status: 500 },
-    );
-  }
+    try {
+      const orgId = getOrgIdOrThrow();
+      const cacheWaitStart = performance.now();
+      const data = await cachedReport(
+        "activity-feed-stats",
+        orgId,
+        { from, to },
+        () => timing.time("query", () => loadActivityFeedStats(orgId, { from, to })),
+        {
+          onStatus: (status: ReportCacheStatus) =>
+            timing.describeCache(
+              new Map([["activity-feed-stats", status]]),
+              performance.now() - cacheWaitStart,
+            ),
+        },
+      );
+      return timedJson(timing, rangeClamped ? { ...data, rangeClamped: true } : data);
+    } catch (e) {
+      log.error({ err: e }, "[activity-feed/stats] falhou");
+      return NextResponse.json(
+        { message: "Erro ao carregar estatísticas de atividade." },
+        { status: 500 },
+      );
+    }
+  });
 }
