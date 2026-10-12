@@ -142,10 +142,18 @@ export type PainelFunnel = {
   stages: PainelFunnelStage[];
   empty: boolean;
   /**
-   * Chegadas no período, no funil selecionado.
-   * Contato novo com deal nesse funil conta 1. Só deal conta 1. Só contato conta 1.
+   * Negócios criados no período no funil selecionado, pela etapa de criação e com
+   * os mesmos filtros de `entered` (funil, responsável, etapa, etiquetas, origem).
+   * Etapa de criação: `meta.stageId` do evento CREATED; sem esse evento (inbound,
+   * importação, automação, IA, fulfillment), a origem do 1º STAGE_CHANGED do
+   * negócio e, sem movimento, a etapa atual.
+   * `count` = Σ `inflow[fromStageId=null]` das etapas abertas + `novosForaDoFunil.count`.
    */
   novos: { count: number; value: number };
+  /**
+   * Parte de `novos` criada direto numa etapa Ganho/Perdido (fora de `stages[]`).
+   */
+  novosForaDoFunil: { count: number; won: number; lost: number };
   /**
    * Etapas "Perdido" (isLost) do(s) funil(is) selecionado(s).
    * count/value: negócios que estão HOJE nessas etapas, qualquer status (igual à coluna do Kanban,
@@ -491,6 +499,7 @@ export async function getPainelFunnel(f: PainelDealFilters): Promise<PainelFunne
       stages: [],
       empty: true,
       novos: emptyNovos,
+      novosForaDoFunil: { count: 0, won: 0, lost: 0 },
       lostStage: { count: 0, value: 0, sentInPeriod: 0 },
     };
   }
@@ -608,6 +617,39 @@ export async function getPainelFunnel(f: PainelDealFilters): Promise<PainelFunne
           AND e."createdAt" >= ${f.range.from}
           AND e."createdAt" <= ${f.range.to}
           AND (e.meta->>'stageId') IS NOT NULL
+        UNION ALL
+        -- Criado no período sem CREATED utilizável (inbound, importação,
+        -- automação, IA e fulfillment não gravam o evento): a etapa de criação
+        -- é a origem do 1º STAGE_CHANGED dele; sem movimento, a etapa atual.
+        SELECT d0.id,
+               COALESCE(
+                 (SELECT (e2.meta->'from'->>'id')
+                    FROM deal_events e2
+                   WHERE e2."dealId" = d0.id
+                     AND e2."organizationId" = ${orgId}
+                     AND e2.type = 'STAGE_CHANGED'
+                     AND e2."createdAt" >= d0."createdAt"
+                     AND (e2.meta->'from'->>'id') IS NOT NULL
+                   ORDER BY e2."createdAt" ASC
+                   LIMIT 1),
+                 d0."stageId"
+               ) AS "stageId",
+               d0."createdAt" AS "enteredAt",
+               'CREATED' AS "eventType",
+               NULL, NULL, NULL
+        FROM deals d0
+        WHERE d0."organizationId" = ${orgId}
+          AND d0."createdAt" >= ${f.range.from}
+          AND d0."createdAt" <= ${f.range.to}
+          AND NOT EXISTS (
+            SELECT 1 FROM deal_events e3
+             WHERE e3."dealId" = d0.id
+               AND e3."organizationId" = ${orgId}
+               AND e3.type = 'CREATED'
+               AND e3."createdAt" >= ${f.range.from}
+               AND e3."createdAt" <= ${f.range.to}
+               AND (e3.meta->>'stageId') IS NOT NULL
+          )
       ) x
       INNER JOIN deals d ON d.id = x."dealId" AND d."organizationId" = ${orgId}
       INNER JOIN stages s ON s.id = x."stageId"
@@ -619,7 +661,8 @@ export async function getPainelFunnel(f: PainelDealFilters): Promise<PainelFunne
         ${stageFilter}
         ${tagFilter}
         ${sourceFilter}
-      ORDER BY x."dealId", x."stageId", x."enteredAt" ASC
+      ORDER BY x."dealId", x."stageId", x."enteredAt" ASC,
+        (x."eventType" = 'CREATED') DESC
     `),
     db().$queryRaw<
       {
@@ -708,6 +751,12 @@ export async function getPainelFunnel(f: PainelDealFilters): Promise<PainelFunne
     stock.byUser.set(ownerKey, user);
   }
 
+  // Novos = entradas por criação (as mesmas que viram `inflow[null]`), então
+  // Σ inflow[null] das etapas abertas + novosForaDoFunil.count = novos.count.
+  const stageFlags = new Map(stages.map((s) => [s.id, s]));
+  const novos = { count: 0, value: 0 };
+  const novosForaDoFunil = { count: 0, won: 0, lost: 0 };
+
   for (const row of entered) {
     const bucket = byStage.get(row.stageId);
     if (!bucket) continue;
@@ -717,6 +766,16 @@ export async function getPainelFunnel(f: PainelDealFilters): Promise<PainelFunne
     bucket.count += 1;
     const value = toNumber(row.value);
     bucket.value += value;
+    if (row.eventType === "CREATED") {
+      novos.count += 1;
+      novos.value += value;
+      const flags = stageFlags.get(row.stageId);
+      if (flags?.isWon || flags?.isLost) {
+        novosForaDoFunil.count += 1;
+        if (flags.isWon) novosForaDoFunil.won += 1;
+        else novosForaDoFunil.lost += 1;
+      }
+    }
     const isToday = row.enteredAt >= todayStart;
     if (isToday) bucket.todayDelta += 1;
     const ownerKey = row.ownerId ?? "__none__";
@@ -895,66 +954,13 @@ export async function getPainelFunnel(f: PainelDealFilters): Promise<PainelFunne
       })),
     }),
   );
-  // Contato novo + deal no período = 1. Só deal = 1. Só contato = 1.
-  // Escopo = funil selecionado (etapa atual do negócio).
-  const pipeIds = f.pipelineIds.length
-    ? f.pipelineIds
-    : [...new Set(stages.map((s) => s.pipelineId))];
-  const inPipe = pipeIds.length
-    ? Prisma.sql`AND s."pipelineId" IN (${Prisma.join(pipeIds)})`
-    : Prisma.sql`AND FALSE`;
-  const createdRows = await db().$queryRaw<{ cnt: bigint; val: unknown }[]>(Prisma.sql`
-    SELECT
-      (
-        (SELECT COUNT(*)::bigint FROM contacts c
-          WHERE c."organizationId" = ${orgId}
-            AND c."createdAt" >= ${f.range.from}
-            AND c."createdAt" <= ${f.range.to}
-            AND EXISTS (
-              SELECT 1 FROM deals d
-              INNER JOIN stages s ON s.id = d."stageId"
-              WHERE d."contactId" = c.id
-                AND d."organizationId" = ${orgId}
-                AND d."createdAt" >= ${f.range.from}
-                AND d."createdAt" <= ${f.range.to}
-                ${inPipe}
-            ))
-        +
-        (SELECT COUNT(*)::bigint FROM deals d
-          INNER JOIN stages s ON s.id = d."stageId"
-          WHERE d."organizationId" = ${orgId}
-            AND d."createdAt" >= ${f.range.from}
-            AND d."createdAt" <= ${f.range.to}
-            ${inPipe}
-            AND NOT EXISTS (
-              SELECT 1 FROM contacts c
-              WHERE c.id = d."contactId"
-                AND c."createdAt" >= ${f.range.from}
-                AND c."createdAt" <= ${f.range.to}
-            ))
-      ) AS cnt,
-      (
-        SELECT COALESCE(SUM(CAST(d.value AS DECIMAL)), 0)
-        FROM deals d
-        INNER JOIN stages s ON s.id = d."stageId"
-        WHERE d."organizationId" = ${orgId}
-          AND d."createdAt" >= ${f.range.from}
-          AND d."createdAt" <= ${f.range.to}
-          ${inPipe}
-      ) AS val
-  `);
-  const created = createdRows[0];
-  const novos = {
-    count: created ? Number(created.cnt) : 0,
-    value: round2(toNumber(created?.val)),
-  };
-
   return {
     definition: "cohort",
     tooltip,
     stages: merged,
     empty: openStages.length === 0,
-    novos,
+    novos: { count: novos.count, value: round2(novos.value) },
+    novosForaDoFunil,
     lostStage,
   };
 }
