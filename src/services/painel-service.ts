@@ -10,6 +10,7 @@
 import { Prisma } from "@prisma/client";
 
 import { analyticsClient, isReplicaConnectionError, tripReplica } from "@/lib/analytics";
+import { NON_CHAT_MESSAGE_TYPES } from "@/lib/conversation-last-message";
 import { isReplicaActive, isReplicaTripped } from "@/lib/prisma-replica";
 import { localTs } from "@/lib/local-time-sql";
 import { getOrgIdOrThrow } from "@/lib/request-context";
@@ -633,7 +634,7 @@ export async function getPainelVolume(
   const incompleteLast = periodIncludesToday(range.to);
   const days = eachDayKey(range.from, range.to);
 
-  const [createdRow, finishedRow, startedByDay, finishedByDay] = await Promise.all([
+  const [createdRow, finishedRow, startedByDay, finishedByDay, messageRow] = await Promise.all([
     db().$queryRaw<
       {
         started: bigint;
@@ -693,6 +694,23 @@ export async function getPainelVolume(
         AND conv."closedAt" <= ${range.to}
       GROUP BY 1
     `),
+    // Mensagens de chat do período, mesmo recorte dos totais (org inteira,
+    // `createdAt` no período; esta aba não filtra por funil). Recorte de chat
+    // = o da lista do inbox (`isListChatMessage`): pública, in/out, sem nota,
+    // rascunho/resumo da IA, ligação e evento de sistema. `out` conta toda
+    // resposta enviada (humano, IA, automação). Índice (organizationId, createdAt).
+    db().$queryRaw<{ messagesIn: bigint; messagesOut: bigint }[]>(Prisma.sql`
+      SELECT
+        COUNT(*) FILTER (WHERE m.direction = 'in')::bigint AS "messagesIn",
+        COUNT(*) FILTER (WHERE m.direction = 'out')::bigint AS "messagesOut"
+      FROM messages m
+      WHERE m."organizationId" = ${orgId}
+        AND m."createdAt" >= ${range.from} AND m."createdAt" <= ${range.to}
+        AND m."isPrivate" = false
+        AND m.direction IN ('in', 'out')
+        AND m."messageType" NOT IN (${Prisma.join([...NON_CHAT_MESSAGE_TYPES])})
+        AND m."messageType" NOT LIKE 'event%'
+    `),
   ]);
 
   void clock;
@@ -705,10 +723,8 @@ export async function getPainelVolume(
   const resolved = Number(c?.resolved ?? 0);
   const finishedFromStarted = Number(finishedRow[0]?.fromStarted ?? 0);
   const hiddenDelta = painelDelta(0, 0, 0);
-  // Full-period COUNT on `messages` locks the primary. Volume KPIs come from
-  // conversations; the chart subtitle omits message totals when they are 0.
-  const messagesIn = 0;
-  const messagesOut = 0;
+  const messagesIn = Number(messageRow[0]?.messagesIn ?? 0);
+  const messagesOut = Number(messageRow[0]?.messagesOut ?? 0);
   // `d` é `date` do SQL (dia civil de SP já calculado no banco): chave sem
   // nova conversão de fuso, senão todo dia recua um e o de hoje fica 0/0.
   const startMap = new Map(startedByDay.map((r) => [dayKeyFromSqlDate(r.d), Number(r.c)]));
