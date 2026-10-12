@@ -10,6 +10,7 @@
 import { Prisma } from "@prisma/client";
 
 import { analyticsClient, isReplicaConnectionError, tripReplica } from "@/lib/analytics";
+import { NON_CHAT_MESSAGE_TYPES } from "@/lib/conversation-last-message";
 import { isReplicaActive, isReplicaTripped } from "@/lib/prisma-replica";
 import { localTs } from "@/lib/local-time-sql";
 import { getOrgIdOrThrow } from "@/lib/request-context";
@@ -20,6 +21,7 @@ import {
   PAINEL_MAX_RANGE_MS,
   clampRangeFromEnd,
   dayKeyFromDate,
+  dayKeyFromSqlDate,
   eachDayKey,
   mean,
   median,
@@ -632,7 +634,7 @@ export async function getPainelVolume(
   const incompleteLast = periodIncludesToday(range.to);
   const days = eachDayKey(range.from, range.to);
 
-  const [createdRow, finishedRow, startedByDay, finishedByDay] = await Promise.all([
+  const [createdRow, finishedRow, startedByDay, finishedByDay, messageRow] = await Promise.all([
     db().$queryRaw<
       {
         started: bigint;
@@ -692,6 +694,23 @@ export async function getPainelVolume(
         AND conv."closedAt" <= ${range.to}
       GROUP BY 1
     `),
+    // Mensagens de chat do período, mesmo recorte dos totais (org inteira,
+    // `createdAt` no período; esta aba não filtra por funil). Recorte de chat
+    // = o da lista do inbox (`isListChatMessage`): pública, in/out, sem nota,
+    // rascunho/resumo da IA, ligação e evento de sistema. `out` conta toda
+    // resposta enviada (humano, IA, automação). Índice (organizationId, createdAt).
+    db().$queryRaw<{ messagesIn: bigint; messagesOut: bigint }[]>(Prisma.sql`
+      SELECT
+        COUNT(*) FILTER (WHERE m.direction = 'in')::bigint AS "messagesIn",
+        COUNT(*) FILTER (WHERE m.direction = 'out')::bigint AS "messagesOut"
+      FROM messages m
+      WHERE m."organizationId" = ${orgId}
+        AND m."createdAt" >= ${range.from} AND m."createdAt" <= ${range.to}
+        AND m."isPrivate" = false
+        AND m.direction IN ('in', 'out')
+        AND m."messageType" NOT IN (${Prisma.join([...NON_CHAT_MESSAGE_TYPES])})
+        AND m."messageType" NOT LIKE 'event%'
+    `),
   ]);
 
   void clock;
@@ -704,12 +723,12 @@ export async function getPainelVolume(
   const resolved = Number(c?.resolved ?? 0);
   const finishedFromStarted = Number(finishedRow[0]?.fromStarted ?? 0);
   const hiddenDelta = painelDelta(0, 0, 0);
-  // Full-period COUNT on `messages` locks the primary. Volume KPIs come from
-  // conversations; the chart subtitle omits message totals when they are 0.
-  const messagesIn = 0;
-  const messagesOut = 0;
-  const startMap = new Map(startedByDay.map((r) => [dayKeyFromDate(r.d), Number(r.c)]));
-  const finMap = new Map(finishedByDay.map((r) => [dayKeyFromDate(r.d), Number(r.c)]));
+  const messagesIn = Number(messageRow[0]?.messagesIn ?? 0);
+  const messagesOut = Number(messageRow[0]?.messagesOut ?? 0);
+  // `d` é `date` do SQL (dia civil de SP já calculado no banco): chave sem
+  // nova conversão de fuso, senão todo dia recua um e o de hoje fica 0/0.
+  const startMap = new Map(startedByDay.map((r) => [dayKeyFromSqlDate(r.d), Number(r.c)]));
+  const finMap = new Map(finishedByDay.map((r) => [dayKeyFromSqlDate(r.d), Number(r.c)]));
   const todayKey = dayKeyFromDate(new Date());
   const byDay = days.map((date) => ({
     date,
@@ -1189,7 +1208,7 @@ export async function getPainelByDepartment(
     const meta = totals.get(key) ?? { label, started: 0 };
     meta.started += n;
     totals.set(key, meta);
-    lookup.set(`${dayKeyFromDate(r.d)}::${key}`, n);
+    lookup.set(`${dayKeyFromSqlDate(r.d)}::${key}`, n);
   }
   for (const r of counts) {
     const key = r.deptId || NONE_DEPT_KEY;
@@ -1313,7 +1332,7 @@ export async function getPainelConnections(range: PainelRange): Promise<PainelCo
 
   for (const r of rows) {
     const n = Number(r.c);
-    const date = dayKeyFromDate(r.d);
+    const date = dayKeyFromSqlDate(r.d);
     const connKey = r.chId || r.chName || r.platform || "outros";
     const connLabel =
       [r.chName, r.phone].filter(Boolean).join(" · ") || platformLabel(r.platform ?? "Outros");

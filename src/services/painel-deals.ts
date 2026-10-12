@@ -18,6 +18,7 @@ import {
 import { ensureTodayDealStageSnapshot } from "@/services/painel-snapshots";
 import {
   dayKeyFromDate,
+  dayKeyFromSqlDate,
   eachDayKey,
   painelDelta,
   parseDay,
@@ -786,7 +787,8 @@ export async function getPainelEvolution(
     `;
     const oldest = oldestRows[0] ?? null;
 
-    const retainedFrom = oldest ? dayKeyFromDate(oldest.date) : null;
+    // `date` é coluna SQL `date`: o Prisma devolve meia-noite UTC do dia certo.
+    const retainedFrom = oldest ? dayKeyFromSqlDate(oldest.date) : null;
     const askedFrom = dayKeyFromDate(f.range.from);
     const beyond =
       retainedFrom != null && askedFrom < retainedFrom
@@ -837,7 +839,7 @@ export async function getPainelEvolution(
 
   const byDay = new Map<string, Record<string, number>>();
   for (const row of rows) {
-    const key = dayKeyFromDate(row.date);
+    const key = dayKeyFromSqlDate(row.date);
     const rec = byDay.get(key) ?? {};
     rec[row.stageId] = (rec[row.stageId] ?? 0) + row.openCount;
     byDay.set(key, rec);
