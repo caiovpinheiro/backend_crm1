@@ -86,7 +86,7 @@ describe("filtro de links — endereço inteiro e conteúdo da empresa", () => {
 
   it("link não liberado sai inteiro, com os parâmetros; a pontuação da frase fica", () => {
     const r = removeUnauthorizedUrls("Baixe em https://apps.outra.com/app?id=br.exemplo.app. Depois entre.", allowed);
-    expect(r.text).toBe("Baixe em . Depois entre.");
+    expect(r.text).toBe("Baixe. Depois entre.");
     expect(r.removed).toEqual(["https://apps.outra.com/app?id=br.exemplo.app"]);
   });
 
@@ -107,3 +107,14 @@ describe("filtro de links — endereço inteiro e conteúdo da empresa", () => {
   });
 });
 
+
+describe("link removido leva junto o que o apresentava", () => {
+  it("“em <link> usando” vira “usando”; link liberado fica", async () => {
+    const { removeUnauthorizedUrls } = await import("../output-guard");
+    const r = removeUnauthorizedUrls("O acesso é online, pelo navegador, em https://outro.exemplo.net/ usando seus dados.", ["loja.exemplo.com"]);
+    expect(r.text).toBe("O acesso é online, pelo navegador, usando seus dados.");
+    expect(r.removed).toEqual(["https://outro.exemplo.net/"]);
+    expect(removeUnauthorizedUrls("Entre no site https://outro.exemplo.net e confirme.", ["loja.exemplo.com"]).text).toBe("Entre e confirme.");
+    expect(removeUnauthorizedUrls("Entre em https://loja.exemplo.com/conta e confirme.", ["loja.exemplo.com"]).text).toBe("Entre em https://loja.exemplo.com/conta e confirme.");
+  });
+});

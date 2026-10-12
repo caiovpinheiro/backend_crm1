@@ -48,14 +48,22 @@ export function removeUnauthorizedUrls(text: string, allowedDomains: string[], t
   if (allowedDomains.length === 0) return { text, removed: [] };
   const trusted = new Set(trustedUrls.map(sameUrl));
   const removed: string[] = [];
-  const cleaned = text.replace(URL_RE, (raw) => {
+  const CUT = "\u0000";
+  const marked = text.replace(URL_RE, (raw) => {
     const [url, tail] = splitUrl(raw);
     if (!isUrlAllowed(url, allowedDomains) && !trusted.has(sameUrl(url))) {
       removed.push(url);
-      return tail;
+      return `${CUT}${tail}`;
     }
     return raw;
   });
+  // O que apresentava o link sai junto: "pelo navegador, em <link> usando
+  // seus dados" virava "pelo navegador, em usando seus dados".
+  const cleaned = marked
+    .replace(new RegExp(`[ \\t]*\\b(?:atrav[ée]s d[oa]|pelo link|no link|pelo site|no site|pelo endere[çc]o|no endere[çc]o|pelo|no|na|em)\\s*:?[ \\t]*${CUT}`, "gi"), CUT)
+    .split(CUT).join("")
+    .replace(/[ \t]+([,.;:!?])/g, "$1")
+    .replace(/([,;:])(?:\s*[,;:])+/g, "$1");
   // Só espaços em sequência: juntar tudo com \s+ colava as linhas e
   // desmontava passo a passo e listas quando havia domínio liberado.
   return { text: cleaned.replace(/[ \t]{2,}/g, " ").replace(/[ \t]+\n/g, "\n").trim(), removed };
