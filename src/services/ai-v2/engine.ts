@@ -20,7 +20,7 @@ import { tryGetAgentApiKey } from "@/services/ai/agent-key";
 import { detectV2MediaKinds, evaluateV2Media } from "./media";
 import { enrichTurnWithMedia } from "./media-turn";
 import { isMediaPlaceholderText } from "@/lib/ai-agents/media-placeholder";
-import { getMediaTexts, mediaTextLine, understoodKindOf } from "./media-understanding";
+import { getMediaTexts, isBareFileName, mediaTextLine, understoodKindOf } from "./media-understanding";
 import { callV2LLM } from "./llm";
 import { themePromptText } from "./theme-prompt";
 import { actionValueAllowed, allowedActionTypes, allowedFlowIdsFor, allowedMessageModelIdsFor, humanRequestSubject, mentionsHumanRequest, normalizeAskOptions } from "./action-policy";
@@ -224,7 +224,7 @@ const MEDIA_ASK_TEXT_DEFAULT: Record<string, string> = {
 const MEDIA_NOT_UNDERSTOOD_DEFAULT: Record<string, string> = {
   audio: "Não consegui entender o seu áudio. Pode me escrever o que precisa?",
   image: "Não consegui ler a sua imagem. Pode me escrever o que aparece nela?",
-  document: "Não consegui abrir o seu arquivo. Pode me escrever o que precisa?",
+  document: "Não consegui ler esse arquivo. Pode me mandar um print da parte com a dúvida ou escrever o que precisa?",
 };
 
 function ownerToPrisma(owner: V2Owner): string {
@@ -1284,7 +1284,12 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // Mídia recebida
   // A política vale para a mídia do turno, em qualquer bolha: antes só o tipo
   // da última decidia (imagem e depois "aparece isso" ignorava a imagem).
-  const turnMediaType = (await turnMessageTypes(input.messageIds)).find((t) => detectV2MediaKinds(t).length > 0);
+  const turnTypes = await turnMessageTypes(input.messageIds);
+  const turnMediaType = turnTypes.find((t) => detectV2MediaKinds(t).length > 0);
+  // Documento sem legenda chega com o nome do arquivo como texto: não é
+  // mensagem do cliente.
+  const turnHasDocument = [...turnTypes, input.messageType ?? ""].some((t) => t.toLowerCase() === "document");
+  const isClientText = (l: string) => !isMediaPlaceholderText(l) && !(turnHasDocument && isBareFileName(l));
   const media = evaluateV2Media(config, turnMediaType ?? input.messageType);
   if (media) traceStep("mídia", `Recebeu ${media.kind} → política "${media.action}"`);
 
@@ -1314,10 +1319,10 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // áudio com "pedir texto" respondia "não consigo ouvir" ignorando o texto,
   // e áudio + texto nem transcrevia o áudio.
   const turnLines = input.userMessage.split(/\r?\n/).filter((l) => l.trim());
-  const turnHasText = turnLines.some((l) => !isMediaPlaceholderText(l));
+  const turnHasText = turnLines.some(isClientText);
   // Imagem com legenda chega só com a legenda no texto (sem "[Imagem]").
   const understandsMedia = (["transcribe", "describe"] as string[]).some(
-    (a) => a === config.media.audio?.action || a === config.media.image?.action,
+    (a) => a === config.media.audio?.action || a === config.media.image?.action || a === config.media.document?.action,
   );
   const turnHasMedia = understandsMedia && (turnLines.some((l) => isMediaPlaceholderText(l)) || !!turnMediaType);
   if (media && media.action === "ask_text") {
@@ -1325,7 +1330,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     traceStep("mídia", "Mídia veio junto com texto → responde o texto e avisa que a mídia não foi vista");
     // O cliente não sabia que a mídia ficou de fora.
     const note = MEDIA_IGNORED_NOTE[media.kind];
-    const kept = turnLines.filter((l) => !isMediaPlaceholderText(l));
+    const kept = turnLines.filter(isClientText);
     input = { ...input, userMessage: [...kept, note].join("\n") };
   }
   if (turnHasMedia && (input.messageIds?.length ?? 0) > 0) {

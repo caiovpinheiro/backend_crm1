@@ -100,3 +100,18 @@ describe("admittedMissingInstructions e procedureAdmittedMissing", () => {
     expect(procedureAdmittedMissing("Acesse a área de renovação e selecione a opção.", "A renovação não consta no cadastro do cliente.")).toBe(false);
   });
 });
+
+describe("conta conferida com valores das fontes", () => {
+  it("valor que é diferença ou soma de dois valores das fontes passa; conta errada continua sem fonte", async () => {
+    const { moneyDerivations, unsupportedFigures } = await import("../ground-reply");
+    const doc = "[Documento enviado pelo cliente]: Valor do Documento R$ 795,61 * DESCONTO DE R$ 659,71 ATE 13/10/26; R$ 641,59 ATE 26/10/26;";
+    const reply = "O valor cheio é R$ 795,61. Pagando até 13/10 você paga R$ 135,90; até 26/10, R$ 154,02.";
+    expect(unsupportedFigures(reply, [doc])).toEqual([]);
+    expect(moneyDerivations(reply, [doc])).toEqual([
+      { token: "R$ 135,90", expr: "R$ 795,61 − R$ 659,71" },
+      { token: "R$ 154,02", expr: "R$ 795,61 − R$ 641,59" },
+    ]);
+    expect(unsupportedFigures("Até 13/10 você paga R$ 136,00.", [doc])).toEqual(["R$ 136,00"]);
+    expect(unsupportedFigures("As duas parcelas somam R$ 1.437,20.", ["Parcela 1: R$ 795,61. Parcela 2: R$ 641,59."])).toEqual([]);
+  });
+});

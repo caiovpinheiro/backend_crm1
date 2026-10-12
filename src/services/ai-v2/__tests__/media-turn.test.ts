@@ -14,12 +14,21 @@ const cfg = (audio: string, image: string) =>
   ({ media: { audio: { action: audio }, image: { action: image }, document: { action: "handoff" } } }) as unknown as V2AgentConfig;
 
 describe("mídia do turno", () => {
-  it("reconhece áudio e imagem pelo tipo da mensagem", () => {
+  it("reconhece áudio, imagem e documento pelo tipo da mensagem", () => {
     expect(understoodKindOf("ptt")).toBe("audio");
     expect(understoodKindOf("audio")).toBe("audio");
     expect(understoodKindOf("image")).toBe("image");
-    expect(understoodKindOf("document")).toBeNull();
+    expect(understoodKindOf("document")).toBe("document");
     expect(understoodKindOf("text")).toBeNull();
+  });
+
+  it("documento: lido só com a política “ler”; o nome do arquivo sai do texto e volta junto do conteúdo", () => {
+    const withDoc = (action: string) => ({ media: { audio: { action: "handoff" }, image: { action: "handoff" }, document: { action } } }) as unknown as V2AgentConfig;
+    expect(shouldUnderstand(withDoc("describe"), "document")).toBe(true);
+    expect(shouldUnderstand(withDoc("ask_text"), "document")).toBe(false);
+    const text = composeTurnText("fatura_outubro.pdf\nnão entendi esse valor", [{ kind: "document", text: "Valor do documento R$ 300,00", content: "fatura_outubro.pdf" }]);
+    expect(text).toBe('não entendi esse valor\n[Documento enviado pelo cliente ("fatura_outubro.pdf")]: Valor do documento R$ 300,00');
+    expect(mediaTextLine("document", "x", "segue a fatura")).toBe('[Documento enviado pelo cliente, com a legenda "segue a fatura"]: x');
   });
 
   it("só entende quando a política é transcrever/descrever", () => {

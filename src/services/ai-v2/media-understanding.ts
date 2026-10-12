@@ -1,7 +1,8 @@
 /**
- * Áudio e imagem do cliente viram texto para o agente, com a chave do
- * próprio agente: áudio é transcrito e imagem é lida pelo modelo dele
- * (descrição + texto visível, como print de erro ou documento).
+ * Áudio, imagem e documento do cliente viram texto para o agente: áudio é
+ * transcrito e imagem é lida pelo modelo dele (descrição + texto visível,
+ * como print de erro ou comprovante), com a chave do próprio agente;
+ * documento (PDF, DOCX, texto) tem o texto extraído, sem modelo.
  *
  * O resultado fica guardado por mensagem: não repete o custo, e o histórico
  * dos turnos seguintes (e o "Comparar com humano") enxerga o conteúdo em vez
@@ -14,20 +15,32 @@ import { guessInputExt } from "@/lib/audio-convert";
 import { transcribeWithGroq } from "@/lib/groq-transcribe";
 import { isMediaPlaceholderText } from "@/lib/ai-agents/media-placeholder";
 import { generateWithTools, transcribeWithOpenAI } from "@/services/ai/provider";
+import { extractKnowledgeText } from "@/services/ai/knowledge-extract";
 import { getLogger } from "@/lib/logger";
 
 const log = getLogger("ai-v2.media-understanding");
 
-export type UnderstoodKind = "audio" | "image";
+export type UnderstoodKind = "audio" | "image" | "document";
 
 const AUDIO_TYPES = new Set(["audio", "ptt", "voice", "voice_note"]);
 const IMAGE_TYPES = new Set(["image"]);
+const DOCUMENT_TYPES = new Set(["document"]);
 
 export function understoodKindOf(messageType: string | null | undefined): UnderstoodKind | null {
   const t = (messageType ?? "").toLowerCase();
   if (AUDIO_TYPES.has(t)) return "audio";
   if (IMAGE_TYPES.has(t)) return "image";
+  if (DOCUMENT_TYPES.has(t)) return "document";
   return null;
+}
+
+/**
+ * Nome de arquivo sozinho ("fatura_10.pdf"): o canal grava o nome do
+ * documento como conteúdo da mensagem quando não há legenda. Não é texto
+ * do cliente.
+ */
+export function isBareFileName(text: string | null | undefined): boolean {
+  return /^[^\s\\/]{1,160}\.(?:pdf|docx?|xlsx?|csv|tsv|txt|md|jpe?g|png|webp|heic)$/i.test((text ?? "").trim());
 }
 
 /**
@@ -38,6 +51,10 @@ export function understoodKindOf(messageType: string | null | undefined): Unders
 export function mediaTextLine(kind: UnderstoodKind, text: string, caption?: string | null): string {
   const cap = caption && !isMediaPlaceholderText(caption) ? caption.trim() : "";
   if (kind === "audio") return `[Áudio do cliente, transcrito]: ${text}`;
+  if (kind === "document") {
+    const label = !cap ? "" : isBareFileName(cap) ? ` ("${cap}")` : `, com a legenda "${cap}"`;
+    return `[Documento enviado pelo cliente${label}]: ${text}`;
+  }
   return `[Imagem enviada pelo cliente${cap ? `, com a legenda "${cap}"` : ""}]: ${text}`;
 }
 
@@ -106,6 +123,39 @@ const IMAGE_PROMPT = [
   "Não interprete a intenção do cliente nem invente o que não aparece. Até 8 linhas.",
 ].join(" ");
 
+/** Texto de documento que entra no turno: o bastante para uma fatura ou contrato curto. */
+export const MAX_DOCUMENT_CHARS = 6000;
+
+const DOCUMENT_EXT_BY_MIME: Record<string, string> = {
+  "application/pdf": "pdf",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+  "text/plain": "txt",
+  "text/csv": "csv",
+  "text/tab-separated-values": "tsv",
+  "text/markdown": "md",
+};
+
+/**
+ * Texto de um documento do cliente (PDF com texto, DOCX, texto puro), com a
+ * mesma extração dos materiais. PDF escaneado (só imagem) não tem texto:
+ * volta erro e o agente pede um print ou que o cliente escreva.
+ */
+export async function readDocumentText(buffer: Buffer, mime: string, content: string | null): Promise<{ text: string | null; error?: string }> {
+  const name = isBareFileName(content) ? content!.trim() : `documento.${DOCUMENT_EXT_BY_MIME[mime] ?? "pdf"}`;
+  try {
+    const r = await extractKnowledgeText(name, buffer);
+    const clean = r.text
+      .replace(/^-- \d+ of \d+ --$/gm, "")
+      .replace(/[ \t]+\n/g, "\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+    if (!clean) return { text: null, error: "documento sem texto legível" };
+    return { text: clean.length > MAX_DOCUMENT_CHARS ? `${clean.slice(0, MAX_DOCUMENT_CHARS)}\n[…documento cortado]` : clean };
+  } catch (err) {
+    return { text: null, error: `documento sem texto legível (${err instanceof Error ? err.message : String(err)})` };
+  }
+}
+
 export type MediaMessage = {
   id: string;
   messageType: string | null;
@@ -155,6 +205,10 @@ export async function understandMedia(args: UnderstandArgs): Promise<{ text: str
         if ("error" in r) return { text: null, error: `agente sem chave do modelo; ${r.error}`, cached: false };
         text = r.text.trim();
       }
+    } else if (args.kind === "document") {
+      const r = await readDocumentText(media.buffer, mime, args.message.content);
+      if (!r.text) return { text: null, error: r.error, cached: false };
+      text = r.text;
     } else {
       if (!args.apiKey) return { text: null, error: "sem chave do modelo", cached: false };
       const r = await generateWithTools({

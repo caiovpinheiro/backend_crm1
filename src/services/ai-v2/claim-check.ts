@@ -32,6 +32,10 @@ NÃO liste:
 
 O que o atendente já disse antes na conversa não é fonte: repetir uma afirmação anterior só está sustentado se as fontes a sustentam.
 
+Documento ou imagem que o cliente enviou (fatura, comprovante, print) é fonte sobre o caso dele: valores, datas e condições que aparecem nele estão sustentados.
+
+Valor que é a soma ou a diferença de valores das fontes ou dos documentos do cliente, com a conta certa, está sustentado (ex.: o valor do documento menos o desconto que ele traz). As contas já conferidas vêm listadas.
+
 O que o cliente disse sobre a própria situação (o valor que veio na cobrança dele, a data em que comprou, o que aparece na tela dele) pode ser usado para explicar a regra das fontes: isso NÃO é afirmação sem fonte. Só é sem fonte quando a resposta confirma como regra, preço, prazo ou condição da empresa algo que só o cliente afirmou e as fontes não dizem (ex.: cliente "a taxa é R$ 30, né?" → resposta "Isso, a taxa é R$ 30").
 
 Responda só com JSON: {"unsupported": ["trecho curto da resposta com a afirmação sem fonte", ...]}. Sem nenhuma, {"unsupported": []}.`;
@@ -52,7 +56,31 @@ export function worthClaimCheck(reply: string): boolean {
   return !sentences.every((s) => s.endsWith("?"));
 }
 
-export function buildClaimCheckInput(args: { reply: string; sources: string[]; clientTexts: string[]; agentHistory?: string[] }): string {
+/** Documentos e imagens do cliente já lidos, no texto da conversa. */
+export function clientDocumentTexts(clientTexts: string[]): string[] {
+  const out: string[] = [];
+  const re = /\[(?:Documento enviado|Imagem enviada) pelo cliente[^\]]*\]:\s*([\s\S]*?)(?=\n\[(?:Documento enviado|Imagem enviada|Áudio do cliente)|$)/g;
+  for (const t of clientTexts) for (const m of t.matchAll(re)) if (m[1].trim()) out.push(m[1].trim());
+  return out;
+}
+
+/**
+ * A marcação traz um valor que é conta conferida (soma ou diferença de
+ * valores das fontes) e todo número dela está nos documentos do cliente ou
+ * nas contas: está sustentada, mesmo que o checador tenha marcado.
+ */
+export function claimBackedByArithmetic(claim: string, derivedAmounts: string[], clientDocuments: string[]): boolean {
+  if (derivedAmounts.length === 0) return false;
+  const norm = (s: string) => s.replace(/\.(?=\d{3}\b)/g, "").replace(/\s+/g, "");
+  const tokens = derivedAmounts.map((d) => norm(d.split("=")[0].replace(/^R\$/i, "")));
+  const flat = norm(claim);
+  if (!tokens.some((t) => t && flat.includes(t))) return false;
+  const pool = norm([...derivedAmounts, ...clientDocuments].join(" "));
+  const numbers = claim.match(/\d[\d.,/]*\d|\d/g) ?? [];
+  return numbers.every((n) => pool.includes(norm(n.replace(/[.,]$/, ""))));
+}
+
+export function buildClaimCheckInput(args: { reply: string; sources: string[]; clientTexts: string[]; agentHistory?: string[]; clientDocuments?: string[]; derivedAmounts?: string[] }): string {
   let budget = MAX_SOURCE_CHARS;
   const kept: string[] = [];
   for (const s of args.sources.map((x) => x.trim()).filter(Boolean)) {
@@ -63,6 +91,12 @@ export function buildClaimCheckInput(args: { reply: string; sources: string[]; c
   }
   return [
     `Fontes da empresa:\n${kept.map((s, i) => `[${i + 1}] ${s}`).join("\n\n") || "(nenhuma)"}`,
+    ...(args.clientDocuments?.length
+      ? [`Documentos e imagens que o cliente enviou (fonte sobre o caso dele):\n${args.clientDocuments.slice(-2).map((t) => `- ${t.slice(0, 4000)}`).join("\n")}`]
+      : []),
+    ...(args.derivedAmounts?.length
+      ? [`Contas conferidas pelo sistema (valor da resposta = conta com valores das fontes; está sustentado):\n${args.derivedAmounts.map((d) => `- ${d}`).join("\n")}`]
+      : []),
     `O que o cliente disse (não é fonte):\n${args.clientTexts.slice(-4).map((t) => `- ${t.slice(0, 400)}`).join("\n") || "(nada)"}`,
     ...(args.agentHistory?.length
       ? [`O que o atendente já disse antes (não é fonte; só para entender a conversa):\n${args.agentHistory.slice(-3).map((t) => `- ${t.slice(0, 400)}`).join("\n")}`]
@@ -310,6 +344,10 @@ export async function checkClaimsWithModel(args: {
   agentHistory?: string[];
   /** Valores do cadastro/informações montadas que o agente pode citar. */
   citableValues?: string[];
+  /** Texto dos documentos/imagens que o cliente enviou. */
+  clientDocuments?: string[];
+  /** Contas conferidas: "R$ 135,90 = R$ 795,61 − R$ 659,71". */
+  derivedAmounts?: string[];
 }): Promise<{ unsupported: string[]; inputTokens: number; outputTokens: number; ok: boolean }> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -329,7 +367,7 @@ export async function checkClaimsWithModel(args: {
       }),
     ]);
     const flagged = parseClaimCheck(res.text, args.reply);
-    const unsupported = flagged.filter((c) => !notAFactClaim(c) && !claimEchoesClient(c, args.clientTexts) && !claimBackedByCitableValues(c, args.citableValues ?? []) && !claimFoundInSources(c, args.sources));
+    const unsupported = flagged.filter((c) => !notAFactClaim(c) && !claimEchoesClient(c, args.clientTexts) && !claimBackedByCitableValues(c, args.citableValues ?? []) && !claimFoundInSources(c, args.sources) && !claimBackedByArithmetic(c, args.derivedAmounts ?? [], args.clientDocuments ?? []));
     if (unsupported.length < flagged.length) {
       log.info(
         { descartadas: flagged.length - unsupported.length },

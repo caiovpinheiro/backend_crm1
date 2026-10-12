@@ -245,6 +245,54 @@ export function unsupportedHedges(reply: string, sources: string[]): string[] {
  * Percentual e valor em dinheiro na resposta que não aparecem em nenhuma
  * fonte. O modelo completava com "juros de 1% ao mês", "R$ 50 de taxa".
  */
+/** 1234.5 → "1.234,50". */
+function brMoney(v: number): string {
+  return v.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+/** Valores em dinheiro das fontes ("R$ 795,61", "659,71"), sem repetição. */
+function sourceMoneyValues(sources: string[]): number[] {
+  const joined = sources.join(" ");
+  const out = new Set<number>();
+  for (const m of joined.matchAll(/R\$\s?(\d[\d.]*(?:,\d{1,2})?)|(?<![\d.,])(\d{1,3}(?:\.\d{3})*,\d{2})(?![\d,])/gi)) {
+    const v = moneyValue(m[1] ?? m[2]);
+    if (v !== null && v > 0) out.add(v);
+    if (out.size >= 60) break;
+  }
+  return [...out];
+}
+
+/**
+ * Valor em dinheiro da resposta que não está nas fontes, mas é a soma ou a
+ * diferença de dois valores delas ("valor do documento menos o desconto"):
+ * a conta certa está sustentada. Conta errada não casa com nenhum par e
+ * continua sem fonte.
+ */
+export function moneyDerivations(reply: string, sources: string[]): Array<{ token: string; expr: string }> {
+  const squash = (s: string) => s.replace(/\s+/g, "").replace(/\.(?=\d{3}\b)/g, "").toLowerCase();
+  const haystack = squash(sources.join(" "));
+  const values = sourceMoneyValues(sources);
+  const out: Array<{ token: string; expr: string }> = [];
+  const seen = new Set<string>();
+  for (const m of reply.matchAll(/R\$\s?\d[\d.]*(?:,\d{1,2})?/gi)) {
+    const token = m[0].trim().replace(/[.,;:!?]+$/, "");
+    if (seen.has(token) || haystack.includes(squash(token))) continue;
+    seen.add(token);
+    const v = moneyValue(token.replace(/^R\$\s?/i, ""));
+    if (v === null) continue;
+    let expr = "";
+    for (let i = 0; i < values.length && !expr; i += 1) {
+      for (let j = 0; j < values.length && !expr; j += 1) {
+        const a = values[i], b = values[j];
+        if (i < j && Math.abs(a + b - v) < 0.005) expr = `R$ ${brMoney(a)} + R$ ${brMoney(b)}`;
+        else if (i !== j && a > b && Math.abs(a - b - v) < 0.005) expr = `R$ ${brMoney(a)} − R$ ${brMoney(b)}`;
+      }
+    }
+    if (expr) out.push({ token, expr });
+  }
+  return out;
+}
+
 export function unsupportedFigures(reply: string, sources: string[], clientTexts: string[] = []): string[] {
   const squash = (s: string) => s.replace(/\s+/g, "").replace(/\.(?=\d{3}\b)/g, "").toLowerCase();
   const haystack = squash(sources.join(" "));
@@ -252,12 +300,13 @@ export function unsupportedFigures(reply: string, sources: string[], clientTexts
   // repetir como "R$ 129" é citar o cliente, não inventar.
   const clientValues = new Set([...clientTexts.join(" ").matchAll(/\d[\d.]*(?:,\d{1,2})?/g)].map((m) => moneyValue(m[0])).filter((v): v is number => v !== null));
   const out = new Set<string>();
+  const derived = new Set(moneyDerivations(reply, sources).map((d) => d.token));
   const patterns = [/\d+(?:[.,]\d+)?\s?%/g, /R\$\s?\d[\d.]*(?:,\d{1,2})?/gi];
   for (const re of patterns) {
     for (const m of reply.matchAll(re)) {
       // "R$ 50." no fim da frase: o ponto é da frase, não do valor.
       const token = m[0].trim().replace(/[.,;:!?]+$/, "");
-      if (haystack.includes(squash(token))) continue;
+      if (haystack.includes(squash(token)) || derived.has(token)) continue;
       const value = /^R\$/i.test(token) ? moneyValue(token.replace(/^R\$\s?/i, "")) : null;
       if (value !== null && clientValues.has(value)) continue;
       out.add(token);
