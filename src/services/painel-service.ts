@@ -20,6 +20,7 @@ import {
   PAINEL_MAX_RANGE_MS,
   clampRangeFromEnd,
   dayKeyFromDate,
+  dayKeyFromSqlDate,
   eachDayKey,
   mean,
   median,
@@ -708,8 +709,10 @@ export async function getPainelVolume(
   // conversations; the chart subtitle omits message totals when they are 0.
   const messagesIn = 0;
   const messagesOut = 0;
-  const startMap = new Map(startedByDay.map((r) => [dayKeyFromDate(r.d), Number(r.c)]));
-  const finMap = new Map(finishedByDay.map((r) => [dayKeyFromDate(r.d), Number(r.c)]));
+  // `d` é `date` do SQL (dia civil de SP já calculado no banco): chave sem
+  // nova conversão de fuso, senão todo dia recua um e o de hoje fica 0/0.
+  const startMap = new Map(startedByDay.map((r) => [dayKeyFromSqlDate(r.d), Number(r.c)]));
+  const finMap = new Map(finishedByDay.map((r) => [dayKeyFromSqlDate(r.d), Number(r.c)]));
   const todayKey = dayKeyFromDate(new Date());
   const byDay = days.map((date) => ({
     date,
@@ -1189,7 +1192,7 @@ export async function getPainelByDepartment(
     const meta = totals.get(key) ?? { label, started: 0 };
     meta.started += n;
     totals.set(key, meta);
-    lookup.set(`${dayKeyFromDate(r.d)}::${key}`, n);
+    lookup.set(`${dayKeyFromSqlDate(r.d)}::${key}`, n);
   }
   for (const r of counts) {
     const key = r.deptId || NONE_DEPT_KEY;
@@ -1313,7 +1316,7 @@ export async function getPainelConnections(range: PainelRange): Promise<PainelCo
 
   for (const r of rows) {
     const n = Number(r.c);
-    const date = dayKeyFromDate(r.d);
+    const date = dayKeyFromSqlDate(r.d);
     const connKey = r.chId || r.chName || r.platform || "outros";
     const connLabel =
       [r.chName, r.phone].filter(Boolean).join(" · ") || platformLabel(r.platform ?? "Outros");

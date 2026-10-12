@@ -107,6 +107,18 @@ export function dayKeyFromDate(date: Date, timeZone = PAINEL_TZ): string {
   return `${p.year}-${String(p.month).padStart(2, "0")}-${String(p.day).padStart(2, "0")}`;
 }
 
+/**
+ * Chave YYYY-MM-DD de uma coluna SQL `date` (ex.: `localTs(col)::date`,
+ * `deal_stage_daily_snapshots.date`). O Prisma devolve `date` como `Date` à
+ * meia-noite UTC daquele dia civil: o dia JÁ é o certo e não pode passar por
+ * `dayKeyFromDate`, que converte para São Paulo (UTC-3) e recua um dia
+ * (2026-10-12T00:00Z vira "2026-10-11").
+ */
+export function dayKeyFromSqlDate(value: Date | string): string {
+  if (typeof value === "string") return value.slice(0, 10);
+  return value.toISOString().slice(0, 10);
+}
+
 /** Meia-noite local (TZ) expressa em Date UTC. */
 export function startOfZonedDay(date: Date, timeZone = PAINEL_TZ): Date {
   const p = zonedParts(date, timeZone);
