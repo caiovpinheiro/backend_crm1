@@ -18,7 +18,8 @@ export const maxDuration = 60;
 export async function GET(request: Request) {
   // `Server-Timing`: auth, q-<seção> (uma por seção que rodou; q-shared é a carga
   // compartilhada por tempo/atendentes/departamento/canais), serialize, total.
-  // Seções rodam em paralelo: as fases se sobrepõem. Sem cache de servidor.
+  // Seções rodam em paralelo: as fases se sobrepõem. Sem cache de servidor, exceto
+  // no fallback sem réplica (`PAINEL_PRIMARY_FALLBACK`): q-primary + cache.
   const timing = new ServerTiming();
   return withOrgContext(async () => {
     timing.add("auth", timing.totalMs());
