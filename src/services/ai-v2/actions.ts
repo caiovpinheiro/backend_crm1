@@ -840,6 +840,8 @@ export async function sendV2TextMessage(args: {
   bypassDuplicateGuard?: boolean;
   /** Trechos que a trava anti-repetição não conta (frases de fecho). */
   dedupeIgnore?: readonly string[];
+  /** Aviso de fila, com a conversa sem responsável. */
+  queueNotice?: boolean;
 }): Promise<{ sent: boolean; reason?: string }> {
   if (!args.text.trim()) return { sent: false, reason: "empty" };
   const text = toWhatsAppText(args.text);
@@ -858,7 +860,9 @@ export async function sendV2TextMessage(args: {
     autonomyMode: args.autonomyMode,
     text,
     channel: args.channel === "baileys" ? "baileys" : "meta",
-    bypassAssigneeCheck: false,
+    // Aviso de fila: a conversa está na fila, sem responsável. A trava de
+    // "pessoa já respondeu" continua valendo.
+    bypassAssigneeCheck: args.queueNotice === true,
     humanBehavior: args.humanBehavior ?? v2HumanBehavior({}),
     ...(interactive ? { interactive } : {}),
     ...(args.bypassDuplicateGuard ? { bypassDuplicateGuard: true } : {}),

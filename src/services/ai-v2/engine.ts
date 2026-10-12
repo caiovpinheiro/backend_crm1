@@ -221,6 +221,20 @@ const MEDIA_ASK_TEXT_DEFAULT: Record<string, string> = {
   image: "Não consigo ver imagens por aqui. Pode me escrever o que aparece nela?",
   document: "Não consigo abrir arquivos por aqui. Pode me escrever o que precisa?",
 };
+/**
+ * Aviso de transferência para pessoas com o horário da equipe, quando a
+ * transferência acontece fora dele (feriado, pausa, fim do expediente). Só
+ * a transferência pedida pelo modelo levava o horário; identificação, atalho,
+ * mídia e as outras saíam sem ele e o cliente esperava como se alguém fosse
+ * responder agora. Para outro agente de IA não vale: ele responde.
+ */
+function withTeamHours(message: string, config: V2AgentConfig, destinationType: string | undefined): string {
+  if (destinationType === "ai_agent") return message;
+  const note = outsideHoursNote(config);
+  if (!note || message.includes(note)) return message;
+  return [message.trim(), note].filter(Boolean).join("\n\n");
+}
+
 const MEDIA_NOT_UNDERSTOOD_DEFAULT: Record<string, string> = {
   audio: "Não consegui entender o seu áudio. Pode me escrever o que precisa?",
   image: "Não consegui ler a sua imagem. Pode me escrever o que aparece nela?",
@@ -433,6 +447,28 @@ async function isRepeatedInteractiveReply(conversationId: string, text: string, 
  * transferência entre agentes). Um atalho de palavra-chave do agente novo
  * mandava a resposta fixa em cima da resposta do anterior.
  */
+/**
+ * O agente que passou a conversa avisou o cliente ao transferir (o turno de
+ * transferência dele tem texto)? Transferência transparente não avisa: aí
+ * este agente precisa avisar, senão o cliente vai para a equipe sem saber.
+ * Sem registro, mantém o comportamento anterior (considera avisado).
+ */
+async function previousAgentAnnouncedTransfer(conversationId: string, previousAgentId: string | null | undefined): Promise<boolean> {
+  if (!previousAgentId) return true;
+  try {
+    const t = await (prisma as unknown as {
+      aISimpleTurnLog: { findFirst: (args: unknown) => Promise<{ reply: string | null } | null> };
+    }).aISimpleTurnLog.findFirst({
+      where: { conversationId, agentId: previousAgentId, handoff: true },
+      orderBy: { createdAt: "desc" },
+      select: { reply: true },
+    });
+    return !t || !!t.reply?.trim();
+  } catch {
+    return true;
+  }
+}
+
 async function inboundAlreadyAnswered(conversationId: string, messageIds: string[] | undefined): Promise<boolean> {
   if (!messageIds?.length) return false;
   try {
@@ -883,7 +919,13 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   const transparentTransfer = handedByAnotherAgent && config.entry.onAiTransfer === "continue";
   if (transparentTransfer) traceStep("agente", "Transferência transparente: segue o atendimento sem se apresentar");
   const waitingInQueue = owner === "pessoa" && !handedByAnotherAgent && (await isWaitingInQueue(input.conversationId));
-  const queueMode = config.handoff.whileQueued ?? "notify";
+  // Conversa na fila sem responsável: o agente só manda o aviso de fila (não
+  // assume nem responde, porque a conversa não é dele).
+  const queueMode = resolved?.queueOnly ? "notify" : config.handoff.whileQueued ?? "notify";
+  if (resolved?.queueOnly && !(waitingInQueue && owner === "pessoa")) {
+    traceStep("fila", "Conversa não está mais na fila esperando a equipe → nada a fazer");
+    return { handoff: false, closed: false };
+  }
   if (waitingInQueue) traceStep("fila", `Conversa transferida voltou ao agente com o cliente na fila → "${queueMode === "notify" ? "só avisar" : "responder"}"`);
   if (owner === "pessoa" && !(waitingInQueue && queueMode === "notify")) {
     owner = "agente";
@@ -973,6 +1015,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // Se há vários negócios abertos e o operador configurou "perguntar",
   // tenta interpretar a resposta do cliente como escolha de negócio.
   if (
+    !resolved?.queueOnly &&
     config.dealSelection === "ask" &&
     loadedContext.deals.length > 1 &&
     !loadedContext.selectedDeal &&
@@ -1083,6 +1126,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
           autonomyMode: mapV2AutonomyToPrisma(config.autonomyMode),
           humanBehavior,
           bypassDuplicateGuard: picked.kind !== "first",
+          queueNotice: resolved?.queueOnly === true,
         })
       : { sent: false, reason: "queued_quiet" };
     await releaseToQueue(input.conversationId);
@@ -1351,7 +1395,8 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   }
   if (media && media.action === "handoff") {
     noteV2Fact("handoffCause", "media", { keepFirst: true });
-    const handoffMessage = renderMessage(media.message ?? config.handoff.message, vars, defaultFormatter());
+    const mediaDestinationPlanned = resolveHandoffDestination(config, config.handoff.defaultDestination, counters, resolved!.agentConfigId);
+    const handoffMessage = withTeamHours(renderMessage(media.message ?? config.handoff.message, vars, defaultFormatter()), config, mediaDestinationPlanned.type);
     await sendV2TextMessage({
       conversationId: input.conversationId,
       contactId,
@@ -1361,7 +1406,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       autonomyMode: mapV2AutonomyToPrisma(config.autonomyMode),
       humanBehavior,
     });
-    const mediaDestination = resolveHandoffDestination(config, config.handoff.defaultDestination, counters, resolved!.agentConfigId);
+    const mediaDestination = mediaDestinationPlanned;
     if (mediaDestination.type === "ai_agent") {
       counters.aiTransferCount += 1;
       rememberChainAgent(counters, resolved!.agentConfigId);
@@ -2876,8 +2921,12 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     // ("vou te passar para…") já cobriu — repetir soa como ninguém atender.
     // Se o anterior foi transparente (sem aviso), este aviso sai.
     if (!opts.skipMessage && handedByAnotherAgent && !sentReply && (await inboundAlreadyAnswered(input.conversationId, input.messageIds))) {
-      traceStep("transferência", "Transferência em cadeia logo após receber a conversa: o aviso do agente anterior já cobriu → sem novo aviso");
-      opts = { ...opts, skipMessage: true };
+      if (await previousAgentAnnouncedTransfer(input.conversationId, stateRow?.agentId)) {
+        traceStep("transferência", "Transferência em cadeia logo após receber a conversa: o aviso do agente anterior já cobriu → sem novo aviso");
+        opts = { ...opts, skipMessage: true };
+      } else {
+        traceStep("transferência", "Transferência em cadeia, mas o agente anterior passou a conversa sem avisar → este avisa");
+      }
     }
     if (!opts.skipMessage) {
       // Mensagem do destino (assunto/regra) quando configurada; a tela já
@@ -2890,7 +2939,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
         traceStep("transferência", "Destino trocado: a mensagem do assunto não vale — sai a mensagem padrão de transferência");
       }
       const destinationMessage = !redirected && typeof requested?.message === "string" ? requested.message.trim() : "";
-      const handoffMsg = renderMessage(opts.message || destinationMessage || config.handoff.message, vars, defaultFormatter());
+      const handoffMsg = withTeamHours(renderMessage(opts.message || destinationMessage || config.handoff.message, vars, defaultFormatter()), config, planned.type);
       // O aviso de transferência nunca passa pelo guarda de repetição: o
       // agente anterior (ou este, minutos antes) pode ter mandado o mesmo
       // texto ao transferir, e o cliente ficava sem saber que mudou de mão.
@@ -2898,6 +2947,17 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
         const res = await sendReply(handoffMsg, null, { bypassDuplicateGuard: true });
         if (res.sent) sent = handoffMsg;
         else traceStep("transferência", `Aviso de transferência não saiu (${res.reason ?? "motivo desconhecido"})`);
+      }
+    } else if (planned.type !== "ai_agent") {
+      // Sem aviso de transferência (o anterior ou o atalho já falou), mas o
+      // cliente vai para pessoas fora do horário: o horário sai sozinho.
+      const note = outsideHoursNote(config);
+      if (note && !(sentReply ?? "").includes(note)) {
+        const res = await sendReply(note, null, { bypassDuplicateGuard: true });
+        if (res.sent) {
+          sent = note;
+          traceStep("transferência", "Fora do horário da equipe: sem aviso de transferência, mas o horário vai ao cliente");
+        }
       }
     }
     // Uma pessoa assumiu durante o turno (ou outro processo retomou o turno):
@@ -3093,7 +3153,7 @@ async function handoffAndReply(
   // do aviso do anterior.
   let skipNotice = false;
   const receivedNow = !!stateRow && stateRow.agentId !== resolved.agentConfigId;
-  if (receivedNow && (await inboundAlreadyAnswered(input.conversationId, input.messageIds))) {
+  if (receivedNow && (await inboundAlreadyAnswered(input.conversationId, input.messageIds)) && (await previousAgentAnnouncedTransfer(input.conversationId, stateRow?.agentId))) {
     traceStep("transferência", "Transferência em cadeia logo após receber a conversa: o aviso do agente anterior já cobriu → sem novo aviso");
     skipNotice = true;
   } else if (fallbackDestination.type === "ai_agent" && fallbackDestination.id) {
@@ -3103,13 +3163,18 @@ async function handoffAndReply(
       skipNotice = true;
     }
   }
-  const res = skipNotice
+  // Para pessoas fora do horário: o aviso leva o horário; sem aviso (cadeia),
+  // o horário sai sozinho.
+  const hoursOnly = skipNotice && fallbackDestination.type !== "ai_agent" ? outsideHoursNote(config) : "";
+  if (hoursOnly) traceStep("transferência", "Fora do horário da equipe: sem aviso de transferência, mas o horário vai ao cliente");
+  const notice = skipNotice ? hoursOnly : withTeamHours(message, config, fallbackDestination.type);
+  const res = !notice
     ? { sent: false as const, reason: undefined as string | undefined }
     : await sendV2TextMessage({
         conversationId: input.conversationId,
         contactId,
         agentUserId: resolved!.userId,
-        text: message,
+        text: notice,
         channel: input.channel,
         autonomyMode: mapV2AutonomyToPrisma(config.autonomyMode),
         humanBehavior: v2HumanBehavior(config),
@@ -3168,7 +3233,7 @@ async function handoffAndReply(
     },
     themeId,
     prompt: "handoff",
-    ...(skipNotice ? {} : { reply: message }),
+    ...(notice ? { reply: notice } : {}),
     executedActions: [{ action: { type: "handoff" }, ok: true }],
     discardedActions: [],
     handoff: true,

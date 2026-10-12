@@ -15,6 +15,12 @@ export type ResolvedV2Agent = {
   userId: string;
   agentConfigId: string;
   wasAssigned: boolean;
+  /**
+   * Conversa transferida para pessoas, ainda na fila: o agente que transferiu
+   * só manda o aviso de fila, sem assumir a conversa (ela segue sem
+   * responsável, esperando a equipe).
+   */
+  queueOnly?: boolean;
 };
 
 type ConversationForResolve = {
@@ -130,7 +136,7 @@ export async function resolveV2AgentForConversation(
   // Kill-switch da org (`ai.newAttendanceEnabled`): o v1 não deixa chat novo
   // entrar em Agente IA com ele desligado; o v2 segue a mesma regra.
   if (!(await isAiAttendanceEnabled())) return null;
-  if (await conversationHandedOffToHuman(conv)) return null;
+  if (await conversationHandedOffToHuman(conv)) return queueNoticeAgent(conv.id);
 
   const agents = await (prismaBase as unknown as {
     user: {
@@ -180,6 +186,52 @@ export async function resolveV2AgentForConversation(
     agentConfigId: agent.aiAgentConfig.id,
     wasAssigned: true,
   };
+}
+
+/**
+ * Cliente escrevendo numa conversa que a IA transferiu e que espera na fila
+ * (pendência de distribuição aberta, sem responsável): o agente que
+ * transferiu responde só o aviso de fila, sem assumir. Sem isso o cliente
+ * escrevia na fila e ninguém respondia nada até alguém da equipe pegar.
+ */
+async function queueNoticeAgent(conversationId: string): Promise<ResolvedV2Agent | null> {
+  const db = prismaBase as unknown as {
+    aISimpleConversationState: { findUnique: (args: unknown) => Promise<{ agentId: string | null } | null> };
+    distributionPending: { findFirst: (args: unknown) => Promise<{ id: string } | null> };
+    user: { findFirst: (args: unknown) => Promise<{ id: string; aiAgentConfig?: { id: string } | null } | null> };
+  };
+  try {
+    const state = await db.aISimpleConversationState.findUnique({ where: { conversationId }, select: { agentId: true } });
+    if (!state?.agentId) return null;
+    const pending = await db.distributionPending.findFirst({ where: { status: "PENDING", conversationId }, select: { id: true } });
+    if (!pending) return null;
+    const agent = await db.user.findFirst({
+      where: { type: "AI", aiAgentConfig: { is: { id: state.agentId, active: true, engine: "simple" } } },
+      select: { id: true, aiAgentConfig: { select: { id: true } } },
+    });
+    if (!agent?.aiAgentConfig) return null;
+    return { userId: agent.id, agentConfigId: agent.aiAgentConfig.id, wasAssigned: false, queueOnly: true };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Sem efeito colateral (não atribui nada): a conversa está transferida para
+ * pessoas, sem responsável, esperando na fila — devolve o agente que só
+ * manda o aviso de fila. Usado por quem executa o turno.
+ */
+export async function queueOnlyV2Agent(conversationId: string): Promise<ResolvedV2Agent | null> {
+  try {
+    const conv = await (prismaBase as unknown as {
+      conversation: { findUnique: (args: unknown) => Promise<{ id: string; assignedToId: string | null; closedAt?: Date | null } | null> };
+    }).conversation.findUnique({ where: { id: conversationId }, select: { id: true, assignedToId: true, closedAt: true } });
+    if (!conv || conv.assignedToId) return null;
+    if (!(await conversationHandedOffToHuman(conv))) return null;
+    return queueNoticeAgent(conversationId);
+  } catch {
+    return null;
+  }
 }
 
 export function resetV2AgentResolverCache(): void {
