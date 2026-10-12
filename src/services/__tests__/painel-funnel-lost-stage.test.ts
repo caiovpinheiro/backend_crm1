@@ -68,6 +68,8 @@ function matches(d: Deal, where: Cond): boolean {
 
 function answerRaw(sql: string): unknown[] {
   h.sqls.push(sql);
+  // Saídas por etapa (inflow/outflow): fora do escopo deste teste.
+  if (sql.includes('x."exitedAt"')) return [];
   if (sql.includes("DISTINCT ON")) {
     // `entered`: eventos no período, 1ª entrada por (negócio, etapa).
     const seen = new Set<string>();
