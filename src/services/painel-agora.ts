@@ -12,7 +12,17 @@ import {
 
 export type PainelAgora = {
   asOf: string;
+  /**
+   * Estoque atual (ignora o período): TODAS as conversas abertas, de qualquer
+   * data, cuja última mensagem é do cliente (`lastMessageDirection = in`).
+   */
   awaitingReply: number;
+  /**
+   * Estoque atual: conversas abertas com responsável (humano ou IA) e última
+   * mensagem nossa (`lastMessageDirection = out`: resposta humana; da IA/automação
+   * só com `conversation.countAgentReplyAsAnswered`). Não é a coorte do dia de
+   * `volume.openStarted`.
+   */
   inService: number;
   longestWait: {
     ms: number;

@@ -121,13 +121,26 @@ export type PainelVolumePartition = {
 export type PainelVolume = {
   /** Criadas no período (coorte). Ver `PainelVolumePartition`. */
   started: { value: number; delta: PainelDelta };
-  /** Encerradas no período, de qualquer criação (fluxo). NÃO é subconjunto de `started`. */
+  /**
+   * Encerradas no período, de qualquer criação (fluxo). NÃO é subconjunto de
+   * `started`. Encerrar = `status RESOLVED` + `closedAt` (gravado por todo
+   * encerramento do Bwipo: atendente, automação, IA). "Acompanhar" não encerra
+   * (fica OPEN), e conversa encerrada só em outro app no mesmo número não chega.
+   */
   finished: { value: number; delta: PainelDelta };
   /** Coorte `started` ainda aberta (status não RESOLVED e sem `closedAt`). */
   stillOpen: { value: number; delta: PainelDelta };
-  /** Abertas do período que já tiveram resposta humana. */
+  /**
+   * Abertas do período (coorte `started`) que já tiveram resposta humana:
+   * `hasHumanReply` ou mensagem pública de saída `authorType = human` (inclui o
+   * eco do app do celular/outro CRM). Resposta da IA/automação não conta.
+   */
   openStarted: { value: number; delta: PainelDelta };
-  /** Abertas do período ainda aguardando primeira resposta humana. */
+  /**
+   * Abertas do período sem nenhuma resposta humana ainda — inclusive as que
+   * estão só com a IA/automação. NÃO é o "Aguardando" do Agora: lá entram todas
+   * as abertas (de qualquer data) cuja última mensagem é do cliente.
+   */
   openWaiting: { value: number; delta: PainelDelta };
   /** Aditivo: como `started` e `finished` se decompõem. */
   partition: PainelVolumePartition;
@@ -653,6 +666,27 @@ function statsFromMs(values: number[]): PainelTimeStat {
   };
 }
 
+/**
+ * "Já teve resposta humana" para `openStarted`/`openWaiting`: a flag
+ * `hasHumanReply` OU uma mensagem pública de saída com `authorType = human` —
+ * a mesma definição de primeira resposta do bloco Tempo (`firstReplyPairs`).
+ * Só a flag não basta: o eco de mensagem enviada por outro app no mesmo número
+ * (`smb_message_echoes`/`message_echoes`: app do WhatsApp Business no celular
+ * ou outro CRM) grava a mensagem como humana, mas não marca a conversa. Numa
+ * operação que responde por lá, todas as conversas do dia ficavam "aguardando".
+ * Índice (conversationId, authorType, createdAt); o OR avalia a flag primeiro.
+ */
+function humanOutboundExists(orgId: string): Prisma.Sql {
+  return Prisma.sql`EXISTS (
+    SELECT 1 FROM messages hm
+    WHERE hm."conversationId" = conv.id
+      AND hm."organizationId" = ${orgId}
+      AND hm.direction = 'out'
+      AND hm."authorType" = 'human'::"MessageAuthorType"
+      AND hm."isPrivate" = false
+  )`;
+}
+
 export async function getPainelVolume(
   range: PainelRange,
   clock: ClockMode,
@@ -678,11 +712,11 @@ export async function getPainelVolume(
         )::bigint AS "stillOpen",
         COUNT(*) FILTER (
           WHERE conv.status <> 'RESOLVED'::"ConversationStatus" AND conv."closedAt" IS NULL
-            AND conv."hasHumanReply" = true
+            AND (conv."hasHumanReply" = true OR ${humanOutboundExists(orgId)})
         )::bigint AS "openStarted",
         COUNT(*) FILTER (
           WHERE conv.status <> 'RESOLVED'::"ConversationStatus" AND conv."closedAt" IS NULL
-            AND conv."hasHumanReply" = false
+            AND conv."hasHumanReply" = false AND NOT ${humanOutboundExists(orgId)}
         )::bigint AS "openWaiting",
         COUNT(*) FILTER (
           WHERE conv.status = 'RESOLVED'::"ConversationStatus"
