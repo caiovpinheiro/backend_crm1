@@ -346,13 +346,13 @@ describe("getPainelFunnel — entradas e saídas por etapa", () => {
     expect(sums(a).inflow).toBe(a.entered);
   });
 
-  it("a seção funnel faz uma consulta a mais (saídas), sem N+1", async () => {
+  it("a seção funnel tem número fixo de consultas, sem N+1", async () => {
     await run();
-    // Antes: stage.findMany, deal.groupBy, deal.aggregate (Perdido), user.findMany
-    // e 3 $queryRaw (entradas, entradas posteriores, novos) = 7. Agora + a das
-    // saídas = 8.
-    expect(h.calls).toBe(8);
-    expect(h.sqls).toHaveLength(4);
+    // stage.findMany, deal.groupBy, deal.aggregate (Perdido), user.findMany e
+    // 3 $queryRaw (entradas, saídas, entradas posteriores) = 7. Os novos saem
+    // das entradas por criação, sem consulta própria.
+    expect(h.calls).toBe(7);
+    expect(h.sqls).toHaveLength(3);
     // Mais negócios/etapas não mudam o número de consultas.
     h.calls = 0;
     h.sqls = [];
@@ -361,6 +361,6 @@ describe("getPainelFunnel — entradas e saídas por etapa", () => {
       h.events.push(ev(`n${i}`, "A", "B", 3), ev(`n${i}`, "B", "C", 4));
     }
     await run();
-    expect(h.calls).toBe(8);
+    expect(h.calls).toBe(7);
   });
 });
