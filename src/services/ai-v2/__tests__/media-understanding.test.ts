@@ -12,7 +12,7 @@ vi.mock("@/services/ai/provider", () => ({
 
 import { transcribeWithGroq } from "@/lib/groq-transcribe";
 import { generateWithTools, transcribeWithOpenAI } from "@/services/ai/provider";
-import { understandMedia } from "../media-understanding";
+import { isBareFileName, readDocumentText, understandMedia } from "../media-understanding";
 
 const base = { organizationId: "org", userId: "u", model: "gpt-4o", message: { id: "m1", messageType: "ptt", mediaUrl: "https://x/a.ogg", content: "[Áudio]" } };
 
@@ -43,5 +43,25 @@ describe("understandMedia", () => {
     const r = await understandMedia({ ...base, message: { ...base.message, messageType: "image" }, kind: "image", apiKey: "sk-agente" });
     expect(r.text).toContain("senha expirada");
     expect((generateWithTools as ReturnType<typeof vi.fn>).mock.calls[0][0].apiKey).toBe("sk-agente");
+  });
+});
+
+describe("documento do cliente", () => {
+  it("nome de arquivo sozinho não é texto do cliente", () => {
+    expect(isBareFileName("in_1791805923867_x.pdf")).toBe(true);
+    expect(isBareFileName("Fatura Outubro.pdf")).toBe(false);
+    expect(isBareFileName("segue o arquivo")).toBe(false);
+    expect(isBareFileName(null)).toBe(false);
+  });
+
+  it("lê o texto do documento; arquivo sem texto volta erro (o agente pede print)", async () => {
+    const ok = await readDocumentText(Buffer.from("Valor do documento\nR$ 300,00\nDesconto de R$ 120,00 até 13/10"), "text/plain", "fatura.txt");
+    expect(ok.text).toContain("Desconto de R$ 120,00 até 13/10");
+    const empty = await readDocumentText(Buffer.from(""), "application/pdf", "escaneado.pdf");
+    expect(empty.text).toBeNull();
+    expect(empty.error).toMatch(/sem texto legível/);
+    const long = await readDocumentText(Buffer.from("linha de conteúdo\n".repeat(800)), "text/plain", null);
+    expect(long.text!.length).toBeLessThan(6100);
+    expect(long.text).toContain("[…documento cortado]");
   });
 });

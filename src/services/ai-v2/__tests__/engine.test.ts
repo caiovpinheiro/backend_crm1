@@ -2124,6 +2124,29 @@ describe("processV2Turn — correções do motor", () => {
     expect(sentTexts()).toEqual(["Até mais!"]);
   });
 
+  it("documento só com o nome do arquivo: não é texto do cliente; com “ler”, o conteúdo vai ao modelo", async () => {
+    const docTurn = async (args: { where?: { id?: { in?: string[] } } }) =>
+      args?.where?.id?.in ? [{ messageType: "document", createdAt: new Date("2026-10-12T12:00:00Z") }] : [];
+    // "Pedir texto": o nome do arquivo não conta como mensagem escrita.
+    const ask = baseConfig({ media: { ...baseConfig().media, document: { action: "ask_text", askTextMessage: "Pode escrever a dúvida?" } } } as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: ask, active: true });
+    mocks.messageFindMany.mockImplementation(docTurn);
+    await run("fatura_outubro.pdf", { messageIds: ["m-d"], messageType: "document" });
+    expect(mocks.callLLM).not.toHaveBeenCalled();
+    expect(sentTexts()).toEqual(["Pode escrever a dúvida?"]);
+
+    // "Ler o documento": o texto lido entra no turno.
+    mocks.sendText.mockClear();
+    const read = baseConfig({ media: { ...baseConfig().media, document: { action: "describe" } } } as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: read, active: true });
+    mocks.enrichMedia.mockResolvedValueOnce({ userMessage: '[Documento enviado pelo cliente ("fatura_outubro.pdf")]: Valor do documento R$ 300,00', understood: 1, failed: 0 });
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "O valor do documento é R$ 300,00." }));
+    await run("fatura_outubro.pdf", { messageIds: ["m-d"], messageType: "document" });
+    expect(mocks.enrichMedia).toHaveBeenCalled();
+    expect(JSON.stringify(mocks.callLLM.mock.calls[0])).toContain("Valor do documento R$ 300,00");
+    mocks.messageFindMany.mockReset();
+  });
+
   it("só áudio com \"pedir texto\": pede para escrever", async () => {
     const config = baseConfig({ media: { ...baseConfig().media, audio: { action: "ask_text", askTextMessage: "Pode escrever?" } } } as Partial<V2AgentConfig>);
     mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
