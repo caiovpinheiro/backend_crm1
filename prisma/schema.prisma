@@ -2686,6 +2686,7 @@ model DealEvent {
   @@index([organizationId])
   @@index([dealId, createdAt])
   @@index([userId])
+  @@index([organizationId, type, createdAt], map: "deal_events_org_type_created_idx")
   @@map("deal_events")
 }
 

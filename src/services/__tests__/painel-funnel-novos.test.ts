@@ -272,6 +272,31 @@ describe("getPainelFunnel — novos batem com os criados nas etapas", () => {
     expect(h.sqls.some((s) => s.includes("AS cnt"))).toBe(false);
   });
 
+  it("toda leitura de deal_events por período usa org + tipo + createdAt (índice deal_events_org_type_created_idx)", async () => {
+    await run();
+    const enteredSql = h.sqls.find((s) => s.includes("DISTINCT ON") && !s.includes("exitedAt"))!;
+    const exitSql = h.sqls.find((s) => s.includes('x."exitedAt"'))!;
+    const laterSql = h.sqls.find((s) => !s.includes("DISTINCT ON"))!;
+    // Recorta cada `FROM deal_events e` (alias `e`: as varreduras por período;
+    // `e2`/`e3` são por negócio, no índice (dealId, createdAt)) até o fim do WHERE.
+    const scans = (sql: string) =>
+      sql
+        .split(/FROM deal_events e\s/)
+        .slice(1)
+        .map((chunk) => chunk.split(/UNION ALL|\) x/)[0]!);
+    const all = [...scans(enteredSql), ...scans(exitSql), ...scans(laterSql)];
+    // Entradas: STAGE_CHANGED + CREATED; saídas: STAGE_CHANGED; posteriores: os dois.
+    expect(all).toHaveLength(5);
+    for (const where of all) {
+      expect(where).toContain('e."organizationId" = ?');
+      expect(where).toMatch(/e\.type = '(STAGE_CHANGED|CREATED)'/);
+      expect(where).toContain('e."createdAt" >= ?');
+    }
+    // Os criados sem evento leem deal_events por negócio, não por período.
+    expect(enteredSql).toContain('e2."dealId" = d0.id');
+    expect(enteredSql).toContain('e3."dealId" = d0.id');
+  });
+
   it("negócio com CREATED utilizável não é contado de novo pelo ramo dos sem evento", async () => {
     h.deals = [deal("comEvento", "B", 2)];
     h.events = [
