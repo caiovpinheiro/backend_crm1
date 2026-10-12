@@ -183,7 +183,11 @@ function removeSpan(unitText: string, flagged: string): string | null {
   while (start > 0 && WRAP_CHARS.includes(unitText[start - 1]) && unmatchedWrap(unitText.slice(start, end), unitText[start - 1], CLOSER[unitText[start - 1]] ?? unitText[start - 1])) start -= 1;
   let rest = `${unitText.slice(0, start)} ${unitText.slice(end)}`;
   rest = rest
+    // "Ana, <trecho cortado>, mas o prazo…": sobrava "Ana,, mas o prazo…".
+    // A oposição era ao trecho que saiu; sem ele, fica "Ana, o prazo…".
+    .replace(/([,;:])\s*,\s*(?:mas|por[ée]m|entretanto|contudo|no entanto)\s+/gi, "$1 ")
     .replace(/\s+([.,;:!?])/g, "$1")
+    .replace(/([,;:])(?:\s*[,;:])+/g, "$1")
     .replace(/[,;:]\s*([.!?])/g, "$1")
     .replace(/\s{2,}/g, " ")
     .replace(/(?:^|\s)(?:e|ou|mas)\s*([.!?])?\s*$/i, "$1")

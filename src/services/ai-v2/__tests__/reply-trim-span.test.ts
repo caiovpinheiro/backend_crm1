@@ -82,3 +82,12 @@ describe("corte que tira a parte que respondia a pergunta", () => {
     expect(trimDroppedTheAnswer("E aí?", original, "Ok.")).toBe(false);
   });
 });
+
+describe("trecho cortado entre o vocativo e o “mas”", () => {
+  it("não sobra vírgula dupla nem “mas” sem o que ele opunha", async () => {
+    const { trimUnsupportedSentences } = await import("../reply-trim");
+    const reply = "Ana, um projeto de leitura em grupo pode contar como atividade de extensão cultural, mas o enquadramento precisa ser confirmado conforme as regras da sua turma. Fale com o responsável para validar.";
+    const r = trimUnsupportedSentences(reply, ["um projeto de leitura em grupo pode contar como atividade de extensão cultural"]);
+    expect(r?.reply).toBe("Ana, o enquadramento precisa ser confirmado conforme as regras da sua turma. Fale com o responsável para validar.");
+  });
+});
