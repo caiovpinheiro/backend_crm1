@@ -1184,6 +1184,22 @@ describe("escopo e repetição", () => {
     expect(r.output.reply).toBe("Seu e-mail cadastrado é a***@exemplo.com. Use ele para entrar no painel.");
   });
 
+  it("dado que o cliente digitou e o modelo repete por extenso (lido do cadastro): não é barrado; sai mascarado", async () => {
+    (generateWithTools as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: "Use o e-mail ana.lima@exemplo.com para entrar no painel, com a senha que você cadastrou.", actions: [] })))
+      .mockResolvedValueOnce(makeLLMResponse('{"unsupported": []}'));
+    const r = await callV2LLM({
+      agentId: "agent-1", config: baseConfig({ groundingCheck: "model" } as Partial<V2AgentConfig>),
+      context: { contact: { Nome: "Ana", "E-mail": "ana.lima@exemplo.com" }, citableContact: { Nome: "Ana", "E-mail": "ana.lima@exemplo.com" }, deals: [], selectedDeal: null, fields: baseConfig().contextFields },
+      userMessage: "tentei entrar com ana.lima@exemplo.com e não foi", stage: "active",
+    });
+    const calls = (generateWithTools as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls).toHaveLength(2);
+    expect(calls[1][0].messages[0].content as string).not.toContain("ana.lima@exemplo.com");
+    expect(r.output.reply).toBe("Use o e-mail a***@exemplo.com para entrar no painel, com a senha que você cadastrou.");
+    expect(r.output.handoff).toBe(false);
+  });
+
   it("material do assunto entra primeiro e inteiro, mesmo com nota menor que a de um vizinho", async () => {
     const { knowledgeDocTitleMapByIds } = await import("@/services/ai/knowledge-docs");
     (knowledgeDocTitleMapByIds as ReturnType<typeof vi.fn>).mockResolvedValueOnce(new Map([["doc-theme", "Primeiro pedido"], ["doc-other", "Segurança da conta"]]));
