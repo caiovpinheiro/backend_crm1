@@ -67,3 +67,18 @@ describe("afirmação marcada que abrange duas frases", () => {
     expect(r?.reply).toBe("Confira se o seu e-mail principal está correto e atualizado no cadastro.");
   });
 });
+
+describe("corte que tira a parte que respondia a pergunta", () => {
+  it("o que sobra não fala de nada do que o cliente perguntou: o corte não vale", async () => {
+    const { trimDroppedTheAnswer } = await import("../reply-trim");
+    const question = "O conteúdo da avaliação vai ser em cima das aulas que vi na plataforma de vídeos?";
+    const original = "A avaliação final compõe a nota junto com as atividades. Para saber os conteúdos cobrados, acompanhe as aulas da plataforma de vídeos da sua turma.";
+    expect(trimDroppedTheAnswer(question, original, "A avaliação final compõe a nota junto com as atividades.")).toBe(false);
+    const q2 = "Os conteúdos vão ser em cima das aulas que vi na plataforma de vídeos?";
+    expect(trimDroppedTheAnswer(q2, original, "A avaliação final compõe a nota junto com as atividades.")).toBe(true);
+    // O que sobrou ainda fala do que foi perguntado: o corte vale.
+    expect(trimDroppedTheAnswer(q2, original, "Os conteúdos seguem as aulas da turma.")).toBe(false);
+    // Pergunta curta, sem palavras de conteúdo suficientes: não decide.
+    expect(trimDroppedTheAnswer("E aí?", original, "Ok.")).toBe(false);
+  });
+});

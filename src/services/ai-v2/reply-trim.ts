@@ -11,6 +11,8 @@
  * cliente era transferido). Nenhum domínio de cliente.
  */
 
+import { sameWordStem } from "./themes";
+
 export type TrimResult = { reply: string; removed: string[] };
 
 /** Começo de frase que é só cortesia (não conta como conteúdo). */
@@ -121,6 +123,35 @@ function foldChars(s: string): { folded: string; map: number[] } {
     }
   }
   return { folded: out.join(""), map };
+}
+
+const QUESTION_STOP = new Set([
+  "para", "como", "qual", "quais", "quando", "onde", "porque", "pois", "esse", "essa", "esses", "essas", "isso", "este", "esta", "isto",
+  "aqui", "ainda", "tambem", "minha", "minhas", "meus", "voce", "voces", "favor", "gostaria", "queria", "quero", "preciso", "sobre",
+  "fazer", "pode", "posso", "consigo", "tenho", "fica", "ficar", "seria", "estou", "sera", "caso", "certo", "obrigado", "obrigada",
+]);
+
+function contentStems(text: string): string[] {
+  return norm(text)
+    .replace(/\[[^\]]*\]:?/g, " ")
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter((w) => w.length >= 4 && !QUESTION_STOP.has(w));
+}
+
+/**
+ * O corte tirou justamente a parte que respondia a pergunta: a resposta
+ * original falava do que o cliente perguntou (2+ palavras da pergunta) e o
+ * que sobrou não fala de nada disso. Mandar o resto parecia resposta e não
+ * respondia ("o conteúdo cobrado é o das aulas X?" → "a avaliação compõe a nota").
+ */
+export function trimDroppedTheAnswer(question: string, original: string, trimmed: string): boolean {
+  const q = [...new Set(contentStems(question))];
+  if (q.length < 2) return false;
+  const hits = (text: string) => {
+    const words = contentStems(text);
+    return q.filter((w) => words.some((x) => sameWordStem(w, x))).length;
+  };
+  return hits(original) >= 2 && hits(trimmed) === 0;
 }
 
 const WRAP_CHARS = "*_~`\"“”";

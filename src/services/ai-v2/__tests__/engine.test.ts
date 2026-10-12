@@ -3169,6 +3169,32 @@ describe("processV2Turn — decisões sem cobertura", () => {
     expect(mocks.simpleHandoff).toHaveBeenCalledTimes(1);
   });
 
+  it("atalho já respondeu nesta conversa: o pedido de identificação sai sem as boas-vindas", async () => {
+    setConfig({ entry: { confirmContact: false, onDealNotFound: "ask_identification", openingEnabled: true, openingMessage: "Olá, eu sou a assistente virtual.", identificationMessage: "Me passa o seu e-mail?" } } as Partial<V2AgentConfig>);
+    mocks.getState.mockResolvedValue(makeState("idle", "agente", { guidanceGiven: true }));
+    mocks.loadContext.mockResolvedValue({ contact: { Nome: "João" }, contactRaw: { id: "contact-1", name: "João" }, deals: [], selectedDeal: null, dealId: undefined, contactId: "contact-1" });
+    await run("o aplicativo e o site");
+    expect(sentTexts()[0]).toBe("Me passa o seu e-mail?");
+  });
+
+  it("resposta curta a uma pergunta, sem assunto ainda: o assunto sai da mensagem anterior do cliente", async () => {
+    setConfig({ themes: [
+      { id: "troca", name: "Troca de produto", instructions: "INSTRUCAO-TROCA", when: ["troca"] },
+      { id: "novo", name: "Primeiro pedido", instructions: "INSTRUCAO-PRIMEIRO-PEDIDO", when: ["primeiro pedido"] },
+    ] } as unknown as Partial<V2AgentConfig>);
+    mocks.getState.mockResolvedValue(makeState("active"));
+    mocks.messageFindFirst.mockImplementation((async (args: { where?: { direction?: string } }) => {
+      if (args?.where?.direction === "out") return { content: "Você já é cliente ou é o seu primeiro pedido?\n1. Já sou cliente\n2. Primeiro pedido", createdAt: new Date("2026-10-12T12:00:00Z") };
+      if (args?.where?.direction === "in") return { content: "quero fazer a troca de um produto que veio com defeito" };
+      return null;
+    }) as never);
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "Certo." }));
+    await run("Já sou cliente", { messageIds: ["m-2"] });
+    expect(mocks.logTurn.mock.lastCall![0].themeId).toBe("troca");
+    mocks.messageFindFirst.mockReset();
+    mocks.messageFindFirst.mockImplementation(async () => null);
+  });
+
   it("boas-vindas configuradas saem antes da confirmação do cadastro e antes do pedido de identificação", async () => {
     setConfig({ entry: { confirmContact: true, onDealNotFound: "ask_identification", openingEnabled: true, openingMessage: "Olá, eu sou a assistente virtual." } } as Partial<V2AgentConfig>);
     mocks.getState.mockResolvedValue(null);

@@ -122,6 +122,26 @@ export function agentAskedQuestion(lastAgentMessage: string | null | undefined, 
   return last.endsWith("?") && !HELP_OFFER.test(foldText(last));
 }
 
+/**
+ * Texto usado para escolher o assunto. Resposta curta a uma pergunta do
+ * agente (ou da resposta fixa de um atalho), numa conversa ainda sem assunto,
+ * não diz nada sozinha: "Já sou cliente", "Sim", "o segundo". Escolhida sozinha, caía
+ * no assunto que mais lembrava a palavra. Vai junto com a mensagem anterior
+ * do cliente, que trazia o pedido.
+ */
+export function themeTextForSelection(args: {
+  message: string;
+  previousClientMessage?: string | null;
+  answeringQuestion: boolean;
+  hasCurrentTheme: boolean;
+  shortMessageWords: number;
+}): { text: string; combined: boolean } {
+  const prev = args.previousClientMessage?.trim();
+  if (!prev || args.hasCurrentTheme || !args.answeringQuestion) return { text: args.message, combined: false };
+  if (!isShortFollowUp(args.message, args.shortMessageWords) || changesSubject(args.message)) return { text: args.message, combined: false };
+  return { text: `${prev}\n${args.message}`, combined: true };
+}
+
 /** O cliente avisa que muda de assunto ("outra dúvida", "mudando de assunto"). */
 const SUBJECT_CHANGE = /\b(?:outro assunto|outra (?:duvida|coisa|questao|pergunta)|mudando de assunto|mudar de assunto|aproveitando|alem disso|tambem (?:queria|quero|preciso))\b/;
 
