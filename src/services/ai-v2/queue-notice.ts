@@ -37,6 +37,13 @@ export const QUEUE_NOTICES: Record<Exclude<QueueNoticeKind, "first">, string[]> 
 /** Mensagens neutras seguidas dentro disto não recebem aviso de novo. */
 export const QUEUE_NOTICE_QUIET_MS = 20_000;
 
+/**
+ * Agradecimento ou "ok" logo depois do aviso de transferência ou de fila:
+ * o cliente só respondeu ao aviso. Mandar o aviso de fila inteiro de novo
+ * (com horário e tudo) parecia robô respondendo a "obrigada".
+ */
+export const QUEUE_COURTESY_QUIET_MS = 15 * 60_000;
+
 /** Aviso padrão para quem escreve enquanto espera na fila. */
 export const QUEUED_MESSAGE_DEFAULT = "Você já está na fila de atendimento. Em instantes alguém da equipe continua com você por aqui.";
 /** Fora do horário não se promete "em instantes": a equipe segue no próximo horário. */
@@ -81,8 +88,11 @@ export function pickQueueNotice(args: {
   outsideHours?: boolean;
   /** Texto da empresa para cada tipo; substitui as variantes padrão. */
   overrides?: QueueNoticeOverrides;
+  /** A mensagem é só cortesia ("obrigada", "ok", "tá bom"). */
+  courtesy?: boolean;
 }): { text: string; kind: QueueNoticeKind } | null {
   const now = args.now ?? new Date();
+  if (args.courtesy && args.lastReplyAt && now.getTime() - args.lastReplyAt.getTime() < QUEUE_COURTESY_QUIET_MS) return null;
   const repeats = (t: string) => !!args.lastReply && isNearDuplicateReply(t, args.lastReply);
   const variants = (k: Exclude<QueueNoticeKind, "first">) => {
     const custom = args.overrides?.[k]?.trim();

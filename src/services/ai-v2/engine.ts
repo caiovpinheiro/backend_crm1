@@ -1111,11 +1111,12 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       lastReply: last?.content ?? null,
       lastReplyAt: last?.createdAt ?? null,
       outsideHours: !queueWithinHours,
+      courtesy: isShortAckText(input.userMessage),
     });
     const hoursNote = picked?.kind === "first" ? outsideHoursNote(config) : "";
     const notice = picked ? [picked.text, hoursNote].filter(Boolean).join("\n\n") : "";
     if (picked) traceStep("fila", `Aviso de fila (${picked.kind === "first" ? "primeiro" : picked.kind === "cancel" ? "pedido de cancelar" : picked.kind === "upset" ? "cliente insatisfeito" : picked.kind === "call" ? "cliente chamando" : "nova mensagem"})`);
-    else traceStep("fila", "Mensagens seguidas em poucos segundos: o aviso anterior vale");
+    else traceStep("fila", isShortAckText(input.userMessage) ? "Cliente só agradeceu ou confirmou logo depois do aviso → sem novo aviso" : "Mensagens seguidas em poucos segundos: o aviso anterior vale");
     const res = picked
       ? await sendV2TextMessage({
           conversationId: input.conversationId,

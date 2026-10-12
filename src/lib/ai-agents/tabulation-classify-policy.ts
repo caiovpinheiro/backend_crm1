@@ -37,6 +37,7 @@ const ACK_WORDS = new Set([
   "obgg",
   "vlw",
   "valeu",
+  "tabom",
   "thanks",
   "thank",
   "thx",
