@@ -186,14 +186,31 @@ export type PainelEvolution = {
   points: { date: string; incomplete: boolean; byStage: Record<string, number> }[];
 };
 
+/**
+ * Linha de "Ganhos por agente". Entram os usuários da org com `type = HUMAN` e
+ * `isSuperAdmin = false` — o mesmo recorte de "Atendentes" no Agora. Agentes de
+ * IA (`type = AI`) e a equipe EduIT ficam de fora. O schema não tem marca de
+ * "usuário de sistema/integração": uma conta humana usada por integração ou
+ * importação (ex.: dona de negócios importados) aparece como qualquer agente.
+ */
 export type PainelAgentRow = {
   id: string;
   name: string;
+  /** Soma de `value` dos negócios GANHOS no período (`closedAt` no período), donos = este usuário. */
   wonValue: number;
+  /** Negócios GANHOS no período. */
   wonCount: number;
+  /** ganhos / (ganhos + perdidos) do período, em %; null sem fechamento. */
   conversion: number | null;
   ticket: number | null;
+  /**
+   * Carteira aberta AGORA: negócios com `status = OPEN` cujo dono é este usuário,
+   * nos filtros estruturais do painel (funil, etapa, tag, origem). NÃO depende do
+   * período nem de atividade no dia — é estoque, não "ativos hoje". O nome do
+   * campo fica por compatibilidade; o rótulo certo na tela é "Em aberto".
+   */
   openToday: number;
+  /** Sem ganho, sem perda no período e sem negócio aberto. */
   zeroActivity: boolean;
 };
 
@@ -1098,6 +1115,7 @@ export async function getPainelAgents(f: PainelDealFilters): Promise<PainelAgent
   };
 
   const [users, won, lost, open] = await Promise.all([
+    // Mesmo recorte de atendentes do Agora (`painel-agora.ts`): só humanos, sem super-admin.
     db().user.findMany({
       where: { organizationId: orgId, type: "HUMAN", isSuperAdmin: false },
       select: { id: true, name: true },
@@ -1114,6 +1132,7 @@ export async function getPainelAgents(f: PainelDealFilters): Promise<PainelAgent
       where: and(structural, lostCond),
       _count: { _all: true },
     }),
+    // Carteira aberta atual (`openToday`): sem recorte de data, de propósito.
     db().deal.groupBy({
       by: ["ownerId"],
       where: and(structural, { status: "OPEN" as DealStatus }),
