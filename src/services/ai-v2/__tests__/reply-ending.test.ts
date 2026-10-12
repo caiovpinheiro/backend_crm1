@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { applyReplyEnding, classifyReply, effectiveReplyEnding, hasReplyEnding } from "../reply-ending";
+import { applyReplyEnding, classifyReply, effectiveReplyEnding, hasReplyEnding, withoutChoiceQuestionAfterSteps } from "../reply-ending";
 
 const ending = {
   procedure: { enabled: true, phrases: ["Faz esses passos e me avisa se funcionou.", "Conseguiu fazer?"] },
@@ -57,3 +57,16 @@ describe("tipo de fecho — tutorial sem lista numerada e material que segue a r
   });
 });
 
+
+describe("passo a passo que termina perguntando qual caminho o cliente usa", () => {
+  const steps = "No aplicativo, faça assim:\n\n1️⃣ Abra o aplicativo e toque em Pedidos.\n2️⃣ Escolha o pedido.\n3️⃣ Toque em Detalhes.\n\nSe estiver pelo site, acesse: https://loja.exemplo.com/";
+  it("a pergunta de escolha depois dos passos sai; o resto fica", () => {
+    expect(withoutChoiceQuestionAfterSteps(`${steps}\n\nVocê está usando o aplicativo ou o site?`)).toBe(steps);
+  });
+  it("fica: pedido de dado, pergunta sem escolha, resposta sem passos, pergunta que é passo", () => {
+    expect(withoutChoiceQuestionAfterSteps(`${steps}\n\nQual é o número do seu pedido ou o seu e-mail?`)).toBeNull();
+    expect(withoutChoiceQuestionAfterSteps(`${steps}\n\nAparece alguma mensagem de erro?`)).toBeNull();
+    expect(withoutChoiceQuestionAfterSteps("O prazo é de 7 dias.\n\nVocê comprou pelo aplicativo ou pelo site?")).toBeNull();
+    expect(withoutChoiceQuestionAfterSteps(`${steps}`)).toBeNull();
+  });
+});

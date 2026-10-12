@@ -41,7 +41,7 @@ import { isConfusionMessage, rephraseAfterConfusion } from "./confusion";
 import { answersBeforeHandoff, applyNoSourceGuard, conditionalHandoff, handoffExplanation, type V2PrefetchFact } from "./no-source";
 import { NONSENSE_LIMIT_REASON } from "./limits";
 import { applyV2Tabulation } from "./tabulation";
-import { applyReplyEnding, asksClient, classifyReply, effectiveReplyEnding, isGreetingOnlyReply, replyEndingButtons, replyEndingPhrases, withoutReplyEndings } from "./reply-ending";
+import { withoutChoiceQuestionAfterSteps, applyReplyEnding, asksClient, classifyReply, effectiveReplyEnding, isGreetingOnlyReply, replyEndingButtons, replyEndingPhrases, withoutReplyEndings } from "./reply-ending";
 import { hasSearchableQuestion, knowledgeChunkTexts, repeatFallback } from "./ground-reply";
 import { loadPriorV2Summary, summaryEnabled, updateRunningSummary, writeV2Summary, SUMMARY_MESSAGE_TYPE } from "./summary";
 import { looksLikeSystemError, saysTriedAndFailed } from "./retry-signal";
@@ -2525,6 +2525,15 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   if (replyText.trim() && classifyReply(replyText) === "procedure") counters.guidanceGiven = true;
   const courtesyInbound = isShortAckText(input.userMessage);
   const endingAllowed = !anyHandoff && !anyClose && askOptions.length === 0 && (stage as V2Stage) !== "confirming" && !llmOutput.outOfScope && !noSourceApplied && !conditionalWait && !courtesyInbound && !humanRequestOffer;
+  // Passo a passo que termina com "pelo aplicativo ou pelo site?": a escolha
+  // sai e o fecho de passo a passo ("deu certo?") entra no lugar.
+  if (endingAllowed && replyText.trim()) {
+    const trimmedQuestion = withoutChoiceQuestionAfterSteps(replyText);
+    if (trimmedQuestion) {
+      traceStep("resposta", "Passo a passo terminava perguntando qual caminho o cliente usa → pergunta tirada; entra o fecho de passo a passo");
+      replyText = trimmedQuestion;
+    }
+  }
   if (endingAllowed && !materialFollows && replyText.trim()) {
     const ending = applyReplyEnding({
       reply: replyText,
