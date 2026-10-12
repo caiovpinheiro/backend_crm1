@@ -1819,6 +1819,12 @@ export async function callV2LLM(args: {
     // Tempo verbal x data: "os encontros foram realizados de 06/11 a 09/11"
     // com 06/11 ainda por vir. Quando é só o verbo, conserta; senão a frase
     // sai (regra em `unsupportedOf`).
+    // O modelo também lê o cadastro por extenso e às vezes repete o valor
+    // real (o e-mail que o cliente digitou) em vez do marcador: com as fontes
+    // marcadas, a frase com o e-mail certo saía como "sem fonte". A resposta
+    // ganha o mesmo marcador antes da conferência; na saída ele vira a versão
+    // mascarada, como quando o modelo usa o marcador.
+    if (vault.size > 0) r.output = { ...r.output, reply: known(r.output.reply) };
     for (const t of tenseMismatches(r.output.reply, new Date(), tz)) {
       if (!t.fixed) continue;
       r.output = { ...r.output, reply: r.output.reply.replace(t.sentence, t.fixed) };
