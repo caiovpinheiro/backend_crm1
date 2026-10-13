@@ -5,7 +5,7 @@
  * ─────
  * Requisições **Bearer** com `organizationId` (`org:{id}:rpm:token`).
  * Teto da lane token: `TOKEN_ORG_RATE_LIMIT_RPM` (default 240).
- * Sessão NextAuth não entra — teto é `api.session` (600/user).
+ * Sessão NextAuth não entra — teto é por classe de custo (`api-cost-limit.ts`).
  *
  * Não conta
  * ─────────
@@ -24,8 +24,8 @@
  * Override lane token: `TOKEN_ORG_RATE_LIMIT_RPM` (default 240).
  * `ORG_RATE_LIMIT_RPM` (default 400) não vale para Bearer.
  *
- * Sessão NextAuth não consome o bucket de token — já tem `api.session`
- * (600/user). GET quentes do inbox também ficam de fora.
+ * Sessão NextAuth não consome o bucket de token — já tem o limite por
+ * classe de custo (`api-cost-limit.ts`). GET quentes do inbox também ficam de fora.
  */
 
 import { NextResponse } from "next/server";
@@ -237,8 +237,8 @@ export function orgRateLimitResponse(decision: OrgRateLimitDecision): NextRespon
 /**
  * Retorna 429 se a org estourou o teto; `null` se isento ou dentro do limite.
  *
- * Sessão (`viaToken !== true`): não cobra org — já tem `api.session` por
- * usuário. GET quentes do inbox (lista, counts, mensagens) ficam nesse
+ * Sessão (`viaToken !== true`): não cobra org — já tem o limite por classe de
+ * custo por usuário. GET quentes do inbox (lista, counts, mensagens) ficam nesse
  * ramo e não tocam `org:{id}:rpm:token`. Bearer: só o bucket de token.
  */
 export async function enforceOrgApiRateLimit(opts: {

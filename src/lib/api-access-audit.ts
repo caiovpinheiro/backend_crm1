@@ -18,6 +18,7 @@ import { NextResponse } from "next/server";
 
 import {
   CRM_API_PATH_HEADER,
+  CRM_API_SEARCH_HEADER,
   CRM_HTTP_METHOD_HEADER,
   CRM_REQUEST_ID_HEADER,
 } from "@/lib/api-access-audit-constants";
@@ -55,6 +56,10 @@ export async function readApiAccessHeaders(): Promise<{
   path?: string;
   method?: string;
   requestId?: string;
+  /** GET com `search`/`q` (classe de custo `heavy_read`). */
+  hasSearch?: boolean;
+  /** Objeto da requisição — identifica a requisição sem confiar em header. */
+  requestToken?: object;
 }> {
   try {
     const h = await headers();
@@ -62,6 +67,8 @@ export async function readApiAccessHeaders(): Promise<{
       path: h.get(CRM_API_PATH_HEADER) ?? undefined,
       method: h.get(CRM_HTTP_METHOD_HEADER) ?? undefined,
       requestId: h.get(CRM_REQUEST_ID_HEADER) ?? undefined,
+      hasSearch: h.get(CRM_API_SEARCH_HEADER) === "1",
+      requestToken: h,
     };
   } catch {
     return {};
