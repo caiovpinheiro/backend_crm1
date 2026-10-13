@@ -58,6 +58,18 @@ export function mediaTextLine(kind: UnderstoodKind, text: string, caption?: stri
   return `[Imagem enviada pelo cliente${cap ? `, com a legenda "${cap}"` : ""}]: ${text}`;
 }
 
+/**
+ * Só o que o cliente escreveu ou falou: tira o texto lido de imagem e de
+ * documento (fica a legenda). Atalho por palavra-chave casava com o texto de
+ * um botão da tela ("Cancelar") e mandava o cliente para o lugar errado.
+ */
+export function clientWordsOnly(text: string): string {
+  return text
+    .replace(/\[(?:Imagem|Documento) enviad[ao] pelo cliente(?:, com a legenda "([^"]*)")?[^\]]*\]:[\s\S]*?(?=\n\[(?:Imagem|Documento) enviad|\n\[Áudio do cliente|$)/g, (_m, caption?: string) => caption ?? "")
+    .replace(/\n{2,}/g, "\n")
+    .trim();
+}
+
 // ─── Armazenamento ─────────────────────────────────────────────────────
 
 const db = prismaBase as unknown as {

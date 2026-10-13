@@ -20,7 +20,7 @@ import { tryGetAgentApiKey } from "@/services/ai/agent-key";
 import { detectV2MediaKinds, evaluateV2Media } from "./media";
 import { enrichTurnWithMedia } from "./media-turn";
 import { isMediaPlaceholderText } from "@/lib/ai-agents/media-placeholder";
-import { getMediaTexts, isBareFileName, mediaTextLine, understoodKindOf } from "./media-understanding";
+import { clientWordsOnly, getMediaTexts, isBareFileName, mediaTextLine, understoodKindOf } from "./media-understanding";
 import { callV2LLM } from "./llm";
 import { themePromptText } from "./theme-prompt";
 import { actionValueAllowed, allowedActionTypes, allowedFlowIdsFor, allowedMessageModelIdsFor, humanRequestSubject, mentionsHumanRequest, normalizeAskOptions } from "./action-policy";
@@ -1468,8 +1468,10 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     contact: loadedContext.contactRaw ?? null,
     selectedDeal: loadedContext.selectedDealRaw ?? null,
   };
+  // Palavra-chave de atalho vale só para o que o cliente escreveu ou falou,
+  // não para o texto lido de imagem ou documento.
   let rule = evaluateV2Rules(config, {
-    userMessage: input.userMessage,
+    userMessage: clientWordsOnly(input.userMessage),
     messageType: input.messageType,
     isFirstMessage: !stateRow || (stateRow.stage as V2Stage) === "idle",
     contactTags: (loadedContext.contactRaw?.tags as string[] | undefined) ?? [],

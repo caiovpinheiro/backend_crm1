@@ -12,7 +12,7 @@ vi.mock("@/services/ai/provider", () => ({
 
 import { transcribeWithGroq } from "@/lib/groq-transcribe";
 import { generateWithTools, transcribeWithOpenAI } from "@/services/ai/provider";
-import { isBareFileName, readDocumentText, understandMedia } from "../media-understanding";
+import { clientWordsOnly, isBareFileName, readDocumentText, understandMedia } from "../media-understanding";
 
 const base = { organizationId: "org", userId: "u", model: "gpt-4o", message: { id: "m1", messageType: "ptt", mediaUrl: "https://x/a.ogg", content: "[Áudio]" } };
 
@@ -63,5 +63,16 @@ describe("documento do cliente", () => {
     const long = await readDocumentText(Buffer.from("linha de conteúdo\n".repeat(800)), "text/plain", null);
     expect(long.text!.length).toBeLessThan(6100);
     expect(long.text).toContain("[…documento cortado]");
+  });
+});
+
+describe("só as palavras do cliente", () => {
+  it("tira o texto lido da imagem e do documento, mantém a legenda, o áudio e o que ele escreveu", () => {
+    const msg = 'olha aí aparece isso\n[Imagem enviada pelo cliente]: Tela de verificação. Botões: "Cancelar", "Continuar".\n[Documento enviado pelo cliente ("fatura.pdf")]: Cancelamento só pelo site.\n[Áudio do cliente, transcrito]: não consigo entrar';
+    const out = clientWordsOnly(msg);
+    expect(out).toContain("olha aí aparece isso");
+    expect(out).toContain("não consigo entrar");
+    expect(out).not.toMatch(/Cancelar|Cancelamento/);
+    expect(clientWordsOnly('[Imagem enviada pelo cliente, com a legenda "quero cancelar"]: Tela inicial.')).toBe("quero cancelar");
   });
 });

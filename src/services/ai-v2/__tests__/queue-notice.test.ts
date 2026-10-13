@@ -54,7 +54,7 @@ describe("cortesia logo depois do aviso", () => {
     expect(pickQueueNotice({ ...base, message: "Obrigada", courtesy: true, lastReplyAt: new Date("2026-10-12T16:30:00Z") })).not.toBeNull();
     expect(pickQueueNotice({ ...base, message: "e o prazo?", courtesy: false, lastReplyAt: new Date("2026-10-12T16:59:00Z") })).not.toBeNull();
     const { isShortAckText } = await import("@/lib/ai-agents/tabulation-classify-policy");
-    for (const m of ["Obrigada", "Tabom", "ta bom", "ok 👍"]) expect(isShortAckText(m)).toBe(true);
+    for (const m of ["Obrigada", "Tabom", "ta bom", "ok 👍", "Ta bom muito obrigada"]) expect(isShortAckText(m)).toBe(true);
     expect(isShortAckText("tá, mas e o prazo?")).toBe(false);
   });
 });
