@@ -25,6 +25,7 @@ const h = vi.hoisted(() => {
       findUnique: vi.fn(),
       count: vi.fn().mockResolvedValue(0),
       findMany: vi.fn().mockResolvedValue([]),
+      aggregate: vi.fn().mockResolvedValue({ _max: { position: null } }),
       update: vi.fn().mockResolvedValue({}),
     },
     stage: { findUnique: vi.fn() },
@@ -201,6 +202,7 @@ beforeEach(() => {
   h.tx.pipeline.findUnique.mockResolvedValue({ lossReasonRequired: false });
   h.tx.deal.count.mockResolvedValue(0);
   h.tx.deal.findMany.mockResolvedValue([]);
+  h.tx.deal.aggregate.mockResolvedValue({ _max: { position: null } });
   h.tx.deal.update.mockResolvedValue({});
   h.prisma.customField.findMany.mockResolvedValue([]);
 });
@@ -444,6 +446,21 @@ describe("moveDeal", () => {
     expect(data).not.toHaveProperty("status");
     // ponto médio entre os vizinhos 1 e 2
     expect(data.position).toBe(1.5);
+  });
+
+  it("gap esgotado manda o card para o fim da coluna", async () => {
+    seedDeal("stage-a");
+    h.tx.deal.count.mockResolvedValue(4);
+    h.tx.deal.findMany.mockResolvedValue([{ position: 3 }, { position: 3 }]);
+    h.tx.deal.aggregate.mockResolvedValue({ _max: { position: 10 } });
+
+    await withOrg(ORG, () => moveDeal("deal-1", "stage-b", 2));
+    const data = h.tx.deal.update.mock.calls[0]![0].data as Record<string, unknown>;
+    expect(data.position).toBe(11);
+    expect(h.tx.deal.update).toHaveBeenCalledTimes(1);
+    for (const call of h.tx.deal.findMany.mock.calls) {
+      expect(call[0]?.take).toBe(2);
+    }
   });
 
   it("retenta em deadlock (P2034) e desiste em erro comum", async () => {
