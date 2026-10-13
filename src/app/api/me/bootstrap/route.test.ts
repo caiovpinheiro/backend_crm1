@@ -1,6 +1,8 @@
 /**
  * GET /api/me/bootstrap — serializa o payload do serviço, manda ETag +
- * Cache-Control e responde 304 quando `If-None-Match` bate.
+ * Cache-Control e responde 304 quando `If-None-Match` bate. Os blocos
+ * (`blocks`) ficam vazios aqui; contrato, 304 sem banco e isolamento dos
+ * blocos em `app/api/startup-cache-routes.test.ts`.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -44,10 +46,20 @@ vi.mock("@/services/user-preferences", () => ({
   getAppearancePreferences: vi.fn(),
 }));
 
+vi.mock("@/services/bootstrap-blocks", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/services/bootstrap-blocks")>();
+  return {
+    ...actual,
+    resolveBootstrapBlocks: vi.fn(async () => []),
+    loadBootstrapBlocks: vi.fn(async () => ({ entries: [], errors: [] })),
+  };
+});
+
 vi.mock("@/services/me-bootstrap", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/services/me-bootstrap")>();
   return {
     computeBootstrapEtag: actual.computeBootstrapEtag,
+    computeBootstrapBlocksEtag: actual.computeBootstrapBlocksEtag,
     etagMatches: actual.etagMatches,
     buildMeBootstrap: mocks.buildMeBootstrap,
   };
@@ -56,7 +68,7 @@ vi.mock("@/services/me-bootstrap", async (importOriginal) => {
 import { NextResponse } from "next/server";
 
 import { GET } from "@/app/api/me/bootstrap/route";
-import { computeBootstrapEtag } from "@/services/me-bootstrap";
+import { computeBootstrapBlocksEtag } from "@/services/me-bootstrap";
 
 const SESSION = {
   user: {
@@ -97,15 +109,15 @@ describe("GET /api/me/bootstrap", () => {
     mocks.buildMeBootstrap.mockResolvedValue(PAYLOAD);
   });
 
-  it("devolve o payload com ETag e Cache-Control private, no-store", async () => {
+  it("devolve o payload (+ blocks) com ETag e Cache-Control private, no-cache", async () => {
     const res = await GET(req());
 
     expect(res.status).toBe(200);
-    expect(res.headers.get("cache-control")).toBe("private, no-store");
+    expect(res.headers.get("cache-control")).toBe("private, no-cache");
     expect(res.headers.get("content-type")).toContain("application/json");
     const etag = res.headers.get("etag");
-    expect(etag).toBe(computeBootstrapEtag(JSON.stringify(PAYLOAD)));
-    expect(await res.json()).toEqual(PAYLOAD);
+    expect(etag).toBe(computeBootstrapBlocksEtag("user_1", JSON.stringify(PAYLOAD), []));
+    expect(await res.json()).toEqual({ ...PAYLOAD, blocks: {}, blockErrors: [] });
     expect(mocks.buildMeBootstrap).toHaveBeenCalledWith(SESSION.user);
   });
 
@@ -117,7 +129,7 @@ describe("GET /api/me/bootstrap", () => {
 
     expect(res.status).toBe(304);
     expect(res.headers.get("etag")).toBe(etag);
-    expect(res.headers.get("cache-control")).toBe("private, no-store");
+    expect(res.headers.get("cache-control")).toBe("private, no-cache");
     expect(await res.text()).toBe("");
   });
 
