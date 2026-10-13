@@ -121,3 +121,38 @@ describe("aviso de transferência: explicação que sobra e condição com “ac
     expect(conditionalHandoff("Se precisar, é só me chamar.")).toBe(false);
   });
 });
+
+describe("frase sem oração principal depois de um corte", () => {
+  it("causa + finalidade, finalidade + causa, causa + \"mas\": a causa vira a principal; sem causa, sai", () => {
+    expect(standaloneClause("Como o pedido aparece como entregue em 07/10, mas você não recebeu a encomenda"))
+      .toBe("O pedido aparece como entregue em 07/10, mas você não recebeu a encomenda");
+    expect(standaloneClause("Para a taxa de entrega, como a fatura não foi emitida")).toBe("A fatura não foi emitida");
+    expect(standaloneClause("Como você só consegue pagar no dia 30, para verificar uma condição específica")).toBe("Você só consegue pagar no dia 30");
+    expect(standaloneClause("Para concluir a troca, se o código não chegar")).toBe("");
+    expect(standaloneClause("No Portal do Cliente")).toBe("");
+    // Com oração principal, nada muda.
+    expect(standaloneClause("Se precisar, me chame por aqui")).toBe("Se precisar, me chame por aqui");
+    expect(standaloneClause("No aplicativo, toque em Minha conta")).toBe("No aplicativo, toque em Minha conta");
+  });
+
+  it("aviso de transferência no fim de \"Como X, mas Y\": fica a explicação de pé", () => {
+    expect(withoutTransferClause("Como o pedido aparece como entregue em 07/10, mas você não recebeu a encomenda, vou te passar para o time de Atendimento."))
+      .toBe("O pedido aparece como entregue em 07/10, mas você não recebeu a encomenda.");
+    expect(withoutTransferClause("Para a taxa de entrega, como a fatura não foi emitida, vou te passar para a equipe."))
+      .toBe("A fatura não foi emitida.");
+  });
+
+  it("trecho sem fonte no meio, no começo ou no fim: o que sobra não fica pela metade", () => {
+    const meio = "Entendo a situação. Como você só consegue pagar no dia 30, a condição de desconto pode não ser mantida, para verificar uma condição específica. A equipe consegue olhar outras formas de pagamento com você.";
+    expect(trimUnsupportedSentences(meio, ["a condição de desconto pode não ser mantida"])?.reply)
+      .toBe("Entendo a situação. Você só consegue pagar no dia 30. A equipe consegue olhar outras formas de pagamento com você.");
+
+    const comeco = "Entendo a preocupação com o valor da fatura deste mês. O valor pode sofrer reajuste conforme as regras da loja, e não consigo congelá-lo por aqui. A equipe consegue revisar as condições do seu plano com você.";
+    expect(trimUnsupportedSentences(comeco, ["O valor pode sofrer reajuste conforme as regras da loja"])?.reply)
+      .toBe("Entendo a preocupação com o valor da fatura deste mês. A equipe consegue revisar as condições do seu plano com você.");
+
+    const fim = "Entendo a preocupação com as duas faturas em aberto. No Portal do Cliente, você consegue consultar e pagar as faturas pela opção Pagar Fatura. A equipe consegue ver com você uma forma de regularizar as duas.";
+    expect(trimUnsupportedSentences(fim, ["você consegue consultar e pagar as faturas pela opção Pagar Fatura"])?.reply)
+      .toBe("Entendo a preocupação com as duas faturas em aberto. A equipe consegue ver com você uma forma de regularizar as duas.");
+  });
+});

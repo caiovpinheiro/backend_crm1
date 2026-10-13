@@ -45,16 +45,38 @@ export function standaloneClause(clause: string): string {
   // oração independente — o que conta é o que vem depois dele.
   const vocative = s.match(/^([\p{Lu}][\p{L}]+(?:\s[\p{Lu}][\p{L}]+)?),\s+/u);
   const body = vocative ? s.slice(vocative[0].length) : s;
-  if (body.includes(",")) return s;
-  const causal = body.match(CAUSAL_START);
-  if (causal) {
-    const rest = body.slice(causal[0].length);
-    // "Como você precisa dessa informação para seguir" sem o resto da frase:
-    // "dessa", "isso" apontavam para o que foi cortado. Sozinha, não diz nada.
-    if (/(?<![\p{L}])(?:d?ess[ae]s?|d?est[ae]s?|n?isso|n?isto|disso|disto|dele|dela)(?![\p{L}])/iu.test(rest)) return "";
-    return vocative ? `${vocative[1]}, ${rest}` : rest.charAt(0).toUpperCase() + rest.slice(1);
-  }
-  return DEPENDENT_START.test(body) ? "" : s;
+  const withVocative = (rest: string) => (vocative ? `${vocative[1]}, ${rest}` : rest.charAt(0).toUpperCase() + rest.slice(1));
+  // Partes separadas por vírgula. Basta uma oração principal para a frase
+  // ficar de pé. Sem nenhuma ("Como X, para Y", "Para X, como Y", "Como X,
+  // mas Y"), a de causa vira a principal e leva junto o "mas/e…" que a
+  // segue; o que é só finalidade/condição sai. Sem oração de causa, não
+  // sobra frase.
+  const pieces = body.split(/,\s+/);
+  const kinds = pieces.map(pieceKind);
+  if (kinds.includes("main")) return s;
+  const c = kinds.indexOf("causal");
+  if (c < 0) return "";
+  const kept = [pieces[c].replace(CAUSAL_START, "")];
+  for (let i = c + 1; i < pieces.length && kinds[i] === "continuation"; i += 1) kept.push(pieces[i]);
+  const rest = kept.join(", ");
+  // "Como você precisa dessa informação para seguir" sem o resto da frase:
+  // "dessa", "isso" apontavam para o que foi cortado. Sozinha, não diz nada.
+  if (/(?<![\p{L}])(?:d?ess[ae]s?|d?est[ae]s?|n?isso|n?isto|disso|disto|dele|dela)(?![\p{L}])/iu.test(rest)) return "";
+  return withVocative(rest);
+}
+
+/** Começo de oração ligada à anterior ("mas você não recebeu…"). */
+const CONTINUATION_PIECE = /^(?:mas|por[ée]m|e|ou|contudo|entretanto|no entanto|todavia)\s/i;
+/** Locução curta sem verbo ("No Portal do Cliente"): sozinha não diz nada. */
+const PREPOSITION_START = /^(?:em|no|na|nos|nas|pelo|pela|pelos|pelas|com|sem|sobre|ao|aos|[àa]s?)\s/i;
+
+function pieceKind(piece: string): "main" | "causal" | "dependent" | "continuation" {
+  const p = piece.trim();
+  if (CAUSAL_START.test(p)) return "causal";
+  if (DEPENDENT_START.test(p)) return "dependent";
+  if (CONTINUATION_PIECE.test(p)) return "continuation";
+  if (PREPOSITION_START.test(p) && p.split(/\s+/).length <= 4) return "dependent";
+  return "main";
 }
 
 function norm(s: string): string {
@@ -192,13 +214,24 @@ function removeSpan(unitText: string, flagged: string): string | null {
     .replace(/\s{2,}/g, " ")
     .replace(/(?:^|\s)(?:e|ou|mas)\s*([.!?])?\s*$/i, "$1")
     .trim();
+  const cutAtStart = !/\p{L}/u.test(unitText.slice(0, start));
+  const cutAtEnd = !/\p{L}/u.test(unitText.slice(end));
   // Marcação no começo da frase ("Se X, me diga…"): sobrava ", me diga…".
-  if (!/\p{L}/u.test(unitText.slice(0, start))) {
-    rest = rest.replace(/^[,;:.\s]+/, "");
+  if (cutAtStart) {
+    rest = rest.replace(/^[,;:.\s]+/, "").replace(ORPHAN_CONNECTOR, "");
+    // "…, e não consigo congelá-lo": o pronome apontava para o que saiu.
+    if (/\p{L}-(?:l|n)?[oa]s?(?![\p{L}])|(?<![\p{L}])(?:n?isso|disso)(?![\p{L}])/iu.test(rest)) return null;
     rest = rest.charAt(0).toUpperCase() + rest.slice(1);
   }
+  // Marcação no meio: o que sobra dos dois lados também precisa de uma
+  // oração principal ("Como X, <cortado>, para Y" não é frase).
+  if (!cutAtStart && !cutAtEnd) {
+    const whole = standaloneClause(rest.replace(/[,;:.!?\s]+$/, ""));
+    if (!whole) return null;
+    rest = whole;
+  }
   // Marcação no fim da frase: o que sobra é o começo dela, que precisa ficar de pé.
-  if (!/\p{L}/u.test(unitText.slice(end))) {
+  if (cutAtEnd) {
     const head = standaloneClause(rest.replace(/[,;:.!?\s]+$/, ""));
     if (!head) return null;
     rest = head;
