@@ -3564,3 +3564,15 @@ describe("processV2Turn — decisões sem cobertura", () => {
     expect(mocks.logTurn).toHaveBeenCalledWith(expect.objectContaining({ handoff: true }));
   });
 });
+
+describe("atalho de resposta fixa em mensagem longa com vários pedidos", () => {
+  it("não vale quando a palavra é um detalhe de uma mensagem longa; vale na mensagem curta e no atalho que transfere", async () => {
+    const { shortcutTooNarrowFor } = await import("../engine");
+    const reply = { conditions: [{ type: "keywords" }], actions: [{ type: "send_message" }] };
+    const longo = "Por que estão me cobrando R$ 120,00 na data de amanhã, se o vencimento era hoje? Fiz a avaliação de recuperação e ela não aparece no sistema, o aplicativo não entra e o editor de texto só dá erro há três meses, assim não dá para continuar com vocês?";
+    expect(shortcutTooNarrowFor(reply, longo)).toBe(true);
+    expect(shortcutTooNarrowFor(reply, "como ativo o editor de texto?")).toBe(false);
+    expect(shortcutTooNarrowFor({ conditions: [{ type: "keywords" }], actions: [{ type: "handoff" }] }, longo)).toBe(false);
+    expect(shortcutTooNarrowFor({ conditions: [{ type: "first_message" }], actions: [{ type: "send_message" }] }, longo)).toBe(false);
+  });
+});
