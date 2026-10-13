@@ -13,6 +13,7 @@
  */
 import { Prisma } from "@prisma/client";
 
+import { bumpResponseFamilies, RESPONSE_FAMILIES } from "@/lib/cache/response-families";
 import { prismaBase } from "@/lib/prisma-base";
 import {
   buildPublicUrl,
@@ -303,6 +304,9 @@ export async function repairOrgTemplateMedia(
         data: { attachmentUrl: result.nextUrl },
       });
     }
+  }
+  if (!dryRun && repaired.some((r) => r.kind === "quick_reply")) {
+    await bumpResponseFamilies(orgId, RESPONSE_FAMILIES.quickReplies);
   }
 
   return {

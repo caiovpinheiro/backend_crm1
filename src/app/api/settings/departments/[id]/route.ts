@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 
+import { bumpResponseFamilies, RESPONSE_FAMILIES } from "@/lib/cache/response-families";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/prisma";
 import { assertLeafInDepartment } from "@/services/tabulations";
@@ -104,6 +105,7 @@ export async function PUT(
         after: { name: updated.name, color: updated.color },
       },
     });
+    await bumpResponseFamilies(session.user.organizationId, RESPONSE_FAMILIES.departments);
     return NextResponse.json(updated);
   });
 }
@@ -163,6 +165,7 @@ export async function DELETE(
         before: { name: dept.name, color: dept.color },
       },
     });
+    await bumpResponseFamilies(session.user.organizationId, RESPONSE_FAMILIES.departments);
     return NextResponse.json({ ok: true });
   });
 }

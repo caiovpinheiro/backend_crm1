@@ -4,7 +4,14 @@ import { withOrgContext } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { z } from "zod";
+import {
+  bumpResponseFamilies,
+  RESPONSE_FAMILIES,
+  respondWithCachedJson,
+} from "@/lib/cache/response-cache";
 import { getLogger } from "@/lib/logger";
+import { ServerTiming } from "@/lib/server-timing";
+import { departmentsSpec, loadDepartments } from "@/services/startup-cache";
 
 const log = getLogger("api/settings/departments");
 
@@ -17,8 +24,10 @@ const CreateSchema = z.object({
   icon: z.string().min(1).max(40).default("IconBuilding"),
 });
 
-export async function GET() {
+export async function GET(request: Request) {
+  const timing = new ServerTiming();
   return withOrgContext(async (session) => {
+    timing.add("auth", timing.totalMs());
     // Listagem (id/nome) é necessária no inbox para "Distribuir p/ departamento".
     // Mutações (POST/PATCH) continuam restritas a ADMIN/MANAGER.
     const orgId = session.user.organizationId;
@@ -28,57 +37,14 @@ export async function GET() {
         { status: 400 },
       );
     }
+    // Corpo por papel (MEMBER: só id/nome; ADMIN/MANAGER: com contagens) —
+    // cache por org + papel, com ETag/304 (`services/startup-cache.ts`).
+    const spec = departmentsSpec(session.user);
+    if (spec) return respondWithCachedJson(request, spec, timing);
     const role = session.user.role;
-    const isManagerUp = role === "ADMIN" || role === "MANAGER";
-    try {
-      if (!isManagerUp) {
-        const departments = await prisma.department.findMany({
-          where: { organizationId: orgId },
-          select: {
-            id: true,
-            name: true,
-            color: true,
-            icon: true,
-            // Necessário no inbox: após "Distribuir p/ departamento", o FE
-            // atualiza o sticky com o flag de tabulação do novo depto.
-            requireTabulationOnClose: true,
-          },
-          orderBy: { name: "asc" },
-        });
-        return NextResponse.json(departments);
-      }
-      const departments = await prisma.department.findMany({
-        where: { organizationId: orgId },
-        include: {
-          _count: {
-            select: {
-              conversations: { where: { status: "OPEN" } },
-              members: true,
-            },
-          },
-        },
-        orderBy: { name: "asc" },
-      });
-      return NextResponse.json(departments);
-    } catch {
-      // A contagem de `members` depende da tabela `department_members`
-      // (migração add_department_members). Se ela ainda não existe neste
-      // ambiente, NÃO escondemos todos os departamentos — reconsultamos
-      // sem o _count.members (só conversas), pra a tela continuar viva.
-      try {
-        const departments = await prisma.department.findMany({
-          where: { organizationId: orgId },
-          include: {
-            _count: { select: { conversations: { where: { status: "OPEN" } } } },
-          },
-          orderBy: { name: "asc" },
-        });
-        return NextResponse.json(departments);
-      } catch {
-        // Nem a tabela de departamentos existe ainda — lista vazia.
-        return NextResponse.json([]);
-      }
-    }
+    return NextResponse.json(
+      await loadDepartments(orgId, role === "ADMIN" || role === "MANAGER"),
+    );
   });
 }
 
@@ -108,6 +74,7 @@ export async function POST(request: Request) {
           distributionEnabled: true,
         }),
       });
+      await bumpResponseFamilies(session.user.organizationId, RESPONSE_FAMILIES.departments);
       await prisma.auditLog.create({
         data: {
           organizationId: session.user.organizationId,

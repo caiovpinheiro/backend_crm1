@@ -6,13 +6,21 @@ import {
   listLossReasons,
   reorderLossReasons,
 } from "@/services/loss-reasons";
+import { respondWithCachedJson } from "@/lib/cache/response-cache";
 import { getLogger } from "@/lib/logger";
+import { ServerTiming } from "@/lib/server-timing";
+import { lossReasonsSpec } from "@/services/startup-cache";
 
 const log = getLogger("api/settings/loss-reasons");
 
-export async function GET() {
-  return withOrgContext(async () => {
+export async function GET(request: Request) {
+  const timing = new ServerTiming();
+  return withOrgContext(async (session) => {
+    timing.add("auth", timing.totalMs());
     try {
+      // Cache por org + ETag/304 (`services/startup-cache.ts`).
+      const spec = lossReasonsSpec(session.user);
+      if (spec) return await respondWithCachedJson(request, spec, timing);
       const reasons = await listLossReasons();
       return NextResponse.json(reasons);
     } catch (e) {
