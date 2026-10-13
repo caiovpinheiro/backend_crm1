@@ -169,6 +169,7 @@ beforeEach(() => {
   h.failNext = null;
   process.env.REDIS_URL = "redis://fake-redis.localhost:6379";
   delete process.env.SSE_MAX_PER_USER;
+  delete process.env.SSE_MAX_CONNECTIONS_PER_USER;
   delete process.env.SSE_MAX_PER_ORG;
   // Só o relógio: score/TTL usam Date.now(); setImmediate do flush() fica real.
   vi.useFakeTimers({ toFake: ["Date"] });
@@ -183,7 +184,19 @@ afterEach(() => {
 });
 
 describe("envs", () => {
-  it("defaults 6/200; inteiro válido vale; 0 é 'desligado'; inválido cai no default", () => {
+  it("SSE_MAX_CONNECTIONS_PER_USER (padrão 3) vence o nome antigo SSE_MAX_PER_USER", () => {
+    expect(DEFAULT_SSE_MAX_PER_USER).toBe(3);
+    process.env.SSE_MAX_PER_USER = "5";
+    expect(getSseMaxPerUser()).toBe(5);
+    process.env.SSE_MAX_CONNECTIONS_PER_USER = "2";
+    expect(getSseMaxPerUser()).toBe(2);
+    process.env.SSE_MAX_CONNECTIONS_PER_USER = "0";
+    expect(getSseMaxPerUser()).toBe(0);
+    process.env.SSE_MAX_CONNECTIONS_PER_USER = "abc";
+    expect(getSseMaxPerUser()).toBe(DEFAULT_SSE_MAX_PER_USER);
+  });
+
+  it("defaults 3/200; inteiro válido vale; 0 é 'desligado'; inválido cai no default", () => {
     expect(getSseMaxPerUser()).toBe(DEFAULT_SSE_MAX_PER_USER);
     expect(getSseMaxPerOrg()).toBe(DEFAULT_SSE_MAX_PER_ORG);
     process.env.SSE_MAX_PER_USER = "3";
@@ -204,20 +217,23 @@ describe("envs", () => {
 });
 
 describe("teto por usuário", () => {
-  it("a 7ª conexão encerra a mais antiga (onEvict), publica e entra", async () => {
+  it("a 4ª conexão (padrão 3) encerra a mais antiga (onEvict), publica e entra", async () => {
     const conns = [];
-    for (let i = 0; i < 6; i++) conns.push(await open("u1"));
+    for (let i = 0; i < 3; i++) {
+      conns.push(await open("u1"));
+      vi.advanceTimersByTime(1_000); // abertas em instantes diferentes
+    }
     expect(conns.every((c) => c.r.ok)).toBe(true);
-    expect(h.zsets.get("sse:conn:u:u1")?.size).toBe(6);
+    expect(h.zsets.get("sse:conn:u:u1")?.size).toBe(3);
 
-    const seventh = await open("u1");
-    expect(seventh.r.ok).toBe(true);
+    const fourth = await open("u1");
+    expect(fourth.r.ok).toBe(true);
     await flush();
     expect(conns[0].onEvict).toHaveBeenCalledTimes(1);
     for (const c of conns.slice(1)) expect(c.onEvict).not.toHaveBeenCalled();
-    expect(seventh.onEvict).not.toHaveBeenCalled();
-    expect(h.zsets.get("sse:conn:u:u1")?.size).toBe(6);
-    expect(h.zsets.get("sse:conn:o:org1")?.size).toBe(6);
+    expect(fourth.onEvict).not.toHaveBeenCalled();
+    expect(h.zsets.get("sse:conn:u:u1")?.size).toBe(3);
+    expect(h.zsets.get("sse:conn:o:org1")?.size).toBe(3);
 
     const evictedId = okSlot(conns[0].r).connId;
     expect(h.published).toEqual([
@@ -225,7 +241,7 @@ describe("teto por usuário", () => {
     ]);
     expect(await rejected("user_limit_evicted")).toBe(1);
     expect(h.info).toHaveBeenCalledWith(
-      expect.objectContaining({ userId: "u1", evictedConnId: evictedId, limit: 6 }),
+      expect.objectContaining({ userId: "u1", evictedConnId: evictedId, limit: 3 }),
       expect.stringMatching(/mais antiga/),
     );
     // Evicção de novo do mesmo id (pub/sub da própria réplica) é no-op.
