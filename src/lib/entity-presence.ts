@@ -368,11 +368,114 @@ export async function removeViewer(p: {
   return removeMemory(p);
 }
 
+/** Lista atual de viewers da entidade, sem escrever nada. */
+export async function listViewers(p: RoomMeta): Promise<EntityViewer[]> {
+  const now = Date.now();
+  const client = getCacheClient();
+  if (client) {
+    try {
+      const all = await client.hgetall(entityPresenceRedisKey(p.orgId, p.entityType, p.entityId));
+      noteSuccess();
+      return liveFromHash(all, now);
+    } catch (err) {
+      noteFailure(err, "presence:list", "presence");
+    }
+  }
+  const room = rooms.get(roomKey(p.orgId, p.entityType, p.entityId));
+  return publicList(room).filter((v) => isLive(v, now));
+}
+
+// ── Dedup de escrita: N abas do mesmo usuário na mesma entidade ──────────
+//
+// Cada aba (ou navegador) do mesmo usuário aberta no mesmo deal manda o seu
+// heartbeat. Todas renovam o MESMO campo (userId) — contam como 1 viewer —,
+// mas cada uma custava um MULTI de escrita no Redis. Agora só o primeiro
+// heartbeat do ciclo escreve: `SET presence:viewer-write:<org>:<tipo>:<id>:<user>
+// 1 PX <ciclo> NX`. Quem perde o claim responde a lista atual (HGETALL, só
+// leitura). O ciclo (padrão 20 s, `PRESENCE_HEARTBEAT_DEDUP_MS`) fica bem
+// abaixo do TTL do viewer (90 s), então quem está na tela nunca expira.
+
+export const ENTITY_PRESENCE_DEDUP_MS_DEFAULT = 20_000;
+const DEDUP_MIN_MS = 1_000;
+/** Teto: um terço do TTL — dois ciclos perdidos ainda não derrubam o viewer. */
+const DEDUP_MAX_MS = Math.floor(TTL_MS / 3);
+const DEDUP_KEY_PREFIX = "presence:viewer-write:";
+const DEDUP_MEMORY_MAX_KEYS = 10_000;
+
+/** `PRESENCE_HEARTBEAT_DEDUP_MS` (1.000–30.000; padrão 20.000; `0` desliga). */
+export function entityPresenceDedupMs(
+  env: Record<string, string | undefined> = process.env,
+): number {
+  const raw = env.PRESENCE_HEARTBEAT_DEDUP_MS?.trim();
+  if (!raw) return ENTITY_PRESENCE_DEDUP_MS_DEFAULT;
+  const n = Number(raw);
+  if (n === 0) return 0;
+  if (!Number.isFinite(n) || n < 0) return ENTITY_PRESENCE_DEDUP_MS_DEFAULT;
+  return Math.min(DEDUP_MAX_MS, Math.max(DEDUP_MIN_MS, Math.floor(n)));
+}
+
+export function entityPresenceDedupKey(p: PresenceArgs): string {
+  return `${DEDUP_KEY_PREFIX}${p.orgId}:${p.entityType}:${p.entityId}:${p.userId}`;
+}
+
+/** Claims do ciclo sem Redis: chave → expira em (ms). */
+const memoryWriteClaims = new Map<string, number>();
+
+function claimMemory(key: string, ms: number): boolean {
+  const now = Date.now();
+  const exp = memoryWriteClaims.get(key);
+  if (exp !== undefined && exp > now) return false;
+  if (memoryWriteClaims.size >= DEDUP_MEMORY_MAX_KEYS) {
+    for (const [k, e] of memoryWriteClaims) if (e <= now) memoryWriteClaims.delete(k);
+    if (memoryWriteClaims.size >= DEDUP_MEMORY_MAX_KEYS) memoryWriteClaims.clear();
+  }
+  memoryWriteClaims.set(key, now + ms);
+  return true;
+}
+
+/**
+ * `true` = este heartbeat é o primeiro do ciclo para usuário+entidade e deve
+ * escrever (`touchViewer`); `false` = já escrito no ciclo, só ler. Falha no
+ * Redis → `true` (melhor escrever de novo do que sumir da pilha).
+ */
+export async function claimViewerWrite(p: PresenceArgs): Promise<boolean> {
+  const ms = entityPresenceDedupMs();
+  if (ms === 0) return true;
+  const key = entityPresenceDedupKey(p);
+  const client = getCacheClient();
+  if (client) {
+    try {
+      const won = await client.set(key, "1", "PX", ms, "NX");
+      noteSuccess();
+      return won === "OK";
+    } catch (err) {
+      noteFailure(err, key, "presence");
+      return true;
+    }
+  }
+  return claimMemory(key, ms);
+}
+
+/** Solta o claim do ciclo (saída explícita): a próxima aba escreve na hora. */
+export async function releaseViewerWrite(p: PresenceArgs): Promise<void> {
+  const key = entityPresenceDedupKey(p);
+  memoryWriteClaims.delete(key);
+  const client = getCacheClient();
+  if (!client) return;
+  try {
+    await client.del(key);
+    noteSuccess();
+  } catch (err) {
+    noteFailure(err, key, "presence");
+  }
+}
+
 /** Só para testes: esquece salas locais (memória e conhecidas no Redis). */
 export function resetEntityPresenceForTests(): void {
   rooms.clear();
   keyMeta.clear();
   redisRooms.clear();
+  memoryWriteClaims.clear();
 }
 
 // ── Reaper: expira viewers inativos e faz broadcast das salas que mudaram ──
