@@ -412,7 +412,8 @@ async function getContactCustomFieldValuesRaw(contactId: string) {
 
 export async function upsertContactCustomFieldValues(
   contactId: string,
-  values: { fieldId: string; value: string }[]
+  values: { fieldId: string; value: string }[],
+  options?: { allowBlank?: boolean },
 ) {
   if (values.length === 0) return [];
   const existing = await prisma.contactCustomFieldValue.findMany({
@@ -422,6 +423,7 @@ export async function upsertContactCustomFieldValues(
   const writable = withoutBlankOverwrites(
     values,
     existing.map((row) => ({ fieldId: row.customFieldId, value: row.value })),
+    options,
   );
   if (writable.length === 0) return [];
   const ops = writable.map((v) =>
@@ -513,11 +515,16 @@ async function getDealCustomFieldValuesRaw(dealId: string) {
   });
 }
 
-/** Vazio não apaga valor já gravado (formulário/flow salvando o campo em branco). */
+/**
+ * Vazio não apaga valor já gravado (formulário/flow/integração mandando o
+ * campo em branco). `allowBlank` é o salvamento explícito do editor.
+ */
 export function withoutBlankOverwrites(
   incoming: { fieldId: string; value: string }[],
   previous: { fieldId: string; value: string | null }[],
+  options?: { allowBlank?: boolean },
 ): { fieldId: string; value: string }[] {
+  if (options?.allowBlank) return incoming;
   const prev = new Map(previous.map((p) => [p.fieldId, p.value ?? ""]));
   return incoming.filter((item) => {
     if (item.value.trim() !== "") return true;
@@ -527,7 +534,8 @@ export function withoutBlankOverwrites(
 
 export async function upsertDealCustomFieldValues(
   dealId: string,
-  values: { fieldId: string; value: string }[]
+  values: { fieldId: string; value: string }[],
+  options?: { allowBlank?: boolean },
 ) {
   if (values.length === 0) return [];
   const existing = await prisma.dealCustomFieldValue.findMany({
@@ -537,6 +545,7 @@ export async function upsertDealCustomFieldValues(
   const writable = withoutBlankOverwrites(
     values,
     existing.map((row) => ({ fieldId: row.customFieldId, value: row.value })),
+    options,
   );
   if (writable.length === 0) return [];
   const ops = writable.map((v) =>

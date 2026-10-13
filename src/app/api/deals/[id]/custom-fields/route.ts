@@ -91,11 +91,13 @@ export async function PUT(request: Request, ctx: Ctx) {
       const oldMap = new Map(
         (oldValues as { fieldId: string; value: string }[]).map((v) => [v.fieldId, v.value]),
       );
+      const allowBlank = body.allowBlank === true;
       const writable = withoutBlankOverwrites(
         cleaned,
         [...oldMap.entries()].map(([fieldId, value]) => ({ fieldId, value })),
+        { allowBlank },
       );
-      await upsertDealCustomFieldValues(dealId, writable);
+      await upsertDealCustomFieldValues(dealId, writable, { allowBlank });
       const updated = await getDealCustomFieldValues(dealId);
 
       const uid = authResult.user.id;
