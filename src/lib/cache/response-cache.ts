@@ -44,6 +44,7 @@ import { createHash } from "node:crypto";
 import { NextResponse } from "next/server";
 
 import { getLogger } from "@/lib/logger";
+import { recordCacheLookup, recordConditionalResponse } from "@/lib/metrics";
 import type { ServerTiming } from "@/lib/server-timing";
 
 import { cache } from "./index";
@@ -247,15 +248,25 @@ export async function respondWithCachedJson(
   const t0 = performance.now();
   const key = await responseCacheKey(spec);
   const ifNoneMatch = request.headers.get("if-none-match");
+  // Métricas (`/api/metrics`): hit rate por bloco e 304 vs 200 por rota.
+  const done = (status: 200 | 304, hit: boolean) => {
+    recordCacheLookup(`resp_${spec.name}`, hit);
+    recordConditionalResponse(new URL(request.url).pathname, status);
+  };
   if (ifNoneMatch) {
     const known = await peekResponseEtag(key, spec.ttlSec);
     if (known && etagMatches(ifNoneMatch, known)) {
       timing?.add("cache", performance.now() - t0, "304");
+      done(304, true);
       return notModifiedResponse(known, timing);
     }
   }
   const res = await loadCachedResponse(spec, key);
   timing?.add("cache", performance.now() - t0, res.source);
-  if (etagMatches(ifNoneMatch, res.etag)) return notModifiedResponse(res.etag, timing);
+  if (etagMatches(ifNoneMatch, res.etag)) {
+    done(304, res.source !== "miss");
+    return notModifiedResponse(res.etag, timing);
+  }
+  done(200, res.source !== "miss");
   return cachedJsonResponse(res.body, res.etag, timing);
 }

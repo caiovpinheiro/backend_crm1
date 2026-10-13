@@ -38,6 +38,7 @@ import {
   etagMatches,
 } from "@/services/me-bootstrap";
 import { getLogger } from "@/lib/logger";
+import { recordConditionalResponse } from "@/lib/metrics";
 import { ServerTiming } from "@/lib/server-timing";
 
 const log = getLogger("api/me/bootstrap");
@@ -73,6 +74,7 @@ export async function GET(request: Request) {
           refs.map((r) => ({ url: r.url, etag: r.knownEtag as string })),
         );
         if (etagMatches(ifNoneMatch, etag)) {
+          recordConditionalResponse("/api/me/bootstrap", 304);
           return new NextResponse(null, { status: 304, headers: headers(etag, timing) });
         }
       }
@@ -85,8 +87,10 @@ export async function GET(request: Request) {
         blocks.errors,
       );
       if (etagMatches(ifNoneMatch, etag)) {
+        recordConditionalResponse("/api/me/bootstrap", 304);
         return new NextResponse(null, { status: 304, headers: headers(etag, timing) });
       }
+      recordConditionalResponse("/api/me/bootstrap", 200);
       const body = timing.timeSync("serialize", () =>
         appendBlocksToBootstrapJson(baseJson, blocks),
       );
