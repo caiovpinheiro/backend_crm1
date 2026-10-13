@@ -100,7 +100,17 @@ export function pickQueueNotice(args: {
   };
   const custom = Object.values(args.overrides ?? {}).map((t) => (t ?? "").trim()).filter(Boolean);
   const allDefaults = [QUEUED_MESSAGE_DEFAULT, QUEUED_MESSAGE_OUTSIDE_HOURS, ...Object.values(QUEUE_NOTICES).flat(), ...custom];
-  const noticedBefore = !!args.lastReply && (repeats(args.configured) || allDefaults.some(repeats));
+  // O aviso anterior pode ter saído com o horário da equipe colado no fim:
+  // comparado inteiro, não parecia o mesmo, o "primeiro" aviso era tentado de
+  // novo, a trava de repetição barrava e o cliente (até o insatisfeito)
+  // ficava sem nada. Vale também o aviso contido na última mensagem.
+  const squash = (t: string) => fold(t).replace(/\s+/g, " ").trim();
+  const lastSquashed = args.lastReply ? squash(args.lastReply) : "";
+  const contained = (t: string) => {
+    const head = squash(t).slice(0, 80);
+    return head.length >= 30 && lastSquashed.includes(head);
+  };
+  const noticedBefore = !!args.lastReply && (repeats(args.configured) || allDefaults.some(repeats) || contained(args.configured) || allDefaults.some(contained));
   if (!noticedBefore) return { text: args.configured, kind: "first" };
   const kind = queueNoticeKind(args.message);
   const recent = !!args.lastReplyAt && now.getTime() - args.lastReplyAt.getTime() < QUEUE_NOTICE_QUIET_MS;

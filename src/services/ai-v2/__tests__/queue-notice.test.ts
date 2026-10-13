@@ -58,3 +58,14 @@ describe("cortesia logo depois do aviso", () => {
     expect(isShortAckText("tá, mas e o prazo?")).toBe(false);
   });
 });
+
+describe("aviso anterior com o horário colado", () => {
+  it("cliente insatisfeito logo depois do aviso (com horário no fim) recebe a variante de insatisfeito, não o primeiro de novo", async () => {
+    const { pickQueueNotice } = await import("../queue-notice");
+    const configured = "Você já está na fila de atendimento. Sua mensagem fica registrada e alguém da equipe continua com você por aqui no próximo horário de atendimento.";
+    const lastReply = `${configured}\n\nNossa equipe atende segunda a sexta, 08:00 às 18:00. Sua mensagem fica registrada e seguimos com você na terça-feira, 13/10, às 08:00.`;
+    const r = pickQueueNotice({ message: "vou reclamar no órgão de defesa do consumidor, que absurdo", configured, lastReply, lastReplyAt: new Date(Date.now() - 30_000), outsideHours: true });
+    expect(r?.kind).toBe("upset");
+    expect(r?.text).not.toBe(configured);
+  });
+});
