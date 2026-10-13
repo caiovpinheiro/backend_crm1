@@ -14,6 +14,8 @@ type Conv = {
   closedAt: Date | null;
   status: "OPEN" | "RESOLVED" | "PENDING" | "SNOOZED";
   hasHumanReply: boolean;
+  /** Tem mensagem pública de saída `authorType = human` (ex.: eco do app do celular). */
+  humanOut?: boolean;
 };
 
 const h = vi.hoisted(() => ({
@@ -29,13 +31,14 @@ function answer(sql: string): unknown[] {
   h.sqls.push(sql);
   const created = h.convs.filter((c) => inRange(c.createdAt));
   const isOpen = (c: Conv) => c.status !== "RESOLVED" && c.closedAt === null;
+  const answered = (c: Conv) => c.hasHumanReply || c.humanOut === true;
   if (sql.includes('AS "stillOpen"')) {
     return [
       {
         started: BigInt(created.length),
         stillOpen: BigInt(created.filter(isOpen).length),
-        openStarted: BigInt(created.filter((c) => isOpen(c) && c.hasHumanReply).length),
-        openWaiting: BigInt(created.filter((c) => isOpen(c) && !c.hasHumanReply).length),
+        openStarted: BigInt(created.filter((c) => isOpen(c) && answered(c)).length),
+        openWaiting: BigInt(created.filter((c) => isOpen(c) && !answered(c)).length),
         resolved: BigInt(created.filter((c) => c.status === "RESOLVED").length),
       },
     ];
@@ -153,6 +156,31 @@ describe("getPainelVolume — partição do período (10 conversas)", () => {
     );
     const where = flow.slice(flow.indexOf('WHERE conv."organizationId"'));
     expect(where).not.toMatch(/createdAt/);
+  });
+
+  it("resposta humana sem a flag (eco de outro app) conta como iniciada", async () => {
+    h.convs = [
+      // respondida pelo app do celular/outro CRM: mensagem humana, flag não marcada
+      { id: "e1", createdAt: D("2026-09-22"), closedAt: null, status: "OPEN", hasHumanReply: false, humanOut: true },
+      // respondida pelo Bwipo
+      { id: "e2", createdAt: D("2026-09-22"), closedAt: null, status: "OPEN", hasHumanReply: true, humanOut: true },
+      // só a IA/automação falou (authorType bot): continua aguardando
+      { id: "e3", createdAt: D("2026-09-22"), closedAt: null, status: "OPEN", hasHumanReply: false },
+    ];
+    const v = await getPainelVolume({ from: FROM, to: TO }, "elapsed");
+    expect(v.openStarted.value).toBe(2);
+    expect(v.openWaiting.value).toBe(1);
+    expect(v.openStarted.value + v.openWaiting.value).toBe(v.stillOpen.value);
+
+    const cohort = h.sqls.find((s) => s.includes('AS "stillOpen"'))!;
+    // Mesma definição de resposta humana do bloco Tempo: saída pública com authorType human.
+    expect(cohort).toMatch(
+      /conv\."hasHumanReply" = true OR EXISTS \(\s*SELECT 1 FROM messages hm\s+WHERE hm\."conversationId" = conv\.id/,
+    );
+    expect(cohort).toMatch(/conv\."hasHumanReply" = false AND NOT EXISTS \(/);
+    expect(cohort).toMatch(/hm\.direction = 'out'/);
+    expect(cohort).toMatch(/hm\."authorType" = 'human'::"MessageAuthorType"/);
+    expect(cohort).toMatch(/hm\."isPrivate" = false/);
   });
 
   it("período vazio zera a partição", async () => {

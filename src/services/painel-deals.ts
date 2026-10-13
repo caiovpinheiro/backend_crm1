@@ -87,6 +87,30 @@ export type PainelFunnelUserRow = {
   todayDelta: number;
 };
 
+/**
+ * Origem das entradas da etapa. `fromStageId: null` = criado direto na etapa;
+ * `"other"` = soma do que passou do teto de itens. `fromPipelineId` só vem quando
+ * a origem é de outro funil.
+ */
+export type PainelFunnelInflow = {
+  fromStageId: string | null;
+  fromStageName?: string;
+  fromPipelineId?: string;
+  count: number;
+};
+
+/**
+ * Destino das saídas da etapa (inclui Ganho/Perdido e etapas de outro funil).
+ * `"other"` = soma do que passou do teto. `toPipelineId` só vem quando o destino
+ * é de outro funil.
+ */
+export type PainelFunnelOutflow = {
+  toStageId: string;
+  toStageName?: string;
+  toPipelineId?: string;
+  count: number;
+};
+
 export type PainelFunnelStage = {
   id: string;
   name: string;
@@ -97,6 +121,15 @@ export type PainelFunnelStage = {
   passThrough: number | null;
   /** Entradas na etapa no período. */
   entered: number;
+  /**
+   * Negócios distintos que saíram da etapa no período (STAGE_CHANGED com
+   * `meta.from.id` = etapa). Conta a 1ª saída de cada negócio.
+   */
+  exited: number;
+  /** De onde vieram as entradas; soma de `count` = `entered`. */
+  inflow: PainelFunnelInflow[];
+  /** Para onde foram as saídas; soma de `count` = `exited`. */
+  outflow: PainelFunnelOutflow[];
   lost: number;
   /** Entradas desde o início do dia (fuso do Painel). */
   todayDelta: number;
@@ -109,10 +142,18 @@ export type PainelFunnel = {
   stages: PainelFunnelStage[];
   empty: boolean;
   /**
-   * Chegadas no período, no funil selecionado.
-   * Contato novo com deal nesse funil conta 1. Só deal conta 1. Só contato conta 1.
+   * Negócios criados no período no funil selecionado, pela etapa de criação e com
+   * os mesmos filtros de `entered` (funil, responsável, etapa, etiquetas, origem).
+   * Etapa de criação: `meta.stageId` do evento CREATED; sem esse evento (inbound,
+   * importação, automação, IA, fulfillment), a origem do 1º STAGE_CHANGED do
+   * negócio e, sem movimento, a etapa atual.
+   * `count` = Σ `inflow[fromStageId=null]` das etapas abertas + `novosForaDoFunil.count`.
    */
   novos: { count: number; value: number };
+  /**
+   * Parte de `novos` criada direto numa etapa Ganho/Perdido (fora de `stages[]`).
+   */
+  novosForaDoFunil: { count: number; won: number; lost: number };
   /**
    * Etapas "Perdido" (isLost) do(s) funil(is) selecionado(s).
    * count/value: negócios que estão HOJE nessas etapas, qualquer status (igual à coluna do Kanban,
@@ -145,14 +186,31 @@ export type PainelEvolution = {
   points: { date: string; incomplete: boolean; byStage: Record<string, number> }[];
 };
 
+/**
+ * Linha de "Ganhos por agente". Entram os usuários da org com `type = HUMAN` e
+ * `isSuperAdmin = false` — o mesmo recorte de "Atendentes" no Agora. Agentes de
+ * IA (`type = AI`) e a equipe EduIT ficam de fora. O schema não tem marca de
+ * "usuário de sistema/integração": uma conta humana usada por integração ou
+ * importação (ex.: dona de negócios importados) aparece como qualquer agente.
+ */
 export type PainelAgentRow = {
   id: string;
   name: string;
+  /** Soma de `value` dos negócios GANHOS no período (`closedAt` no período), donos = este usuário. */
   wonValue: number;
+  /** Negócios GANHOS no período. */
   wonCount: number;
+  /** ganhos / (ganhos + perdidos) do período, em %; null sem fechamento. */
   conversion: number | null;
   ticket: number | null;
+  /**
+   * Carteira aberta AGORA: negócios com `status = OPEN` cujo dono é este usuário,
+   * nos filtros estruturais do painel (funil, etapa, tag, origem). NÃO depende do
+   * período nem de atividade no dia — é estoque, não "ativos hoje". O nome do
+   * campo fica por compatibilidade; o rótulo certo na tela é "Em aberto".
+   */
   openToday: number;
+  /** Sem ganho, sem perda no período e sem negócio aberto. */
   zeroActivity: boolean;
 };
 
@@ -358,6 +416,48 @@ export async function getPainelDealsKpis(
   };
 }
 
+/** Itens de origem/destino por etapa; o resto vira um item `"other"`. */
+export const FUNNEL_FLOW_TOP = 8;
+const FUNNEL_FLOW_OTHER = "other";
+
+function sortFlows<T extends { count: number }>(rows: T[], key: (r: T) => string | null): T[] {
+  return rows.sort((a, b) => b.count - a.count || (key(a) ?? "").localeCompare(key(b) ?? ""));
+}
+
+/** Soma por etapa de origem/destino (usado ao juntar etapas de mesmo nome). */
+function mergeFlows<T extends { count: number }>(
+  a: T[],
+  b: T[],
+  key: (r: T) => string | null,
+): T[] {
+  const map = new Map<string | null, T>();
+  for (const r of [...a, ...b]) {
+    const k = key(r);
+    const prev = map.get(k);
+    if (prev) map.set(k, { ...prev, count: prev.count + r.count });
+    else map.set(k, { ...r });
+  }
+  return sortFlows([...map.values()], key);
+}
+
+/** Ordena por `count` desc e agrega o que passar de `FUNNEL_FLOW_TOP` em `"other"`. */
+function capFlows<T extends { count: number }>(
+  rows: T[],
+  key: (r: T) => string | null,
+  other: (count: number) => T,
+): T[] {
+  const known = sortFlows(
+    rows.filter((r) => key(r) !== FUNNEL_FLOW_OTHER),
+    key,
+  );
+  let rest = rows
+    .filter((r) => key(r) === FUNNEL_FLOW_OTHER)
+    .reduce((n, r) => n + r.count, 0);
+  rest += known.slice(FUNNEL_FLOW_TOP).reduce((n, r) => n + r.count, 0);
+  const top = known.slice(0, FUNNEL_FLOW_TOP);
+  return rest > 0 ? [...top, other(rest)] : top;
+}
+
 function mergeFunnelStagesByName(stages: PainelFunnelStage[]): PainelFunnelStage[] {
   const map = new Map<string, PainelFunnelStage>();
   for (const s of stages) {
@@ -382,6 +482,9 @@ function mergeFunnelStagesByName(stages: PainelFunnelStage[]): PainelFunnelStage
     prev.count += s.count;
     prev.value = round2(prev.value + s.value);
     prev.entered += s.entered;
+    prev.exited += s.exited;
+    prev.inflow = mergeFlows(prev.inflow, s.inflow, (r) => r.fromStageId);
+    prev.outflow = mergeFlows(prev.outflow, s.outflow, (r) => r.toStageId);
     prev.lost += s.lost;
     prev.todayDelta += s.todayDelta;
     const users = new Map(prev.byUser.map((u) => [u.id, { ...u }]));
@@ -413,6 +516,7 @@ export async function getPainelFunnel(f: PainelDealFilters): Promise<PainelFunne
       stages: [],
       empty: true,
       novos: emptyNovos,
+      novosForaDoFunil: { count: 0, won: 0, lost: 0 },
       lostStage: { count: 0, value: 0, sentInPeriod: 0 },
     };
   }
@@ -474,53 +578,150 @@ export async function getPainelFunnel(f: PainelDealFilters): Promise<PainelFunne
       : Promise.resolve(null),
   ]);
 
-  const entered = await db().$queryRaw<
-    {
-      dealId: string;
-      stageId: string;
-      enteredAt: Date;
-      value: unknown;
-      ownerId: string | null;
-      eventType: string;
-    }[]
-  >(Prisma.sql`
-    SELECT DISTINCT ON (x."dealId", x."stageId")
-      x."dealId", x."stageId", x."enteredAt", CAST(d.value AS DECIMAL) AS value,
-      d."ownerId" AS "ownerId", x."eventType" AS "eventType"
-    FROM (
-      SELECT e."dealId" AS "dealId",
-             (e.meta->'to'->>'id') AS "stageId",
-             e."createdAt" AS "enteredAt",
-             e.type AS "eventType"
-      FROM deal_events e
-      WHERE e."organizationId" = ${orgId}
-        AND e.type = 'STAGE_CHANGED'
-        AND e."createdAt" >= ${f.range.from}
-        AND e."createdAt" <= ${f.range.to}
-        AND (e.meta->'to'->>'id') IS NOT NULL
-      UNION ALL
-      SELECT e."dealId",
-             (e.meta->>'stageId') AS "stageId",
-             e."createdAt" AS "enteredAt",
-             e.type AS "eventType"
-      FROM deal_events e
-      WHERE e."organizationId" = ${orgId}
-        AND e.type = 'CREATED'
-        AND e."createdAt" >= ${f.range.from}
-        AND e."createdAt" <= ${f.range.to}
-        AND (e.meta->>'stageId') IS NOT NULL
-    ) x
-    INNER JOIN deals d ON d.id = x."dealId" AND d."organizationId" = ${orgId}
-    INNER JOIN stages s ON s.id = x."stageId"
-    LEFT JOIN contacts c ON c.id = d."contactId"
-    WHERE 1=1
-      ${pipelineFilter}
-      ${ownerFilter}
-      ${stageFilter}
-      ${tagFilter}
-      ${sourceFilter}
-    ORDER BY x."dealId", x."stageId", x."enteredAt" ASC
-  `);
+  const exitStageFilter =
+    f.stageIds && f.stageIds.length
+      ? Prisma.sql`AND x."fromStageId" IN (${Prisma.join(f.stageIds)})`
+      : Prisma.empty;
+
+  // Entradas: 1ª entrada por (negócio, etapa) no período, com a etapa de origem
+  // dessa entrada (NULL quando o negócio foi criado direto na etapa). Nome e funil
+  // da origem vêm da etapa atual; se ela sumiu, do que o evento gravou.
+  // Saídas: 1ª saída por (negócio, etapa) no período, com o destino. Mesmos
+  // filtros, aplicados à etapa de onde o negócio saiu.
+  const [entered, exits] = await Promise.all([
+    db().$queryRaw<
+      {
+        dealId: string;
+        stageId: string;
+        enteredAt: Date;
+        value: unknown;
+        ownerId: string | null;
+        eventType: string;
+        fromStageId: string | null;
+        fromStageName: string | null;
+        fromPipelineId: string | null;
+      }[]
+    >(Prisma.sql`
+      SELECT DISTINCT ON (x."dealId", x."stageId")
+        x."dealId", x."stageId", x."enteredAt", CAST(d.value AS DECIMAL) AS value,
+        d."ownerId" AS "ownerId", x."eventType" AS "eventType",
+        x."fromStageId" AS "fromStageId",
+        COALESCE(fs.name, x."fromStageName") AS "fromStageName",
+        COALESCE(fs."pipelineId", x."fromPipelineId") AS "fromPipelineId"
+      FROM (
+        SELECT e."dealId" AS "dealId",
+               (e.meta->'to'->>'id') AS "stageId",
+               e."createdAt" AS "enteredAt",
+               e.type AS "eventType",
+               (e.meta->'from'->>'id') AS "fromStageId",
+               (e.meta->'from'->>'name') AS "fromStageName",
+               (e.meta->'from'->>'pipelineId') AS "fromPipelineId"
+        FROM deal_events e
+        WHERE e."organizationId" = ${orgId}
+          AND e.type = 'STAGE_CHANGED'
+          AND e."createdAt" >= ${f.range.from}
+          AND e."createdAt" <= ${f.range.to}
+          AND (e.meta->'to'->>'id') IS NOT NULL
+        UNION ALL
+        SELECT e."dealId",
+               (e.meta->>'stageId') AS "stageId",
+               e."createdAt" AS "enteredAt",
+               e.type AS "eventType",
+               NULL, NULL, NULL
+        FROM deal_events e
+        WHERE e."organizationId" = ${orgId}
+          AND e.type = 'CREATED'
+          AND e."createdAt" >= ${f.range.from}
+          AND e."createdAt" <= ${f.range.to}
+          AND (e.meta->>'stageId') IS NOT NULL
+        UNION ALL
+        -- Criado no período sem CREATED utilizável (inbound, importação,
+        -- automação, IA e fulfillment não gravam o evento): a etapa de criação
+        -- é a origem do 1º STAGE_CHANGED dele; sem movimento, a etapa atual.
+        SELECT d0.id,
+               COALESCE(
+                 (SELECT (e2.meta->'from'->>'id')
+                    FROM deal_events e2
+                   WHERE e2."dealId" = d0.id
+                     AND e2."organizationId" = ${orgId}
+                     AND e2.type = 'STAGE_CHANGED'
+                     AND e2."createdAt" >= d0."createdAt"
+                     AND (e2.meta->'from'->>'id') IS NOT NULL
+                   ORDER BY e2."createdAt" ASC
+                   LIMIT 1),
+                 d0."stageId"
+               ) AS "stageId",
+               d0."createdAt" AS "enteredAt",
+               'CREATED' AS "eventType",
+               NULL, NULL, NULL
+        FROM deals d0
+        WHERE d0."organizationId" = ${orgId}
+          AND d0."createdAt" >= ${f.range.from}
+          AND d0."createdAt" <= ${f.range.to}
+          AND NOT EXISTS (
+            SELECT 1 FROM deal_events e3
+             WHERE e3."dealId" = d0.id
+               AND e3."organizationId" = ${orgId}
+               AND e3.type = 'CREATED'
+               AND e3."createdAt" >= ${f.range.from}
+               AND e3."createdAt" <= ${f.range.to}
+               AND (e3.meta->>'stageId') IS NOT NULL
+          )
+      ) x
+      INNER JOIN deals d ON d.id = x."dealId" AND d."organizationId" = ${orgId}
+      INNER JOIN stages s ON s.id = x."stageId"
+      LEFT JOIN stages fs ON fs.id = x."fromStageId"
+      LEFT JOIN contacts c ON c.id = d."contactId"
+      WHERE 1=1
+        ${pipelineFilter}
+        ${ownerFilter}
+        ${stageFilter}
+        ${tagFilter}
+        ${sourceFilter}
+      ORDER BY x."dealId", x."stageId", x."enteredAt" ASC,
+        (x."eventType" = 'CREATED') DESC
+    `),
+    db().$queryRaw<
+      {
+        dealId: string;
+        fromStageId: string;
+        toStageId: string;
+        toStageName: string | null;
+        toPipelineId: string | null;
+      }[]
+    >(Prisma.sql`
+      SELECT DISTINCT ON (x."dealId", x."fromStageId")
+        x."dealId", x."fromStageId", x."toStageId",
+        COALESCE(ts.name, x."toStageName") AS "toStageName",
+        COALESCE(ts."pipelineId", x."toPipelineId") AS "toPipelineId"
+      FROM (
+        SELECT e."dealId" AS "dealId",
+               (e.meta->'from'->>'id') AS "fromStageId",
+               (e.meta->'to'->>'id') AS "toStageId",
+               (e.meta->'to'->>'name') AS "toStageName",
+               (e.meta->'to'->>'pipelineId') AS "toPipelineId",
+               e."createdAt" AS "exitedAt"
+        FROM deal_events e
+        WHERE e."organizationId" = ${orgId}
+          AND e.type = 'STAGE_CHANGED'
+          AND e."createdAt" >= ${f.range.from}
+          AND e."createdAt" <= ${f.range.to}
+          AND (e.meta->'from'->>'id') IS NOT NULL
+          AND (e.meta->'to'->>'id') IS NOT NULL
+      ) x
+      INNER JOIN deals d ON d.id = x."dealId" AND d."organizationId" = ${orgId}
+      INNER JOIN stages s ON s.id = x."fromStageId"
+      LEFT JOIN stages ts ON ts.id = x."toStageId"
+      LEFT JOIN contacts c ON c.id = d."contactId"
+      WHERE 1=1
+        ${pipelineFilter}
+        ${ownerFilter}
+        ${exitStageFilter}
+        ${tagFilter}
+        ${sourceFilter}
+      ORDER BY x."dealId", x."fromStageId", x."exitedAt" ASC
+    `),
+  ]);
 
   type StageBucket = {
     count: number;
@@ -530,8 +731,12 @@ export async function getPainelFunnel(f: PainelDealFilters): Promise<PainelFunne
     dealIds: Set<string>;
     firstAt: Map<string, Date>;
     byUser: Map<string, { count: number; value: number; todayDelta: number }>;
+    inflow: Map<string | null, PainelFunnelInflow>;
+    exited: number;
+    outflow: Map<string, PainelFunnelOutflow>;
   };
   const byStage = new Map<string, StageBucket>();
+  const pipelineOfStage = new Map(stages.map((s) => [s.id, s.pipelineId]));
   type StockUser = { count: number; value: number };
   const stockByStage = new Map<string, { count: number; value: number; byUser: Map<string, StockUser> }>();
   for (const s of stages) {
@@ -543,6 +748,9 @@ export async function getPainelFunnel(f: PainelDealFilters): Promise<PainelFunne
       dealIds: new Set(),
       firstAt: new Map(),
       byUser: new Map(),
+      inflow: new Map(),
+      exited: 0,
+      outflow: new Map(),
     });
     stockByStage.set(s.id, { count: 0, value: 0, byUser: new Map() });
   }
@@ -560,6 +768,12 @@ export async function getPainelFunnel(f: PainelDealFilters): Promise<PainelFunne
     stock.byUser.set(ownerKey, user);
   }
 
+  // Novos = entradas por criação (as mesmas que viram `inflow[null]`), então
+  // Σ inflow[null] das etapas abertas + novosForaDoFunil.count = novos.count.
+  const stageFlags = new Map(stages.map((s) => [s.id, s]));
+  const novos = { count: 0, value: 0 };
+  const novosForaDoFunil = { count: 0, won: 0, lost: 0 };
+
   for (const row of entered) {
     const bucket = byStage.get(row.stageId);
     if (!bucket) continue;
@@ -569,6 +783,16 @@ export async function getPainelFunnel(f: PainelDealFilters): Promise<PainelFunne
     bucket.count += 1;
     const value = toNumber(row.value);
     bucket.value += value;
+    if (row.eventType === "CREATED") {
+      novos.count += 1;
+      novos.value += value;
+      const flags = stageFlags.get(row.stageId);
+      if (flags?.isWon || flags?.isLost) {
+        novosForaDoFunil.count += 1;
+        if (flags.isWon) novosForaDoFunil.won += 1;
+        else novosForaDoFunil.lost += 1;
+      }
+    }
     const isToday = row.enteredAt >= todayStart;
     if (isToday) bucket.todayDelta += 1;
     const ownerKey = row.ownerId ?? "__none__";
@@ -577,6 +801,40 @@ export async function getPainelFunnel(f: PainelDealFilters): Promise<PainelFunne
     user.value += value;
     if (isToday) user.todayDelta += 1;
     bucket.byUser.set(ownerKey, user);
+
+    // Origem desta 1ª entrada: soma de `inflow` = `entered`. Movimento sem
+    // `meta.from.id` (evento antigo) cai em "other".
+    const fromKey =
+      row.eventType === "CREATED" ? null : (row.fromStageId ?? FUNNEL_FLOW_OTHER);
+    const inflow = bucket.inflow.get(fromKey);
+    if (inflow) inflow.count += 1;
+    else {
+      const item: PainelFunnelInflow = { fromStageId: fromKey, count: 1 };
+      if (fromKey && fromKey !== FUNNEL_FLOW_OTHER) {
+        if (row.fromStageName) item.fromStageName = row.fromStageName;
+        if (row.fromPipelineId && row.fromPipelineId !== pipelineOfStage.get(row.stageId)) {
+          item.fromPipelineId = row.fromPipelineId;
+        }
+      }
+      bucket.inflow.set(fromKey, item);
+    }
+  }
+
+  // Saídas: 1ª saída por (negócio, etapa) — soma de `outflow` = `exited`.
+  for (const row of exits) {
+    const bucket = byStage.get(row.fromStageId);
+    if (!bucket) continue;
+    bucket.exited += 1;
+    const out = bucket.outflow.get(row.toStageId);
+    if (out) out.count += 1;
+    else {
+      const item: PainelFunnelOutflow = { toStageId: row.toStageId, count: 1 };
+      if (row.toStageName) item.toStageName = row.toStageName;
+      if (row.toPipelineId && row.toPipelineId !== pipelineOfStage.get(row.fromStageId)) {
+        item.toPipelineId = row.toPipelineId;
+      }
+      bucket.outflow.set(row.toStageId, item);
+    }
   }
 
   // Envios para Perdido no período: sai do `entered` (mesmos filtros), sem consulta
@@ -689,73 +947,37 @@ export async function getPainelFunnel(f: PainelDealFilters): Promise<PainelFunne
       value: round2(stock.value),
       passThrough,
       entered: bucket.count,
+      exited: bucket.exited,
+      inflow: [...bucket.inflow.values()],
+      outflow: [...bucket.outflow.values()],
       lost,
       todayDelta: bucket.todayDelta,
       byUser,
     };
   });
 
-  const merged = f.pipelineIds.length === 1 ? result : mergeFunnelStagesByName(result);
-  // Contato novo + deal no período = 1. Só deal = 1. Só contato = 1.
-  // Escopo = funil selecionado (etapa atual do negócio).
-  const pipeIds = f.pipelineIds.length
-    ? f.pipelineIds
-    : [...new Set(stages.map((s) => s.pipelineId))];
-  const inPipe = pipeIds.length
-    ? Prisma.sql`AND s."pipelineId" IN (${Prisma.join(pipeIds)})`
-    : Prisma.sql`AND FALSE`;
-  const createdRows = await db().$queryRaw<{ cnt: bigint; val: unknown }[]>(Prisma.sql`
-    SELECT
-      (
-        (SELECT COUNT(*)::bigint FROM contacts c
-          WHERE c."organizationId" = ${orgId}
-            AND c."createdAt" >= ${f.range.from}
-            AND c."createdAt" <= ${f.range.to}
-            AND EXISTS (
-              SELECT 1 FROM deals d
-              INNER JOIN stages s ON s.id = d."stageId"
-              WHERE d."contactId" = c.id
-                AND d."organizationId" = ${orgId}
-                AND d."createdAt" >= ${f.range.from}
-                AND d."createdAt" <= ${f.range.to}
-                ${inPipe}
-            ))
-        +
-        (SELECT COUNT(*)::bigint FROM deals d
-          INNER JOIN stages s ON s.id = d."stageId"
-          WHERE d."organizationId" = ${orgId}
-            AND d."createdAt" >= ${f.range.from}
-            AND d."createdAt" <= ${f.range.to}
-            ${inPipe}
-            AND NOT EXISTS (
-              SELECT 1 FROM contacts c
-              WHERE c.id = d."contactId"
-                AND c."createdAt" >= ${f.range.from}
-                AND c."createdAt" <= ${f.range.to}
-            ))
-      ) AS cnt,
-      (
-        SELECT COALESCE(SUM(CAST(d.value AS DECIMAL)), 0)
-        FROM deals d
-        INNER JOIN stages s ON s.id = d."stageId"
-        WHERE d."organizationId" = ${orgId}
-          AND d."createdAt" >= ${f.range.from}
-          AND d."createdAt" <= ${f.range.to}
-          ${inPipe}
-      ) AS val
-  `);
-  const created = createdRows[0];
-  const novos = {
-    count: created ? Number(created.cnt) : 0,
-    value: round2(toNumber(created?.val)),
-  };
-
+  // O teto de itens só depois de juntar as etapas de mesmo nome (senão o "other"
+  // de um funil esconderia uma origem que, somada, entraria no top).
+  const merged = (f.pipelineIds.length === 1 ? result : mergeFunnelStagesByName(result)).map(
+    (s) => ({
+      ...s,
+      inflow: capFlows(s.inflow, (r) => r.fromStageId, (count) => ({
+        fromStageId: FUNNEL_FLOW_OTHER,
+        count,
+      })),
+      outflow: capFlows(s.outflow, (r) => r.toStageId, (count) => ({
+        toStageId: FUNNEL_FLOW_OTHER,
+        count,
+      })),
+    }),
+  );
   return {
     definition: "cohort",
     tooltip,
     stages: merged,
     empty: openStages.length === 0,
-    novos,
+    novos: { count: novos.count, value: round2(novos.value) },
+    novosForaDoFunil,
     lostStage,
   };
 }
@@ -893,6 +1115,7 @@ export async function getPainelAgents(f: PainelDealFilters): Promise<PainelAgent
   };
 
   const [users, won, lost, open] = await Promise.all([
+    // Mesmo recorte de atendentes do Agora (`painel-agora.ts`): só humanos, sem super-admin.
     db().user.findMany({
       where: { organizationId: orgId, type: "HUMAN", isSuperAdmin: false },
       select: { id: true, name: true },
@@ -909,6 +1132,7 @@ export async function getPainelAgents(f: PainelDealFilters): Promise<PainelAgent
       where: and(structural, lostCond),
       _count: { _all: true },
     }),
+    // Carteira aberta atual (`openToday`): sem recorte de data, de propósito.
     db().deal.groupBy({
       by: ["ownerId"],
       where: and(structural, { status: "OPEN" as DealStatus }),
