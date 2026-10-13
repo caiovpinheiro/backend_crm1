@@ -1,3 +1,4 @@
+import { getLogger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { normalizePhone, phoneMatchVariants } from "@/lib/phone";
@@ -6,6 +7,8 @@ import {
   activeConversationOnAccountWhere,
   withConversationNumberRetry,
 } from "@/services/conversations";
+
+const log = getLogger("whatsapp-groups");
 
 export type WhatsAppGroupMemberDto = {
   id: string;
@@ -45,6 +48,13 @@ export type BaileysGroupSnapshot = {
   name: string;
   description: string | null;
   ownerJid: string | null;
+  /** Tamanho informado pelo WhatsApp quando a lista de participantes vem incompleta. */
+  size?: number;
+  /**
+   * Descoberta por histórico/chat, sem metadados. Atualiza o nome e não apaga
+   * participantes que já estavam gravados.
+   */
+  partial?: boolean;
   members: Array<{
     jid: string;
     phone: string | null;
@@ -103,55 +113,100 @@ export async function getWhatsAppGroup(
   };
 }
 
+async function writeGroupSnapshot(
+  organizationId: string,
+  channelId: string,
+  snap: BaileysGroupSnapshot,
+): Promise<void> {
+  const members = snap.members.filter((m) => m.jid);
+  const count = Math.max(members.length, snap.size ?? 0);
+  const name = snap.name.trim();
+  const group = await prisma.whatsAppGroup.upsert({
+    where: { channelId_jid: { channelId, jid: snap.jid } },
+    create: {
+      organizationId,
+      channelId,
+      jid: snap.jid,
+      name: name || "Grupo",
+      description: snap.description,
+      ownerJid: snap.ownerJid,
+      participantCount: count,
+      syncedAt: new Date(),
+    },
+    update: {
+      ...(name ? { name } : {}),
+      ...(snap.partial
+        ? {}
+        : { description: snap.description, ownerJid: snap.ownerJid }),
+      ...(count > 0 ? { participantCount: count } : {}),
+      syncedAt: new Date(),
+    },
+    select: { id: true },
+  });
+
+  // Lista vazia não apaga: a comunidade às vezes chega sem participante
+  // (jid ausente) e um erro aqui interrompia o restante do lote.
+  if (snap.partial || members.length === 0) return;
+
+  await prisma.whatsAppGroupMember.deleteMany({ where: { groupId: group.id } });
+  await prisma.whatsAppGroupMember.createMany({
+    data: members.map((m) => ({
+      organizationId,
+      groupId: group.id,
+      jid: m.jid,
+      phone: m.phone,
+      name: m.name,
+      isAdmin: m.isAdmin,
+      isSuperAdmin: m.isSuperAdmin,
+    })),
+  });
+}
+
+export async function upsertChannelGroupSnapshots(
+  organizationId: string,
+  channelId: string,
+  snapshots: BaileysGroupSnapshot[],
+): Promise<void> {
+  for (const snap of snapshots) {
+    if (!snap.jid.endsWith("@g.us")) continue;
+    try {
+      await writeGroupSnapshot(organizationId, channelId, snap);
+    } catch (err) {
+      log.warn(
+        { channelId, jid: snap.jid, err: err instanceof Error ? err.message : err },
+        "[whatsapp-groups] grupo ignorado ao gravar",
+      );
+    }
+  }
+}
+
 export async function replaceChannelGroups(
   organizationId: string,
   channelId: string,
   snapshots: BaileysGroupSnapshot[],
 ): Promise<number> {
+  // Resposta vazia (socket acabou de abrir) não pode apagar a lista.
+  if (snapshots.length === 0) return 0;
+
   const seen = snapshots.map((s) => s.jid);
   await prisma.whatsAppGroup.deleteMany({
-    where: { channelId, ...(seen.length > 0 ? { jid: { notIn: seen } } : {}) },
+    where: { channelId, jid: { notIn: seen } },
   });
 
+  let written = 0;
   for (const snap of snapshots) {
-    const group = await prisma.whatsAppGroup.upsert({
-      where: { channelId_jid: { channelId, jid: snap.jid } },
-      create: {
-        organizationId,
-        channelId,
-        jid: snap.jid,
-        name: snap.name,
-        description: snap.description,
-        ownerJid: snap.ownerJid,
-        participantCount: snap.members.length,
-        syncedAt: new Date(),
-      },
-      update: {
-        name: snap.name,
-        description: snap.description,
-        ownerJid: snap.ownerJid,
-        participantCount: snap.members.length,
-        syncedAt: new Date(),
-      },
-      select: { id: true },
-    });
-
-    await prisma.whatsAppGroupMember.deleteMany({ where: { groupId: group.id } });
-    if (snap.members.length === 0) continue;
-    await prisma.whatsAppGroupMember.createMany({
-      data: snap.members.map((m) => ({
-        organizationId,
-        groupId: group.id,
-        jid: m.jid,
-        phone: m.phone,
-        name: m.name,
-        isAdmin: m.isAdmin,
-        isSuperAdmin: m.isSuperAdmin,
-      })),
-    });
+    try {
+      await writeGroupSnapshot(organizationId, channelId, snap);
+      written++;
+    } catch (err) {
+      log.warn(
+        { channelId, jid: snap.jid, err: err instanceof Error ? err.message : err },
+        "[whatsapp-groups] grupo ignorado na sincronização",
+      );
+    }
   }
 
-  return snapshots.length;
+  return written;
 }
 
 export async function listWhatsAppGroupMessages(

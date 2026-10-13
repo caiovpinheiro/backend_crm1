@@ -1,9 +1,11 @@
 import type { GroupMetadata, WASocket } from "@whiskeysockets/baileys";
+import { getBinaryNodeChild, getBinaryNodeChildren, type BinaryNode } from "@whiskeysockets/baileys";
 
 import { prismaBase } from "@/lib/prisma-base";
 import { withSystemContext } from "@/lib/webhook-context";
 import {
   replaceChannelGroups,
+  upsertChannelGroupSnapshots,
   type BaileysGroupSnapshot,
 } from "@/services/whatsapp-groups";
 import type { BaileysManager } from "./baileys-manager";
@@ -11,42 +13,220 @@ import { getLogger } from "@/lib/logger";
 
 const log = getLogger("worker.baileys.sync-groups");
 
-function phoneFromJid(jid: string): string | null {
+const EMPTY_RETRY_MS = 4_000;
+const METADATA_TIMEOUT_MS = 8_000;
+/** Conta sem flag de comunidade: sonda os menores jids (a comunidade costuma ser pequena). */
+const UNFLAGGED_PROBE_LIMIT = 5;
+
+type LinkedGroupNode = {
+  id?: string;
+  subject?: string;
+  owner?: string;
+  size?: number;
+};
+
+type QuerySocket = WASocket & {
+  query?: (node: BinaryNode) => Promise<BinaryNode>;
+  communityFetchAllParticipating?: () => Promise<Record<string, GroupMetadata>>;
+};
+
+function phoneFromJid(jid: string | undefined): string | null {
+  if (!jid) return null;
   const [user, server] = jid.split("@");
   if (!user) return null;
   if (server === "s.whatsapp.net" || server === "c.us") {
     const digits = user.replace(/\D/g, "");
-    return digits || user;
+    return digits || null;
   }
   return null;
 }
 
-function snapshotFromMeta(meta: GroupMetadata): BaileysGroupSnapshot {
-  const members = (meta.participants ?? []).map((p) => ({
-    jid: p.id,
-    phone: phoneFromJid(p.id),
-    name: null,
-    isAdmin: p.admin === "admin" || p.admin === "superadmin",
-    isSuperAdmin: p.admin === "superadmin",
-  }));
+function asGroupJid(id: string | undefined): string | null {
+  if (!id) return null;
+  const user = id.split("@")[0]?.trim();
+  if (!user) return null;
+  return `${user}@g.us`;
+}
+
+function errText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+export function snapshotFromMeta(meta: GroupMetadata): BaileysGroupSnapshot {
+  const members = [];
+  for (const p of meta.participants ?? []) {
+    const jid = p.id || p.phoneNumber || p.lid;
+    if (!jid) continue;
+    const phoneSource =
+      p.phoneNumber && !p.phoneNumber.endsWith("@lid") ? p.phoneNumber : p.id;
+    members.push({
+      jid,
+      phone: phoneFromJid(phoneSource),
+      name: p.name || p.notify || null,
+      isAdmin: p.admin === "admin" || p.admin === "superadmin",
+      isSuperAdmin: p.admin === "superadmin",
+    });
+  }
+  const size =
+    typeof meta.size === "number" && Number.isFinite(meta.size) ? meta.size : members.length;
   return {
-    jid: meta.id,
+    jid: asGroupJid(meta.id) ?? meta.id,
     name: meta.subject ?? "",
     description: meta.desc ?? null,
     ownerJid: meta.owner ?? null,
+    size,
     members,
   };
+}
+
+function remember(
+  byId: Map<string, GroupMetadata>,
+  meta: GroupMetadata | undefined,
+  onMeta?: (meta: GroupMetadata) => void,
+): void {
+  const jid = asGroupJid(meta?.id);
+  if (!meta || !jid) return;
+  const normalized = jid === meta.id ? meta : { ...meta, id: jid };
+  byId.set(jid, normalized);
+  onMeta?.(normalized);
+}
+
+function isCommunitySeed(meta: GroupMetadata): boolean {
+  return Boolean(meta.isCommunity || meta.isCommunityAnnounce || meta.linkedParent);
+}
+
+async function querySubGroups(sock: QuerySocket, communityJid: string): Promise<LinkedGroupNode[]> {
+  if (!sock.query) return [];
+  const result = await sock.query({
+    tag: "iq",
+    attrs: { type: "get", xmlns: "w:g2", to: communityJid },
+    content: [{ tag: "sub_groups", attrs: {} }],
+  });
+  const sub = getBinaryNodeChild(result, "sub_groups");
+  if (!sub) return [];
+  return getBinaryNodeChildren(sub, "group").map((node) => ({
+    id: node.attrs.id || node.attrs.jid,
+    subject: node.attrs.subject || "",
+    owner: node.attrs.creator,
+    size: node.attrs.size ? Number(node.attrs.size) : undefined,
+  }));
+}
+
+async function metadataOrStub(
+  sock: WASocket,
+  jid: string,
+  hint: LinkedGroupNode,
+): Promise<GroupMetadata> {
+  try {
+    const meta = await Promise.race([
+      sock.groupMetadata(jid),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("groupMetadata timeout")), METADATA_TIMEOUT_MS),
+      ),
+    ]);
+    return {
+      ...meta,
+      id: asGroupJid(meta.id) ?? jid,
+      subject: meta.subject || hint.subject || "",
+      size: meta.size || hint.size,
+    };
+  } catch (err) {
+    log.warn({ jid, err: errText(err) }, "[baileys] metadados do subgrupo indisponíveis");
+    return {
+      id: jid,
+      subject: hint.subject || "",
+      owner: hint.owner,
+      participants: [],
+      size: hint.size,
+    };
+  }
+}
+
+async function loadParticipating(
+  sock: WASocket,
+  onMeta?: (meta: GroupMetadata) => void,
+): Promise<{ byId: Map<string, GroupMetadata>; replace: boolean }> {
+  const byId = new Map<string, GroupMetadata>();
+  let replace = true;
+  const map = await sock.groupFetchAllParticipating();
+  for (const meta of Object.values(map)) remember(byId, meta, onMeta);
+
+  const ext = sock as QuerySocket;
+  if (ext.communityFetchAllParticipating) {
+    try {
+      const communities = await ext.communityFetchAllParticipating();
+      for (const meta of Object.values(communities ?? {})) remember(byId, meta, onMeta);
+    } catch (err) {
+      replace = false;
+      log.warn({ err: errText(err) }, "[baileys] comunidades não listadas");
+    }
+  }
+
+  const parents = new Set<string>();
+  const addParent = (meta: GroupMetadata) => {
+    if (meta.isCommunity) parents.add(meta.id);
+    const parent = asGroupJid(meta.linkedParent);
+    if (parent) parents.add(parent);
+  };
+  for (const meta of byId.values()) addParent(meta);
+
+  const speculative: string[] = [];
+  // O `participating` às vezes devolve a comunidade sem `<parent>` / `linked_parent`.
+  if (parents.size === 0) {
+    const candidates = [...byId.values()]
+      .sort((a, b) => (a.size ?? a.participants.length) - (b.size ?? b.participants.length))
+      .slice(0, UNFLAGGED_PROBE_LIMIT);
+    for (const meta of candidates) {
+      let seed = meta;
+      if (!isCommunitySeed(meta)) {
+        try {
+          seed = await sock.groupMetadata(meta.id);
+          remember(byId, seed, onMeta);
+        } catch (err) {
+          log.warn({ jid: meta.id, err: errText(err) }, "[baileys] metadados do grupo indisponíveis");
+        }
+      }
+      addParent(seed);
+      if (!seed.isCommunity && !seed.linkedParent) speculative.push(seed.id);
+    }
+  }
+
+  const absorb = async (parent: string, required: boolean) => {
+    try {
+      const linked = await querySubGroups(ext, parent);
+      for (const group of linked) {
+        const jid = asGroupJid(group.id);
+        if (!jid || byId.has(jid)) continue;
+        const meta = await metadataOrStub(sock, jid, group);
+        remember(byId, meta, onMeta);
+      }
+    } catch (err) {
+      if (required) {
+        replace = false;
+        log.warn({ jid: parent, err: errText(err) }, "[baileys] subgrupos da comunidade falharam");
+      }
+    }
+  };
+
+  for (const parent of parents) await absorb(parent, true);
+  for (const jid of speculative) await absorb(jid, false);
+
+  return { byId, replace };
 }
 
 export async function fetchParticipatingGroups(
   sock: WASocket,
   onMeta?: (meta: GroupMetadata) => void,
-): Promise<BaileysGroupSnapshot[]> {
-  const map = await sock.groupFetchAllParticipating();
-  return Object.values(map).map((meta) => {
-    onMeta?.(meta);
-    return snapshotFromMeta(meta);
-  });
+): Promise<{ snapshots: BaileysGroupSnapshot[]; replace: boolean }> {
+  let loaded = await loadParticipating(sock, onMeta);
+  if (loaded.byId.size === 0) {
+    await new Promise((resolve) => setTimeout(resolve, EMPTY_RETRY_MS));
+    loaded = await loadParticipating(sock, onMeta);
+  }
+  return {
+    snapshots: [...loaded.byId.values()].map(snapshotFromMeta),
+    replace: loaded.replace,
+  };
 }
 
 export async function syncChannelGroups(manager: BaileysManager, channelId: string): Promise<number> {
@@ -64,10 +244,27 @@ export async function syncChannelGroups(manager: BaileysManager, channelId: stri
     throw new Error("Canal ausente ou não é BAILEYS_MD");
   }
 
-  const snapshots = await fetchParticipatingGroups(sock, (meta) => session.rememberGroup(meta));
-  const count = await withSystemContext(ch.organizationId, () =>
-    replaceChannelGroups(ch.organizationId, channelId, snapshots),
-  );
+  const fetched = await fetchParticipatingGroups(sock, (meta) => session.rememberGroup(meta));
+  const byJid = new Map<string, BaileysGroupSnapshot>();
+  for (const snap of fetched.snapshots) {
+    if (snap.jid.endsWith("@g.us")) byJid.set(snap.jid, snap);
+  }
+  for (const extra of session.discoveredGroupSnapshots()) {
+    if (!byJid.has(extra.jid)) byJid.set(extra.jid, extra);
+  }
+  const snapshots = [...byJid.values()];
+  if (snapshots.length === 0) {
+    log.warn({ channelId }, "[baileys] sincronização sem grupos — lista atual preservada");
+    return 0;
+  }
+
+  const count = await withSystemContext(ch.organizationId, async () => {
+    if (!fetched.replace) {
+      await upsertChannelGroupSnapshots(ch.organizationId, channelId, snapshots);
+      return snapshots.length;
+    }
+    return replaceChannelGroups(ch.organizationId, channelId, snapshots);
+  });
   log.info({ channelId, count }, "[baileys] grupo(s) sincronizado(s)");
   return count;
 }
