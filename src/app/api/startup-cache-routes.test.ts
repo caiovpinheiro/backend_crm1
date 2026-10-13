@@ -118,6 +118,8 @@ const h = vi.hoisted(() => {
     getChannels: vi.fn(),
     getPipelines: vi.fn(),
     buildMeBootstrap: vi.fn(),
+    roomsByOrg: new Map<string, unknown[]>(),
+    listRooms: vi.fn(),
     /** Usuários sem `pipeline:view`. */
     deniedPipelineUsers: new Set<string>(),
   };
@@ -203,6 +205,7 @@ vi.mock("@/services/api4com/provisioning", () => ({
   disableTelephony: async () => ({ success: true }),
 }));
 vi.mock("@/services/tabulations", () => ({ assertLeafInDepartment: vi.fn() }));
+vi.mock("@/services/team-chat", () => ({ listRooms: h.listRooms, createRoom: vi.fn() }));
 vi.mock("@/lib/auth/lockout", () => ({ clearLoginLockout: vi.fn() }));
 vi.mock("@/lib/auth/session-revocation", () => ({
   SESSION_VERSION_BUMP: {},
@@ -216,6 +219,7 @@ import { GET as channelsGet } from "@/app/api/channels/route";
 import { GET as fieldLayoutGet } from "@/app/api/field-layout/route";
 import { GET as orgSettingsGet } from "@/app/api/settings/org/route";
 import { GET as quickReplyGroupsGet } from "@/app/api/settings/quick-replies/groups/route";
+import { GET as teamChatRoomsGet } from "@/app/api/team-chat/rooms/route";
 import { GET as visibilityGet } from "@/app/api/settings/visibility/route";
 import { GET as departmentsGet } from "@/app/api/settings/departments/route";
 import { PUT as departmentPut } from "@/app/api/settings/departments/[id]/route";
@@ -226,6 +230,7 @@ import {
 } from "@/app/api/settings/quick-replies/route";
 import { GET as usersGet } from "@/app/api/users/route";
 import { PUT as userPut } from "@/app/api/users/[id]/route";
+import { writeBrowserApiCorsHeaders } from "@/lib/browser-api-cors";
 import { resetCacheVersionsForTests } from "@/lib/cache/versions";
 import { resetResponseCacheMemoForTests } from "@/lib/cache/response-cache";
 import { BOOTSTRAP_BLOCK_URLS } from "@/services/bootstrap-blocks";
@@ -256,12 +261,28 @@ beforeEach(() => {
   h.calls.length = 0;
   h.stageDenyByUser.clear();
   h.deniedPipelineUsers.clear();
-  h.buildMeBootstrap.mockImplementation(async (user: { id: string; organizationId: string }) => ({
-    version: 1,
-    user: { id: user.id, organizationId: user.organizationId, isSuperAdmin: false },
-    profile: { id: user.id },
-    failedBlocks: [],
-  }));
+  h.roomsByOrg.set("org_a", [{ id: "r1", name: "Geral A", unread: 0 }]);
+  h.roomsByOrg.set("org_b", [{ id: "r1", name: "Geral B", unread: 0 }]);
+  h.listRooms.mockImplementation(async (v: { organizationId: string }) =>
+    structuredClone(h.roomsByOrg.get(v.organizationId) ?? []),
+  );
+  // Como o serviço real: a lista completa das salas sai da mesma consulta
+  // do resumo `teamChatRooms` e é entregue pelo hook.
+  h.buildMeBootstrap.mockImplementation(
+    async (
+      user: { id: string; organizationId: string },
+      hooks?: { onTeamChatRooms?: (rooms: unknown[]) => void },
+    ) => {
+      const rooms = await h.listRooms({ userId: user.id, organizationId: user.organizationId });
+      hooks?.onTeamChatRooms?.(rooms);
+      return {
+        version: 1,
+        user: { id: user.id, organizationId: user.organizationId, isSuperAdmin: false },
+        profile: { id: user.id },
+        failedBlocks: [],
+      };
+    },
+  );
   resetCacheVersionsForTests();
   resetResponseCacheMemoForTests();
   vi.clearAllMocks();
@@ -472,6 +493,7 @@ describe("isolamento", () => {
 
 describe("GET /api/me/bootstrap — blocks", () => {
   const ROUTE_BY_URL: Record<string, (r: Request) => Promise<Response>> = {
+    "/api/team-chat/rooms": teamChatRoomsGet as unknown as (r: Request) => Promise<Response>,
     "/api/pipelines": pipelinesGet as (r: Request) => Promise<Response>,
     "/api/settings/org?prefix=conversation.": orgSettingsGet as (r: Request) => Promise<Response>,
     "/api/settings/visibility": visibilityGet as (r: Request) => Promise<Response>,
@@ -495,7 +517,8 @@ describe("GET /api/me/bootstrap — blocks", () => {
     expect(Object.keys(body.blocks)).toEqual([...BOOTSTRAP_BLOCK_URLS]);
     expect(body.blockErrors).toEqual([]);
 
-    // A rota individual sai do MESMO cache: acerto, sem banco, mesmo corpo.
+    // Corpo idêntico ao da rota individual; as cacheadas saem do MESMO cache
+    // (acerto, sem banco). `/api/team-chat/rooms` é por usuário e sem cache.
     h.calls.length = 0;
     for (const url of BOOTSTRAP_BLOCK_URLS) {
       const route = await ROUTE_BY_URL[url](get(url));
@@ -503,6 +526,9 @@ describe("GET /api/me/bootstrap — blocks", () => {
       expect(await route.json(), url).toEqual(body.blocks[url]);
     }
     expect(h.calls).toEqual([]);
+    expect(body.blocks["/api/team-chat/rooms"]).toEqual({
+      rooms: [{ id: "r1", name: "Geral A", unread: 0 }],
+    });
   });
 
   it("304 com o ETag guardado: sem ler corpo de bloco e sem consultas", async () => {
@@ -571,5 +597,61 @@ describe("GET /api/me/bootstrap — blocks", () => {
     const body = (await res.json()) as { blocks: Record<string, unknown> };
     expect(body.blocks["/api/pipelines"]).toBeUndefined();
     expect(body.blocks["/api/channels"]).toBeDefined();
+  });
+
+  it("salas do team-chat mudaram (não lida): o ETag do bootstrap muda", async () => {
+    const first = await bootstrap();
+    const etag = first.headers.get("etag");
+    h.roomsByOrg.set("org_a", [{ id: "r1", name: "Geral A", unread: 3 }]);
+    const second = await bootstrap(etag);
+    expect(second.status).toBe(200);
+    expect(second.headers.get("etag")).not.toBe(etag);
+    const body = (await second.json()) as { blocks: Record<string, { rooms: { unread: number }[] }> };
+    expect(body.blocks["/api/team-chat/rooms"].rooms[0].unread).toBe(3);
+  });
+
+  it("sem /api/activities/alerts (o GET marca o alerta como entregue)", async () => {
+    expect(BOOTSTRAP_BLOCK_URLS).not.toContain("/api/activities/alerts");
+  });
+});
+
+describe("cabeçalhos do 304 (cache do navegador, cross-origin)", () => {
+  const ORIGIN = "https://acme.bwipo.com";
+
+  /** O que o middleware faz na resposta de toda rota `/api/*`. */
+  function withCors(res: Response): Response {
+    writeBrowserApiCorsHeaders(
+      { headers: new Headers({ origin: ORIGIN }) },
+      res,
+      ORIGIN,
+    );
+    return res;
+  }
+
+  function expectCacheAndCors(res: Response, etag: string | null) {
+    expect(res.headers.get("etag")).toBe(etag);
+    expect(res.headers.get("cache-control")).toBe("private, no-cache");
+    expect(res.headers.get("access-control-allow-origin")).toBe(ORIGIN);
+    expect(res.headers.get("access-control-allow-credentials")).toBe("true");
+    const vary = (res.headers.get("vary") ?? "").split(",").map((v) => v.trim().toLowerCase());
+    expect(vary).toEqual(expect.arrayContaining(["origin", "cookie", "authorization"]));
+    expect(vary.filter((v) => v === "origin")).toHaveLength(1);
+  }
+
+  it.each([
+    ["/api/channels", channelsGet as (r: Request) => Promise<Response>],
+    ["/api/me/bootstrap", bootstrapGet as (r: Request) => Promise<Response>],
+  ])("%s: 200 e 304 com os mesmos cabeçalhos de CORS, ETag, Cache-Control e Vary", async (path, handler) => {
+    const ok = withCors(await handler(get(path)));
+    expect(ok.status).toBe(200);
+    const etag = ok.headers.get("etag");
+    expectCacheAndCors(ok, etag);
+
+    const notModified = withCors(await handler(get(path, etag)));
+    expect(notModified.status).toBe(304);
+    expectCacheAndCors(notModified, etag);
+    for (const h2 of ["access-control-allow-origin", "access-control-allow-credentials", "vary", "cache-control"]) {
+      expect(notModified.headers.get(h2), h2).toBe(ok.headers.get(h2));
+    }
   });
 });

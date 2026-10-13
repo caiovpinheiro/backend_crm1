@@ -60,6 +60,15 @@ export const RESPONSE_CACHE_TTL_SEC = 600;
 
 export const RESPONSE_CACHE_CONTROL = "private, no-cache";
 
+/**
+ * `Vary` das respostas em cache. O navegador guarda a resposta e revalida
+ * (cross-origin `{slug}.bwipo.com` → `api.bwipo.com`); o `Vary` impede que
+ * reaproveite a cópia de outra origem ou de outro usuário (cookie de sessão
+ * ou token). Já inclui `Origin`: o `Vary` da rota substitui o que o
+ * middleware de CORS pôs, e o middleware não duplica quando já tem `Origin`.
+ */
+export const RESPONSE_CACHE_VARY = "Origin, Cookie, Authorization";
+
 const KEY_PREFIX = "resp:";
 const ETAG_SUFFIX = ":etag";
 const VARIANT_FP_LENGTH = 20;
@@ -212,6 +221,7 @@ function cacheHeaders(etag: string, timing?: ServerTiming): Record<string, strin
   const headers: Record<string, string> = {
     ETag: etag,
     "Cache-Control": RESPONSE_CACHE_CONTROL,
+    Vary: RESPONSE_CACHE_VARY,
   };
   if (timing) headers["Server-Timing"] = timing.header();
   return headers;

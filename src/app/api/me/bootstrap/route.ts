@@ -26,11 +26,16 @@
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
-import { RESPONSE_CACHE_CONTROL } from "@/lib/cache/response-cache";
+import { RESPONSE_CACHE_CONTROL, RESPONSE_CACHE_VARY } from "@/lib/cache/response-cache";
 import {
+  TEAM_CHAT_ROOMS_URL,
   appendBlocksToBootstrapJson,
+  inContractOrder,
   loadBootstrapBlocks,
   resolveBootstrapBlocks,
+  teamChatRoomsBlock,
+  type BootstrapBlockEntry,
+  type BootstrapBlockUrl,
 } from "@/services/bootstrap-blocks";
 import {
   buildMeBootstrap,
@@ -49,6 +54,7 @@ function headers(etag: string, timing: ServerTiming): Record<string, string> {
   return {
     ETag: etag,
     "Cache-Control": RESPONSE_CACHE_CONTROL,
+    Vary: RESPONSE_CACHE_VARY,
     "Server-Timing": timing.header(),
   };
 }
@@ -59,19 +65,41 @@ export async function GET(request: Request) {
     // `auth` = JWT + versão da sessão + rate limit (antes do handler).
     timing.add("auth", timing.totalMs());
     try {
+      let fullRooms: unknown[] | null = null;
       const [payload, refs] = await Promise.all([
-        timing.time("query", () => buildMeBootstrap(session.user)),
+        timing.time("query", () =>
+          buildMeBootstrap(session.user, {
+            onTeamChatRooms: (rooms) => {
+              fullRooms = rooms;
+            },
+          }),
+        ),
         timing.time("cache", () => resolveBootstrapBlocks(session.user)),
       ]);
       const baseJson = timing.timeSync("serialize", () => JSON.stringify(payload));
       const ifNoneMatch = request.headers.get("if-none-match");
+
+      // Bloco por usuário (salas do team-chat): da consulta do payload base.
+      // Sem permissão → ausente; falha → `blockErrors`.
+      const liveRooms: BootstrapBlockEntry | null =
+        fullRooms !== null && session.user.organizationId
+          ? teamChatRoomsBlock(session.user.organizationId, fullRooms)
+          : null;
+      const liveErrors: BootstrapBlockUrl[] = payload.failedBlocks?.includes("teamChatRooms")
+        ? [TEAM_CHAT_ROOMS_URL]
+        : [];
+      const withLive = <T extends { url: BootstrapBlockUrl; etag: string }>(items: T[]) =>
+        inContractOrder<{ url: BootstrapBlockUrl; etag: string }>(
+          liveRooms ? [...items, liveRooms] : items,
+        );
 
       // 304 sem ler corpo de bloco: todos os ETags já estão guardados.
       if (ifNoneMatch && refs.every((r) => r.knownEtag)) {
         const etag = computeBootstrapBlocksEtag(
           session.user.id,
           baseJson,
-          refs.map((r) => ({ url: r.url, etag: r.knownEtag as string })),
+          withLive(refs.map((r) => ({ url: r.url, etag: r.knownEtag as string }))),
+          liveErrors,
         );
         if (etagMatches(ifNoneMatch, etag)) {
           recordConditionalResponse("/api/me/bootstrap", 304);
@@ -79,7 +107,13 @@ export async function GET(request: Request) {
         }
       }
 
-      const blocks = await timing.time("cache", () => loadBootstrapBlocks(refs));
+      const loaded = await timing.time("cache", () => loadBootstrapBlocks(refs));
+      const blocks = {
+        entries: inContractOrder(liveRooms ? [...loaded.entries, liveRooms] : loaded.entries),
+        errors: inContractOrder([...loaded.errors, ...liveErrors].map((url) => ({ url }))).map(
+          (e) => e.url,
+        ),
+      };
       const etag = computeBootstrapBlocksEtag(
         session.user.id,
         baseJson,
