@@ -157,3 +157,41 @@ describe("entity-presence com Redis (2 processos)", () => {
 function ROOM_USER(userId: string) {
   return { ...ROOM, userId };
 }
+
+describe("dedup de escrita por ciclo", () => {
+  it("PRESENCE_HEARTBEAT_DEDUP_MS: padrão 20 s, 0 desliga, limitado a 1–30 s", async () => {
+    const a = await newProcess();
+    expect(a.entityPresenceDedupMs({})).toBe(20_000);
+    expect(a.entityPresenceDedupMs({ PRESENCE_HEARTBEAT_DEDUP_MS: "0" })).toBe(0);
+    expect(a.entityPresenceDedupMs({ PRESENCE_HEARTBEAT_DEDUP_MS: "10" })).toBe(1_000);
+    expect(a.entityPresenceDedupMs({ PRESENCE_HEARTBEAT_DEDUP_MS: "120000" })).toBe(30_000);
+    expect(a.entityPresenceDedupMs({ PRESENCE_HEARTBEAT_DEDUP_MS: "abc" })).toBe(20_000);
+    // Ciclo sempre bem abaixo do TTL do viewer.
+    expect(a.entityPresenceDedupMs({ PRESENCE_HEARTBEAT_DEDUP_MS: "120000" })).toBeLessThan(
+      a.ENTITY_PRESENCE_TTL_MS / 2,
+    );
+  });
+
+  it("claim entre réplicas: só o primeiro do ciclo escreve; release libera", async () => {
+    const a = await newProcess();
+    const b = await newProcess();
+    const p = ROOM_USER("u1");
+    expect(await a.claimViewerWrite(p)).toBe(true);
+    expect(await b.claimViewerWrite(p)).toBe(false);
+    expect(await a.claimViewerWrite(ROOM_USER("u2"))).toBe(true);
+    await b.releaseViewerWrite(p);
+    expect(await a.claimViewerWrite(p)).toBe(true);
+    vi.advanceTimersByTime(20_000);
+    expect(await b.claimViewerWrite(p)).toBe(true);
+  });
+
+  it("listViewers só lê (HGETALL) e filtra vencidos", async () => {
+    const a = await newProcess();
+    await a.touchViewer(user("u1"));
+    h.redis.calls.length = 0;
+    expect(ids(await a.listViewers(ROOM))).toEqual(["u1"]);
+    expect(h.redis.calls.every((c) => c.startsWith("HGETALL"))).toBe(true);
+    vi.advanceTimersByTime(a.ENTITY_PRESENCE_TTL_MS + 1);
+    expect(await a.listViewers(ROOM)).toEqual([]);
+  });
+});

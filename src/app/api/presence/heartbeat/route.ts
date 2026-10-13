@@ -1,7 +1,13 @@
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
-import { removeViewer, touchViewer } from "@/lib/entity-presence";
+import {
+  claimViewerWrite,
+  listViewers,
+  releaseViewerWrite,
+  removeViewer,
+  touchViewer,
+} from "@/lib/entity-presence";
 import { prisma } from "@/lib/prisma";
 
 export const dynamic = "force-dynamic";
@@ -39,6 +45,10 @@ async function getUserInfo(userId: string): Promise<{ name: string; avatarUrl: s
  * action? }`. `action: "leave"` (enviado por `navigator.sendBeacon` no
  * unmount / aba fechada) remove o viewer imediatamente; qualquer outro valor
  * registra/renova. Sempre devolve a lista atual de viewers da entidade.
+ *
+ * Dedup: no mesmo ciclo (`PRESENCE_HEARTBEAT_DEDUP_MS`, 20 s) só o primeiro
+ * heartbeat de usuário+entidade escreve no Redis; os das outras abas
+ * respondem 200 com a lista atual, sem escrever.
  */
 export async function POST(req: Request) {
   return withOrgContext(async (session) => {
@@ -69,6 +79,15 @@ export async function POST(req: Request) {
 
     if (body.action === "leave") {
       const viewers = await removeViewer({ orgId, entityType, entityId, userId });
+      // Outra aba do mesmo usuário que siga no deal volta a escrever já.
+      await releaseViewerWrite({ orgId, entityType, entityId, userId });
+      return NextResponse.json({ viewers });
+    }
+
+    // N abas do mesmo usuário no mesmo deal = 1 viewer e 1 escrita por
+    // ciclo (`claimViewerWrite`); as demais respondem a lista sem escrever.
+    if (!(await claimViewerWrite({ orgId, entityType, entityId, userId }))) {
+      const viewers = await listViewers({ orgId, entityType, entityId });
       return NextResponse.json({ viewers });
     }
 
