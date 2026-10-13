@@ -11,9 +11,15 @@ const mocks = vi.hoisted(() => ({
   send: vi.fn(async (_args: { conversationId: string; text: string }): Promise<{ sent: boolean; reason?: string }> => ({ sent: true })),
   closeState: vi.fn(async (..._args: unknown[]) => undefined),
   logTurn: vi.fn(async (_args: Record<string, unknown>) => undefined),
+  executeRaw: vi.fn(async (..._args: unknown[]) => 1),
+  apiKey: vi.fn(async (_id: string): Promise<string | null> => "chave"),
+  generate: vi.fn(async (_args: Record<string, unknown>) => ({ text: "" })),
 }));
 
-vi.mock("@/lib/prisma-base", () => ({ prismaBase: { $queryRawUnsafe: mocks.queryRaw } }));
+vi.mock("@/services/ai/agent-key", () => ({ tryGetAgentApiKey: mocks.apiKey }));
+vi.mock("@/services/ai/provider", () => ({ generateWithTools: mocks.generate }));
+
+vi.mock("@/lib/prisma-base", () => ({ prismaBase: { $queryRawUnsafe: mocks.queryRaw, $executeRawUnsafe: mocks.executeRaw } }));
 vi.mock("@/lib/logger", () => ({ getLogger: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }) }));
 vi.mock("@/lib/webhook-context", () => ({ withSystemContext: async (_org: string, fn: () => Promise<unknown>) => fn() }));
 vi.mock("../actions", () => ({
@@ -205,5 +211,62 @@ describe("passada de inatividade", () => {
     expect(sql).toContain(`last_out."aiAgentUserId" = c."assignedToId"`);
     expect(sql).toContain(`'inactivity'->>'enabled') = 'true'`);
     expect(sql).toContain(`s."owner" <> 'pessoa' AND s."stage" <> 'closed'`);
+  });
+});
+
+describe("vários lembretes", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.send.mockResolvedValue({ sent: true });
+  });
+
+  it("primeiro lembrete conforme a última mensagem (passo a passo) e o registro do que saiu", async () => {
+    const config = { name: "Agente", tone: "Objetivo", autonomyMode: "auto", inactivity: { enabled: true, closeAfter: 120, followUps: [{ after: 10, mode: "by_reply" }, { after: 40, mode: "fixed", message: "Sigo por aqui se precisar." }] } };
+    mocks.queryRaw.mockResolvedValueOnce([row({ simple_config: config, has_state: true, last_out_content: "Faça assim:\n1. Abra o app.\n2. Toque em Pedidos.", last_out_at: minutesAgo(15), last_inbound_at: minutesAgo(16) })]);
+    mocks.queryRaw.mockResolvedValueOnce([{ createdAt: NOW }]);
+    expect(await processIdleV2(NOW)).toEqual({ nudged: 1, closed: 0 });
+    expect(mocks.send.mock.calls[0][0].text).toContain("Conseguiu fazer?");
+    const saved = JSON.parse(String(mocks.executeRaw.mock.calls[0][2]));
+    expect(saved).toMatchObject({ sent: 1, kind: "procedure", anchorAt: minutesAgo(15).toISOString(), lastAt: NOW.toISOString() });
+  });
+
+  it("segundo lembrete: a última mensagem é o primeiro lembrete (registro) → conta da âncora e manda o segundo", async () => {
+    const config = { name: "Agente", tone: "Objetivo", autonomyMode: "auto", inactivity: { enabled: true, closeAfter: 120, followUps: [{ after: 10, mode: "by_reply" }, { after: 40, mode: "fixed", message: "Sigo por aqui se precisar." }] } };
+    mocks.queryRaw.mockResolvedValueOnce([row({
+      simple_config: config, has_state: true,
+      last_out_content: "Conseguiu fazer?", last_out_at: minutesAgo(31), last_inbound_at: minutesAgo(42),
+      idle_follow_up: { anchorAt: minutesAgo(41).toISOString(), sent: 1, lastAt: minutesAgo(31).toISOString(), kind: "procedure" },
+    })]);
+    mocks.queryRaw.mockResolvedValueOnce([{ createdAt: NOW }]);
+    expect(await processIdleV2(NOW)).toEqual({ nudged: 1, closed: 0 });
+    expect(mocks.send.mock.calls[0][0].text).toBe("Sigo por aqui se precisar.");
+    expect(JSON.parse(String(mocks.executeRaw.mock.calls[0][2]))).toMatchObject({ sent: 2 });
+  });
+});
+
+describe("lembrete escrito pelo agente", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.send.mockResolvedValue({ sent: true });
+  });
+  const config = { name: "Agente", tone: "Objetivo", autonomyMode: "auto", inactivity: { enabled: true, closeAfter: 120, followUps: [{ after: 10, mode: "generated" }] } };
+
+  it("sai o texto escrito a partir da conversa", async () => {
+    mocks.queryRaw.mockResolvedValueOnce([row({ simple_config: config, has_state: true, last_out_content: "Qual é o número do pedido?", last_out_at: minutesAgo(15), last_inbound_at: minutesAgo(16) })]);
+    mocks.queryRaw.mockResolvedValueOnce([{ direction: "in", content: "meu pedido não chegou" }, { direction: "out", content: "Qual é o número do pedido?" }]);
+    mocks.queryRaw.mockResolvedValueOnce([{ createdAt: NOW }]);
+    mocks.generate.mockResolvedValueOnce({ text: "Conseguiu achar o número do pedido? Com ele eu verifico para você." });
+    await processIdleV2(NOW);
+    expect(mocks.send.mock.calls[0][0].text).toBe("Conseguiu achar o número do pedido? Com ele eu verifico para você.");
+    expect(String(mocks.generate.mock.calls[0][0].messages)).not.toBe("");
+  });
+
+  it("texto com número (dado sem conferência) ou falha: sai o texto conforme a última mensagem", async () => {
+    mocks.queryRaw.mockResolvedValueOnce([row({ simple_config: config, has_state: true, last_out_content: "Qual é o número do pedido?", last_out_at: minutesAgo(15), last_inbound_at: minutesAgo(16) })]);
+    mocks.queryRaw.mockResolvedValueOnce([{ direction: "out", content: "Qual é o número do pedido?" }]);
+    mocks.queryRaw.mockResolvedValueOnce([{ createdAt: NOW }]);
+    mocks.generate.mockResolvedValueOnce({ text: "O prazo vence dia 15, conseguiu?" });
+    await processIdleV2(NOW);
+    expect(mocks.send.mock.calls[0][0].text).toContain("Ainda está por aí?");
   });
 });

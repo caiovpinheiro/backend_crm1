@@ -107,6 +107,23 @@ export interface V2InactivityConfig {
   closeAfter?: number;
   /** Mensagem ao encerrar por falta de resposta; vazia = encerra sem mensagem. */
   closeMessage?: string;
+  /** Lembretes antes de encerrar (até 3). Vazio: vale o aviso único (nudgeAfter). */
+  followUps?: V2FollowUpStep[];
+}
+
+/**
+ * Lembrete antes de encerrar. `fixed`: o texto; `by_reply`: conforme a última
+ * mensagem do agente (passo a passo → procedureMessage; pergunta →
+ * questionMessage; outra → message); `generated`: o agente escreve a partir
+ * da conversa (sem dado novo), com o texto do modo anterior como reserva.
+ */
+export interface V2FollowUpStep {
+  /** Minutos desde a última mensagem do agente. */
+  after: number;
+  mode?: "fixed" | "by_reply" | "generated";
+  message?: string;
+  procedureMessage?: string;
+  questionMessage?: string;
 }
 
 /** Como o assunto da conversa é reconhecido e trocado (opção com nome). */

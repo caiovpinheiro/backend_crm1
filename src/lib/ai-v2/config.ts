@@ -200,6 +200,20 @@ const inactivitySchema = z.object({
   nudgeMessage: optionalText,
   closeAfter: z.number().int().min(0).optional().default(1440),
   closeMessage: optionalText,
+  /**
+   * Lembretes antes de encerrar (até 3), cada um com o próprio prazo desde a
+   * última mensagem do agente. Vazio: vale o aviso único (nudgeAfter).
+   */
+  followUps: z.preprocess(
+    (v) => (Array.isArray(v) ? v.filter((s) => s && typeof s === "object" && Number((s as { after?: unknown }).after) > 0).slice(0, 3) : []),
+    z.array(z.object({
+      after: z.coerce.number().int().min(1),
+      mode: z.enum(["fixed", "by_reply", "generated"]).optional().default("fixed"),
+      message: optionalText,
+      procedureMessage: optionalText,
+      questionMessage: optionalText,
+    })),
+  ).optional(),
 }).optional();
 
 // Réguas de similaridade são opções com nome; os números ficam no motor

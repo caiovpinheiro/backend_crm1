@@ -34,6 +34,12 @@ export interface V2Counters {
   humanRequestPending?: boolean;
   /** Agente de IA que passou esta conversa para o atual — não devolver para ele (ping-pong). */
   receivedFromAgentId?: string;
+  /**
+   * Lembretes de inatividade já mandados desde a última mensagem do agente:
+   * `anchorAt` é essa mensagem, `lastAt` o último lembrete (para saber que a
+   * última mensagem enviada é o lembrete, não uma resposta nova).
+   */
+  idleFollowUp?: { anchorAt: string; sent: number; lastAt: string; kind?: "procedure" | "question" | "other" };
 }
 
 export function defaultV2Counters(): V2Counters {
