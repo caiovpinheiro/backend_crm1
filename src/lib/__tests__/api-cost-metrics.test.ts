@@ -1,10 +1,21 @@
 /**
- * Métricas das respostas de inicialização no formato do `/api/metrics`:
- * hit/miss de cache por família e 304 vs 200.
+ * Métricas do limite por classe de custo no formato do `/api/metrics`:
+ * rejeições por classe (429/503), hit/miss de cache por família, 304 vs 200
+ * e atraso do event loop (p50/p99) + nível de sobrecarga.
  */
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
-import { metrics, recordCacheLookup, recordConditionalResponse } from "@/lib/metrics";
+import { OverloadGuard, getOverloadConfig, setOverloadGuardForTests } from "@/lib/overload-guard";
+import {
+  metrics,
+  recordCacheLookup,
+  recordConditionalResponse,
+  renderMetrics,
+} from "@/lib/metrics";
+
+afterEach(() => {
+  setOverloadGuardForTests(null);
+});
 
 async function counterValue(
   c: { get: () => Promise<{ values: Array<{ labels: Record<string, unknown>; value: number }> }> },
@@ -43,5 +54,25 @@ describe("métricas do limite por custo", () => {
     expect(
       await counterValue(metrics.apiCost.conditionalResponses, { route, status: "200" }),
     ).toBeGreaterThanOrEqual(1);
+  });
+
+  it("/api/metrics expõe rejeições por classe, 304/200, p50/p99 do event loop e o nível", async () => {
+    const guard = new OverloadGuard(
+      () => ({ p50Ms: 12, p99Ms: 240 }),
+      () => 1_000,
+      () => getOverloadConfig({}),
+    );
+    guard.tick();
+    setOverloadGuardForTests(guard);
+    metrics.apiCost.rejections.inc({ class: "heavy_read", status: "429" });
+    metrics.apiCost.rejections.inc({ class: "accessory", status: "503" });
+
+    const { body } = await renderMetrics();
+    expect(body).toMatch(/crm_api_cost_rejections_total\{class="heavy_read",status="429"[^}]*\} \d+/);
+    expect(body).toMatch(/crm_api_cost_rejections_total\{class="accessory",status="503"[^}]*\} \d+/);
+    expect(body).toContain("# TYPE crm_http_conditional_responses_total counter");
+    expect(body).toMatch(/crm_event_loop_delay_ms\{quantile="0.5"[^}]*\} 12/);
+    expect(body).toMatch(/crm_event_loop_delay_ms\{quantile="0.99"[^}]*\} 240/);
+    expect(body).toMatch(/crm_overload_level\{[^}]*\} 1/);
   });
 });

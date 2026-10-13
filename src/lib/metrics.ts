@@ -214,6 +214,20 @@ function buildMetrics(registry: Registry): AppMetrics {
     registers: [registry],
   });
 
+  // Atraso do event loop do processo (janela deslizante do overload-guard),
+  // lido no scrape. quantile = "0.5" | "0.99".
+  const eventLoopDelay = new Gauge({
+    name: "crm_event_loop_delay_ms",
+    help: "Atraso do event loop (ms) na janela deslizante do overload-guard (p50/p99).",
+    labelNames: ["quantile"] as const,
+    registers: [registry],
+  });
+  const overloadLevel = new Gauge({
+    name: "crm_overload_level",
+    help: "Nível de sobrecarga do processo: 0 normal, 1 recusa acessórias, 2 também leituras pesadas.",
+    registers: [registry],
+  });
+
   // Presença: batida aceita (escreveu) vs descartada pelo limite de 1 por
   // usuário a cada PRESENCE_BEAT_MIN_INTERVAL_MS, por rota (`beat` nova;
   // `ping` e `heartbeat` antigas, que dividem o mesmo limite).
@@ -268,6 +282,8 @@ function buildMetrics(registry: Registry): AppMetrics {
     apiCost: {
       rejections: apiCostRejections,
       conditionalResponses,
+      eventLoopDelay,
+      overloadLevel,
     },
     presenceBeats,
     activityOutbox: {
@@ -316,6 +332,8 @@ export type AppMetrics = {
   apiCost: {
     rejections: Counter<"class" | "status">;
     conditionalResponses: Counter<"route" | "status">;
+    eventLoopDelay: Gauge<"quantile">;
+    overloadLevel: Gauge;
   };
   presenceBeats: Counter<"route" | "result">;
   activityOutbox: {
@@ -350,7 +368,7 @@ export async function renderMetrics(): Promise<{
   body: string;
   contentType: string;
 }> {
-  await Promise.allSettled([snapshotQueueDepth(), snapshotDbPool()]);
+  await Promise.allSettled([snapshotQueueDepth(), snapshotDbPool(), snapshotEventLoop()]);
   const body = await registry.metrics();
   return { body, contentType: registry.contentType };
 }
@@ -361,6 +379,18 @@ async function snapshotQueueDepth(): Promise<void> {
     await mod.collectQueueDepth();
   } catch {
     // modulo opcional / redis indisponivel — ok.
+  }
+}
+
+async function snapshotEventLoop(): Promise<void> {
+  try {
+    const mod = await import("@/lib/overload-guard");
+    const snap = mod.getOverloadSnapshot();
+    metrics.apiCost.eventLoopDelay.set({ quantile: "0.5" }, snap.p50Ms);
+    metrics.apiCost.eventLoopDelay.set({ quantile: "0.99" }, snap.p99Ms);
+    metrics.apiCost.overloadLevel.set(snap.level);
+  } catch {
+    // medidor indisponível — ok.
   }
 }
 
