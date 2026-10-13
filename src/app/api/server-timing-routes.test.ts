@@ -5,6 +5,8 @@
  *
  * Só instrumentação: o corpo e o status não mudam; o cabeçalho traz as fases
  * `auth`, `query`, `serialize` e `total` (e `checks` onde há checagem própria).
+ * Rotas servidas do cache de inicialização (`response-cache.ts`: channels,
+ * settings/org) trazem `auth`, `cache` (desc 304/hit/miss) e `total`.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -38,8 +40,18 @@ vi.mock("@/services/me-bootstrap", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/services/me-bootstrap")>();
   return {
     computeBootstrapEtag: actual.computeBootstrapEtag,
+    computeBootstrapBlocksEtag: actual.computeBootstrapBlocksEtag,
     etagMatches: actual.etagMatches,
     buildMeBootstrap: h.buildMeBootstrap,
+  };
+});
+// Blocos do bootstrap testados em `bootstrap-blocks.test.ts`; aqui, nenhum.
+vi.mock("@/services/bootstrap-blocks", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/services/bootstrap-blocks")>();
+  return {
+    ...actual,
+    resolveBootstrapBlocks: vi.fn(async () => []),
+    loadBootstrapBlocks: vi.fn(async () => ({ entries: [], errors: [] })),
   };
 });
 vi.mock("@/services/channels", () => ({
@@ -118,16 +130,17 @@ beforeEach(() => {
 });
 
 describe("Server-Timing — rotas do shell", () => {
-  it("GET /api/me/bootstrap: auth, query, serialize, total; 200 e 304 levam o cabeçalho", async () => {
+  it("GET /api/me/bootstrap: auth, query, cache, serialize, total; 200 e 304 levam o cabeçalho", async () => {
     h.buildMeBootstrap.mockResolvedValue({ user: { id: "u1" } });
 
     const res = await bootstrapGet(new Request("https://api.test/api/me/bootstrap"));
 
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ user: { id: "u1" } });
+    expect(await res.json()).toEqual({ user: { id: "u1" }, blocks: {}, blockErrors: [] });
     expect(Object.keys(phases(res.headers.get("server-timing")))).toEqual([
       "auth",
       "query",
+      "cache",
       "serialize",
       "total",
     ]);
@@ -175,19 +188,16 @@ describe("Server-Timing — rotas do shell", () => {
     expect(phases(res.headers.get("server-timing")).serialize).toBeDefined();
   });
 
-  it("GET /api/channels: auth, query, serialize, total", async () => {
+  it("GET /api/channels (cache de inicialização): auth, cache, total; corpo igual", async () => {
     h.getChannels.mockResolvedValue([{ id: "ch1" }]);
 
-    const res = await channelsGet();
+    const res = await channelsGet(new Request("https://api.test/api/channels"));
 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ channels: [{ id: "ch1" }] });
-    expect(Object.keys(phases(res.headers.get("server-timing")))).toEqual([
-      "auth",
-      "query",
-      "serialize",
-      "total",
-    ]);
+    const p = phases(res.headers.get("server-timing"));
+    expect(Object.keys(p)).toEqual(["auth", "cache", "total"]);
+    expect(["miss", "hit"]).toContain(p.cache.desc);
   });
 
   it("GET /api/team-chat/rooms: auth, checks, query, serialize, total", async () => {
@@ -216,7 +226,7 @@ describe("Server-Timing — rotas do shell", () => {
     expect(h.listRooms).not.toHaveBeenCalled();
   });
 
-  it("GET /api/settings/org (key e prefix): auth, query, serialize, total; corpo igual", async () => {
+  it("GET /api/settings/org (key e prefix, cache de inicialização): auth, cache, total; corpo igual", async () => {
     h.getOrgSetting.mockResolvedValue("1");
     const byKey = await orgSettingsGet(
       new Request("https://api.test/api/settings/org?key=conversation.keepAgentOnEnd"),
@@ -225,8 +235,7 @@ describe("Server-Timing — rotas do shell", () => {
     expect(await byKey.json()).toEqual({ key: "conversation.keepAgentOnEnd", value: "1" });
     expect(Object.keys(phases(byKey.headers.get("server-timing")))).toEqual([
       "auth",
-      "query",
-      "serialize",
+      "cache",
       "total",
     ]);
 
@@ -235,6 +244,6 @@ describe("Server-Timing — rotas do shell", () => {
       new Request("https://api.test/api/settings/org?prefix=conversation."),
     );
     expect(await byPrefix.json()).toEqual({ "conversation.a": "x" });
-    expect(phases(byPrefix.headers.get("server-timing")).query).toBeDefined();
+    expect(phases(byPrefix.headers.get("server-timing")).cache).toBeDefined();
   });
 });
