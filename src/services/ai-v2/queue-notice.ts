@@ -37,6 +37,13 @@ export const QUEUE_NOTICES: Record<Exclude<QueueNoticeKind, "first">, string[]> 
 /** Mensagens neutras seguidas dentro disto não recebem aviso de novo. */
 export const QUEUE_NOTICE_QUIET_MS = 20_000;
 
+/**
+ * Agradecimento ou "ok" logo depois do aviso de transferência ou de fila:
+ * o cliente só respondeu ao aviso. Mandar o aviso de fila inteiro de novo
+ * (com horário e tudo) parecia robô respondendo a "obrigada".
+ */
+export const QUEUE_COURTESY_QUIET_MS = 15 * 60_000;
+
 /** Aviso padrão para quem escreve enquanto espera na fila. */
 export const QUEUED_MESSAGE_DEFAULT = "Você já está na fila de atendimento. Em instantes alguém da equipe continua com você por aqui.";
 /** Fora do horário não se promete "em instantes": a equipe segue no próximo horário. */
@@ -81,8 +88,11 @@ export function pickQueueNotice(args: {
   outsideHours?: boolean;
   /** Texto da empresa para cada tipo; substitui as variantes padrão. */
   overrides?: QueueNoticeOverrides;
+  /** A mensagem é só cortesia ("obrigada", "ok", "tá bom"). */
+  courtesy?: boolean;
 }): { text: string; kind: QueueNoticeKind } | null {
   const now = args.now ?? new Date();
+  if (args.courtesy && args.lastReplyAt && now.getTime() - args.lastReplyAt.getTime() < QUEUE_COURTESY_QUIET_MS) return null;
   const repeats = (t: string) => !!args.lastReply && isNearDuplicateReply(t, args.lastReply);
   const variants = (k: Exclude<QueueNoticeKind, "first">) => {
     const custom = args.overrides?.[k]?.trim();
@@ -90,7 +100,17 @@ export function pickQueueNotice(args: {
   };
   const custom = Object.values(args.overrides ?? {}).map((t) => (t ?? "").trim()).filter(Boolean);
   const allDefaults = [QUEUED_MESSAGE_DEFAULT, QUEUED_MESSAGE_OUTSIDE_HOURS, ...Object.values(QUEUE_NOTICES).flat(), ...custom];
-  const noticedBefore = !!args.lastReply && (repeats(args.configured) || allDefaults.some(repeats));
+  // O aviso anterior pode ter saído com o horário da equipe colado no fim:
+  // comparado inteiro, não parecia o mesmo, o "primeiro" aviso era tentado de
+  // novo, a trava de repetição barrava e o cliente (até o insatisfeito)
+  // ficava sem nada. Vale também o aviso contido na última mensagem.
+  const squash = (t: string) => fold(t).replace(/\s+/g, " ").trim();
+  const lastSquashed = args.lastReply ? squash(args.lastReply) : "";
+  const contained = (t: string) => {
+    const head = squash(t).slice(0, 80);
+    return head.length >= 30 && lastSquashed.includes(head);
+  };
+  const noticedBefore = !!args.lastReply && (repeats(args.configured) || allDefaults.some(repeats) || contained(args.configured) || allDefaults.some(contained));
   if (!noticedBefore) return { text: args.configured, kind: "first" };
   const kind = queueNoticeKind(args.message);
   const recent = !!args.lastReplyAt && now.getTime() - args.lastReplyAt.getTime() < QUEUE_NOTICE_QUIET_MS;

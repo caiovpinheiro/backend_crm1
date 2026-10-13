@@ -1111,11 +1111,12 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       lastReply: last?.content ?? null,
       lastReplyAt: last?.createdAt ?? null,
       outsideHours: !queueWithinHours,
+      courtesy: isShortAckText(input.userMessage),
     });
     const hoursNote = picked?.kind === "first" ? outsideHoursNote(config) : "";
     const notice = picked ? [picked.text, hoursNote].filter(Boolean).join("\n\n") : "";
     if (picked) traceStep("fila", `Aviso de fila (${picked.kind === "first" ? "primeiro" : picked.kind === "cancel" ? "pedido de cancelar" : picked.kind === "upset" ? "cliente insatisfeito" : picked.kind === "call" ? "cliente chamando" : "nova mensagem"})`);
-    else traceStep("fila", "Mensagens seguidas em poucos segundos: o aviso anterior vale");
+    else traceStep("fila", isShortAckText(input.userMessage) ? "Cliente só agradeceu ou confirmou logo depois do aviso → sem novo aviso" : "Mensagens seguidas em poucos segundos: o aviso anterior vale");
     const res = picked
       ? await sendV2TextMessage({
           conversationId: input.conversationId,
@@ -1177,7 +1178,14 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
 
   // Pós-encerramento
   if (stage === "closed" && stateRow?.postCloseWindowEndAt && new Date() < new Date(stateRow.postCloseWindowEndAt)) {
-    const caseType = answerToPostCloseQuestion(config, pendingOptions, chosenOption) ?? classifyPostCloseMessage(config, input.userMessage);
+    // Imagem, documento ou áudio depois do encerramento é algo para o agente
+    // ver: era classificado como "ambíguo" antes de ser lido e o cliente
+    // recebia "precisa de ajuda com algo novo?" em vez da leitura.
+    const mediaTurn = detectV2MediaKinds(input.messageType).length > 0
+      || input.userMessage.split(/\r?\n/).some((l) => l.trim() && isMediaPlaceholderText(l));
+    const caseType = answerToPostCloseQuestion(config, pendingOptions, chosenOption)
+      ?? (mediaTurn ? "new_demand" : classifyPostCloseMessage(config, input.userMessage));
+    if (mediaTurn) traceStep("pós-encerramento", "Cliente mandou imagem, documento ou áudio → trata como pedido novo");
     let behavior = getPostCloseBehavior(config, caseType);
     // A pergunta sai uma vez por janela: repetida, a conversa andava em
     // círculo ("??" → pergunta de novo). Depois dela, o ambíguo volta para o

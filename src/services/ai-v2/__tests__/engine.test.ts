@@ -2227,6 +2227,17 @@ describe("processV2Turn — correções do motor", () => {
     mocks.messageFindMany.mockReset();
   });
 
+  it("depois do encerramento, imagem é pedido novo: não pergunta “algo novo?”, segue para o agente", async () => {
+    const config = baseConfig({ media: { ...baseConfig().media, image: { action: "describe" } } } as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.getState.mockResolvedValue({ ...makeState("closed", "ninguem"), postCloseWindowEndAt: new Date(Date.now() + 3600_000) });
+    mocks.enrichMedia.mockResolvedValueOnce({ userMessage: "[Imagem enviada pelo cliente]: comprovante de entrega do pedido", understood: 1, failed: 0 });
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "Pela imagem, o pedido aparece como entregue." }));
+    await run("[Imagem]", { messageType: "image", messageIds: ["m-img"] });
+    expect(sentTexts().join("|")).not.toContain("algo novo");
+    expect(mocks.callLLM).toHaveBeenCalled();
+  });
+
   it("encerrar sem despedida configurada: a resposta do modelo sai (antes o cliente ficava sem nada)", async () => {
     const config = baseConfig();
     mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
