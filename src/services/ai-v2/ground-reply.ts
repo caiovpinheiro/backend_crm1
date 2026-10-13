@@ -361,6 +361,21 @@ function dateKeys(sources: string): Set<string> {
  * resposta que não aparecem em nenhuma fonte. Antes só R$ e % eram
  * conferidos e o resto chegava ao cliente.
  */
+/**
+ * A resposta é quase toda a mensagem do cliente reescrita (o cliente colou
+ * um texto com "manda assim…" e o agente devolveu o texto corrigido, na voz
+ * do cliente, sem responder nada). 70%+ das palavras de conteúdo da resposta
+ * vêm da mensagem dele, com as duas longas o bastante para comparar.
+ */
+export function echoesClientText(reply: string, clientMessage: string): boolean {
+  const words = (s: string) => normalize(s).split(/[^\p{L}\p{N}]+/u).filter((w) => w.length >= 4);
+  const r = words(reply);
+  if (r.length < 12) return false;
+  const c = new Set(words(clientMessage));
+  if (c.size < 12) return false;
+  return r.filter((w) => c.has(w)).length / r.length >= 0.7;
+}
+
 export function unsupportedFacts(reply: string, sources: string[], clientTexts: string[] = []): string[] {
   // Número que o cliente escreveu ("enviei nessa de 10 a 14"): repetir como
   // "14 horas" é citar o cliente, não inventar prazo.
