@@ -55,7 +55,6 @@ vi.mock("@/lib/prisma", () => ({ prisma: {} }));
 vi.mock("@/lib/rate-limit", () => ({
   getClientIp: () => "198.51.100.7",
   withRateLimit: vi.fn(),
-  enforceSessionApiRateLimit: vi.fn().mockResolvedValue(null),
 }));
 vi.mock("@/lib/org-rate-limit", () => ({ enforceOrgApiRateLimit: vi.fn().mockResolvedValue(null) }));
 vi.mock("@/lib/auth/lockout", () => ({

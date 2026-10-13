@@ -24,7 +24,6 @@ vi.mock("@/lib/metrics", () => ({ observeHttpRequest: vi.fn() }));
 vi.mock("@/lib/org-rate-limit", () => ({ enforceOrgApiRateLimit: vi.fn().mockResolvedValue(null) }));
 vi.mock("@/lib/rate-limit", () => ({
   consumeRateLimit: vi.fn(),
-  enforceSessionApiRateLimit: vi.fn().mockResolvedValue(null),
 }));
 vi.mock("@/lib/rate-limit-reject-log", () => ({ logRateLimitReject: vi.fn() }));
 vi.mock("@/services/api-tokens", () => ({ validateToken: vi.fn().mockResolvedValue(null) }));
