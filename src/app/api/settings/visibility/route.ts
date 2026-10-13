@@ -7,7 +7,10 @@ import {
   setVisibilityForRole,
   type VisibilityMode,
 } from "@/lib/visibility";
+import { respondWithCachedJson } from "@/lib/cache/response-cache";
 import { getLogger } from "@/lib/logger";
+import { ServerTiming } from "@/lib/server-timing";
+import { visibilitySpec } from "@/services/startup-cache";
 
 const log = getLogger("api/settings/visibility");
 
@@ -16,9 +19,14 @@ const log = getLogger("api/settings/visibility");
 // precisa do AsyncLocalStorage com organizationId pra resolver tenant.
 // Sem withOrgContext o handler explodia em `withOrgFromCtx` ou retornava
 // settings de outro tenant. Migrado para o padrao oficial.
-export async function GET() {
-  return withOrgContext(async () => {
+export async function GET(request: Request) {
+  const timing = new ServerTiming();
+  return withOrgContext(async (session) => {
+    timing.add("auth", timing.totalMs());
     try {
+      // Cache por org + ETag/304 (`services/startup-cache.ts`).
+      const spec = visibilitySpec(session.user);
+      if (spec) return await respondWithCachedJson(request, spec, timing);
       const settings = await getVisibilitySettings();
       return NextResponse.json(settings);
     } catch (e) {

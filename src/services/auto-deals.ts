@@ -36,6 +36,7 @@
  */
 
 import { scheduleBoardInvalidation } from "@/lib/cache/keys";
+import { bumpResponseFamilies, RESPONSE_FAMILIES } from "@/lib/cache/response-families";
 import { defaultDealTitleForContact } from "@/lib/display-name";
 import { phoneMatchVariants } from "@/lib/phone";
 import { prisma } from "@/lib/prisma";
@@ -350,6 +351,8 @@ export async function ensureOpenDealForContact(
         ? lastStageErr
         : new Error("Falha ao alocar number de estágio.");
     }
+    // Etapa nova aparece em `GET /api/pipelines` (cache por org).
+    await bumpResponseFamilies(incomingStage.organizationId, RESPONSE_FAMILIES.pipelines);
   }
 
   const maxPos = await prisma.deal.aggregate({

@@ -38,6 +38,7 @@ import { createHash } from "node:crypto";
 import { Prisma, type UserRole } from "@prisma/client";
 
 import { userOrgFilter } from "@/lib/auth-helpers";
+import type { BootstrapBlockUrl } from "@/services/bootstrap-blocks";
 import { can, loadAuthzContext, requirePermission } from "@/lib/authz";
 import { requirePermissionForUser } from "@/lib/authz/resource-policy";
 import {
@@ -174,6 +175,22 @@ export type MeBootstrapPayload = {
   widgets: BootstrapWidgets | null;
   /** Blocos que lançaram erro (vieram `null` por falha, não por permissão). */
   failedBlocks: BootstrapBlockName[];
+};
+
+/**
+ * Corpo completo de `GET /api/me/bootstrap`: o payload base +
+ *
+ * - `blocks`: `{ [url]: <corpo idêntico ao de GET url> }`, onde `url` é
+ *   EXATAMENTE o path+query que o frontend chama na inicialização
+ *   (`BOOTSTRAP_BLOCK_URLS` em `services/bootstrap-blocks.ts`). URL ausente =
+ *   sem permissão/sem org → o frontend chama a rota individual.
+ * - `blockErrors`: URLs cujo bloco falhou (idem: rota individual).
+ *
+ * Os blocos saem do mesmo cache das rotas (`services/startup-cache.ts`).
+ */
+export type MeBootstrapResponse = MeBootstrapPayload & {
+  blocks: Partial<Record<BootstrapBlockUrl, unknown>>;
+  blockErrors: BootstrapBlockUrl[];
 };
 
 export type BootstrapBlockName =
@@ -341,6 +358,7 @@ async function loadEmailUnread(
 
 async function loadTeamChatRooms(
   user: MeBootstrapUser,
+  onFullRooms?: (rooms: unknown[]) => void,
 ): Promise<BootstrapTeamChatRooms | null> {
   if (!user.organizationId) return null;
   const denied = await requirePermissionForUser(
@@ -357,6 +375,9 @@ async function loadTeamChatRooms(
     userId: user.id,
     organizationId: user.organizationId,
   });
+  // Lista completa (corpo de `GET /api/team-chat/rooms`) para o bloco
+  // `/api/team-chat/rooms` do bootstrap — a mesma consulta, sem repetir.
+  onFullRooms?.(rooms);
   const summary = rooms.map((r) => ({
     id: r.id,
     kind: r.kind,
@@ -397,8 +418,14 @@ async function settle<T>(
  * Monta o payload completo. Precisa do `RequestContext` ativo
  * (`withOrgContext`/`requireAuth`) porque os serviços usam `prisma` scoped.
  */
+export type BuildMeBootstrapHooks = {
+  /** Recebe a lista completa das salas (mesma de `GET /api/team-chat/rooms`). */
+  onTeamChatRooms?: (rooms: unknown[]) => void;
+};
+
 export async function buildMeBootstrap(
   user: MeBootstrapUser,
+  hooks: BuildMeBootstrapHooks = {},
 ): Promise<MeBootstrapPayload> {
   const failed: BootstrapBlockName[] = [];
 
@@ -426,7 +453,7 @@ export async function buildMeBootstrap(
     settle("alertConfig", failed, () => loadAlertConfig(user)),
     settle("agentStatus", failed, () => loadAgentStatus(user.id)),
     settle("emailUnread", failed, () => loadEmailUnread(user)),
-    settle("teamChatRooms", failed, () => loadTeamChatRooms(user)),
+    settle("teamChatRooms", failed, () => loadTeamChatRooms(user, hooks.onTeamChatRooms)),
   ]);
 
   const preferences =
@@ -466,6 +493,24 @@ export async function buildMeBootstrap(
 /** ETag forte: sha1 do corpo JSON serializado (sem timestamps no payload). */
 export function computeBootstrapEtag(body: string): string {
   return `"${createHash("sha1").update(body).digest("hex")}"`;
+}
+
+/**
+ * ETag do bootstrap com blocos: usuário + payload base + (url, ETag) de cada
+ * bloco, na ordem do contrato. Com os ETags dos blocos já guardados, dá para
+ * responder 304 sem ler nenhum corpo de bloco. Fraco (`W/`): o proxy pode
+ * comprimir a resposta.
+ */
+export function computeBootstrapBlocksEtag(
+  userId: string,
+  baseJson: string,
+  blocks: readonly { url: string; etag: string }[],
+  blockErrors: readonly string[] = [],
+): string {
+  const h = createHash("sha1").update(userId).update("\n").update(baseJson);
+  for (const b of blocks) h.update("\n").update(b.url).update("=").update(b.etag);
+  if (blockErrors.length > 0) h.update("\nerr=").update(blockErrors.join(","));
+  return `W/"${h.digest("hex").slice(0, 32)}"`;
 }
 
 /**

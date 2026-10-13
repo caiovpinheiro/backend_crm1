@@ -1,3 +1,4 @@
+import { bumpResponseFamilies, RESPONSE_FAMILIES } from "@/lib/cache/response-families";
 import { prisma } from "@/lib/prisma";
 // prismaBase sem org-scope: worker precisa listar canais cross-tenant no
 // bootstrap. Cada canal depois executa sob seu proprio withSystemContext.
@@ -62,6 +63,7 @@ export class BaileysManager {
           data: { status: "FAILED" },
         }),
       ).catch(() => {});
+      await bumpResponseFamilies(ch.organizationId, RESPONSE_FAMILIES.channels);
     }
   }
 

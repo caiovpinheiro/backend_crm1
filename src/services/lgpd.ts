@@ -49,6 +49,7 @@
 import { DataRequestStatus, DataRequestType } from "@prisma/client";
 import crypto from "node:crypto";
 
+import { bumpResponseFamilies, RESPONSE_FAMILIES } from "@/lib/cache/response-families";
 import { prismaBase } from "@/lib/prisma-base";
 import {
   SESSION_VERSION_BUMP,
@@ -461,6 +462,8 @@ async function processErase(userId: string, _organizationId: string): Promise<vo
     });
   }
 
+  // Usuário anonimizado sai de `GET /api/users` (lista em cache).
+  await bumpResponseFamilies(_organizationId, RESPONSE_FAMILIES.users);
   notifySessionsRevoked({
     userId,
     organizationId: _organizationId,

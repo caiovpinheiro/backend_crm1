@@ -1,6 +1,15 @@
+import { bumpResponseFamilies, RESPONSE_FAMILIES, type ResponseFamily } from "@/lib/cache/response-families";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
-import { getOrgIdOrThrow } from "@/lib/request-context";
+import { getOrgIdOrNull, getOrgIdOrThrow } from "@/lib/request-context";
+
+/**
+ * Respostas em cache: `GET /api/settings/loss-reasons` (catálogo com os
+ * funis vinculados) e `GET /api/pipelines` (`updatedAt` do funil).
+ */
+async function invalidateCached(...families: ResponseFamily[]): Promise<void> {
+  await bumpResponseFamilies(getOrgIdOrNull(), ...families);
+}
 
 export type LossReasonDto = {
   id: string;
@@ -69,9 +78,11 @@ export async function createLossReason(label: string) {
   if (!trimmed) throw new Error("INVALID_LABEL");
   const maxPos = await prisma.lossReason.aggregate({ _max: { position: true } });
   const position = (maxPos._max.position ?? -1) + 1;
-  return prisma.lossReason.create({
+  const created = await prisma.lossReason.create({
     data: withOrgFromCtx({ label: trimmed, position }),
   });
+  await invalidateCached(RESPONSE_FAMILIES.lossReasons);
+  return created;
 }
 
 export async function updateLossReason(
@@ -85,15 +96,19 @@ export async function updateLossReason(
   if (typeof data.position === "number") payload.position = data.position;
   if (typeof data.isActive === "boolean") payload.isActive = data.isActive;
   if (Object.keys(payload).length === 0) throw new Error("EMPTY_UPDATE");
-  return prisma.lossReason.update({ where: { id }, data: payload });
+  const updated = await prisma.lossReason.update({ where: { id }, data: payload });
+  await invalidateCached(RESPONSE_FAMILIES.lossReasons);
+  return updated;
 }
 
 export async function softDeleteLossReason(id: string) {
   await prisma.pipelineLossReason.deleteMany({ where: { lossReasonId: id } });
-  return prisma.lossReason.update({
+  const updated = await prisma.lossReason.update({
     where: { id },
     data: { isActive: false },
   });
+  await invalidateCached(RESPONSE_FAMILIES.lossReasons);
+  return updated;
 }
 
 /** Reordena o catálogo global (position). */
@@ -104,6 +119,7 @@ export async function reorderLossReasons(ids: string[]) {
       prisma.lossReason.update({ where: { id }, data: { position } }),
     ),
   );
+  await invalidateCached(RESPONSE_FAMILIES.lossReasons);
 }
 
 /**
@@ -141,6 +157,7 @@ export async function setPipelineLossReasons(
       })),
     });
   });
+  await invalidateCached(RESPONSE_FAMILIES.lossReasons);
 
   return listPipelineLossReasons(pipelineId);
 }
@@ -149,22 +166,26 @@ export async function setPipelineLossReasonRequired(
   pipelineId: string,
   required: boolean,
 ) {
-  return prisma.pipeline.update({
+  const updated = await prisma.pipeline.update({
     where: { id: pipelineId },
     data: { lossReasonRequired: required },
     select: { id: true, lossReasonRequired: true },
   });
+  await invalidateCached(RESPONSE_FAMILIES.pipelines);
+  return updated;
 }
 
 export async function setPipelineLossReasonAllowOther(
   pipelineId: string,
   allowOther: boolean,
 ) {
-  return prisma.pipeline.update({
+  const updated = await prisma.pipeline.update({
     where: { id: pipelineId },
     data: { lossReasonAllowOther: allowOther },
     select: { id: true, lossReasonAllowOther: true },
   });
+  await invalidateCached(RESPONSE_FAMILIES.pipelines);
+  return updated;
 }
 
 /** Default true se funil inexistente / sem coluna (migração pendente). */

@@ -37,6 +37,7 @@ import { UserRole, type UserRole as UserRoleEnum } from "@prisma/client";
 
 import { invalidateJwtRefreshCache } from "@/lib/auth/jwt-refresh-cache";
 import { cache } from "@/lib/cache";
+import { bumpResponseFamilies, RESPONSE_FAMILIES } from "@/lib/cache/response-families";
 import {
   bumpCacheVersion,
   cacheVersionName,
@@ -638,6 +639,8 @@ export async function invalidateAuthzForUser(
   // SS-2: o callback `jwt` também cacheia role/org por 30 s neste processo.
   invalidateJwtRefreshCache(userId);
   await cache.del(await cacheKey(organizationId, userId));
+  // Papel/função do usuário aparece em `GET /api/users` (lista em cache).
+  await bumpResponseFamilies(organizationId, RESPONSE_FAMILIES.users);
 }
 
 /**

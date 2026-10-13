@@ -62,6 +62,7 @@ vi.mock("@/services/call-provider-configs", () => ({
 
 import { GET as getTelephonyById } from "@/app/api/users/[id]/telephony/route";
 import { GET as listUsers } from "@/app/api/users/route";
+import { bumpResponseFamilies, RESPONSE_FAMILIES } from "@/lib/cache/response-families";
 
 const PROVISIONED_AT = new Date("2026-10-01T12:00:00.000Z");
 
@@ -85,8 +86,11 @@ async function byId(id: string): Promise<Response> {
   });
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   vi.clearAllMocks();
+  // A lista sai do cache de inicialização (`response-cache.ts`): cada teste
+  // muda os dados sem passar pelos escritores — invalida na mão.
+  await bumpResponseFamilies("org1", RESPONSE_FAMILIES.users);
   h.session.user = { id: "admin", role: "ADMIN", organizationId: "org1", isSuperAdmin: false };
   h.users = makeUsers(3);
   h.exts = [
@@ -181,6 +185,7 @@ describe("GET /api/users — telephony", () => {
 
     vi.clearAllMocks();
     h.users = makeUsers(40);
+    await bumpResponseFamilies("org1", RESPONSE_FAMILIES.users);
     const rows = await list();
     expect(rows).toHaveLength(40);
     expect(rows.every((r) => r.telephony !== undefined)).toBe(true);

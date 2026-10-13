@@ -234,7 +234,9 @@ export function writeBrowserApiCorsHeaders(
   );
   res.headers.set(
     "Access-Control-Expose-Headers",
-    "Content-Disposition, Content-Length, Content-Range, Accept-Ranges, X-Export-Total",
+    // `ETag`: o frontend pode revalidar à mão (`If-None-Match`) as respostas
+    // em cache da inicialização (`lib/cache/response-cache.ts`).
+    "Content-Disposition, Content-Length, Content-Range, Accept-Ranges, X-Export-Total, ETag",
   );
   res.headers.set("Access-Control-Max-Age", "86400");
 }

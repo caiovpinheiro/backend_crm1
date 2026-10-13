@@ -3,6 +3,8 @@ import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { createChannel, getChannels } from "@/services/channels";
+import { channelsSpec } from "@/services/startup-cache";
+import { respondWithCachedJson } from "@/lib/cache/response-cache";
 import { getLogger } from "@/lib/logger";
 import { ServerTiming } from "@/lib/server-timing";
 import { timedJson } from "@/lib/server-timing-response";
@@ -35,12 +37,15 @@ function isChannelProvider(v: unknown): v is ChannelProvider {
 // da Prisma extension popular o ctx via fallback de cookie. UI exibia
 // "[withOrgFromCtx] RequestContext sem organizationId" ao criar canal.
 // Migrado para withOrgContext.
-export async function GET() {
-  // `Server-Timing`: auth, query, serialize, total.
+export async function GET(request: Request) {
+  // `Server-Timing`: auth, cache (304/hit/miss) ou query+serialize, total.
   const timing = new ServerTiming();
-  return withOrgContext(async () => {
+  return withOrgContext(async (session) => {
     timing.add("auth", timing.totalMs());
     try {
+      // Cache por org + ETag/304 (`services/startup-cache.ts`).
+      const spec = channelsSpec(session.user);
+      if (spec) return await respondWithCachedJson(request, spec, timing);
       const channels = await timing.time("query", () => getChannels());
       return timedJson(timing, { channels });
     } catch (e: unknown) {

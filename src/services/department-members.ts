@@ -1,3 +1,4 @@
+import { bumpResponseFamilies, RESPONSE_FAMILIES } from "@/lib/cache/response-families";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 
@@ -51,6 +52,7 @@ export async function addDepartmentMember(departmentId: string, userId: string) 
     create: { departmentId, userId, organizationId: orgId },
     update: {},
   });
+  await bumpResponseFamilies(orgId, RESPONSE_FAMILIES.departments);
   return listDepartmentMembers(departmentId);
 }
 
@@ -60,6 +62,7 @@ export async function removeDepartmentMember(departmentId: string, userId: strin
     where: { departmentId, userId, organizationId: orgId },
   });
   if (deleted.count === 0) return null;
+  await bumpResponseFamilies(orgId, RESPONSE_FAMILIES.departments);
   return { ok: true as const };
 }
 
@@ -102,6 +105,7 @@ export async function setDepartmentMembers(departmentId: string, userIds: string
       });
     }
   });
+  await bumpResponseFamilies(orgId, RESPONSE_FAMILIES.departments);
 
   return listDepartmentMembers(departmentId);
 }
