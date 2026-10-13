@@ -1985,8 +1985,9 @@ async function lockStagesForMove(
 
 /**
  * Gap mínimo entre vizinhos para inserir um ponto médio. Float64 comporta
- * ~50 bisseções consecutivas entre inteiros adjacentes antes de esgotar;
- * abaixo do epsilon o estágio é renormalizado para 0..n-1.
+ * ~50 bisseções consecutivas entre inteiros adjacentes antes de esgotar.
+ * Abaixo do epsilon o card vai para o fim da coluna (uma linha), sem
+ * renumerar o estágio.
  */
 const POSITION_GAP_EPSILON = 1e-9;
 
@@ -2017,7 +2018,7 @@ async function findPositionNeighbors(
   return { prev: rows[0]?.position ?? null, next: rows[1]?.position ?? null };
 }
 
-/** Ponto médio entre vizinhos; `null` quando o gap esgotou (renormalizar). */
+/** Ponto médio entre vizinhos; `null` quando o gap esgotou. */
 function midpointPosition(
   prev: number | null,
   next: number | null,
@@ -2029,32 +2030,29 @@ function midpointPosition(
 }
 
 /**
- * Renumera o estágio para 0..n-1 (um UPDATE com VALUES). Só roda quando o
- * gap fracionário esgota — raro (dezenas de moves consecutivos entre os
- * mesmos 2 cards).
+ * Fim da coluna (maior `position` + 1). Usado quando o gap entre os
+ * vizinhos do índice pedido esgotou: um UPDATE na linha movida, sem
+ * reescrever as demais.
  */
-async function renormalizeStagePositions(
+async function appendPosition(
   tx: ScopedTx,
   stageId: string,
-): Promise<void> {
-  const deals = await tx.deal.findMany({
-    where: { stageId },
-    orderBy: { position: "asc" },
-    select: { id: true },
+  excludeDealId?: string,
+): Promise<number> {
+  const agg = await tx.deal.aggregate({
+    where: {
+      stageId,
+      ...(excludeDealId ? { id: { not: excludeDealId } } : {}),
+    },
+    _max: { position: true },
   });
-  if (deals.length === 0) return;
-  const values = deals.map((d, i) => Prisma.sql`(${d.id}, ${i})`);
-  await tx.$executeRaw`
-    UPDATE deals AS d
-    SET position = v.pos::float8
-    FROM (VALUES ${Prisma.join(values)}) AS v(id, pos)
-    WHERE d.id = v.id AND d.position IS DISTINCT FROM v.pos::float8
-  `;
+  const max = agg._max.position;
+  return max == null ? 0 : max + 1;
 }
 
 /**
  * Posição fracionária para inserir um deal no `index` do estágio.
- * Renormaliza o estágio se o gap entre vizinhos tiver esgotado.
+ * Sem espaço entre os vizinhos, o card vai para o fim da coluna.
  */
 async function resolveInsertionPosition(
   tx: ScopedTx,
@@ -2062,14 +2060,10 @@ async function resolveInsertionPosition(
   index: number,
   excludeDealId?: string,
 ): Promise<number> {
-  let neighbors = await findPositionNeighbors(tx, stageId, index, excludeDealId);
-  let pos = midpointPosition(neighbors.prev, neighbors.next);
-  if (pos === null) {
-    await renormalizeStagePositions(tx, stageId);
-    neighbors = await findPositionNeighbors(tx, stageId, index, excludeDealId);
-    pos = midpointPosition(neighbors.prev, neighbors.next) ?? index;
-  }
-  return pos;
+  const neighbors = await findPositionNeighbors(tx, stageId, index, excludeDealId);
+  const pos = midpointPosition(neighbors.prev, neighbors.next);
+  if (pos !== null) return pos;
+  return appendPosition(tx, stageId, excludeDealId);
 }
 
 function customFieldValueFilled(value: string | null | undefined, type: string): boolean {
