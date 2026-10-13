@@ -106,8 +106,7 @@ export async function PUT(request: Request, ctx: Ctx) {
           { status: 403 },
         );
       }
-      const allowBlank = body.allowBlank === true;
-      await upsertDealCardExtensionValues(existing.id, cleaned, { allowBlank });
+      await upsertDealCardExtensionValues(existing.id, cleaned, { allowBlank: true });
       return NextResponse.json(await listDealCardExtensionValues(existing.id));
     });
   } catch (e) {
