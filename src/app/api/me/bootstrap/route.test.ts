@@ -118,7 +118,7 @@ describe("GET /api/me/bootstrap", () => {
     const etag = res.headers.get("etag");
     expect(etag).toBe(computeBootstrapBlocksEtag("user_1", JSON.stringify(PAYLOAD), []));
     expect(await res.json()).toEqual({ ...PAYLOAD, blocks: {}, blockErrors: [] });
-    expect(mocks.buildMeBootstrap).toHaveBeenCalledWith(SESSION.user);
+    expect(mocks.buildMeBootstrap).toHaveBeenCalledWith(SESSION.user, expect.any(Object));
   });
 
   it("responde 304 sem corpo quando If-None-Match bate", async () => {

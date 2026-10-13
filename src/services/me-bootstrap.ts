@@ -358,6 +358,7 @@ async function loadEmailUnread(
 
 async function loadTeamChatRooms(
   user: MeBootstrapUser,
+  onFullRooms?: (rooms: unknown[]) => void,
 ): Promise<BootstrapTeamChatRooms | null> {
   if (!user.organizationId) return null;
   const denied = await requirePermissionForUser(
@@ -374,6 +375,9 @@ async function loadTeamChatRooms(
     userId: user.id,
     organizationId: user.organizationId,
   });
+  // Lista completa (corpo de `GET /api/team-chat/rooms`) para o bloco
+  // `/api/team-chat/rooms` do bootstrap — a mesma consulta, sem repetir.
+  onFullRooms?.(rooms);
   const summary = rooms.map((r) => ({
     id: r.id,
     kind: r.kind,
@@ -414,8 +418,14 @@ async function settle<T>(
  * Monta o payload completo. Precisa do `RequestContext` ativo
  * (`withOrgContext`/`requireAuth`) porque os serviços usam `prisma` scoped.
  */
+export type BuildMeBootstrapHooks = {
+  /** Recebe a lista completa das salas (mesma de `GET /api/team-chat/rooms`). */
+  onTeamChatRooms?: (rooms: unknown[]) => void;
+};
+
 export async function buildMeBootstrap(
   user: MeBootstrapUser,
+  hooks: BuildMeBootstrapHooks = {},
 ): Promise<MeBootstrapPayload> {
   const failed: BootstrapBlockName[] = [];
 
@@ -443,7 +453,7 @@ export async function buildMeBootstrap(
     settle("alertConfig", failed, () => loadAlertConfig(user)),
     settle("agentStatus", failed, () => loadAgentStatus(user.id)),
     settle("emailUnread", failed, () => loadEmailUnread(user)),
-    settle("teamChatRooms", failed, () => loadTeamChatRooms(user)),
+    settle("teamChatRooms", failed, () => loadTeamChatRooms(user, hooks.onTeamChatRooms)),
   ]);
 
   const preferences =

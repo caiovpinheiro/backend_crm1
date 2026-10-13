@@ -21,6 +21,7 @@
  * {
  *   "version": 1, "user": {...}, "profile": {...}, ..., "failedBlocks": [],
  *   "blocks": {
+ *     "/api/team-chat/rooms": { "rooms": [...] },
  *     "/api/pipelines": [{ "id": "p1", "name": "Vendas", "stages": [...] }],
  *     "/api/settings/org?prefix=conversation.": { "conversation.signature": "true" },
  *     "/api/channels": { "channels": [...] },
@@ -33,10 +34,16 @@
  *
  * Os blocos não custam consultas novas com o cache quente: cada um é lido do
  * Redis (texto já serializado, sem `JSON.parse`) e entra no corpo por
- * concatenação.
+ * concatenação. Exceção: `/api/team-chat/rooms` é por usuário e muda a cada
+ * mensagem — sai da MESMA consulta que o payload base já faz
+ * (`teamChatRooms`), sem cache, e entra no ETag pelo hash do corpo.
+ *
+ * Fora de propósito: `/api/activities/alerts` (o GET marca o alerta como
+ * entregue — efeito colateral).
  */
 import { requirePermissionForUser } from "@/lib/authz/resource-policy";
 import {
+  computeResponseEtag,
   loadCachedResponse,
   peekResponseEtag,
   responseCacheKey,
@@ -59,11 +66,12 @@ import {
 const log = getLogger("bootstrap-blocks");
 
 /**
- * URLs exatas que o frontend (origin/DEV_BRANCH, 13/10/2026) chama na
- * inicialização e ao abrir `/pipeline?deal=<n>`, e que são dados globais da
- * org (ou do perfil). Ordem estável — entra no ETag.
+ * URLs exatas que o frontend chama na abertura da aba (inventário do fe #202,
+ * 13/10/2026) e ao abrir `/pipeline?deal=<n>`. Ordem estável — é a ordem das
+ * chaves em `blocks` e entra no ETag.
  */
 export const BOOTSTRAP_BLOCK_URLS = [
+  "/api/team-chat/rooms",
   "/api/pipelines",
   "/api/settings/org?prefix=conversation.",
   "/api/settings/visibility",
@@ -77,9 +85,37 @@ export const BOOTSTRAP_BLOCK_URLS = [
 
 export type BootstrapBlockUrl = (typeof BOOTSTRAP_BLOCK_URLS)[number];
 
+/** Bloco por usuário, montado da consulta do payload base (sem cache). */
+export const TEAM_CHAT_ROOMS_URL = "/api/team-chat/rooms" satisfies BootstrapBlockUrl;
+
+/** Blocos servidos do cache de inicialização. */
+type CachedBlockUrl = Exclude<BootstrapBlockUrl, typeof TEAM_CHAT_ROOMS_URL>;
+
+const CACHED_BLOCK_URLS = BOOTSTRAP_BLOCK_URLS.filter(
+  (u): u is CachedBlockUrl => u !== TEAM_CHAT_ROOMS_URL,
+);
+
+const ORDER = new Map<string, number>(BOOTSTRAP_BLOCK_URLS.map((u, i) => [u, i]));
+
+/** Ordena pela ordem do contrato (chaves de `blocks` e ETag). */
+export function inContractOrder<T extends { url: BootstrapBlockUrl }>(items: T[]): T[] {
+  return [...items].sort((a, b) => (ORDER.get(a.url) ?? 0) - (ORDER.get(b.url) ?? 0));
+}
+
+export type BootstrapBlockEntry = { url: BootstrapBlockUrl; body: string; etag: string };
+
+/**
+ * Bloco `/api/team-chat/rooms`: o corpo da rota (`{ rooms }`) a partir da
+ * lista completa que o payload base já carregou. ETag = hash do corpo.
+ */
+export function teamChatRoomsBlock(orgId: string, rooms: unknown[]): BootstrapBlockEntry {
+  const body = JSON.stringify({ rooms });
+  return { url: TEAM_CHAT_ROOMS_URL, body, etag: computeResponseEtag(orgId, body) };
+}
+
 /** Especificação do bloco para o usuário; `null` = rota daria 403 / sem org. */
 async function specFor(
-  url: BootstrapBlockUrl,
+  url: CachedBlockUrl,
   user: StartupCacheUser,
 ): Promise<CachedResponseSpec | null> {
   switch (url) {
@@ -113,7 +149,7 @@ async function specFor(
 }
 
 export type BootstrapBlockRef = {
-  url: BootstrapBlockUrl;
+  url: CachedBlockUrl;
   spec: CachedResponseSpec;
   key: string;
   /** ETag já guardado para a chave (memória/Redis); `undefined` = frio. */
@@ -129,7 +165,7 @@ export async function resolveBootstrapBlocks(
   user: StartupCacheUser,
 ): Promise<BootstrapBlockRef[]> {
   const refs = await Promise.all(
-    BOOTSTRAP_BLOCK_URLS.map(async (url): Promise<BootstrapBlockRef | null> => {
+    CACHED_BLOCK_URLS.map(async (url): Promise<BootstrapBlockRef | null> => {
       try {
         const spec = await specFor(url, user);
         if (!spec) return null;
@@ -145,7 +181,7 @@ export async function resolveBootstrapBlocks(
 }
 
 export type LoadedBootstrapBlocks = {
-  entries: { url: BootstrapBlockUrl; body: string; etag: string }[];
+  entries: BootstrapBlockEntry[];
   errors: BootstrapBlockUrl[];
 };
 
