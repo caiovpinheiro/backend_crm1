@@ -469,6 +469,20 @@ async function previousAgentAnnouncedTransfer(conversationId: string, previousAg
   }
 }
 
+/**
+ * Atalho por palavra-chave com resposta fixa numa mensagem longa (35+
+ * palavras) que traz vários pedidos: a palavra é um detalhe, não o assunto.
+ * Atalho que transfere ou tem outra condição continua valendo.
+ */
+export function shortcutTooNarrowFor(rule: { conditions?: Array<{ type: string }>; actions: Array<{ type: string }> }, message: string): boolean {
+  const byKeyword = (rule.conditions ?? []).some((c) => c.type === "keywords");
+  const replyOnly = rule.actions.every((a) => RULE_REPLY_ACTION_TYPES.has(a.type) || a.type === "add_tag" || a.type === "set_variable");
+  if (!byKeyword || !replyOnly) return false;
+  const words = message.trim().split(/\s+/).filter(Boolean).length;
+  const asks = (message.match(/\?/g) ?? []).length + message.split(/[.!]\s+|\n+/).filter((p) => p.trim().split(/\s+/).length >= 4).length;
+  return words >= 35 && asks >= 2;
+}
+
 async function inboundAlreadyAnswered(conversationId: string, messageIds: string[] | undefined): Promise<boolean> {
   if (!messageIds?.length) return false;
   try {
@@ -1473,7 +1487,13 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // cliente disser que não deu certo, transfere com o contexto.
   if (rule && rule.actions.some((a) => RULE_REPLY_ACTION_TYPES.has(a.type))) {
     const fired = await recentlyAppliedRuleIds(input.conversationId).catch(() => new Set<string>());
-    if (fired.has(rule.id)) {
+    if (shortcutTooNarrowFor(rule, input.userMessage)) {
+      // Mensagem longa, com vários pedidos, que só cita a palavra do atalho:
+      // a resposta fixa cobria um detalhe e ignorava o resto (cobrança,
+      // avaliação, acesso…). Segue para o agente, que responde tudo.
+      traceStep("regra", `Atalho "${rule.name ?? rule.id}" casou numa mensagem longa com vários pedidos → a resposta fixa não sai; o agente responde tudo`);
+      rule = null;
+    } else if (fired.has(rule.id)) {
       traceStep("regra", `Atalho "${rule.name ?? rule.id}" já respondeu nesta conversa → não repete; a mensagem segue para o agente`);
       counters.guidanceGiven = true;
       rule = null;
