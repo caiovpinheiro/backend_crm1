@@ -23,6 +23,10 @@
  * mas fora do ar / com erro → FAIL-OPEN (deixa passar): o limite é rede de
  * proteção, não pode virar indisponibilidade.
  *
+ * Sobrecarga do processo (event loop atrasado, `overload-guard.ts`): antes
+ * do bucket, 503 `{ message, code: "OVERLOADED", class, retryAfterMs }`
+ * primeiro para `accessory`, depois também para `heavy_read`.
+ *
  * Log de rejeição: `api_cost_rejected` com userId, classe e rota, no máximo
  * 1 por usuário+classe por minuto (por processo, e entre réplicas via
  * `SET NX` no Redis), com a contagem do que foi suprimido.
@@ -40,6 +44,7 @@ import type { ApiCostClass } from "@/lib/api-cost-class";
 import { getCacheClient, isCacheRedisDisabled, noteFailure, noteSuccess } from "@/lib/cache/redis-client";
 import { getLogger } from "@/lib/logger";
 import { metrics, templatizeRoute } from "@/lib/metrics";
+import { checkOverload } from "@/lib/overload-guard";
 
 const log = getLogger("api-cost-limit");
 
@@ -382,10 +387,34 @@ export type EnforceApiCostArgs = {
   requestToken?: object | null;
 };
 
-/** 429 da classe ou `null` (segue). Nunca bloqueia `essential`. */
+/**
+ * 503 de sobrecarga (`overload-guard.ts`), 429 da classe ou `null` (segue).
+ * Nunca bloqueia `essential`.
+ */
 export async function enforceApiCostLimits(args: EnforceApiCostArgs): Promise<NextResponse | null> {
   const userId = args.userId?.trim();
   if (!userId || args.cls === "essential") return null;
+
+  const overloaded = checkOverload(args.cls);
+  if (overloaded) {
+    try {
+      metrics.apiCost.rejections.inc({ class: args.cls, status: "503" });
+    } catch {
+      /* métrica nunca derruba a requisição */
+    }
+    logApiCostReject({
+      userId,
+      organizationId: args.organizationId,
+      cls: args.cls,
+      method: args.method,
+      path: args.path,
+      status: 503,
+      retryAfterMs: overloaded.retryAfterMs,
+      reason: "overload",
+    });
+    return apiCostRejectResponse(503, args.cls, overloaded.retryAfterMs);
+  }
+
   if (isApiCostLimitDisabled()) return null;
   const config = getApiCostBucketConfig(args.cls);
   if (!config) return null;
