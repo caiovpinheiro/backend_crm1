@@ -11,7 +11,6 @@ import { prisma } from "@/lib/prisma";
 import {
   getDealCustomFieldValues,
   upsertDealCustomFieldValues,
-  withoutBlankOverwrites,
 } from "@/services/custom-fields";
 import { createDealEvent, getDealById } from "@/services/deals";
 
@@ -91,24 +90,20 @@ export async function PUT(request: Request, ctx: Ctx) {
       const oldMap = new Map(
         (oldValues as { fieldId: string; value: string }[]).map((v) => [v.fieldId, v.value]),
       );
-      const allowBlank = body.allowBlank === true;
-      const writable = withoutBlankOverwrites(
-        cleaned,
-        [...oldMap.entries()].map(([fieldId, value]) => ({ fieldId, value })),
-        { allowBlank },
-      );
-      await upsertDealCustomFieldValues(dealId, writable, { allowBlank });
+      // O editor manda value: "" para limpar. Esse PUT grava o vazio.
+      // Importação, lead e automação seguem sem apagar texto já gravado.
+      await upsertDealCustomFieldValues(dealId, cleaned, { allowBlank: true });
       const updated = await getDealCustomFieldValues(dealId);
 
       const uid = authResult.user.id;
-      const fieldIds = writable.map((c) => c.fieldId);
+      const fieldIds = cleaned.map((c) => c.fieldId);
       const fieldDefs = await prisma.customField.findMany({
         where: { id: { in: fieldIds } },
         select: { id: true, label: true },
       });
       const labelMap = new Map(fieldDefs.map((f) => [f.id, f.label]));
 
-      for (const item of writable) {
+      for (const item of cleaned) {
         const prev = oldMap.get(item.fieldId) ?? "";
         if (prev !== item.value) {
           createDealEvent(dealId, uid, "CUSTOM_FIELD_UPDATED", {
