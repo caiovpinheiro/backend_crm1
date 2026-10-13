@@ -56,7 +56,6 @@
   "src/services/channels-instagram-oauth.ts|TS2322|Type 'Record<string, unknown>' is not assignable to type 'InputJsonValue | undefined'.": 2,
   "src/services/channels-messaging-provision.ts|TS2322|Type 'Record<string, unknown>' is not assignable to type 'InputJsonValue | undefined'.": 2,
   "src/services/channels-meta-provision.ts|TS2322|Type 'Record<string, unknown>' is not assignable to type 'InputJsonValue | undefined'.": 2,
-  "src/services/contacts.ts|TS2321|Excessive stack depth comparing types 'Contact$assignedToArgs<DefaultArgs>' and 'Contact$assignedToArgs<InternalArgs & { result: {}; model: {}; query: {}; client: {}; }>'.": 1,
   "src/services/contacts.ts|TS2322|Type '{ [K in keyof T as (T & object)[K] extends false | Skip | null | undefined ? never : K]: (T & object)[K] extends object ? $ContactPayload<InternalArgs & { ...; }> extends SelectablePayloadFields<...> ? O extends OperationPayload ? GetFindResult<...>[] : never : $ContactPayload<...> extends SelectablePayloadFields<.....' is not assignable to type '{ [K in keyof T as (T & object)[K] extends false | Skip | null | undefined ? never : K]: (T & object)[K] extends object ? $ContactPayload<DefaultArgs> extends SelectablePayloadFields<...> ? O extends OperationPayload ? GetFindResult<...>[] : never : $ContactPayload<...> extends SelectablePayloadFields<...> ? O exten...'.": 1,
   "src/services/conversation-error-flag.ts|TS2322|Type 'DynamicClientExtensionThis<TypeMap<InternalArgs & { result: {}; model: {}; query: {}; client: {}; }, {}>, TypeMapCb<PrismaClientOptions>, { result: {}; model: {}; query: {}; client: {}; }>' is not assignable to type 'Db'.": 1,
   "src/services/conversation-products.ts|TS2345|Argument of type 'string | null' is not assignable to parameter of type 'string'.": 1,
@@ -70,6 +69,7 @@
   "src/services/distribution/pending-drain.ts|TS2339|Property 'catch' does not exist on type 'RetryResult | Promise<RetryResult>'.": 1,
   "src/services/distribution/pending-drain.ts|TS2345|Argument of type 'string | null | undefined' is not assignable to parameter of type 'string'.": 1,
   "src/services/distribution/pending-drain.ts|TS7006|Parameter 'e' implicitly has an 'any' type.": 1,
+  "src/services/pipelines.ts|TS2321|Excessive stack depth comparing types 'StageFindFirstArgs<InternalArgs & { result: {}; model: {}; query: {}; client: {}; }>' and 'StageFindFirstArgs<DefaultArgs>'.": 1,
   "src/services/pipelines.ts|TS2345|Argument of type 'Omit<DynamicClientExtensionThis<TypeMap<InternalArgs & { result: {}; model: {}; query: {}; client: {}; }, {}>, TypeMapCb<PrismaClientOptions>, { result: {}; model: {}; query: {}; client: {}; }>, \"$connect\" | ... 3 more ... | \"$extends\">' is not assignable to parameter of type 'TransactionClient'.": 2,
   "src/services/pipelines.ts|TS2349|This expression is not callable.": 1,
   "src/services/quota.test.ts|TS2783|'id' is specified more than once, so this usage will be overwritten.": 1,
@@ -79,5 +79,5 @@
   "src/services/whatsapp-conversation.ts|TS2561|Object literal may only specify known properties, but 'channelId' does not exist in type 'ConversationUpdateInput'. Did you mean to write 'channel'?": 1,
   "src/services/whatsapp-flow-definitions.ts|TS2322|Type 'Omit<MetaFlowListItem, \"alreadyImported\" | \"crmFlowDefinitionId\">[]' is not assignable to type 'MetaFlowListItem[]'.": 1,
   "src/workers/baileys/baileys-manager.ts|TS18048|'session' is possibly 'undefined'.": 1,
-  "src/workers/baileys/message-handler.ts|TS2367|This comparison appears to be unintentional because the types '\"call\" | \"chat\" | \"contactMessage\" | \"viewOnceMessage\" | \"viewOnceMessageV2\" | \"viewOnceMessageV2Extension\" | \"senderKeyDistributionMessage\" | \"locationMessage\" | \"documentMessage\" | ... 80 more ... | \"pollResultSnapshotMessageV3\"' and '\"ptt\"' have no overlap.": 1
+  "src/workers/baileys/message-handler.ts|TS2367|This comparison appears to be unintentional because the types '\"call\" | \"questionMessage\" | \"chat\" | \"contactMessage\" | \"viewOnceMessage\" | \"viewOnceMessageV2\" | \"viewOnceMessageV2Extension\" | \"senderKeyDistributionMessage\" | \"locationMessage\" | ... 80 more ... | \"pollResultSnapshotMessageV3\"' and '\"ptt\"' have no overlap.": 1
 }
