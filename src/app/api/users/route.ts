@@ -1,16 +1,13 @@
 import { NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
 
-import { requireAdmin, requireAuth, userOrgFilter } from "@/lib/auth-helpers";
+import { requireAdmin, requireAuth } from "@/lib/auth-helpers";
 import { syncUserRoleAssignment } from "@/lib/authz/sync-user-role";
 import { prisma } from "@/lib/prisma";
 import { nextUserNumber } from "@/lib/public-id";
-import {
-  getProvisioningStatusMany,
-  type ProvisionStatus,
-} from "@/services/api4com/provisioning";
-import { getSystemPresenceMap } from "@/services/system-presence";
+import { bumpResponseFamilies, RESPONSE_FAMILIES, respondWithCachedJson } from "@/lib/cache/response-cache";
 import { getLogger } from "@/lib/logger";
+import { loadUsersList, usersSpec } from "@/services/startup-cache";
 
 const log = getLogger("api/users");
 
@@ -25,96 +22,10 @@ export async function GET(request: Request) {
       new URL(request.url).searchParams.get("includeAi") === "1" ||
       new URL(request.url).searchParams.get("includeAi") === "true";
 
-    const users = await prisma.user.findMany({
-      // Por padrão só humanos (Equipe / filtros). Com ?includeAi=1 inclui
-      // agentes IA ativos — usado nos seletores de responsável (1º atendimento).
-      // Exclui anonimizados (soft-delete da Equipe / LGPD).
-      where: includeAi
-        ? {
-            ...userOrgFilter(r.session),
-            isErased: false,
-            OR: [
-              { type: "HUMAN" },
-              { type: "AI", aiAgentConfig: { active: true } },
-            ],
-          }
-        : { type: "HUMAN", isErased: false, ...userOrgFilter(r.session) },
-      orderBy: { name: "asc" },
-      select: {
-        id: true,
-        number: true,
-        name: true,
-        email: true,
-        role: true,
-        type: true,
-        avatarUrl: true,
-        phone: true,
-        // Só para achar o ramal na org do usuário (telefonia); sai da resposta.
-        organizationId: true,
-        // Roles RBAC atribuídas (modelo novo). Usado pela tela de Equipe
-        // para exibir a "função" como role customizada (mantendo só ADMIN
-        // como preset). NÃO substitui `role` legado — coexistem.
-        roleAssignments: {
-          select: {
-            role: { select: { id: true, name: true, systemPreset: true } },
-          },
-        },
-        agentStatus: {
-          select: {
-            status: true,
-            availableForVoiceCalls: true,
-            updatedAt: true,
-          },
-        },
-      },
-    });
-
-    // Presença de USO (aba do CRM aberta) — SEPARADA de agentStatus.
-    // agentStatus continua refletindo apenas a disponibilidade manual
-    // da Distribuição. Nunca combinar esses dois conceitos.
-    const orgId = r.session.user.organizationId;
-    let presence: Awaited<ReturnType<typeof getSystemPresenceMap>> = new Map();
-    if (orgId) {
-      try {
-        presence = await getSystemPresenceMap({
-          organizationId: orgId,
-          userIds: users.map((u) => u.id),
-        });
-      } catch {
-        // Migration ainda não aplicada / erro transiente: seguimos sem presença.
-      }
-    }
-
-    // Telefonia de cada usuário (evita 1 GET /api/users/:id/telephony por
-    // linha na tela de Equipe). Mesma regra da rota por id: só ADMIN lê; os
-    // demais recebem a lista SEM o campo `telephony`. Para ADMIN o campo é o
-    // mesmo objeto da rota por id, ou `null` onde ela daria 404 (usuário sem
-    // org). Uma consulta para a lista inteira.
-    const canReadTelephony = r.session.user.role === "ADMIN";
-    let telephony: Map<string, ProvisionStatus> | null = null;
-    if (canReadTelephony) {
-      try {
-        telephony = await getProvisioningStatusMany(users);
-      } catch (err) {
-        // Falha na telefonia não derruba a lista: o front cai na rota por id.
-        log.warn({ err }, "GET: telefonia em lote falhou");
-      }
-    }
-
-    // Achata `roleAssignments` em `assignedRoles` (lista limpa pra UI).
-    const shaped = users.map((u) => {
-      const { roleAssignments, organizationId: _organizationId, ...rest } = u;
-      const p = presence.get(u.id);
-      return {
-        ...rest,
-        assignedRoles: roleAssignments.map((a) => a.role),
-        systemOnline: p?.systemOnline ?? false,
-        lastSeenAt: p?.lastSeenAt ? p.lastSeenAt.toISOString() : null,
-        ...(telephony ? { telephony: telephony.get(u.id) ?? null } : {}),
-      };
-    });
-
-    return NextResponse.json(shaped);
+    // Cache por org + variante (ETag/304), TTL 60 s por causa da presença.
+    const spec = usersSpec(r.session.user, includeAi);
+    if (spec) return await respondWithCachedJson(request, spec);
+    return NextResponse.json(await loadUsersList(r.session.user, includeAi));
   } catch (e) {
     log.error({ err: e }, "GET falhou");
     return NextResponse.json({ message: "Erro ao listar usuários." }, { status: 500 });
@@ -182,6 +93,7 @@ export async function POST(request: Request) {
         });
         return created;
       });
+      await bumpResponseFamilies(orgId, RESPONSE_FAMILIES.users);
       return NextResponse.json(user, { status: 201 });
     } catch (e: unknown) {
       const prismaErr = e as { code?: string };

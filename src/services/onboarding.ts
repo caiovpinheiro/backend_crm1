@@ -5,6 +5,7 @@ import {
   ensureSystemPresetRoles,
   syncUserRoleAssignment,
 } from "@/lib/authz/sync-user-role";
+import { bumpResponseFamilies, RESPONSE_FAMILIES } from "@/lib/cache/response-families";
 import { normalizeOrganizationLogoUrl } from "@/lib/organization-logo-url";
 import { prismaBase } from "@/lib/prisma-base";
 import { nextUserNumber } from "@/lib/public-id";
@@ -273,7 +274,15 @@ export async function applyPipelineTemplate(
     return pipeline;
   });
 
+  // Também sobe `GET /api/pipelines` em cache.
   await invalidatePipelinesMeta(organizationId);
+  // Demais listas em cache criadas pelo template.
+  await bumpResponseFamilies(
+    organizationId,
+    RESPONSE_FAMILIES.lossReasons,
+    RESPONSE_FAMILIES.customFields,
+    RESPONSE_FAMILIES.quickReplies,
+  );
   return { pipelineId: result.id };
 }
 

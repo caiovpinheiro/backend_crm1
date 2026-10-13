@@ -1,57 +1,72 @@
 import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
+import { withOrgContext } from "@/lib/auth-helpers";
+import { bumpResponseFamilies, RESPONSE_FAMILIES, respondWithCachedJson } from "@/lib/cache/response-cache";
 import { prisma } from "@/lib/prisma";
 import { getLogger } from "@/lib/logger";
+import { ServerTiming } from "@/lib/server-timing";
+import { loadSettingsQuickReplies, settingsQuickRepliesSpec } from "@/services/startup-cache";
 
 const log = getLogger("api/settings/quick-replies");
 
 export async function GET(request: Request) {
-  try {
-    const session = await auth();
-    const user = session?.user as { id?: string; organizationId?: string | null } | undefined;
-    if (!user?.id || !user.organizationId) {
+  const timing = new ServerTiming();
+  // `withOrgContext` (requireAuth) no lugar de `auth()` cru: o 304 só sai
+  // depois da autenticação completa.
+  return withOrgContext(async (session) => {
+    timing.add("auth", timing.totalMs());
+    const orgId = session.user.organizationId;
+    if (!orgId) {
       return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
     }
-
-    const { searchParams } = new URL(request.url);
-    const groupIdParam = searchParams.get("groupId");
-    const q = searchParams.get("q");
-
-    const where: Record<string, unknown> = { organizationId: user.organizationId };
-
-    if (groupIdParam === "ungrouped") {
-      where.groupId = null;
-    } else if (groupIdParam) {
-      where.groupId = groupIdParam;
-    }
-
-    if (q) {
-      where.OR = [
-        { title: { contains: q, mode: "insensitive" } },
-        { content: { contains: q, mode: "insensitive" } },
-      ];
-    }
-
     try {
-      const replies = await prisma.quickReply.findMany({
-        where,
-        orderBy: { position: "asc" },
-        include: { group: { select: { id: true, name: true } } },
-      });
-      return NextResponse.json(replies);
-    } catch {
-      // group relation may not exist yet (migration pending) — try without include.
-      const replies = await prisma.quickReply.findMany({
-        where: { organizationId: user.organizationId },
-        orderBy: { position: "asc" },
-      });
-      return NextResponse.json(replies.map((r) => ({ ...r, group: null })));
+      const { searchParams } = new URL(request.url);
+      const groupIdParam = searchParams.get("groupId");
+      const q = searchParams.get("q");
+
+      // Lista inteira (o que o composer pede ao abrir): cache por org + ETag/304.
+      if (!groupIdParam && !q) {
+        const spec = settingsQuickRepliesSpec(session.user);
+        if (spec) return await respondWithCachedJson(request, spec, timing);
+        return NextResponse.json(await loadSettingsQuickReplies(orgId));
+      }
+
+      const where: Record<string, unknown> = { organizationId: orgId };
+
+      if (groupIdParam === "ungrouped") {
+        where.groupId = null;
+      } else if (groupIdParam) {
+        where.groupId = groupIdParam;
+      }
+
+      if (q) {
+        where.OR = [
+          { title: { contains: q, mode: "insensitive" } },
+          { content: { contains: q, mode: "insensitive" } },
+        ];
+      }
+
+      try {
+        const replies = await prisma.quickReply.findMany({
+          where,
+          orderBy: { position: "asc" },
+          include: { group: { select: { id: true, name: true } } },
+        });
+        return NextResponse.json(replies);
+      } catch {
+        // group relation may not exist yet (migration pending) — try without include.
+        const replies = await prisma.quickReply.findMany({
+          where: { organizationId: orgId },
+          orderBy: { position: "asc" },
+        });
+        return NextResponse.json(replies.map((r) => ({ ...r, group: null })));
+      }
+    } catch (e) {
+      log.error({ err: e }, "GET falhou");
+      return NextResponse.json({ message: "Erro ao listar respostas rápidas." }, { status: 500 });
     }
-  } catch (e) {
-    log.error({ err: e }, "GET falhou");
-    return NextResponse.json({ message: "Erro ao listar respostas rápidas." }, { status: 500 });
-  }
+  });
 }
 
 export async function POST(request: Request) {
@@ -98,6 +113,7 @@ export async function POST(request: Request) {
       },
       include: { group: { select: { id: true, name: true } } },
     });
+    await bumpResponseFamilies(user.organizationId, RESPONSE_FAMILIES.quickReplies);
     return NextResponse.json(reply, { status: 201 });
   } catch (e) {
     log.error({ err: e }, "POST falhou");

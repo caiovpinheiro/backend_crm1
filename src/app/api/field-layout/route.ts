@@ -1,17 +1,18 @@
 import { NextResponse } from "next/server";
-import { Prisma } from "@prisma/client";
 
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
+import {
+  bumpResponseFamilies,
+  RESPONSE_FAMILIES,
+  respondWithCachedJson,
+} from "@/lib/cache/response-cache";
 import type { SectionConfig } from "@/lib/field-layout";
 import { prisma } from "@/lib/prisma";
-
-function isMissingFieldLayoutTable(error: unknown): boolean {
-  return (
-    error instanceof Prisma.PrismaClientKnownRequestError &&
-    error.code === "P2021" &&
-    String(error.meta?.table ?? "").includes("field_layout_configs")
-  );
-}
+import {
+  fieldLayoutSpec,
+  isMissingFieldLayoutTable,
+  loadFieldLayout,
+} from "@/services/startup-cache";
 
 export async function GET(request: Request) {
   const authResult = await authenticateApiRequest(request);
@@ -23,27 +24,12 @@ export async function GET(request: Request) {
     const user = authResult.user as { id: string; organizationId: string };
     if (!context) return NextResponse.json({ admin: null, agent: null });
 
-    try {
-      const adminConfig = await prisma.fieldLayoutConfig.findFirst({
-        where: { organizationId: user.organizationId, context, userId: null },
-      });
-
-      const agentConfig = forUser
-        ? await prisma.fieldLayoutConfig.findFirst({
-            where: { organizationId: user.organizationId, context, userId: user.id },
-          })
-        : null;
-
-      return NextResponse.json({
-        admin: adminConfig?.sections ?? null,
-        agent: agentConfig?.sections ?? null,
-      });
-    } catch (error) {
-      if (isMissingFieldLayoutTable(error)) {
-        return NextResponse.json({ admin: null, agent: null });
-      }
-      throw error;
-    }
+    // Cache por org + contexto (+ usuário com `forUser`), com ETag/304.
+    const spec = fieldLayoutSpec(authResult.user, context, forUser);
+    if (spec) return respondWithCachedJson(request, spec);
+    return NextResponse.json(
+      await loadFieldLayout(user.organizationId, user.id, context, forUser),
+    );
   });
 }
 
@@ -68,6 +54,7 @@ export async function PUT(request: Request) {
         await prisma.fieldLayoutConfig.deleteMany({
           where: { organizationId: user.organizationId, context, userId: user.id },
         });
+        await bumpResponseFamilies(user.organizationId, RESPONSE_FAMILIES.fieldLayout);
         return NextResponse.json({ ok: true });
       }
 
@@ -93,6 +80,7 @@ export async function PUT(request: Request) {
         });
       }
 
+      await bumpResponseFamilies(user.organizationId, RESPONSE_FAMILIES.fieldLayout);
       return NextResponse.json({ ok: true });
     } catch (error) {
       if (isMissingFieldLayoutTable(error)) {

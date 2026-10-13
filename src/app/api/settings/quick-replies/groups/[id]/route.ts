@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
+import { bumpResponseFamilies, RESPONSE_FAMILIES } from "@/lib/cache/response-families";
 import { prisma } from "@/lib/prisma";
 import { getLogger } from "@/lib/logger";
 
@@ -32,6 +33,7 @@ export async function PUT(request: Request, ctx: Ctx) {
       data,
       include: { _count: { select: { quickReplies: true } } },
     });
+    await bumpResponseFamilies(user.organizationId, RESPONSE_FAMILIES.quickReplies);
     return NextResponse.json(updated);
   } catch (e) {
     log.error({ err: e }, "PUT falhou");
@@ -51,6 +53,7 @@ export async function DELETE(_req: Request, ctx: Ctx) {
     await prisma.quickReplyGroup.delete({
       where: { id, organizationId: user.organizationId },
     });
+    await bumpResponseFamilies(user.organizationId, RESPONSE_FAMILIES.quickReplies);
     return NextResponse.json({ ok: true });
   } catch (e) {
     log.error({ err: e }, "DELETE falhou");

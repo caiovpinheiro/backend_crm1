@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 
+import { bumpResponseFamilies, RESPONSE_FAMILIES } from "@/lib/cache/response-families";
 import { recordPresenceTransition } from "@/lib/agent-presence";
 import { debugWarn } from "@/lib/debug-log";
 import { withOrgContext } from "@/lib/auth-helpers";
@@ -69,6 +70,8 @@ export async function PUT(req: Request, ctx: Ctx) {
         create: withOrgFromCtx({ userId: id, status, availableForVoiceCalls }),
         update: { status, availableForVoiceCalls },
       });
+      // Status do agente aparece em `GET /api/users` (lista em cache).
+      await bumpResponseFamilies(getOrgIdOrNull(), RESPONSE_FAMILIES.users);
 
       const statusChanged = !existing || existing.status !== status;
       // #region agent log

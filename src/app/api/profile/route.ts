@@ -28,6 +28,7 @@ import { z } from "zod";
 
 import { Prisma } from "@prisma/client";
 
+import { bumpResponseFamilies, RESPONSE_FAMILIES } from "@/lib/cache/response-families";
 import { auth } from "@/lib/auth";
 import { issueSessionRenewal } from "@/lib/auth/session-renewal";
 import {
@@ -213,6 +214,8 @@ export async function PUT(request: Request) {
     extra: Record<string, unknown> = {},
   ) => {
     const { sessionVersion: newVersion, ...profile } = updated;
+    // Nome/foto/telefone aparecem em `GET /api/users` (lista em cache).
+    await bumpResponseFamilies(session.user.organizationId, RESPONSE_FAMILIES.users);
     if (!passwordChanged) return NextResponse.json({ ...profile, ...extra });
     notifySessionsRevoked({
       userId: session.user.id,

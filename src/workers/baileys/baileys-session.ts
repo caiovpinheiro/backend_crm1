@@ -13,6 +13,7 @@ import { Boom } from "@hapi/boom";
 import { Prisma } from "@prisma/client";
 import QRCode from "qrcode";
 
+import { bumpResponseFamilies, RESPONSE_FAMILIES } from "@/lib/cache/response-families";
 import { prisma } from "@/lib/prisma";
 import { prismaBase } from "@/lib/prisma-base";
 import {
@@ -285,6 +286,8 @@ export class BaileysSession {
         data,
       });
     });
+    // Status/QR aparecem na lista de canais em cache.
+    await bumpResponseFamilies(orgId, RESPONSE_FAMILIES.channels);
     try {
       publishChannelUpdated({
         organizationId: orgId,

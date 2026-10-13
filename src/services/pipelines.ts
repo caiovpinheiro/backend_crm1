@@ -17,6 +17,7 @@ import {
   invalidateLocalVersioned,
   localVersioned,
 } from "@/lib/cache/local-versioned";
+import { bumpResponseFamilies, RESPONSE_FAMILIES } from "@/lib/cache/response-families";
 import { slugify } from "@/lib/utils";
 
 const log = getLogger("pipelines");
@@ -255,6 +256,13 @@ export async function invalidatePipelinesMeta(organizationId?: string): Promise<
   const orgId = organizationId ?? getOrgIdOrNull();
   if (!orgId) return;
   await invalidateLocalVersioned(PIPELINES_META_FAMILY, orgId);
+  // `GET /api/pipelines` em cache (e o bloco do bootstrap).
+  await bumpResponseFamilies(orgId, RESPONSE_FAMILIES.pipelines);
+}
+
+/** Etapas mudaram: só a lista em cache de `GET /api/pipelines`. */
+async function invalidatePipelinesResponse(): Promise<void> {
+  await bumpResponseFamilies(getOrgIdOrNull(), RESPONSE_FAMILIES.pipelines);
 }
 
 /**
@@ -726,7 +734,7 @@ export async function createStage(pipelineId: string, data: CreateStageInput) {
   const name = data.name.trim();
   if (!name) throw new Error("INVALID_NAME");
 
-  return withStageCreateRetry(() =>
+  const created = await withStageCreateRetry(() =>
     prisma.$transaction(async (tx) => {
       const max = await tx.stage.aggregate({
         where: { pipelineId },
@@ -777,6 +785,8 @@ export async function createStage(pipelineId: string, data: CreateStageInput) {
       });
     }),
   );
+  await invalidatePipelinesResponse();
+  return created;
 }
 
 const MAX_STAGE_ENTRY_FIELDS = 20;
@@ -856,10 +866,12 @@ export async function updateStage(id: string, data: UpdateStageInput) {
     return prisma.stage.findUniqueOrThrow({ where: { id } });
   }
 
-  return prisma.stage.update({
+  const updated = await prisma.stage.update({
     where: { id },
     data: payload,
   });
+  await invalidatePipelinesResponse();
+  return updated;
 }
 
 export async function getStageInPipeline(pipelineId: string, stageId: string) {
@@ -884,6 +896,7 @@ export async function deleteStage(id: string) {
     throw new Error("STAGE_HAS_DEALS");
   }
   await prisma.stage.delete({ where: { id } });
+  await invalidatePipelinesResponse();
 }
 
 export async function reorderStages(pipelineId: string, stageIds: string[]) {
@@ -926,4 +939,5 @@ export async function reorderStages(pipelineId: string, stageIds: string[]) {
       });
     }
   });
+  await invalidatePipelinesResponse();
 }
