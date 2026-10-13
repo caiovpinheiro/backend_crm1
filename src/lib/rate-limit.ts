@@ -19,7 +19,8 @@
  *   - `rl:org:<organizationId>:<route>`
  *   - `rl:user:<userId>:<route>`
  *   - `rl:ip:<ip>:<route>`
- *   - `rl:api.session:session:<userId>` (cookie NextAuth — requireAuth)
+ *   - `rl:cost:<classe>:<userId>` (cookie NextAuth — requireAuth; ver
+ *     `api-cost-limit.ts`, token bucket por classe de custo da rota)
  *   - `rl:api.token:token:<hash>` (Bearer)
  *
  * Nunca misturar IP e org na mesma chave — quem dispara abuso pode trocar
@@ -33,7 +34,6 @@
 
 import { createHash } from "node:crypto";
 
-import { NextResponse } from "next/server";
 import {
   RateLimiterMemory,
   RateLimiterRedis,
@@ -85,21 +85,6 @@ export function logRedisUnavailableOnce(
   }
 }
 
-/** Default do perfil `api.session`. Override: `SESSION_RATE_LIMIT_RPM`. */
-export const DEFAULT_SESSION_RATE_LIMIT_RPM = 600;
-
-export function getSessionRateLimitRpm(): number {
-  const raw = process.env.SESSION_RATE_LIMIT_RPM?.trim();
-  if (!raw) return DEFAULT_SESSION_RATE_LIMIT_RPM;
-  const n = Number(raw);
-  if (!Number.isFinite(n) || n < 1) return DEFAULT_SESSION_RATE_LIMIT_RPM;
-  return Math.floor(n);
-}
-
-export function sessionRateLimitKey(userId: string): string {
-  return `session:${userId}`;
-}
-
 /**
  * Perfis canônicos. Todo handler escolhe um destes — não inventar limites
  * ad-hoc na rota. Mudanças aqui se aplicam em massa.
@@ -148,13 +133,10 @@ export const RATE_LIMIT_PROFILES = {
 
   /** Bearer API tokens (n8n/integrações). Teto por token = TOKEN_ORG_RATE_LIMIT_RPM. */
   "api.token": { points: getTokenOrgRateLimitRpm(), durationSec: 60 },
-  /**
-   * Sessão cookie (NextAuth) — choke point `requireAuth` / `withOrgContext`.
-   * 600/min bloqueia um loop de render (~15 req/s ≈ 900/min) e ainda cabe
-   * um dashboard que dispara dezenas de APIs por load. 400 (igual Bearer)
-   * é apertado demais pra UI; override `SESSION_RATE_LIMIT_RPM`.
-   */
-  "api.session": { points: DEFAULT_SESSION_RATE_LIMIT_RPM, durationSec: 60 },
+  // Sessão cookie (NextAuth) NÃO tem perfil aqui: o antigo `api.session`
+  // (600 pontos/60 s por usuário) bloqueava o usuário inteiro até a janela
+  // virar. Agora é por classe de custo da rota — `api-cost-limit.ts`
+  // (`SESSION_RATE_LIMIT_RPM` virou alias da classe de leituras comuns).
 } as const satisfies Record<string, { points: number; durationSec: number }>;
 
 export type RateLimitProfile = keyof typeof RATE_LIMIT_PROFILES;
@@ -185,9 +167,6 @@ function getProfileConfig(profile: RateLimitProfile): {
   points: number;
   durationSec: number;
 } {
-  if (profile === "api.session") {
-    return { points: getSessionRateLimitRpm(), durationSec: 60 };
-  }
   if (profile === "api.token") {
     return { points: getTokenOrgRateLimitRpm(), durationSec: 60 };
   }
@@ -262,7 +241,7 @@ function getLimiter(profile: RateLimitProfile): RateLimiterAbstract {
   return limiter;
 }
 
-/** Só testes. Descarta limiters em cache (ex.: depois de mudar SESSION_RATE_LIMIT_RPM). */
+/** Só testes. Descarta limiters em cache (ex.: depois de mudar uma env de limite). */
 export function resetRateLimitersForTests(): void {
   limiterCache.clear();
   sharedRedis = null;
@@ -427,60 +406,6 @@ export async function withRateLimit(
     },
   );
   return { ok: false, response, headers };
-}
-
-function applyConsumeRateLimitHeaders(
-  headers: Headers,
-  decision: RateLimitDecision,
-): void {
-  headers.set("X-RateLimit-Limit", String(decision.limit));
-  headers.set("X-RateLimit-Remaining", String(decision.remaining));
-  headers.set("X-RateLimit-Reset", String(Math.floor(decision.resetAt / 1000)));
-  if (!decision.allowed) {
-    headers.set("Retry-After", String(decision.retryAfterSec));
-  }
-}
-
-/**
- * Teto por sessão cookie (`session:{userId}`, perfil `api.session`).
- * Choke point de `requireAuth` — cobre withOrgContext / requireRole / requireCan.
- * `/api/health`, `/api/auth`, webhooks e cron não passam por requireAuth.
- *
- * Retorna 429 se estourou; `null` se dentro do limite.
- */
-export async function enforceSessionApiRateLimit(opts: {
-  userId: string;
-  organizationId?: string | null;
-}): Promise<NextResponse | null> {
-  const userId = opts.userId?.trim();
-  if (!userId) return null;
-
-  const key = sessionRateLimitKey(userId);
-  const decision = await consumeRateLimit(key, "api.session");
-  if (decision.allowed) return null;
-
-  metrics.errors.inc({
-    scope: "rate-limit",
-    kind: safeLabel("api.session"),
-  });
-  logRateLimitReject(key, {
-    profile: "api.session",
-    scope: "user",
-    organizationId: opts.organizationId?.trim() || undefined,
-    limit: decision.limit,
-    retryAfterSec: decision.retryAfterSec,
-  });
-
-  const headers = new Headers({ "Content-Type": "application/json" });
-  applyConsumeRateLimitHeaders(headers, decision);
-  return NextResponse.json(
-    {
-      error: "rate_limit_exceeded",
-      message: "Muitas requisições. Tente novamente em instantes.",
-      retryAfterSec: decision.retryAfterSec,
-    },
-    { status: 429, headers },
-  );
 }
 
 /**

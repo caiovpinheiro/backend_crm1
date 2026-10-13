@@ -26,7 +26,7 @@ vi.mock("@/lib/api-access-audit", () => ({
   resolveResponseStatus: () => 200,
 }));
 vi.mock("@/lib/metrics", () => ({ observeHttpRequest: vi.fn(), metrics: {} }));
-vi.mock("@/lib/rate-limit", () => ({ enforceSessionApiRateLimit: vi.fn().mockResolvedValue(null) }));
+vi.mock("@/lib/api-cost-limit", () => ({ enforceApiCostLimits: vi.fn().mockResolvedValue(null) }));
 vi.mock("@/lib/org-rate-limit", () => ({ enforceOrgApiRateLimit: vi.fn().mockResolvedValue(null) }));
 vi.mock("@/lib/prisma", () => ({ prisma: { user: { findFirst: h.findFirst } } }));
 vi.mock("@/lib/prisma-base", () => ({

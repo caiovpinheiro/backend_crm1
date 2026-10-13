@@ -196,6 +196,38 @@ function buildMetrics(registry: Registry): AppMetrics {
     registers: [registry],
   });
 
+  // Limite por classe de custo (api-cost-limit.ts / overload-guard.ts):
+  // 429 = bucket da classe vazio; 503 = proteção contra sobrecarga.
+  const apiCostRejections = new Counter({
+    name: "crm_api_cost_rejections_total",
+    help: "Requisições recusadas por classe de custo (status 429 limite, 503 sobrecarga).",
+    labelNames: ["class", "status"] as const,
+    registers: [registry],
+  });
+
+  // Respostas condicionais (ETag/If-None-Match): 304 vs 200 por rota.
+  // As rotas incrementam via `recordConditionalResponse`.
+  const conditionalResponses = new Counter({
+    name: "crm_http_conditional_responses_total",
+    help: "Respostas de GET com validador (ETag): 304 (não mudou) vs 200, por rota (template).",
+    labelNames: ["route", "status"] as const,
+    registers: [registry],
+  });
+
+  // Atraso do event loop do processo (janela deslizante do overload-guard),
+  // lido no scrape. quantile = "0.5" | "0.99".
+  const eventLoopDelay = new Gauge({
+    name: "crm_event_loop_delay_ms",
+    help: "Atraso do event loop (ms) na janela deslizante do overload-guard (p50/p99).",
+    labelNames: ["quantile"] as const,
+    registers: [registry],
+  });
+  const overloadLevel = new Gauge({
+    name: "crm_overload_level",
+    help: "Nível de sobrecarga do processo: 0 normal, 1 recusa acessórias, 2 também leituras pesadas.",
+    registers: [registry],
+  });
+
   const activityOutboxProcessed = new Counter({
     name: "crm_activity_outbox_processed_total",
     help: "Itens da activity_outbox projetados, em retry ou dead letter.",
@@ -237,6 +269,12 @@ function buildMetrics(registry: Registry): AppMetrics {
     errors,
     cacheHits,
     cacheMisses,
+    apiCost: {
+      rejections: apiCostRejections,
+      conditionalResponses,
+      eventLoopDelay,
+      overloadLevel,
+    },
     activityOutbox: {
       processed: activityOutboxProcessed,
       depth: activityOutboxDepth,
@@ -280,6 +318,12 @@ export type AppMetrics = {
   errors: Counter<"scope" | "kind">;
   cacheHits: Counter<"key">;
   cacheMisses: Counter<"key">;
+  apiCost: {
+    rejections: Counter<"class" | "status">;
+    conditionalResponses: Counter<"route" | "status">;
+    eventLoopDelay: Gauge<"quantile">;
+    overloadLevel: Gauge;
+  };
   activityOutbox: {
     processed: Counter<"organization" | "status">;
     depth: Gauge<"organization">;
@@ -312,7 +356,7 @@ export async function renderMetrics(): Promise<{
   body: string;
   contentType: string;
 }> {
-  await Promise.allSettled([snapshotQueueDepth(), snapshotDbPool()]);
+  await Promise.allSettled([snapshotQueueDepth(), snapshotDbPool(), snapshotEventLoop()]);
   const body = await registry.metrics();
   return { body, contentType: registry.contentType };
 }
@@ -323,6 +367,18 @@ async function snapshotQueueDepth(): Promise<void> {
     await mod.collectQueueDepth();
   } catch {
     // modulo opcional / redis indisponivel — ok.
+  }
+}
+
+async function snapshotEventLoop(): Promise<void> {
+  try {
+    const mod = await import("@/lib/overload-guard");
+    const snap = mod.getOverloadSnapshot();
+    metrics.apiCost.eventLoopDelay.set({ quantile: "0.5" }, snap.p50Ms);
+    metrics.apiCost.eventLoopDelay.set({ quantile: "0.99" }, snap.p99Ms);
+    metrics.apiCost.overloadLevel.set(snap.level);
+  } catch {
+    // medidor indisponível — ok.
   }
 }
 
@@ -393,6 +449,39 @@ export function observeHttpRequest(args: {
       { route, method, status },
       Math.max(0, args.durationMs) / 1000,
     );
+  } catch {
+    // métricas nunca devem quebrar o request
+  }
+}
+
+/**
+ * Hit/miss de cache por FAMÍLIA (ex.: "settings", "channels", "bootstrap").
+ * Reaproveita `crm_cache_hits_total` / `crm_cache_misses_total` (label
+ * `key` = família), as mesmas séries do `lib/cache`. Hit rate no Prometheus:
+ * `sum by (key) (rate(crm_cache_hits_total[5m])) / (… hits + … misses)`.
+ * Nunca lança.
+ */
+export function recordCacheLookup(family: string, hit: boolean): void {
+  try {
+    const label = { key: safeLabel(family) };
+    if (hit) metrics.cacheHits.inc(label);
+    else metrics.cacheMisses.inc(label);
+  } catch {
+    // métricas nunca devem quebrar o request
+  }
+}
+
+/**
+ * Resposta de um GET com validador (ETag / If-None-Match): chame com o
+ * status final (304 quando o cliente já tinha a versão, 200 quando mandou o
+ * corpo). `path` é templatizado (cardinalidade controlada). Nunca lança.
+ */
+export function recordConditionalResponse(path: string, status: number): void {
+  try {
+    metrics.apiCost.conditionalResponses.inc({
+      route: templatizeRoute(path),
+      status: String(status || 0),
+    });
   } catch {
     // métricas nunca devem quebrar o request
   }

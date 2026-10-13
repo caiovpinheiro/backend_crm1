@@ -7,9 +7,10 @@ import {
   readApiAccessHeaders,
   resolveResponseStatus,
 } from "@/lib/api-access-audit";
+import { classifyApiRequest } from "@/lib/api-cost-class";
+import { enforceApiCostLimits } from "@/lib/api-cost-limit";
 import { observeHttpRequest } from "@/lib/metrics";
 import { enforceOrgApiRateLimit } from "@/lib/org-rate-limit";
-import { enforceSessionApiRateLimit } from "@/lib/rate-limit";
 import { auth } from "./auth";
 import { revokedReasonOf, sessionRevokedResponse } from "./auth/revoked-session";
 import { sessionVersionFromClaim } from "./auth/session-version";
@@ -136,14 +137,22 @@ export async function requireAuth(): Promise<AuthResult<AppSession>> {
     };
   }
 
-  // Per-credential (cookie): bloqueia loop de render no frontend (~15 req/s).
+  // Limite por classe de custo da rota (`api-cost-class.ts`): 429 curto só
+  // na classe que estourou — nunca o usuário inteiro, nunca envio de
+  // mensagem/salvar/auth. Rota/método vêm dos headers do middleware; sem
+  // eles (handler fora do middleware) a classe é `essential`.
   // Org RPM abaixo só vale pra Bearer — sessão não compete com n8n.
-  const sessionRpm = await enforceSessionApiRateLimit({
+  const reqInfo = await readApiAccessHeaders();
+  const costLimited = await enforceApiCostLimits({
     userId: session.user.id,
     organizationId: session.user.organizationId,
+    cls: classifyApiRequest(reqInfo),
+    method: reqInfo.method,
+    path: reqInfo.path,
+    requestToken: reqInfo.requestToken,
   });
-  if (sessionRpm) {
-    return { ok: false, response: sessionRpm };
+  if (costLimited) {
+    return { ok: false, response: costLimited };
   }
 
   const orgRpm = await enforceOrgApiRateLimit({
