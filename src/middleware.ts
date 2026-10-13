@@ -4,9 +4,11 @@ import { getToken } from "next-auth/jwt";
 
 import {
   CRM_API_PATH_HEADER,
+  CRM_API_SEARCH_HEADER,
   CRM_HTTP_METHOD_HEADER,
   CRM_REQUEST_ID_HEADER,
 } from "@/lib/api-access-audit-constants";
+import { hasSearchParam } from "@/lib/api-cost-class";
 import {
   resolveBrowserApiCorsOrigin,
   writeBrowserApiCorsHeaders,
@@ -147,7 +149,7 @@ async function decideCors(req: {
 
 /** Request mínimo do middleware. */
 type MiddlewareReq = {
-  nextUrl: { pathname: string };
+  nextUrl: { pathname: string; searchParams?: URLSearchParams };
   headers: Headers;
   method: string;
 };
@@ -157,6 +159,10 @@ function forwardApiAuditHeaders(req: MiddlewareReq, apiPath: string): Headers {
   const h = new Headers(req.headers);
   h.set(CRM_API_PATH_HEADER, apiPath);
   h.set(CRM_HTTP_METHOD_HEADER, req.method);
+  // Classe de custo (busca = leitura pesada). Sempre reescrito: o valor que
+  // o cliente mandar não vale.
+  h.delete(CRM_API_SEARCH_HEADER);
+  if (hasSearchParam(req.nextUrl.searchParams)) h.set(CRM_API_SEARCH_HEADER, "1");
   if (!h.has(CRM_REQUEST_ID_HEADER)) {
     h.set(CRM_REQUEST_ID_HEADER, crypto.randomUUID());
   }

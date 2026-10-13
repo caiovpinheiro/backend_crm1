@@ -196,6 +196,15 @@ function buildMetrics(registry: Registry): AppMetrics {
     registers: [registry],
   });
 
+  // Limite por classe de custo (api-cost-limit.ts / overload-guard.ts):
+  // 429 = bucket da classe vazio; 503 = proteção contra sobrecarga.
+  const apiCostRejections = new Counter({
+    name: "crm_api_cost_rejections_total",
+    help: "Requisições recusadas por classe de custo (status 429 limite, 503 sobrecarga).",
+    labelNames: ["class", "status"] as const,
+    registers: [registry],
+  });
+
   const activityOutboxProcessed = new Counter({
     name: "crm_activity_outbox_processed_total",
     help: "Itens da activity_outbox projetados, em retry ou dead letter.",
@@ -237,6 +246,7 @@ function buildMetrics(registry: Registry): AppMetrics {
     errors,
     cacheHits,
     cacheMisses,
+    apiCost: { rejections: apiCostRejections },
     activityOutbox: {
       processed: activityOutboxProcessed,
       depth: activityOutboxDepth,
@@ -280,6 +290,9 @@ export type AppMetrics = {
   errors: Counter<"scope" | "kind">;
   cacheHits: Counter<"key">;
   cacheMisses: Counter<"key">;
+  apiCost: {
+    rejections: Counter<"class" | "status">;
+  };
   activityOutbox: {
     processed: Counter<"organization" | "status">;
     depth: Gauge<"organization">;
