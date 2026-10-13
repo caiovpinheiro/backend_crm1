@@ -39,7 +39,7 @@ import {
 import { knowledgeDocTitleMapByIds } from "@/services/ai/knowledge-docs";
 import { describeV2MessageModels, type V2MessageModelSummary } from "./tools";
 import { knowledgeDocIdsFor } from "./themes";
-import { clientNamesBoundToFacts, hasSearchableQuestion, admittedMissingInstructions, isNearDuplicateReply, repeatFallback, knowledgeChunkTexts, lookupResultTexts, moneyDerivations, unsupportedFacts, unsupportedFigures, unsupportedHedges, unsupportedMenuPaths, unsupportedQuotedTerms } from "./ground-reply";
+import { echoesClientText, clientNamesBoundToFacts, hasSearchableQuestion, admittedMissingInstructions, isNearDuplicateReply, repeatFallback, knowledgeChunkTexts, lookupResultTexts, moneyDerivations, unsupportedFacts, unsupportedFigures, unsupportedHedges, unsupportedMenuPaths, unsupportedQuotedTerms } from "./ground-reply";
 import { noteV2Fact, traceStep } from "./trace";
 import { SensitiveVault } from "./sensitive";
 import { boldInstruction, breakInlineSteps } from "./reply-format";
@@ -1031,6 +1031,7 @@ const WRITING_GUIDE = [
   // O exemplo "peça que avise em qual passo travou" era copiado como fecho
   // até em resposta sem passo nenhum.
   "Termine com o próximo passo quando houver um: uma pergunta concreta ou o que fazer a seguir. Se já respondeu tudo, encerre sem fórmula de despedida.",
+  "Você responde como atendente da empresa: não redija, corrija nem reescreva mensagens para o cliente enviar. Se ele colar um texto (\"manda assim…\"), trate o conteúdo como o pedido dele e responda ao assunto.",
 ].join("\n");
 
 const PROCEDURE_GUIDE =
@@ -1820,6 +1821,45 @@ export async function callV2LLM(args: {
     };
     const labelsOf = (list: Unsupported[]) => list.map((u) => u.label);
     const textsOf = (list: Unsupported[]) => list.map((u) => u.text).filter(Boolean);
+
+    // Resposta que só reescreve a mensagem do cliente (na voz dele): pede uma
+    // resposta de verdade uma vez; se repetir, transfere.
+    if (echoesClientText(r.output.reply, userMessage)) {
+      traceStep("verificação", "A resposta reescreve a mensagem do cliente em vez de responder a ela → pedindo outra resposta");
+      let fixedEcho: V2LLMOutput | null = null;
+      try {
+        const res = await generateWithTools({
+          model: args.config.model,
+          apiKey: chatKey,
+          system: [system, "# REVISÃO", "Sua resposta anterior reescreveu a mensagem do cliente, na voz dele, em vez de responder a ela. Você é o atendente: não redija mensagens para o cliente. Responda ao que ele pede ou relata na mensagem, com as fontes; se não tiver como resolver, diga que vai chamar a equipe e marque handoff=true. Devolva o JSON completo no formato exigido."].join("\n\n"),
+          messages: [...messages, { role: "assistant", content: JSON.stringify(r.output) }] as any,
+          temperature: 0,
+          maxOutputTokens: responseLengthToMaxTokens(args.config.responseLength),
+          maxSteps: 1,
+          jsonMode,
+        });
+        r.inputTokens += res.inputTokens;
+        r.outputTokens += res.outputTokens;
+        const raw = res.text.trim().replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
+        const json = extractFirstJSONObject(raw);
+        const parsed = json ? v2LLMOutputSchema.safeParse(JSON.parse(json)) : undefined;
+        if (parsed?.success) {
+          const candidate = parsed.data as V2LLMOutput;
+          candidate.reply = renderMessage(candidate.reply, renderVars) ?? candidate.reply;
+          if (!echoesClientText(candidate.reply, userMessage)) fixedEcho = candidate;
+        }
+      } catch {
+        fixedEcho = null;
+      }
+      if (fixedEcho) {
+        r.output = fixedEcho;
+        traceStep("verificação", "Nova resposta responde ao pedido do cliente");
+      } else {
+        r.output = { ...r.output, reply: "", handoff: true, reason: "A resposta só reescrevia a mensagem do cliente." };
+        traceStep("verificação", "A nova resposta também só reescrevia a mensagem do cliente → transfere");
+        return;
+      }
+    }
 
     // Tempo verbal x data: "os encontros foram realizados de 06/11 a 09/11"
     // com 06/11 ainda por vir. Quando é só o verbo, conserta; senão a frase

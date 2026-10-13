@@ -1200,6 +1200,23 @@ describe("escopo e repetição", () => {
     expect(r.output.handoff).toBe(false);
   });
 
+  it("resposta que só reescreve a mensagem do cliente (na voz dele) pede outra; se repetir, transfere", async () => {
+    const config = baseConfig({ groundingCheck: "rules" } as Partial<V2AgentConfig>);
+    const context = { contact: null, deals: [], selectedDeal: null, fields: baseConfig().contextFields };
+    (generateWithTools as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: 'Boa tarde! Eu havia entrado em contato antes porque não aparecia a cobrança de outubro. Vocês informaram que estava tudo normal, pois eu não teria pedidos nesse mês. Agora consta uma cobrança de outubro em aberto, mas não tenho nenhum pedido para esse mês. Poderiam verificar?', actions: [] })))
+      .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: 'Entendi: aparece uma cobrança de outubro em aberto sem pedido no mês. Vou pedir para a equipe financeira conferir esse lançamento.', handoff: true, actions: [] })));
+    const r = await callV2LLM({ agentId: "agent-1", config, context, userMessage: 'manda assim: Boa tarde, eu havia entrado em contato antes porque não aparecia a cobrança de outubro, e vocês informaram que estava tudo normal, pois eu não teria pedidos nesse mês. Agora consta uma cobrança de outubro em aberto, mas eu não tenho nenhum pedido para esse mês.', stage: "active" });
+    expect(r.output.reply).toBe('Entendi: aparece uma cobrança de outubro em aberto sem pedido no mês. Vou pedir para a equipe financeira conferir esse lançamento.');
+
+    (generateWithTools as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: 'Boa tarde! Eu havia entrado em contato antes porque não aparecia a cobrança de outubro. Vocês informaram que estava tudo normal, pois eu não teria pedidos nesse mês. Agora consta uma cobrança de outubro em aberto, mas não tenho nenhum pedido para esse mês. Poderiam verificar?', actions: [] })))
+      .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: 'Boa tarde! Eu havia entrado em contato antes porque não aparecia a cobrança de outubro. Vocês informaram que estava tudo normal, pois eu não teria pedidos nesse mês. Agora consta uma cobrança de outubro em aberto, mas não tenho nenhum pedido para esse mês. Poderiam verificar?', actions: [] })));
+    const r2 = await callV2LLM({ agentId: "agent-1", config, context, userMessage: 'manda assim: Boa tarde, eu havia entrado em contato antes porque não aparecia a cobrança de outubro, e vocês informaram que estava tudo normal, pois eu não teria pedidos nesse mês. Agora consta uma cobrança de outubro em aberto, mas eu não tenho nenhum pedido para esse mês.', stage: "active" });
+    expect(r2.output.reply).toBe("");
+    expect(r2.output.handoff).toBe(true);
+  });
+
   it("material do assunto entra primeiro e inteiro, mesmo com nota menor que a de um vizinho", async () => {
     const { knowledgeDocTitleMapByIds } = await import("@/services/ai/knowledge-docs");
     (knowledgeDocTitleMapByIds as ReturnType<typeof vi.fn>).mockResolvedValueOnce(new Map([["doc-theme", "Primeiro pedido"], ["doc-other", "Segurança da conta"]]));

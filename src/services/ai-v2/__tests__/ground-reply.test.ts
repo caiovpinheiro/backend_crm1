@@ -115,3 +115,12 @@ describe("conta conferida com valores das fontes", () => {
     expect(unsupportedFigures("As duas parcelas somam R$ 1.437,20.", ["Parcela 1: R$ 795,61. Parcela 2: R$ 641,59."])).toEqual([]);
   });
 });
+
+describe("resposta que reescreve a mensagem do cliente", () => {
+  it("detecta a cópia; resposta que responde ao assunto não conta", async () => {
+    const { echoesClientText } = await import("../ground-reply");
+    expect(echoesClientText('Boa tarde! Eu havia entrado em contato antes porque não aparecia a cobrança de outubro. Vocês informaram que estava tudo normal, pois eu não teria pedidos nesse mês. Agora consta uma cobrança de outubro em aberto, mas não tenho nenhum pedido para esse mês. Poderiam verificar?', 'manda assim: Boa tarde, eu havia entrado em contato antes porque não aparecia a cobrança de outubro, e vocês informaram que estava tudo normal, pois eu não teria pedidos nesse mês. Agora consta uma cobrança de outubro em aberto, mas eu não tenho nenhum pedido para esse mês.')).toBe(true);
+    expect(echoesClientText('Entendi: aparece uma cobrança de outubro em aberto sem pedido no mês. Vou pedir para a equipe financeira conferir esse lançamento.', 'manda assim: Boa tarde, eu havia entrado em contato antes porque não aparecia a cobrança de outubro, e vocês informaram que estava tudo normal, pois eu não teria pedidos nesse mês. Agora consta uma cobrança de outubro em aberto, mas eu não tenho nenhum pedido para esse mês.')).toBe(false);
+    expect(echoesClientText("Ok, entendi.", "ok")).toBe(false);
+  });
+});
