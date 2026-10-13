@@ -22,6 +22,11 @@ import {
 import { withSystemContext } from "@/lib/webhook-context";
 import { usePostgresAuthState } from "./auth-state-postgres";
 import { handleBaileysMessage } from "./message-handler";
+import { snapshotFromMeta } from "./sync-groups";
+import {
+  upsertChannelGroupSnapshots,
+  type BaileysGroupSnapshot,
+} from "@/services/whatsapp-groups";
 import { registerLidMapping, getMapSize, clearChannelMap, loadPersistedMappings, fixLidContacts } from "./lid-resolver";
 import { attachContactTyping, detachContactTyping } from "./contact-typing";
 import { maskPhone } from "@/lib/pii-mask";
@@ -32,6 +37,24 @@ const log = getLogger("worker.baileys.baileys-session");
 const RECONNECT_MAX_RETRIES = 8;
 const RECONNECT_BASE_DELAY_MS = 2_000;
 const QR_TIMEOUT_MS = 60_000;
+
+function snapshotsFromChats(
+  chats: Array<{ id?: string | null; name?: string | null }>,
+): BaileysGroupSnapshot[] {
+  const out: BaileysGroupSnapshot[] = [];
+  for (const chat of chats) {
+    if (!chat.id?.endsWith("@g.us")) continue;
+    out.push({
+      jid: chat.id,
+      name: chat.name?.trim() || "",
+      description: null,
+      ownerJid: null,
+      partial: true,
+      members: [],
+    });
+  }
+  return out;
+}
 
 export class BaileysSession {
   channelId: string;
@@ -48,6 +71,9 @@ export class BaileysSession {
   // cache o sendMessage(@g.us) resolve metadados vazios e o WhatsApp
   // nunca entrega — a API já tinha respondido 200 só por enfileirar.
   private groupCache = new Map<string, GroupMetadata>();
+  // Grupos vistos no histórico ou no upsert. O sync completo inclui esta
+  // lista para não apagar um grupo que o `participating` ainda não devolveu.
+  private discoveredGroups = new Map<string, BaileysGroupSnapshot>();
 
   constructor(channelId: string) {
     this.channelId = channelId;
@@ -162,14 +188,30 @@ export class BaileysSession {
 
     sock.ev.on("groups.upsert", (groups) => {
       for (const g of groups) this.rememberGroup(g);
+      void this.persistDiscovered(groups.map((g) => snapshotFromMeta(g)));
+    });
+
+    sock.ev.on("messaging-history.set", ({ chats }) => {
+      void this.persistDiscovered(snapshotsFromChats(chats));
+    });
+
+    sock.ev.on("chats.upsert", (chats) => {
+      void this.persistDiscovered(snapshotsFromChats(chats));
     });
 
     sock.ev.on("groups.update", (updates) => {
       for (const u of updates) {
         if (!u.id) continue;
         const prev = this.groupCache.get(u.id);
+        const full = Array.isArray((u as GroupMetadata).participants);
         if (prev) {
           this.rememberGroup({ ...prev, ...u } as GroupMetadata);
+          continue;
+        }
+        // `groupFetchAllParticipating` emite o metadado inteiro neste evento.
+        // Refetch em paralelo estourava o limite e a lista saía incompleta.
+        if (full) {
+          this.rememberGroup(u as GroupMetadata);
           continue;
         }
         void sock.groupMetadata(u.id).then((m) => this.rememberGroup(m)).catch(() => {});
@@ -402,6 +444,41 @@ export class BaileysSession {
     this.groupCache.set(meta.id, meta);
   }
 
+  discoveredGroupSnapshots(): BaileysGroupSnapshot[] {
+    return [...this.discoveredGroups.values()];
+  }
+
+  private async persistDiscovered(snaps: BaileysGroupSnapshot[]): Promise<void> {
+    const fresh = snaps.filter((snap) => {
+      if (!snap.jid.endsWith("@g.us")) return false;
+      const prev = this.discoveredGroups.get(snap.jid);
+      if (!prev) return true;
+      if (prev.partial && !snap.partial) return true;
+      return Boolean(snap.partial && snap.name.trim() && snap.name !== prev.name);
+    });
+    if (fresh.length === 0) return;
+    for (const snap of fresh) {
+      const prev = this.discoveredGroups.get(snap.jid);
+      if (!prev || (prev.partial && !snap.partial)) {
+        this.discoveredGroups.set(snap.jid, snap);
+      } else if (snap.name.trim()) {
+        this.discoveredGroups.set(snap.jid, { ...prev, name: snap.name });
+      }
+    }
+    const orgId = this.organizationId;
+    if (!orgId) return;
+    try {
+      await withSystemContext(orgId, () =>
+        upsertChannelGroupSnapshots(orgId, this.channelId, fresh),
+      );
+    } catch (err) {
+      log.warn(
+        { channelId: this.channelId, err: err instanceof Error ? err.message : err },
+        "[baileys] falha ao gravar grupos descobertos",
+      );
+    }
+  }
+
   async sendMessage(jid: string, content: AnyMessageContent): Promise<WAMessage | undefined> {
     if (!this.socket) throw new Error("Socket não conectado");
     if (!this.socket.user) {
@@ -440,6 +517,7 @@ export class BaileysSession {
     this.destroyed = true;
     this.clearQrTimer();
     this.groupCache.clear();
+    this.discoveredGroups.clear();
     clearChannelMap(this.channelId);
     detachContactTyping(this.channelId);
     try {
@@ -454,6 +532,7 @@ export class BaileysSession {
   async logout(): Promise<void> {
     this.clearQrTimer();
     this.groupCache.clear();
+    this.discoveredGroups.clear();
     clearChannelMap(this.channelId);
     if (!this.socket) {
       await this.connect();
