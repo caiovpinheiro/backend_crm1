@@ -1,6 +1,6 @@
 /**
  * Inatividade do cliente no agente v2 ("Começo e fim › Cliente sem
- * responder"): depois da última mensagem do agente, um aviso opcional e o
+ * responder"): depois da última mensagem do agente, até três lembretes e o
  * encerramento. O worker de inatividade do v1 ignora agentes v2 de
  * propósito; sem isto a config existia e nada acontecia — "encerro em 30
  * minutos" e o atendimento seguia aberto.
@@ -10,54 +10,113 @@
 import { prismaBase } from "@/lib/prisma-base";
 import { normalizeV2Config } from "@/lib/ai-v2/config";
 import { buildVariableMap, defaultFormatter, renderMessage } from "@/lib/ai-v2/message-render";
-import type { V2AgentConfig, V2InactivityConfig } from "@/lib/ai-v2/types";
+import type { V2AgentConfig, V2FollowUpStep, V2InactivityConfig } from "@/lib/ai-v2/types";
 import { getLogger } from "@/lib/logger";
+import { asksClient, classifyReply, replyEndingPhrases, withoutReplyEndings } from "./reply-ending";
 
 const log = getLogger("ai-v2.inactivity");
 
 export const NUDGE_MESSAGE_DEFAULT = "Ainda está por aí? Se precisar de algo, é só me responder.";
+/** Lembrete depois de um passo a passo. */
+export const FOLLOWUP_PROCEDURE_DEFAULT = "Conseguiu fazer? Se travou em algum passo, me conta qual que eu te ajudo.";
+/** Lembrete depois de uma pergunta do agente. */
+export const FOLLOWUP_QUESTION_DEFAULT = "Ainda está por aí? Fico no aguardo da sua resposta para continuar.";
 
 const MINUTE = 60 * 1000;
 const WINDOW_24H = 24 * 60 * MINUTE;
 
-export type V2IdleDecision = "nudge" | "close" | "none";
-
-const fold = (s: string) =>
-  s
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[̀-ͯ]/g, "")
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim();
+export type V2IdleKind = "procedure" | "question" | "other";
 
 /**
- * O que fazer com a conversa parada. Prazos em minutos desde a última
- * mensagem do agente; depois do aviso, o encerramento conta do aviso o que
- * falta (closeAfter − nudgeAfter). Fora da janela de 24h do WhatsApp não há
- * aviso (a Meta não entrega), só o encerramento.
+ * Lembretes valendo, em ordem de prazo, até 3, só os que saem antes do
+ * encerramento. Sem lista, o aviso único antigo (`nudgeAfter`) é o lembrete.
+ */
+export function followUpSteps(cfg: V2InactivityConfig | undefined): V2FollowUpStep[] {
+  if (!cfg) return [];
+  const closeAfter = Math.max(0, cfg.closeAfter ?? 0);
+  const list = (cfg.followUps ?? []).filter((s) => s && s.after > 0);
+  const steps = list.length > 0
+    ? list
+    : (cfg.nudgeAfter ?? 0) > 0
+      ? [{ after: cfg.nudgeAfter as number, mode: "fixed" as const, ...(cfg.nudgeMessage ? { message: cfg.nudgeMessage } : {}) }]
+      : [];
+  return [...steps]
+    .sort((a, b) => a.after - b.after)
+    .filter((s) => closeAfter === 0 || s.after < closeAfter)
+    .slice(0, 3);
+}
+
+/** De que tipo foi a última mensagem do agente (sem a frase de fecho). */
+export function idleKindOf(text: string | null | undefined, config: Pick<V2AgentConfig, "replyEnding" | "themes">): V2IdleKind {
+  const t = (text ?? "").trim();
+  if (!t) return "other";
+  if (classifyReply(t) === "procedure") return "procedure";
+  const core = withoutReplyEndings(t, replyEndingPhrases(config));
+  return core && asksClient(core) ? "question" : "other";
+}
+
+export type V2IdleDecision = { action: "followup"; index: number } | { action: "close" } | { action: "none" };
+
+/**
+ * O que fazer com a conversa parada. Prazos em minutos desde `anchorAt` (a
+ * última mensagem do agente que não é lembrete). Depois de um lembrete, o
+ * encerramento ainda dá ao cliente o intervalo que faltava entre ele e o
+ * encerramento. Fora da janela de 24h do WhatsApp não há lembrete (a Meta
+ * não entrega), só o encerramento.
  */
 export function decideV2Idle(args: {
   inactivity: V2InactivityConfig | undefined;
-  lastOutAt: Date;
-  lastOutText: string | null;
-  /** Aviso como foi enviado (já com as variáveis). */
-  nudgeText: string;
+  anchorAt: Date;
+  /** Lembretes já mandados desde `anchorAt`. */
+  sent: number;
+  lastFollowUpAt: Date | null;
   lastInboundAt: Date | null;
   now: Date;
 }): V2IdleDecision {
   const cfg = args.inactivity;
-  if (!cfg?.enabled) return "none";
+  if (!cfg?.enabled) return { action: "none" };
+  const steps = followUpSteps(cfg);
   const closeAfter = Math.max(0, cfg.closeAfter ?? 0);
-  const nudgeAfter = Math.max(0, cfg.nudgeAfter ?? 0);
-  const useNudge = nudgeAfter > 0 && (closeAfter === 0 || nudgeAfter < closeAfter);
-  const age = (args.now.getTime() - args.lastOutAt.getTime()) / MINUTE;
-  const lastIsNudge = useNudge && !!args.lastOutText && fold(args.lastOutText) === fold(args.nudgeText);
-  if (lastIsNudge) return closeAfter > 0 && age >= Math.max(1, closeAfter - nudgeAfter) ? "close" : "none";
-  if (closeAfter > 0 && age >= closeAfter) return "close";
+  const age = (args.now.getTime() - args.anchorAt.getTime()) / MINUTE;
+  const sent = Math.min(args.sent, steps.length);
+  if (closeAfter > 0 && age >= closeAfter) {
+    if (!args.lastFollowUpAt || sent === 0) return { action: "close" };
+    const sinceLast = (args.now.getTime() - args.lastFollowUpAt.getTime()) / MINUTE;
+    const gap = Math.max(1, closeAfter - steps[sent - 1].after);
+    if (sinceLast >= gap) return { action: "close" };
+  }
   const canText = !!args.lastInboundAt && args.now.getTime() - args.lastInboundAt.getTime() < WINDOW_24H;
-  if (useNudge && age >= nudgeAfter && canText) return "nudge";
-  return "none";
+  const next = steps[sent];
+  if (next && age >= next.after && canText) return { action: "followup", index: sent };
+  return { action: "none" };
 }
+
+/** Texto fixo do lembrete (modos "fixo" e "conforme a última mensagem"). */
+export function followUpFixedText(step: V2FollowUpStep, kind: V2IdleKind): string {
+  if (step.mode === "by_reply" || step.mode === "generated") {
+    if (kind === "procedure") return step.procedureMessage?.trim() || FOLLOWUP_PROCEDURE_DEFAULT;
+    if (kind === "question") return step.questionMessage?.trim() || FOLLOWUP_QUESTION_DEFAULT;
+  }
+  return step.message?.trim() || NUDGE_MESSAGE_DEFAULT;
+}
+
+/**
+ * Lembrete escrito pelo agente vale só se for curto e sem dado: número, data,
+ * valor ou link seriam afirmação sem conferência.
+ */
+export function acceptableGeneratedFollowUp(text: string | null | undefined): string | null {
+  const t = (text ?? "").trim().replace(/^["“]|["”]$/g, "").trim();
+  if (!t || t.length > 280) return null;
+  if (/\d|https?:\/\/|www\./i.test(t)) return null;
+  return t;
+}
+
+const FOLLOWUP_WRITER_SYSTEM = [
+  "Você escreve UMA mensagem curta de acompanhamento para um cliente que parou de responder num atendimento por mensagem.",
+  "Até 2 frases, no tom do atendente. Retome o ponto em que a conversa parou: se o atendente mandou passos, pergunte se o cliente conseguiu; se fez uma pergunta, retome a pergunta; se respondeu uma dúvida, pergunte se ficou claro.",
+  "Não traga informação nova, não cite números, datas, valores, prazos ou links, não prometa nada e não se despeça.",
+  "Responda só com o texto da mensagem.",
+].join(" ");
 
 type IdleRow = {
   conversation_id: string;
@@ -73,16 +132,20 @@ type IdleRow = {
   last_out_content: string | null;
   last_out_at: Date;
   last_inbound_at: Date | null;
+  idle_follow_up?: { anchorAt?: string; sent?: number; lastAt?: string; kind?: V2IdleKind } | null;
+  has_state?: boolean;
 };
 
 const db = prismaBase as unknown as {
   $queryRawUnsafe: <T = unknown>(q: string, ...v: unknown[]) => Promise<T>;
+  $executeRawUnsafe?: (q: string, ...v: unknown[]) => Promise<number>;
 };
 
 /**
  * Conversas de agentes v2 com inatividade ligada, abertas, sem resposta de
  * pessoa, com o agente como último a falar e já no prazo mínimo (o menor
- * entre aviso e encerramento). Fica de fora quem está na fila ou encerrado.
+ * entre o primeiro lembrete e o encerramento). Fica de fora quem está na fila
+ * ou encerrado.
  */
 async function listIdleV2(now: Date): Promise<IdleRow[]> {
   return db.$queryRawUnsafe<IdleRow[]>(
@@ -97,7 +160,9 @@ async function listIdleV2(now: Date): Promise<IdleRow[]> {
                ORDER BY d."updatedAt" DESC LIMIT 1
             )) AS deal_id,
             last_out."content" AS last_out_content, last_out."createdAt" AS last_out_at,
-            c."lastInboundAt" AS last_inbound_at
+            c."lastInboundAt" AS last_inbound_at,
+            s."counters"->'idleFollowUp' AS idle_follow_up,
+            (s."id" IS NOT NULL) AS has_state
        FROM "conversations" c
        JOIN "users" u ON u."id" = c."assignedToId" AND u."type" = 'AI'
        JOIN "ai_agent_configs" a ON a."userId" = u."id" AND a."active" = true AND a."engine" = 'simple'
@@ -120,6 +185,7 @@ async function listIdleV2(now: Date): Promise<IdleRow[]> {
         AND (s."id" IS NULL OR (s."owner" <> 'pessoa' AND s."stage" <> 'closed'))
         AND (c."lastInboundAt" IS NULL OR c."lastInboundAt" <= last_out."createdAt")
         AND last_out."createdAt" < $1::timestamptz - make_interval(mins => LEAST(
+              COALESCE(NULLIF((a."simpleConfig"->'inactivity'->'followUps'->0->>'after')::int, 0), 1000000),
               COALESCE(NULLIF((a."simpleConfig"->'inactivity'->>'nudgeAfter')::int, 0), 1000000),
               COALESCE(NULLIF((a."simpleConfig"->'inactivity'->>'closeAfter')::int, 0), 1000000)))
       ORDER BY last_out."createdAt" ASC
@@ -132,7 +198,68 @@ function autonomy(config: V2AgentConfig): "AUTONOMOUS" | "DRAFT" {
   return config.autonomyMode === "auto" ? "AUTONOMOUS" : "DRAFT";
 }
 
-/** Uma passada: avisa e encerra o que venceu. */
+/**
+ * De onde contam os prazos: se a última mensagem enviada é o lembrete que
+ * esta passada registrou, vale a âncora gravada; senão a última mensagem é
+ * nova e a contagem recomeça dela.
+ */
+export function idleProgress(row: Pick<IdleRow, "idle_follow_up" | "last_out_at" | "last_out_content">, config: V2AgentConfig): {
+  anchorAt: Date;
+  sent: number;
+  lastFollowUpAt: Date | null;
+  kind: V2IdleKind;
+} {
+  const lastOutAt = new Date(row.last_out_at);
+  const f = row.idle_follow_up;
+  if (f?.anchorAt && f.lastAt && Math.abs(new Date(f.lastAt).getTime() - lastOutAt.getTime()) < 5000) {
+    return { anchorAt: new Date(f.anchorAt), sent: Math.max(0, f.sent ?? 0), lastFollowUpAt: new Date(f.lastAt), kind: f.kind ?? "other" };
+  }
+  // Sem registro (conversa sem estado): o aviso único antigo ainda é
+  // reconhecido pelo texto, como antes.
+  const steps = followUpSteps(config.inactivity);
+  const lastText = (row.last_out_content ?? "").trim();
+  const fixedTexts = steps.map((s) => followUpFixedText(s, "other"));
+  const idx = lastText ? fixedTexts.findIndex((t) => t === lastText) : -1;
+  if (idx >= 0) {
+    const anchorAt = new Date(lastOutAt.getTime() - steps[idx].after * MINUTE);
+    return { anchorAt, sent: idx + 1, lastFollowUpAt: lastOutAt, kind: "other" };
+  }
+  return { anchorAt: lastOutAt, sent: 0, lastFollowUpAt: null, kind: idleKindOf(row.last_out_content, config) };
+}
+
+/** Lembrete escrito pelo agente a partir das últimas mensagens; null = usa o texto fixo. */
+async function writeFollowUp(config: V2AgentConfig, agentConfigId: string, conversationId: string): Promise<string | null> {
+  try {
+    const { tryGetAgentApiKey } = await import("@/services/ai/agent-key");
+    const apiKey = await tryGetAgentApiKey(agentConfigId).catch(() => null);
+    if (!apiKey) return null;
+    const rows = await db.$queryRawUnsafe<Array<{ direction: string; content: string | null }>>(
+      `SELECT m."direction", m."content" FROM "messages" m
+        WHERE m."conversationId" = $1 AND COALESCE(m."isPrivate", false) = false AND m."messageType" <> 'note'
+        ORDER BY m."createdAt" DESC LIMIT 8`,
+      conversationId,
+    );
+    const history = rows.reverse().filter((r) => r.content?.trim())
+      .map((r) => `${r.direction === "out" ? "Atendente" : "Cliente"}: ${String(r.content).slice(0, 500)}`).join("\n");
+    if (!history) return null;
+    const { generateWithTools } = await import("@/services/ai/provider");
+    const { v2FastAuxModel } = await import("@/lib/ai-v2/models");
+    const res = await generateWithTools({
+      model: v2FastAuxModel(config.model),
+      apiKey,
+      system: `${FOLLOWUP_WRITER_SYSTEM}${config.tone ? ` Tom do atendente: ${config.tone}.` : ""}`,
+      messages: [{ role: "user", content: `Conversa:\n${history}` }] as never,
+      temperature: 0.3,
+      maxOutputTokens: 120,
+      maxSteps: 1,
+    });
+    return acceptableGeneratedFollowUp(res.text);
+  } catch {
+    return null;
+  }
+}
+
+/** Uma passada: manda lembretes e encerra o que venceu. */
 export async function processIdleV2(now: Date = new Date()): Promise<{ nudged: number; closed: number }> {
   const rows = await listIdleV2(now);
   let nudged = 0;
@@ -154,16 +281,16 @@ export async function processIdleV2(now: Date = new Date()): Promise<{ nudged: n
     }
     const inactivity = config.inactivity;
     const vars = buildVariableMap(config.variables, null, null, { id: row.contact_id, name: row.contact_name ?? "" });
-    const nudgeText = renderMessage(inactivity?.nudgeMessage?.trim() || NUDGE_MESSAGE_DEFAULT, vars, defaultFormatter());
+    const progress = idleProgress(row, config);
     const decision = decideV2Idle({
       inactivity,
-      lastOutAt: new Date(row.last_out_at),
-      lastOutText: row.last_out_content,
-      nudgeText,
+      anchorAt: progress.anchorAt,
+      sent: progress.sent,
+      lastFollowUpAt: progress.lastFollowUpAt,
       lastInboundAt: row.last_inbound_at ? new Date(row.last_inbound_at) : null,
       now,
     });
-    if (decision === "none") continue;
+    if (decision.action === "none") continue;
     try {
       await withSystemContext(row.organization_id, () =>
         runWithV2Trace(async () => {
@@ -178,11 +305,25 @@ export async function processIdleV2(now: Date = new Date()): Promise<{ nudged: n
               humanBehavior: v2HumanBehavior(config),
             });
           let reply: string | undefined;
-          if (decision === "nudge") {
-            traceStep("inatividade", `Cliente sem responder há ${inactivity?.nudgeAfter} min → aviso`);
-            if ((await send(nudgeText)).sent) {
-              reply = nudgeText;
+          if (decision.action === "followup") {
+            const step = followUpSteps(inactivity)[decision.index];
+            const minutes = Math.round((now.getTime() - progress.anchorAt.getTime()) / MINUTE);
+            const mode = step.mode ?? "fixed";
+            let text = renderMessage(followUpFixedText(step, progress.kind), vars, defaultFormatter());
+            if (mode === "generated") {
+              const written = await writeFollowUp(config, row.agent_config_id, row.conversation_id);
+              if (written) text = written;
+              else traceStep("inatividade", "Lembrete escrito pelo agente indisponível ou com dado → texto padrão");
+            }
+            traceStep("inatividade", `Cliente sem responder há ${minutes} min → lembrete ${decision.index + 1} (${mode === "fixed" ? "texto fixo" : mode === "by_reply" ? "conforme a última mensagem" : "escrito pelo agente"})`);
+            if ((await send(text)).sent) {
+              reply = text;
               nudged++;
+              await saveProgress(row, {
+                anchorAt: progress.anchorAt.toISOString(),
+                sent: decision.index + 1,
+                kind: progress.kind,
+              }, now);
             }
           } else {
             traceStep("inatividade", `Cliente sem responder há ${inactivity?.closeAfter} min → encerramento`);
@@ -207,12 +348,12 @@ export async function processIdleV2(now: Date = new Date()): Promise<{ nudged: n
             executedActions: [],
             discardedActions: [],
             handoff: false,
-            ...(decision === "close" ? { closed: true } : {}),
+            ...(decision.action === "close" ? { closed: true } : {}),
             latencyMs: 0,
             inputTokens: 0,
             outputTokens: 0,
             owner: "agente",
-            stage: decision === "close" ? "closed" : "active",
+            stage: decision.action === "close" ? "closed" : "active",
           });
         }),
       );
@@ -223,6 +364,30 @@ export async function processIdleV2(now: Date = new Date()): Promise<{ nudged: n
       );
     }
   }
-  if (nudged + closed > 0) log.info({ avisos: nudged, encerradas: closed }, "[ai-v2 inatividade] resumo");
+  if (nudged + closed > 0) log.info({ lembretes: nudged, encerradas: closed }, "[ai-v2 inatividade] resumo");
   return { nudged, closed };
+}
+
+/**
+ * Grava quantos lembretes saíram e quando (a hora da mensagem enviada, para
+ * a próxima passada reconhecer que a última mensagem é o lembrete).
+ */
+async function saveProgress(row: IdleRow, progress: { anchorAt: string; sent: number; kind: V2IdleKind }, now: Date): Promise<void> {
+  if (!row.has_state || !db.$executeRawUnsafe) return;
+  try {
+    const last = await db.$queryRawUnsafe<Array<{ createdAt: Date }>>(
+      `SELECT m."createdAt" FROM "messages" m WHERE m."conversationId" = $1 AND m."direction" = 'out' ORDER BY m."createdAt" DESC LIMIT 1`,
+      row.conversation_id,
+    );
+    const lastAt = last?.[0]?.createdAt ? new Date(last[0].createdAt) : now;
+    await db.$executeRawUnsafe(
+      `UPDATE "ai_simple_conversation_states"
+          SET "counters" = jsonb_set(COALESCE("counters", '{}'::jsonb), '{idleFollowUp}', $2::jsonb, true)
+        WHERE "conversationId" = $1`,
+      row.conversation_id,
+      JSON.stringify({ ...progress, lastAt: lastAt.toISOString() }),
+    );
+  } catch (err) {
+    log.warn({ conv: row.conversation_id, err: err instanceof Error ? err.message : err }, "[ai-v2 inatividade] não gravou o lembrete");
+  }
 }

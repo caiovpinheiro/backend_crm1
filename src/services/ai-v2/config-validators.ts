@@ -606,6 +606,18 @@ function validateTeamClosures(c: V2AgentConfig, now: Date, add: (f: Omit<Validat
   });
 }
 
+/** Lembretes antes de encerrar: o que sai depois do encerramento nunca é enviado. */
+function validateFollowUps(c: V2AgentConfig, add: (f: Omit<ValidationFinding, "agentId">) => void): void {
+  const cfg = c.inactivity;
+  if (!cfg?.enabled) return;
+  const closeAfter = Math.max(0, cfg.closeAfter ?? 0);
+  (cfg.followUps ?? []).forEach((s, i) => {
+    if (closeAfter > 0 && s.after >= closeAfter) {
+      add({ code: "lembrete_depois_do_encerramento", severity: "avisa", path: `inactivity.followUps[${i}]`, message: `Lembrete ${i + 1} sai em ${s.after} min, mas a conversa encerra em ${closeAfter} min: ele nunca é enviado.` });
+    }
+  });
+}
+
 function validateCalendar(c: V2AgentConfig, now: Date, add: (f: Omit<ValidationFinding, "agentId">) => void): void {
   const events = c.calendar?.events ?? [];
   if (events.length === 0) return;
@@ -824,6 +836,7 @@ export function validateAgentConfig(agentId: string, data: ConfigValidationData)
   validateCalendar(agent.config, data.now ?? new Date(), add);
   validateNotices(agent.config, data.now ?? new Date(), add);
   validateTeamClosures(agent.config, data.now ?? new Date(), add);
+  validateFollowUps(agent.config, add);
   validateFields(agent.config, add);
   validateTabulation(agent.config, data, add);
   validateAutomations(data, add);

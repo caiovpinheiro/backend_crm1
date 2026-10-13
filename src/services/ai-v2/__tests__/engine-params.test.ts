@@ -7,7 +7,7 @@ import { normalizeV2Config } from "@/lib/ai-v2/config";
 import type { V2AgentConfig } from "@/lib/ai-v2/types";
 import { answerToPostCloseQuestion, classifyPostCloseMessage, isGreetingOnlyMessage, isNewRequest, postCloseHandoffMessage, postCloseQuestion, postCloseShortReply } from "@/services/ai-v2/closure";
 import { isConfusionMessage, rephraseAfterConfusion } from "@/services/ai-v2/confusion";
-import { NUDGE_MESSAGE_DEFAULT, decideV2Idle } from "@/services/ai-v2/inactivity";
+import { decideV2Idle } from "@/services/ai-v2/inactivity";
 import { pickV2TabulationId } from "@/services/ai-v2/tabulation";
 import { isShortFollowUp, themeThresholds } from "@/services/ai-v2/theme-semantic";
 import { knowledgeMinSimilarity } from "@/services/ai-v2/similarity-presets";
@@ -77,28 +77,67 @@ describe("tabulação", () => {
 describe("inatividade", () => {
   const now = new Date("2026-09-26T12:00:00Z");
   const ago = (min: number) => new Date(now.getTime() - min * 60 * 1000);
-  const base = { nudgeText: NUDGE_MESSAGE_DEFAULT, lastInboundAt: ago(40), now };
+  const base = { lastInboundAt: ago(40), now, sent: 0, lastFollowUpAt: null };
 
   it("desligada: nada", () => {
-    expect(decideV2Idle({ ...base, inactivity: { enabled: false, closeAfter: 30 }, lastOutAt: ago(100), lastOutText: "x" })).toBe("none");
+    expect(decideV2Idle({ ...base, inactivity: { enabled: false, closeAfter: 30 }, anchorAt: ago(100) })).toEqual({ action: "none" });
   });
 
-  it("sem aviso: encerra no prazo", () => {
+  it("sem lembrete: encerra no prazo", () => {
     const inactivity = { enabled: true, nudgeAfter: 0, closeAfter: 30 };
-    expect(decideV2Idle({ ...base, inactivity, lastOutAt: ago(29), lastOutText: "x" })).toBe("none");
-    expect(decideV2Idle({ ...base, inactivity, lastOutAt: ago(31), lastOutText: "x" })).toBe("close");
+    expect(decideV2Idle({ ...base, inactivity, anchorAt: ago(29) })).toEqual({ action: "none" });
+    expect(decideV2Idle({ ...base, inactivity, anchorAt: ago(31) })).toEqual({ action: "close" });
   });
 
-  it("com aviso: avisa, e encerra contando do aviso o que falta", () => {
+  it("aviso único antigo: avisa, e encerra contando do aviso o que falta", () => {
     const inactivity = { enabled: true, nudgeAfter: 20, closeAfter: 30 };
-    expect(decideV2Idle({ ...base, inactivity, lastOutAt: ago(21), lastOutText: "Resposta" })).toBe("nudge");
-    expect(decideV2Idle({ ...base, inactivity, lastOutAt: ago(5), lastOutText: NUDGE_MESSAGE_DEFAULT })).toBe("none");
-    expect(decideV2Idle({ ...base, inactivity, lastOutAt: ago(11), lastOutText: NUDGE_MESSAGE_DEFAULT })).toBe("close");
+    expect(decideV2Idle({ ...base, inactivity, anchorAt: ago(21) })).toEqual({ action: "followup", index: 0 });
+    // Aviso mandado com atraso (há 5 min, âncora há 31): ainda faltam 5 dos 10 minutos.
+    expect(decideV2Idle({ ...base, inactivity, anchorAt: ago(31), sent: 1, lastFollowUpAt: ago(5) })).toEqual({ action: "none" });
+    expect(decideV2Idle({ ...base, inactivity, anchorAt: ago(31), sent: 1, lastFollowUpAt: ago(11) })).toEqual({ action: "close" });
   });
 
-  it("fora da janela de 24h não avisa (só encerra no prazo)", () => {
+  it("três lembretes em sequência e depois o encerramento", () => {
+    const inactivity = { enabled: true, closeAfter: 60, followUps: [{ after: 10 }, { after: 25 }, { after: 45 }] };
+    expect(decideV2Idle({ ...base, inactivity, anchorAt: ago(11) })).toEqual({ action: "followup", index: 0 });
+    expect(decideV2Idle({ ...base, inactivity, anchorAt: ago(20), sent: 1, lastFollowUpAt: ago(9) })).toEqual({ action: "none" });
+    expect(decideV2Idle({ ...base, inactivity, anchorAt: ago(26), sent: 1, lastFollowUpAt: ago(15) })).toEqual({ action: "followup", index: 1 });
+    expect(decideV2Idle({ ...base, inactivity, anchorAt: ago(46), sent: 2, lastFollowUpAt: ago(20) })).toEqual({ action: "followup", index: 2 });
+    expect(decideV2Idle({ ...base, inactivity, anchorAt: ago(61), sent: 3, lastFollowUpAt: ago(16) })).toEqual({ action: "close" });
+  });
+
+  it("fora da janela de 24h não manda lembrete (só encerra no prazo)", () => {
     const inactivity = { enabled: true, nudgeAfter: 20, closeAfter: 30 };
-    expect(decideV2Idle({ ...base, lastInboundAt: ago(60 * 25), inactivity, lastOutAt: ago(21), lastOutText: "Resposta" })).toBe("none");
+    expect(decideV2Idle({ ...base, lastInboundAt: ago(60 * 25), inactivity, anchorAt: ago(21) })).toEqual({ action: "none" });
+  });
+});
+
+describe("lembretes: texto conforme a última mensagem e o escrito pelo agente", () => {
+  it("passo a passo → “conseguiu?”; pergunta → “ainda está aí?”; outra → texto geral", async () => {
+    const { followUpFixedText, idleKindOf, FOLLOWUP_PROCEDURE_DEFAULT, FOLLOWUP_QUESTION_DEFAULT } = await import("@/services/ai-v2/inactivity");
+    const cfg = { replyEnding: undefined, themes: [] } as never;
+    expect(idleKindOf("Faça assim:\n1. Abra o app.\n2. Toque em Pedidos.", cfg)).toBe("procedure");
+    expect(idleKindOf("Qual é o número do pedido?", cfg)).toBe("question");
+    expect(idleKindOf("O prazo de entrega é de três dias úteis.", cfg)).toBe("other");
+    const step = { after: 10, mode: "by_reply" as const };
+    expect(followUpFixedText(step, "procedure")).toBe(FOLLOWUP_PROCEDURE_DEFAULT);
+    expect(followUpFixedText(step, "question")).toBe(FOLLOWUP_QUESTION_DEFAULT);
+    expect(followUpFixedText({ ...step, procedureMessage: "Deu certo?" }, "procedure")).toBe("Deu certo?");
+    expect(followUpFixedText({ after: 10, mode: "fixed", message: "Oi?" }, "procedure")).toBe("Oi?");
+  });
+
+  it("texto escrito pelo agente só vale curto e sem número, data ou link", async () => {
+    const { acceptableGeneratedFollowUp } = await import("@/services/ai-v2/inactivity");
+    expect(acceptableGeneratedFollowUp("Conseguiu abrir a tela de pedidos? Se travou em algum passo, me conta.")).toBe("Conseguiu abrir a tela de pedidos? Se travou em algum passo, me conta.");
+    expect(acceptableGeneratedFollowUp("O prazo é dia 15, conseguiu?")).toBeNull();
+    expect(acceptableGeneratedFollowUp("Veja em https://x.exemplo.com")).toBeNull();
+    expect(acceptableGeneratedFollowUp("")).toBeNull();
+  });
+
+  it("config: até 3 lembretes; lembrete depois do encerramento não vale", async () => {
+    const { followUpSteps } = await import("@/services/ai-v2/inactivity");
+    expect(followUpSteps({ enabled: true, closeAfter: 30, followUps: [{ after: 40 }, { after: 10 }, { after: 20 }] }).map((s) => s.after)).toEqual([10, 20]);
+    expect(followUpSteps({ enabled: true, closeAfter: 30, nudgeAfter: 15, nudgeMessage: "Oi?" })).toEqual([{ after: 15, mode: "fixed", message: "Oi?" }]);
   });
 });
 

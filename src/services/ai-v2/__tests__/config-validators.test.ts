@@ -323,6 +323,11 @@ describe("3. calendário", () => {
     expect(find(off, "pausa_sem_horario")).toHaveLength(1);
   });
 
+  it("lembrete depois do encerramento avisa", () => {
+    const d = data({ agents: [agent("a", { config: { channelIds: ["ch-1"], inactivity: { enabled: true, closeAfter: 30, followUps: [{ after: 10 }, { after: 45 }] } } })] });
+    expect(find(d, "lembrete_depois_do_encerramento")).toEqual([expect.objectContaining({ path: "inactivity.followUps[1]", severity: "avisa" })]);
+  });
+
   it("calendário só com datas passadas avisa; com uma futura, não", () => {
     const past = data({ agents: [agent("a", { config: { channelIds: ["ch-1"], calendar: { events: [{ id: "e1", start: "2026-09-01", end: "2026-09-10", title: "Inscrições" }] } } })] });
     expect(find(past, "calendario_so_passado")[0]).toMatchObject({ path: "calendar.events", severity: "avisa" });
