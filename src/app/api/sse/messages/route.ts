@@ -34,6 +34,7 @@ import {
   SSE_EVICTED_EVENT,
   SSE_HEARTBEAT_MS,
   acquireSseConnection,
+  sseSupersededFrame,
 } from "@/lib/sse-connection-limit";
 import { watchSseMembership } from "@/lib/sse-membership-watch";
 
@@ -307,21 +308,16 @@ export async function GET(request: Request) {
         }
       };
 
-      // Teto por usuário: outra conexão deste usuário entrou e esta é a
-      // mais antiga. Avisa o motivo e pede ao EventSource nativo que espere
-      // antes de reconectar (evita rodízio entre abas); cliente custom lê o
-      // evento. Depois fecha.
+      // Teto por usuário (SSE_MAX_CONNECTIONS_PER_USER): outra conexão deste
+      // usuário entrou e esta é a mais antiga. Manda `superseded`
+      // ({"code":"SSE_SUPERSEDED"} — a aba não deve reconectar sozinha) e o
+      // legado `sse_connection_evicted` com `retry:` longo (frontend antigo
+      // espera antes de reconectar). Contrato em lib/sse-connection-limit.ts.
+      // Depois fecha.
       const evictNow = () => {
         if (closed) return;
         try {
-          controller.enqueue(
-            encoder.encode(
-              `retry: ${SSE_HEARTBEAT_MS * 2}\nevent: ${SSE_EVICTED_EVENT}\ndata: ${JSON.stringify({
-                reason: "user_limit",
-                retryAfterMs: SSE_HEARTBEAT_MS * 2,
-              })}\n\n`,
-            ),
-          );
+          controller.enqueue(encoder.encode(sseSupersededFrame()));
         } catch {
           /* já fechado */
         }
