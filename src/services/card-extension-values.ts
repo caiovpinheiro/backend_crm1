@@ -42,6 +42,7 @@ export async function listDealCardExtensionValues(dealId: string) {
 export async function upsertDealCardExtensionValues(
   dealId: string,
   values: { fieldId: string; value: string }[],
+  options?: { allowBlank?: boolean },
 ) {
   if (values.length === 0) return [];
   const existing = await prisma.dealCardExtensionValue.findMany({
@@ -51,6 +52,7 @@ export async function upsertDealCardExtensionValues(
   const writable = withoutBlankOverwrites(
     values,
     existing.map((row) => ({ fieldId: row.customFieldId, value: row.value })),
+    options,
   );
   if (writable.length === 0) return [];
   const ops = writable.map((item) =>

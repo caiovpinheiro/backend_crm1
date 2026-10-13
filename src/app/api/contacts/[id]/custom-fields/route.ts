@@ -65,11 +65,13 @@ export async function PUT(request: Request, ctx: Ctx) {
         ]),
       );
 
+      const allowBlank = body.allowBlank === true;
       const writable = withoutBlankOverwrites(
         cleaned,
         [...prevByField.entries()].map(([fieldId, value]) => ({ fieldId, value })),
+        { allowBlank },
       );
-      await upsertContactCustomFieldValues(id, writable);
+      await upsertContactCustomFieldValues(id, writable, { allowBlank });
       const updated = await getContactCustomFieldValues(id);
 
       // Emite 1 evento por campo que realmente mudou.
