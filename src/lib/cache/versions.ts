@@ -103,6 +103,19 @@ export function cacheVersionRedisKey(name: string): string {
  */
 const NO_MEMO_FAMILIES: ReadonlySet<string> = new Set(["board"]);
 
+/**
+ * Respostas de inicialização em cache (`rc_*`, ver `response-cache.ts`)
+ * também sem memória: o navegador revalida com `If-None-Match` logo depois
+ * de uma escrita (o react-query refaz o GET) e pode cair na outra réplica —
+ * com a versão velha na memória dela, o 304 confirmaria o dado antigo. Custa
+ * 1 GET pequeno no Redis por família a cada leitura (coalescido no processo).
+ */
+const NO_MEMO_FAMILY_PREFIX = "rc_";
+
+function isNoMemoFamily(family: string): boolean {
+  return NO_MEMO_FAMILIES.has(family) || family.startsWith(NO_MEMO_FAMILY_PREFIX);
+}
+
 function familyOf(name: string): string {
   const i = name.indexOf(":");
   return i < 0 ? name : name.slice(0, i);
@@ -110,7 +123,7 @@ function familyOf(name: string): string {
 
 /** Memória local da versão, em ms (`name` decide as famílias sem memo). */
 export function cacheVersionMemoMs(name?: string): number {
-  if (name !== undefined && NO_MEMO_FAMILIES.has(familyOf(name))) return 0;
+  if (name !== undefined && isNoMemoFamily(familyOf(name))) return 0;
   const raw = process.env.CACHE_VERSION_MEMO_MS?.trim();
   if (!raw) return DEFAULT_MEMO_MS;
   const n = Number(raw);
