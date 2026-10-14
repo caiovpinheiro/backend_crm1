@@ -96,6 +96,45 @@ function isFieldWritable(config: V2AgentConfig, entity: string, field: string): 
   return cfg.permissions.includes("write");
 }
 
+const NATIVE_CONTACT_FIELDS = new Set(["name", "email", "phone"]);
+const NATIVE_DEAL_FIELDS = new Set(["title", "value", "status", "expectedClose", "lostReason", "stageId", "ownerId"]);
+
+/** Coluna nativa ou campo personalizado da org. A chave da config pode ser o id ou o name. */
+async function writeConfiguredField(
+  entity: "contact" | "deal",
+  targetId: string,
+  key: string,
+  value: unknown,
+): Promise<void> {
+  if (entity === "deal" && NATIVE_DEAL_FIELDS.has(key)) {
+    await updateDeal(targetId, { [key]: value } as any);
+    return;
+  }
+  if (entity === "contact" && NATIVE_CONTACT_FIELDS.has(key)) {
+    await prisma.contact.update({
+      where: { id: targetId },
+      data: { [key]: value } as any,
+    });
+    return;
+  }
+  const text = value == null ? "" : String(value);
+  const field = await prisma.customField.findFirst({
+    where: {
+      entity: { equals: entity, mode: "insensitive" },
+      OR: [{ id: key }, { name: { equals: key, mode: "insensitive" } }],
+    },
+    select: { id: true },
+  });
+  if (!field) throw new Error("Campo não encontrado");
+  if (entity === "deal") {
+    const { upsertDealCustomFieldValues } = await import("@/services/custom-fields");
+    await upsertDealCustomFieldValues(targetId, [{ fieldId: field.id, value: text }]);
+    return;
+  }
+  const { upsertContactCustomFieldValues } = await import("@/services/custom-fields");
+  await upsertContactCustomFieldValues(targetId, [{ fieldId: field.id, value: text }]);
+}
+
 /** Aplica os campos configurados para atualizar no encerramento (closure.fieldUpdates). Respeita a permissão "write" do campo. */
 export async function applyV2ClosureFieldUpdates(
   config: V2AgentConfig,
@@ -112,13 +151,10 @@ export async function applyV2ClosureFieldUpdates(
     }
     try {
       if (entity === "deal" && dealId) {
-        await updateDeal(dealId, { [key]: value } as any);
+        await writeConfiguredField("deal", dealId, key, value);
         results.push({ entity, field: key, ok: true });
       } else if (entity === "contact" && contactId) {
-        await (prisma as unknown as { contact: { update: (args: unknown) => Promise<unknown> } }).contact.update({
-          where: { id: contactId },
-          data: { [key]: value },
-        });
+        await writeConfiguredField("contact", contactId, key, value);
         results.push({ entity, field: key, ok: true });
       } else {
         results.push({ entity, field: key, ok: false, error: "target not available" });
@@ -140,12 +176,9 @@ async function executeUpdateField(action: V2Action, ctx: V2ActionContext): Promi
   }
   try {
     if (entity === "deal" && ctx.dealId) {
-      await updateDeal(ctx.dealId, { [field]: value } as any);
+      await writeConfiguredField("deal", ctx.dealId, field, value);
     } else if (entity === "contact" && ctx.contactId) {
-      await (prisma as unknown as { contact: { update: (args: unknown) => Promise<unknown> } }).contact.update({
-        where: { id: ctx.contactId },
-        data: { [field]: value },
-      });
+      await writeConfiguredField("contact", ctx.contactId, field, value);
     } else {
       return { action, ok: false, error: "Entity/target not available" };
     }

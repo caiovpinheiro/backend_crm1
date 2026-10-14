@@ -1,5 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const customMocks = vi.hoisted(() => ({
+  upsertDeal: vi.fn(async () => []),
+  upsertContact: vi.fn(async () => []),
+  findField: vi.fn(async () => ({ id: "cf-1" })),
+}));
+
 import { executeV2Actions } from "../actions";
 import { prisma } from "@/lib/prisma";
 import { sendAgentMessage } from "@/services/ai/send-agent-message";
@@ -13,6 +19,7 @@ vi.mock("@/lib/prisma", () => ({
     note: { create: vi.fn() },
     conversation: { findUnique: vi.fn() },
     contact: { findUnique: vi.fn(), update: vi.fn() },
+    customField: { findFirst: customMocks.findField },
     message: { create: vi.fn() },
     whatsAppTemplateConfig: { findFirst: vi.fn() },
   },
@@ -28,6 +35,11 @@ vi.mock("@/lib/meta-whatsapp/client", () => ({
 
 vi.mock("@/lib/meta-whatsapp/enrich-template-flow", () => ({
   enrichTemplateComponentsForFlowSend: vi.fn(),
+}));
+
+vi.mock("@/services/custom-fields", () => ({
+  upsertDealCustomFieldValues: customMocks.upsertDeal,
+  upsertContactCustomFieldValues: customMocks.upsertContact,
 }));
 
 vi.mock("@/lib/sse-bus", () => ({
@@ -136,5 +148,17 @@ describe("executeV2Actions effect tools", () => {
     const res = await executeV2Actions([action], ctx({ config }));
     expect(res.results[0].ok).toBe(true);
     expect(prisma.contact.update).toHaveBeenCalled();
+  });
+
+  it("update_field grava campo personalizado do negócio pelo nome", async () => {
+    customMocks.findField.mockResolvedValue({ id: "cf-plano" });
+    const action: V2Action = { type: "update_field", entity: "deal", field: "plano", value: "Básico" };
+    const config = {
+      contextFields: { contact: [], deal: [{ key: "plano", label: "Plano", permissions: ["write"] }] },
+    } as unknown as V2AgentConfig;
+    const res = await executeV2Actions([action], ctx({ config }));
+    expect(res.results[0].ok).toBe(true);
+    expect(customMocks.upsertDeal).toHaveBeenCalledWith("deal-1", [{ fieldId: "cf-plano", value: "Básico" }]);
+    expect(prisma.customField.findFirst).toHaveBeenCalled();
   });
 });

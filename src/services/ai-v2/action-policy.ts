@@ -79,6 +79,7 @@ export function allowedActionTypes(config: V2AgentConfig, theme: Theme): Set<str
   // uma mensagem pronta vale mesmo que o assunto não liste a ação.
   if (allowedMessageModelIdsFor(config, theme).length > 0) allowed.add("send_message_model");
   if (allowedFlowIdsFor(config).length > 0) allowed.add("send_whatsapp_flow");
+  if (writableFieldsForGuide(config).length > 0) allowed.add("update_field");
   // Anexo de material: só chega aqui o que veio dos materiais liberados e
   // lidos no turno (o motor monta a ação; o modelo não a devolve em actions).
   allowed.add("send_material_attachment");
@@ -120,7 +121,19 @@ export function actionValueAllowed(config: V2AgentConfig, action: V2Action): boo
  * via os nomes, e só quando o assunto restringia: não sabia que campos
  * mandar, e etiqueta e etapa saíam inventadas.
  */
-export function actionsGuide(allowed: Set<string>, options: { tags: string[]; stages: Array<{ id: string; name: string; lost?: boolean }>; lossReasons?: string[] }): string {
+/** Campos com permissão "Gravar" na configuração. A chave é a do campo, não o rótulo. */
+export function writableFieldsForGuide(config: V2AgentConfig): Array<{ entity: "contact" | "deal"; key: string; label: string }> {
+  const out: Array<{ entity: "contact" | "deal"; key: string; label: string }> = [];
+  for (const entity of ["contact", "deal"] as const) {
+    for (const field of config.contextFields?.[entity] ?? []) {
+      if (!field.key || !field.permissions?.includes("write")) continue;
+      out.push({ entity, key: field.key, label: field.label?.trim() || field.key });
+    }
+  }
+  return out;
+}
+
+export function actionsGuide(allowed: Set<string>, options: { tags: string[]; stages: Array<{ id: string; name: string; lost?: boolean }>; lossReasons?: string[]; fields?: Array<{ entity: string; key: string; label: string }> }): string {
   const lines: string[] = [];
   if (allowed.has("ask_with_options")) {
     lines.push('- Perguntar com botões: {"type":"ask_with_options","options":["Opção 1","Opção 2"]}. A pergunta vai na reply; de 2 a 3 opções curtas. Use quando o cliente precisa escolher entre caminhos definidos.');
@@ -142,6 +155,10 @@ export function actionsGuide(allowed: Set<string>, options: { tags: string[]; st
   }
   if (allowed.has("create_activity")) {
     lines.push('- Criar tarefa para a equipe: {"type":"create_activity","activityType":"TASK","content":"o que precisa ser feito e por quê"}. Use quando algo depende da equipe e não precisa transferir agora.');
+  }
+  if (allowed.has("update_field") && (options.fields?.length ?? 0) > 0) {
+    const list = options.fields!.map((f) => `${f.entity === "deal" ? "negócio" : "contato"} ${f.key} (${f.label})`).join("; ");
+    lines.push(`- Gravar um campo: {"type":"update_field","entity":"deal ou contact","field":"<chave>","value":"texto"}. Só estes: ${list}. A chave é o nome do campo, não o rótulo. Use quando as instruções pedirem ou o cliente informar esse dado.`);
   }
   if (allowed.has("add_note")) {
     lines.push('- Anotação interna: {"type":"add_note","content":"resumo do que o cliente informou"}. O cliente não vê.');
