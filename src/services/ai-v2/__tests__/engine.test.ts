@@ -2766,6 +2766,24 @@ describe("processV2Turn — correções do motor", () => {
     });
   });
 
+  it("imagem reenviada sem texto e resposta barrada por repetição: não manda saída nenhuma", async () => {
+    const config = baseConfig();
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.callLLM.mockResolvedValue(llmOut({
+      reply: "Recebi o recibo de R$ 120,00 pago ontem. A confirmação no sistema leva de 3 a 5 dias úteis; nesse período é normal ainda aparecer em aberto.",
+    }));
+    mocks.sendText.mockResolvedValueOnce({ sent: false, reason: "near_duplicate" }).mockResolvedValue({ sent: true });
+    await run("[Imagem enviada pelo cliente]: Recibo de transferência de R$ 120,00, pago ontem.");
+    expect(mocks.sendText).toHaveBeenCalledTimes(1);
+    expect(sentTexts().join(" ")).not.toContain("Ficou alguma dúvida");
+
+    // Com palavra do cliente junto, a saída de sempre continua.
+    mocks.sendText.mockClear();
+    mocks.sendText.mockResolvedValueOnce({ sent: false, reason: "near_duplicate" }).mockResolvedValue({ sent: true });
+    await run("[Imagem enviada pelo cliente, com a legenda \"e agora?\"]: Recibo de transferência de R$ 120,00, pago ontem.");
+    expect(mocks.sendText.mock.calls.length).toBeGreaterThan(1);
+  });
+
   it("resposta barrada por outro motivo não entra no log como enviada", async () => {
     const config = baseConfig();
     mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
