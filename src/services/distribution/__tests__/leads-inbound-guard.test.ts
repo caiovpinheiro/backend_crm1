@@ -4,8 +4,10 @@
  * - Conversa em departamento com distributionMode="leads" NÃO é distribuída
  *   pelo smart (fica para o bloco mode="leads").
  * - Conversa marcada (routeMode="leads") sem dono: idem.
- * - Dono humano com assignedVia="leads" NÃO é reavaliado (offline/expediente
- *   não removem) — permanece.
+ * - Dono humano com assignedVia="leads" ou "assign_owner" NÃO é reavaliado
+ *   (offline/expediente não removem) — permanece.
+ * - Org com distribution.mode=leads: o inbound inteligente não roda
+ *   (não lê expediente, não tira responsável, não sorteia).
  * - LIMITAÇÃO REGISTRADA (decisão de produto): primeira mensagem de conversa
  *   NOVA, ainda sem departamento, com as configurações globais atuais
  *   (autoOnInbound=true) → o smart distribui antes da automação rotear. O
@@ -30,6 +32,7 @@ const humanWasAssignedInThisConversation = vi.fn(async (..._a: unknown[]) => fal
 const isDistributionAutoOnInbound = vi.fn(async (..._a: unknown[]) => true);
 const hasOrganizationWidget = vi.fn(async (..._a: unknown[]) => true);
 const isDistributionEnabled = vi.fn(async (..._a: unknown[]) => true);
+const getOrgDistributionModeFresh = vi.fn(async () => "smart" as const);
 
 vi.mock("@/lib/debug-log", () => ({
   debugInfo: vi.fn(),
@@ -77,6 +80,10 @@ vi.mock("@/services/distribution/engine", () => ({
 vi.mock("@/services/distribution/enabled", () => ({
   isDistributionEnabled: (...a: unknown[]) =>
     (isDistributionEnabled as (...args: unknown[]) => unknown)(...a),
+}));
+vi.mock("@/services/distribution/mode", () => ({
+  ASSIGN_OWNER_VIA: "assign_owner",
+  getOrgDistributionModeFresh: () => getOrgDistributionModeFresh(),
 }));
 vi.mock("@/services/distribution/pending-shared", () => ({
   ensureConversationInWaitingQueue: vi.fn(async () => {}),
@@ -139,6 +146,7 @@ describe("maybeDistributeNewInboundTicket — guardas do modo leads", () => {
     isDistributionAutoOnInbound.mockResolvedValue(true);
     hasOrganizationWidget.mockResolvedValue(true);
     isDistributionEnabled.mockResolvedValue(true);
+    getOrgDistributionModeFresh.mockResolvedValue("smart");
   });
 
   it("conversa NOVA sem departamento: smart distribui (limitação registrada — leads não troca esse dono depois)", async () => {
@@ -324,6 +332,78 @@ describe("maybeDistributeNewInboundTicket — guardas do modo leads", () => {
     expect(clearOwnershipForRedistribution).not.toHaveBeenCalled();
     expect(isAssigneeCurrentlyEligible).not.toHaveBeenCalled();
     expect(tryAssignFirstAttendanceAi).not.toHaveBeenCalled();
+    expect(executeDistribution).not.toHaveBeenCalled();
+  });
+
+  it("modo da org por leads: não reavalia expediente nem tira o responsável da atribuição direta", async () => {
+    getOrgDistributionModeFresh.mockResolvedValue("leads");
+    const { isAssigneeCurrentlyEligible, shouldClearOwnershipOnIneligible } =
+      await import("@/services/distribution/assignee-eligibility");
+    vi.mocked(isAssigneeCurrentlyEligible).mockResolvedValue({
+      eligible: false,
+      isAi: false,
+      reason: "OUTSIDE_WORKING_HOURS",
+      blockedReasons: ["OUTSIDE_WORKING_HOURS"],
+    });
+    vi.mocked(shouldClearOwnershipOnIneligible).mockReturnValue(true);
+    conversations.set("c1", {
+      id: "c1",
+      contactId: "ct1",
+      assignedToId: "uEduardo",
+      assignedVia: null,
+      routeMode: null,
+      departmentId: null,
+      assigneeType: "HUMAN",
+    });
+
+    await maybeDistributeNewInboundTicket({
+      conversationId: "c1",
+      contactId: "ct1",
+      assignedToId: "uEduardo",
+    });
+
+    const { prisma } = await import("@/lib/prisma");
+    const { clearOwnershipForRedistribution } = await import(
+      "@/services/distribution/assignee-eligibility"
+    );
+    expect(prisma.conversation.findUnique).not.toHaveBeenCalled();
+    expect(isAssigneeCurrentlyEligible).not.toHaveBeenCalled();
+    expect(clearOwnershipForRedistribution).not.toHaveBeenCalled();
+    expect(tryAssignFirstAttendanceAi).not.toHaveBeenCalled();
+    expect(executeDistribution).not.toHaveBeenCalled();
+  });
+
+  it("bloco atribuir responsável (assignedVia=assign_owner) não entra na reavaliação do motor inteligente", async () => {
+    const { isAssigneeCurrentlyEligible, shouldClearOwnershipOnIneligible } =
+      await import("@/services/distribution/assignee-eligibility");
+    vi.mocked(isAssigneeCurrentlyEligible).mockResolvedValue({
+      eligible: false,
+      isAi: false,
+      reason: "OUTSIDE_WORKING_HOURS",
+      blockedReasons: ["OUTSIDE_WORKING_HOURS"],
+    });
+    vi.mocked(shouldClearOwnershipOnIneligible).mockReturnValue(true);
+    conversations.set("c1", {
+      id: "c1",
+      contactId: "ct1",
+      assignedToId: "uEduardo",
+      assignedVia: "assign_owner",
+      routeMode: null,
+      departmentId: null,
+      assigneeType: "HUMAN",
+    });
+
+    await maybeDistributeNewInboundTicket({
+      conversationId: "c1",
+      contactId: "ct1",
+      assignedToId: "uEduardo",
+    });
+
+    const { clearOwnershipForRedistribution } = await import(
+      "@/services/distribution/assignee-eligibility"
+    );
+    expect(isAssigneeCurrentlyEligible).not.toHaveBeenCalled();
+    expect(clearOwnershipForRedistribution).not.toHaveBeenCalled();
     expect(executeDistribution).not.toHaveBeenCalled();
   });
 

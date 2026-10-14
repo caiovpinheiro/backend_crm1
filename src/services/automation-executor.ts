@@ -80,7 +80,7 @@ import { loadIntentionalStageClusterIds } from "@/services/intentional-stage-clu
 import { updateContactScore } from "@/services/lead-scoring";
 import { executeDistribution } from "@/services/distribution";
 import { executeLeadsDistribution } from "@/services/distribution/leads/engine";
-import { getOrgDistributionMode } from "@/services/distribution/mode";
+import { ASSIGN_OWNER_VIA, getOrgDistributionMode } from "@/services/distribution/mode";
 import { logEvent, userIdForFk } from "@/services/activity-log";
 import { createInternalNoteOnConversation } from "@/services/outbound-messaging";
 import { tabulationLogMeta } from "@/services/tabulations";
@@ -2376,11 +2376,14 @@ export async function executeStep(
           )?.owner ?? null
         : null;
 
+      // Bloco "Atribuir responsável" não é distribuição. A marca impede o
+      // inbound do motor inteligente de reavaliar expediente/fila/status.
+      const directVia = ownerId ? ASSIGN_OWNER_VIA : null;
       if (target === "deal") {
         if (!targetDealId) throw new Error("assign_owner: dealId ausente");
         // Responsável único: muda o owner do deal e propaga para o
         // contato + conversas do contato (helper no service).
-        await assignDealOwner(targetDealId, ownerId);
+        await assignDealOwner(targetDealId, ownerId, { via: directVia });
       } else if (target === "contact") {
         if (!targetContactId) throw new Error("assign_owner: contactId ausente");
         // Mesma regra de herança do deal: ao atribuir pelo contato,
@@ -2389,10 +2392,10 @@ export async function executeStep(
         // User type=AI (`maybeReplyAsAIAgent` lê `conversation.assignedToId`).
         // O dono também entra em todos os negócios OPEN do contato.
         const chatAssigneeChanges = await prisma.$transaction(async (tx) => {
-          const changes = await propagateOwnerToContactAndChat(tx, targetContactId, ownerId);
+          const changes = await propagateOwnerToContactAndChat(tx, targetContactId, ownerId, { via: directVia });
           await tx.deal.updateMany({
             where: { contactId: targetContactId, status: "OPEN" },
-            data: { ownerId },
+            data: { ownerId, assignedVia: directVia },
           });
           return changes;
         });
@@ -2407,10 +2410,10 @@ export async function executeStep(
           // assignDealOwner já cobre deal + contato do deal + chats. Se o
           // rt.contactId vier de outra origem (ex.: divergente do contato
           // do deal), propagamos também — idempotente se for o mesmo contato.
-          await assignDealOwner(targetDealId, ownerId);
+          await assignDealOwner(targetDealId, ownerId, { via: directVia });
           if (rt.contactId) {
             const extraChanges = await prisma.$transaction((tx) =>
-              propagateOwnerToContactAndChat(tx, rt.contactId, ownerId),
+              propagateOwnerToContactAndChat(tx, rt.contactId, ownerId, { via: directVia }),
             );
             if (extraChanges.length > 0) {
               await logConversationAssigneeChanges(extraChanges);
@@ -2418,10 +2421,10 @@ export async function executeStep(
           }
         } else if (targetContactId) {
           const chatAssigneeChanges = await prisma.$transaction(async (tx) => {
-            const changes = await propagateOwnerToContactAndChat(tx, targetContactId, ownerId);
+            const changes = await propagateOwnerToContactAndChat(tx, targetContactId, ownerId, { via: directVia });
             await tx.deal.updateMany({
               where: { contactId: targetContactId, status: "OPEN" },
-              data: { ownerId },
+              data: { ownerId, assignedVia: directVia },
             });
             return changes;
           });

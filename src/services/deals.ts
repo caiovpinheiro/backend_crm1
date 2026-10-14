@@ -1627,7 +1627,9 @@ export async function assignOwnerToContactClusterTx(
 export async function assignDealOwner(
   dealId: string,
   ownerId: string | null,
+  opts?: { via?: string | null },
 ) {
+  const viaData = opts?.via !== undefined ? { assignedVia: opts.via } : {};
   const deal = await prisma.$transaction(async (tx) => {
     const current = await tx.deal.findUnique({
       where: { id: dealId },
@@ -1635,7 +1637,7 @@ export async function assignDealOwner(
     });
     const row = await tx.deal.update({
       where: { id: dealId },
-      data: { ownerId },
+      data: { ownerId, ...viaData },
       select: {
         id: true,
         contactId: true,
@@ -1652,7 +1654,7 @@ export async function assignDealOwner(
       if (siblings.length > 0) {
         await tx.deal.updateMany({
           where: { id: { in: siblings.map((s) => s.id) } },
-          data: { ownerId },
+          data: { ownerId, ...viaData },
         });
         siblingPipelineIds.push(
           ...siblings.map((s) => s.stage?.pipelineId ?? null),
@@ -1663,6 +1665,7 @@ export async function assignDealOwner(
       tx,
       row.contactId,
       ownerId,
+      opts?.via !== undefined ? { via: opts.via } : undefined,
     );
     return {
       ...row,

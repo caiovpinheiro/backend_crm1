@@ -15,6 +15,7 @@ import { Prisma } from "@prisma/client";
 
 import { getConversationSession } from "@/lib/channel-session";
 import { isDistributionEnabled } from "./enabled";
+import { ASSIGN_OWNER_VIA } from "./mode";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { logEvent } from "@/services/activity-log";
@@ -729,10 +730,11 @@ export async function executeDistribution(
       select: { assignedToId: true, contactId: true, assignedVia: true },
     });
     if (already?.assignedToId) {
-      // Atribuição feita pelo modo leads é protegida de reavaliação
-      // automática (offline / expediente / fila): sem `reassign` explícito,
-      // o dono permanece — independente de elegibilidade.
-      if ((already as { assignedVia?: string | null }).assignedVia === "leads") {
+      // Por leads e o bloco "Atribuir responsável" não passam pela
+      // reavaliação do motor inteligente (offline / expediente / fila).
+      // Sem `reassign` explícito, o dono permanece.
+      const assignedVia = (already as { assignedVia?: string | null }).assignedVia;
+      if (assignedVia === "leads" || assignedVia === ASSIGN_OWNER_VIA) {
         const contactId = input.contactId ?? already.contactId ?? null;
         await resolvePendingFor(input.dealId, contactId, already.assignedToId);
         return {
