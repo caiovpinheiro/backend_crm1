@@ -249,7 +249,7 @@ describe("resposta que é só saudação", () => {
     }
   });
   it("resposta com conteúdo não é saudação", () => {
-    for (const r of ["Para emitir o boleto, acesse https://exemplo.com e toque em Pagar.", "O prazo é 19/10. Posso ajudar em algo mais?", ""]) {
+    for (const r of ["Para emitir a fatura, acesse https://exemplo.com e toque em Pagar.", "O prazo é 19/10. Posso ajudar em algo mais?", ""]) {
       expect(isGreetingOnlyReply(r)).toBe(false);
     }
   });
@@ -258,6 +258,6 @@ describe("resposta que é só saudação", () => {
 describe("mensagem que é só cumprimento", () => {
   it("cumprimentos (combinados ou não) e pedidos", () => {
     for (const m of ["Oi", "Oi, boa tarde!", "olá, tudo bem?", "Bom dia", "oi oi"]) expect(isGreetingOnlyMessage(m)).toBe(true);
-    for (const m of ["Oi, preciso do boleto", "bom dia, qual o prazo?", "valeu", ""]) expect(isGreetingOnlyMessage(m)).toBe(false);
+    for (const m of ["Oi, preciso da fatura", "bom dia, qual o prazo?", "valeu", ""]) expect(isGreetingOnlyMessage(m)).toBe(false);
   });
 });

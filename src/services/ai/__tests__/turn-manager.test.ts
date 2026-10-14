@@ -665,7 +665,7 @@ describe("concorrência", () => {
   });
 
   it("transferência para outro agente de IA: as mesmas mensagens viram turno pronto, que roda depois do atual", async () => {
-    await ingest("m1", "o boleto veio com valor diferente");
+    await ingest("m1", "a fatura veio com valor diferente");
     const first = firstTurn().id as string;
     vi.advanceTimersByTime(1500);
     await promoteTurnToReady(first, ORG);

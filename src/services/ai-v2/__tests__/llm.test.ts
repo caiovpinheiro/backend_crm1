@@ -1066,14 +1066,14 @@ describe("escopo e repetição", () => {
     vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-10-09T18:00:00Z") });
     try {
       (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
-        makeLLMResponse(JSON.stringify({ reply: "Vamos localizar essa avaliação. As provas da primeira etapa foram realizadas de 06/11 a 09/11/2026. Qual é a disciplina mencionada no e-mail?", actions: [] })),
+        makeLLMResponse(JSON.stringify({ reply: "Vamos localizar esse pedido. As entregas da primeira etapa foram realizadas de 06/11 a 09/11/2026. Qual é o pedido mencionado no e-mail?", actions: [] })),
       );
       const r = await callV2LLM({
-        agentId: "agent-1", config: baseConfig({ variables: [{ key: "Provas da primeira etapa", value: "06/11 a 09/11/2026" }] } as Partial<V2AgentConfig>),
+        agentId: "agent-1", config: baseConfig({ variables: [{ key: "Entregas da primeira etapa", value: "06/11 a 09/11/2026" }] } as Partial<V2AgentConfig>),
         context: { contact: null, deals: [], selectedDeal: null, fields: baseConfig().contextFields },
-        userMessage: "recebi um e-mail dizendo que não fiz uma prova", stage: "active",
+        userMessage: "recebi um e-mail dizendo que não recebi uma entrega", stage: "active",
       });
-      expect(r.output.reply).toBe("Vamos localizar essa avaliação. As provas da primeira etapa serão realizadas de 06/11 a 09/11/2026. Qual é a disciplina mencionada no e-mail?");
+      expect(r.output.reply).toBe("Vamos localizar esse pedido. As entregas da primeira etapa serão realizadas de 06/11 a 09/11/2026. Qual é o pedido mencionado no e-mail?");
     } finally {
       vi.useRealTimers();
     }

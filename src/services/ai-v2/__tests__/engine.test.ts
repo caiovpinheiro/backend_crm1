@@ -1409,7 +1409,7 @@ describe("processV2Turn — correções do motor", () => {
     mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
     mocks.callLLM.mockResolvedValue(llmOut({ reply: "Vou verificar e te retorno em breve." }));
 
-    const result = await run("Meu boleto venceu");
+    const result = await run("Minha fatura venceu");
 
     expect(result.handoff).toBe(true);
     expect(mocks.simpleHandoff).toHaveBeenCalledTimes(1);
@@ -1930,8 +1930,8 @@ describe("processV2Turn — correções do motor", () => {
     await expect(hb.abortIf!()).resolves.toBe(true);
 
     mocks.sendText.mockClear();
-    mocks.callLLM.mockResolvedValue(llmOut({ reply: "O boleto fica na área de pagamentos, no menu Financeiro." }));
-    await run("Preciso do boleto", { messageIds: ["m-2"] });
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "A fatura fica na área de pagamentos, no menu Financeiro." }));
+    await run("Preciso da fatura", { messageIds: ["m-2"] });
     expect((mocks.sendText.mock.calls.at(-1)![0].humanBehavior as { abortIf?: unknown }).abortIf).toBeUndefined();
     mocks.messageFindFirst.mockReset();
     mocks.messageFindFirst.mockImplementation(async () => null);
@@ -1948,8 +1948,8 @@ describe("processV2Turn — correções do motor", () => {
     expect(mocks.sendText.mock.calls.map((c) => c[0].text as string)).toEqual(["Olá! Sou a assistente virtual. Como posso te ajudar?"]);
 
     mocks.sendText.mockClear();
-    mocks.callLLM.mockResolvedValue(llmOut({ reply: "Para emitir o boleto, acesse a área de pagamentos." }));
-    await run("Oi, preciso do boleto");
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "Para emitir a fatura, acesse a área de pagamentos." }));
+    await run("Oi, preciso da fatura");
     expect(mocks.callLLM).toHaveBeenCalled();
     expect(mocks.sendText.mock.calls.map((c) => c[0].text as string).join("|")).not.toContain("assistente virtual");
   });
@@ -2202,7 +2202,7 @@ describe("processV2Turn — correções do motor", () => {
     const config = baseConfig({ media: { ...baseConfig().media, audio: { action: "ask_text", askTextMessage: "Pode escrever?" } } } as Partial<V2AgentConfig>);
     mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
     mocks.callLLM.mockResolvedValue(llmOut());
-    await run(["tenho uma dúvida sobre o boleto", "[Áudio]"].join("\n"), { messageType: "audio" });
+    await run(["tenho uma dúvida sobre a fatura", "[Áudio]"].join("\n"), { messageType: "audio" });
     expect(mocks.callLLM).toHaveBeenCalled();
     expect(sentTexts()).not.toContain("Pode escrever?");
     // O modelo sabe que o áudio ficou de fora e avisa o cliente.
@@ -2310,7 +2310,7 @@ describe("processV2Turn — correções do motor", () => {
     const config = baseConfig({ replyEnding: { info: { enabled: true, phrases: [endingPhrase] } } } as Partial<V2AgentConfig>);
     mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
     mocks.callLLM.mockResolvedValue(llmOut({
-      reply: "Para gerar o pagamento, acesse o painel, toque em Pagamentos, escolha o título desejado e selecione boleto ou cartão para concluir o pagamento ainda hoje pelo aplicativo.",
+      reply: "Para gerar o pagamento, acesse o painel, toque em Pagamentos, escolha o título desejado e selecione pix ou cartão para concluir o pagamento ainda hoje pelo aplicativo.",
     }));
     mocks.sendText
       .mockResolvedValueOnce({ sent: false, reason: "near_duplicate" })

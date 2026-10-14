@@ -43,9 +43,9 @@ describe("tenseMismatches — tempo verbal x data", () => {
   const TODAY = new Date("2026-10-09T18:00:00Z");
 
   it("data que ainda vem dita no passado: troca o verbo", () => {
-    const [t] = tenseMismatches("Vamos localizar a avaliação. As provas da primeira etapa foram realizadas de 06/11 a 09/11/2026. Qual é a disciplina?", TODAY);
-    expect(t.sentence).toBe("As provas da primeira etapa foram realizadas de 06/11 a 09/11/2026.");
-    expect(t.fixed).toBe("As provas da primeira etapa serão realizadas de 06/11 a 09/11/2026.");
+    const [t] = tenseMismatches("Vamos localizar o pedido. As entregas da primeira etapa foram realizadas de 06/11 a 09/11/2026. Qual é o pedido?", TODAY);
+    expect(t.sentence).toBe("As entregas da primeira etapa foram realizadas de 06/11 a 09/11/2026.");
+    expect(t.fixed).toBe("As entregas da primeira etapa serão realizadas de 06/11 a 09/11/2026.");
     expect(t.why).toContain("06/11/2026 a 09/11/2026 ainda vem");
     expect(tenseMismatches("A entrega foi de 20/11 a 22/11.", TODAY)[0]?.fixed).toBe("A entrega será de 20/11 a 22/11.");
     expect(tenseMismatches("O encontro já aconteceu em 15 de novembro.", TODAY)[0]?.fixed).toBe("O encontro acontece em 15 de novembro.");
@@ -58,13 +58,13 @@ describe("tenseMismatches — tempo verbal x data", () => {
   });
 
   it("data que já passou dita no futuro: troca o verbo", () => {
-    expect(tenseMismatches("A prova será realizada em 06/09/2026.", TODAY)[0]?.fixed).toBe("A prova foi realizada em 06/09/2026.");
+    expect(tenseMismatches("A entrega será realizada em 06/09/2026.", TODAY)[0]?.fixed).toBe("A entrega foi realizada em 06/09/2026.");
     expect(tenseMismatches("As notas vão sair dia 20/09.", TODAY)).toEqual([]);
   });
 
   it("não mexe: período em andamento, verbo de outra oração, remarcação para o futuro, valor sem data", () => {
     expect(tenseMismatches("As inscrições foram realizadas de 01/10 a 30/10.", TODAY)).toEqual([]);
-    expect(tenseMismatches("A inscrição foi feita e a prova será 06/11.", TODAY)).toEqual([]);
+    expect(tenseMismatches("A inscrição foi feita e a entrega será 06/11.", TODAY)).toEqual([]);
     expect(tenseMismatches("O prazo foi prorrogado para 20/11.", TODAY)).toEqual([]);
     expect(tenseMismatches("O valor foi de 100 reais.", TODAY)).toEqual([]);
   });

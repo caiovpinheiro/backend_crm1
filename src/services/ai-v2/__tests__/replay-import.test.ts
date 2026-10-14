@@ -7,7 +7,7 @@ import { extractReplayPoints } from "../replay-extract";
 const ANDROID = `24/09/2026 13:18 - As mensagens e as ligações são protegidas com a criptografia de ponta a ponta.
 24/09/2026 13:19 - Cliente Um: Bom dia
 24/09/2026 13:19 - Cliente Um: preciso da segunda via
-do boleto deste mês
+da fatura deste mês
 24/09/2026 13:21 - Ana Equipe: Bom dia! Você emite pela área do cliente, no menu Pagamentos.
 24/09/2026 13:22 - Cliente Um: <Mídia oculta>
 24/09/2026 13:23 - Ana Equipe: Esta mensagem foi apagada
@@ -24,7 +24,7 @@ describe("parseTranscript", () => {
       { name: "Cliente Um", messages: 4 },
       { name: "Ana Equipe", messages: 1 },
     ]);
-    expect(p.messages[1].text).toBe("preciso da segunda via\ndo boleto deste mês");
+    expect(p.messages[1].text).toBe("preciso da segunda via\nda fatura deste mês");
     expect(p.messages[3]).toMatchObject({ media: "document", text: "" });
     expect(p.teamGuess).toEqual(["Ana Equipe"]);
     expect(p.messages[0].at?.getHours()).toBe(13);

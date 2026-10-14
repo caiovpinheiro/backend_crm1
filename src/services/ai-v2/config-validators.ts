@@ -519,9 +519,9 @@ export function monthsInTitle(title: string): number[] {
     const month = MONTH_NAMES[token];
     if (!month) continue;
     if (token.length === 3 && !/\d\s*(de\s+)?$/.test(text.slice(0, m.index))) continue;
-    // Mês de referência, não do evento: "ref. disc. de março", "disciplina de
-    // março", "ingresso em abril", "turma de maio".
-    if (/(?:\bref\.?|referente(?:\s+a|\s+ao)?|\bdisc\.?|disciplinas?\s+de|ingresso\s+em|turma\s+de|periodo\s+de)\s*(?:de\s+)?$/.test(text.slice(0, m.index))) continue;
+    // Mês de referência, não do evento: "ref. pedidos de março", "resultado
+    // da campanha de março", "ingresso em abril", "turma de maio".
+    if (/(?:\bref(?:erente)?\b[^\n]{0,30}|\b(?:da|do)\s+[a-z]+\s+de\s*|ingresso\s+em\s*|turma\s+de\s*|periodo\s+de\s*)$/.test(text.slice(0, m.index))) continue;
     out.add(month);
   }
   for (const m of text.matchAll(DAY_MONTH_RE)) {

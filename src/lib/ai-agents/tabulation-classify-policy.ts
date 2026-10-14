@@ -217,7 +217,7 @@ const DEMAND_HINTS = [
   "consegui",
   "erro",
   "problema",
-  "boleto",
+  "fatura",
   "senha",
   "acesso",
   "cadastro",

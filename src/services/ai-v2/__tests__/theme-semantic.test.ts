@@ -10,7 +10,7 @@ import { agentAskedQuestion, changesSubject, clearThemeVectorCache, selectV2Them
 
 const THEMES = [
   { id: "docs", name: "Documentos", when: ["segunda via", "documento"], examples: [], instructions: "Ajude a emitir documentos." },
-  { id: "pay", name: "Pagamentos", when: ["boleto"], examples: [], instructions: "Ajude com pagamentos." },
+  { id: "pay", name: "Pagamentos", when: ["fatura"], examples: [], instructions: "Ajude com pagamentos." },
 ];
 const cfg = { themes: THEMES } as unknown as V2AgentConfig;
 
@@ -115,7 +115,7 @@ describe("gatilho x sentido", () => {
 
   it("frase longa: sentido claramente de outro assunto vence o gatilho", async () => {
     embedWith([0.1, 0.99]); // pagamentos ~0,99; documentos ~0,10
-    const r = await selectV2ThemeSemantic({ config: cfg, message: "preciso do documento para pagar o boleto atrasado deste mês", apiKey: "k" });
+    const r = await selectV2ThemeSemantic({ config: cfg, message: "preciso do documento para pagar a fatura atrasada deste mês", apiKey: "k" });
     expect(r.theme?.id).toBe("pay");
   });
 
@@ -133,20 +133,20 @@ describe("resposta a uma pergunta do agente fica no assunto em andamento", () =>
   });
 
   it("gatilho de outro assunto na resposta não troca o assunto", async () => {
-    const r = await selectV2ThemeSemantic({ config: cfg, message: "é que o boleto chegou no endereço antigo", currentThemeId: "docs", apiKey: null, answeringQuestion: true });
+    const r = await selectV2ThemeSemantic({ config: cfg, message: "é que a fatura chegou no endereço antigo", currentThemeId: "docs", apiKey: null, answeringQuestion: true });
     expect(r).toEqual(expect.objectContaining({ method: "kept", answer: true }));
     expect(r.theme?.id).toBe("docs");
   });
 
   it("sem pergunta do agente, o gatilho vale como antes", async () => {
-    const r = await selectV2ThemeSemantic({ config: cfg, message: "é que o boleto chegou no endereço antigo", currentThemeId: "docs", apiKey: null });
+    const r = await selectV2ThemeSemantic({ config: cfg, message: "é que a fatura chegou no endereço antigo", currentThemeId: "docs", apiKey: null });
     expect(r.theme?.id).toBe("pay");
   });
 
   it("cliente avisa que muda de assunto: o gatilho vale", async () => {
-    const r = await selectV2ThemeSemantic({ config: cfg, message: "outra dúvida: e o boleto?", currentThemeId: "docs", apiKey: null, answeringQuestion: true });
+    const r = await selectV2ThemeSemantic({ config: cfg, message: "outra dúvida: e a fatura?", currentThemeId: "docs", apiKey: null, answeringQuestion: true });
     expect(r.theme?.id).toBe("pay");
-    expect(changesSubject("Mudando de assunto, quero ver o boleto")).toBe(true);
+    expect(changesSubject("Mudando de assunto, quero ver a fatura")).toBe(true);
   });
 
   it("pergunta do agente = última frase com '?', fora fecho configurado, oferta de ajuda e opções", () => {

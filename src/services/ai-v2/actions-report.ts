@@ -393,7 +393,7 @@ function csvCell(v: unknown): string {
 
 /**
  * Telefone sem "+" na frente: o Excel lê "+55…" como fórmula (ou número em
- * notação científica). Com espaços fica texto: "55 11 98439-3285".
+ * notação científica). Com espaços fica texto: "55 11 90000-0000".
  */
 function csvPhone(phone: string | null): string {
   const d = (phone ?? "").replace(/\D/g, "");

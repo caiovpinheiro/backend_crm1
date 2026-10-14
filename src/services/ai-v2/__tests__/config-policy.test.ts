@@ -88,8 +88,8 @@ describe("O que ele pode fazer", () => {
 
 describe("testar reconhecimento", () => {
   it("mostra as palavras que casaram", () => {
-    const theme = { id: "t", name: "T", instructions: "", when: ["segunda via", "boleto"], examples: [] } as never;
-    expect(matchV2Theme(theme, "preciso da segunda via do boleto").matched).toEqual(["segunda via", "boleto"]);
+    const theme = { id: "t", name: "T", instructions: "", when: ["segunda via", "fatura"], examples: [] } as never;
+    expect(matchV2Theme(theme, "preciso da segunda via da fatura").matched).toEqual(["segunda via", "fatura"]);
     expect(matchV2Theme(theme, "bom dia").score).toBe(0);
   });
 });

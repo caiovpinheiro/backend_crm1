@@ -119,12 +119,12 @@ describe("tarefas auxiliares e anexos", () => {
 
   it("promessa de envio escolhe a mensagem pronta do assunto que combina", () => {
     const models = [
-      { id: "campo", name: "Campo de Estágio", content: "Como solicitar indicação de campo de estágio na Área do Aluno." },
-      { id: "termo", name: "Solicitação de Termo de Estágio", content: "Passo a passo para solicitar a assinatura do termo de estágio." },
+      { id: "campo", name: "Endereço de Entrega", content: "Como alterar o endereço de entrega na Área do Cliente." },
+      { id: "termo", name: "Solicitação de Termo de Garantia", content: "Passo a passo para solicitar a assinatura do termo de garantia." },
     ];
     expect(pickPromisedModelId("Vou te enviar a orientação sobre a assinatura do termo.", "sobre a assinatura", models)).toBe("termo");
-    expect(pickPromisedModelId("O prazo do TCE é de 15 dias.", "qual o prazo", models)).toBeNull();
-    expect(pickPromisedModelId("Vou te enviar o passo a passo.", "estágio", [{ id: "unico", name: "Estágio", content: "Texto." }])).toBe("unico");
+    expect(pickPromisedModelId("O prazo da garantia é de 15 dias.", "qual o prazo", models)).toBeNull();
+    expect(pickPromisedModelId("Vou te enviar o passo a passo.", "garantia", [{ id: "unico", name: "Garantia", content: "Texto." }])).toBe("unico");
   });
 });
 

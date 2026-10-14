@@ -11,8 +11,8 @@ import { isNearDuplicateBotText, isNearDuplicateBotTextIgnoring } from "@/servic
 const ENDING =
   "Posso te ajudar em mais alguma coisa? 😊\n\n_Se não tiver mais nenhuma dúvida, tudo bem! Caso eu não receba uma resposta nos próximos 30 minutos, vou encerrar este atendimento por aqui._";
 
-const first = `Tudo bem, Ana. O boleto fica disponível na sua Área do Cliente, em *Pagar Fatura*.\n\n${ENDING}`;
-const second = `Ana, para gerar o pagamento, acesse a sua *Área do Cliente*, toque em *Pagar Fatura*, escolha o título desejado e selecione *boleto* ou *cartão*.\n\n${ENDING}`;
+const first = `Tudo bem, Ana. A fatura fica disponível na sua Área do Cliente, em *Pagar Fatura*.\n\n${ENDING}`;
+const second = `Ana, para gerar o pagamento, acesse a sua *Área do Cliente*, toque em *Pagar Fatura*, escolha o título desejado e selecione *fatura* ou *cartão*.\n\n${ENDING}`;
 
 describe("trava anti-repetição sem contar o fecho", () => {
   it("reproduz o defeito: com o fecho, respostas diferentes contam como repetição", () => {
