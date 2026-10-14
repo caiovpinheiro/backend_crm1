@@ -90,6 +90,9 @@ export const API_COST_RULES: readonly Rule[] = [
   { methods: READ, pattern: p("/api/activities/alerts"), cls: "accessory", note: "alertas de atividade (polling)" },
   { methods: READ, pattern: p("/api/agents/:id/status"), cls: "accessory", note: "status de agente (leitura)" },
 
+  // ── (b) leituras comuns explícitas ────────────────────────────────────
+  { methods: READ, pattern: p("/api/me/live"), cls: "cached_read", note: "voláteis do shell (status do agente, não lidas) — fora do bootstrap v2" },
+
   // ── (c) leituras pesadas ──────────────────────────────────────────────
   { methods: READ, pattern: p("/api/pipelines/:id/board"), cls: "heavy_read", note: "board do funil" },
   { methods: READ, pattern: p("/api/pipelines/:id/board/columns"), cls: "heavy_read", note: "colunas do board" },

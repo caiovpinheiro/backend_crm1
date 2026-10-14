@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { withOrgContext } from "@/lib/auth-helpers";
+import { bumpMeBootstrap } from "@/lib/cache/response-families";
 import { prisma } from "@/lib/prisma";
 
 const DEFAULT_PERMISSIONS = {
@@ -116,6 +117,10 @@ export async function PUT(
         update: safeData,
       });
     }
+
+    // `canConfigureFieldVisibility` entra nas permissões efetivas do
+    // bootstrap v2 do usuário (cache por usuário).
+    await bumpMeBootstrap(session.user.organizationId, userId);
 
     await prisma.auditLog.create({
       data: {

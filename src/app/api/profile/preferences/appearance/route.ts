@@ -10,6 +10,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { withOrgContext } from "@/lib/auth-helpers";
+import { bumpMeBootstrap } from "@/lib/cache/response-families";
 import { saveAppearancePreferences } from "@/services/user-preferences";
 import { getLogger } from "@/lib/logger";
 
@@ -41,6 +42,8 @@ export async function PATCH(request: Request) {
         session.user.id,
         parsed.data.theme,
       );
+      // `preferences` do bootstrap v2 (cache por usuário).
+      await bumpMeBootstrap(session.user.organizationId, session.user.id);
       return NextResponse.json({ appearance });
     } catch (e) {
       log.error({ err: e }, "[PATCH /api/profile/preferences/appearance] falhou");

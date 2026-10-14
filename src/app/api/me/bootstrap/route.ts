@@ -21,6 +21,18 @@
  * nenhum corpo de bloco é lido.
  *
  * `Server-Timing`: auth, query (payload base), cache (blocos), serialize, total.
+ *
+ * ## v2 — header `x-bootstrap-version: 2`
+ *
+ * Só o payload ESTÁVEL (`buildMeBootstrapStable`: sem `agentStatus`,
+ * `emailUnread`, `teamChatRooms`) + `blocks` sem `/api/team-chat/rooms`. Os
+ * voláteis estão em `GET /api/me/live`. O payload estável fica no Redis por
+ * usuário (`services/me-bootstrap-cache.ts`, invalidação explícita + TTL de
+ * 10 min) e o ETag do v2 = usuário + ETag guardado do payload + ETag de cada
+ * bloco. `If-None-Match` igual → 304 lendo só versões/ETags no Redis, sem
+ * nenhuma consulta Prisma (`Server-Timing: cache;desc="304"`, sem `query`).
+ * Sem o header (frontend atual da main), a resposta continua a v1 acima.
+ * `Vary` inclui `X-Bootstrap-Version`: a mesma URL tem dois corpos.
  */
 
 import { NextResponse } from "next/server";
@@ -41,22 +53,101 @@ import {
   buildMeBootstrap,
   computeBootstrapBlocksEtag,
   etagMatches,
+  type MeBootstrapUser,
 } from "@/services/me-bootstrap";
+import {
+  loadMeBootstrapStable,
+  meBootstrapCacheKey,
+  peekMeBootstrapEtag,
+} from "@/services/me-bootstrap-cache";
 import { getLogger } from "@/lib/logger";
-import { recordConditionalResponse } from "@/lib/metrics";
+import { recordCacheLookup, recordConditionalResponse } from "@/lib/metrics";
 import { ServerTiming } from "@/lib/server-timing";
 
 const log = getLogger("api/me/bootstrap");
 
 export const dynamic = "force-dynamic";
 
+/** Header que pede o bootstrap v2 (só o estável). */
+const BOOTSTRAP_VERSION_HEADER = "x-bootstrap-version";
+
+/** A mesma URL tem dois corpos (v1/v2): o navegador separa pela versão. */
+const BOOTSTRAP_VARY = `${RESPONSE_CACHE_VARY}, X-Bootstrap-Version`;
+
 function headers(etag: string, timing: ServerTiming): Record<string, string> {
   return {
     ETag: etag,
     "Cache-Control": RESPONSE_CACHE_CONTROL,
-    Vary: RESPONSE_CACHE_VARY,
+    Vary: BOOTSTRAP_VARY,
     "Server-Timing": timing.header(),
   };
+}
+
+function wantsV2(request: Request): boolean {
+  return request.headers.get(BOOTSTRAP_VERSION_HEADER)?.trim() === "2";
+}
+
+/** ETag do v2: usuário + ETag do payload estável + ETag de cada bloco. */
+function v2Etag(
+  userId: string,
+  baseEtag: string,
+  blocks: readonly { url: string; etag: string }[],
+  blockErrors: readonly string[] = [],
+): string {
+  return computeBootstrapBlocksEtag(userId, `v2\n${baseEtag}`, blocks, blockErrors);
+}
+
+async function respondV2(
+  request: Request,
+  user: MeBootstrapUser,
+  timing: ServerTiming,
+): Promise<NextResponse> {
+  const ifNoneMatch = request.headers.get("if-none-match");
+  const t0 = performance.now();
+  const [key, refs] = await Promise.all([
+    meBootstrapCacheKey(user),
+    resolveBootstrapBlocks(user),
+  ]);
+
+  // 304 só com versões e ETags guardados: nenhum corpo lido, nenhum Prisma.
+  if (ifNoneMatch && refs.every((r) => r.knownEtag)) {
+    const baseEtag = await peekMeBootstrapEtag(key);
+    if (baseEtag) {
+      const etag = v2Etag(
+        user.id,
+        baseEtag,
+        inContractOrder(refs.map((r) => ({ url: r.url, etag: r.knownEtag as string }))),
+      );
+      if (etagMatches(ifNoneMatch, etag)) {
+        timing.add("cache", performance.now() - t0, "304");
+        recordCacheLookup("resp_me_boot", true);
+        recordConditionalResponse("/api/me/bootstrap", 304);
+        return new NextResponse(null, { status: 304, headers: headers(etag, timing) });
+      }
+    }
+  }
+
+  const [base, loaded] = await Promise.all([
+    loadMeBootstrapStable(user, key, (fn) => timing.time("query", fn)),
+    loadBootstrapBlocks(refs),
+  ]);
+  timing.add("cache", performance.now() - t0, base.source);
+  recordCacheLookup("resp_me_boot", base.source !== "miss");
+  const blocks = {
+    entries: inContractOrder(loaded.entries),
+    errors: loaded.errors,
+  };
+  const etag = v2Etag(user.id, base.etag, blocks.entries, blocks.errors);
+  if (etagMatches(ifNoneMatch, etag)) {
+    recordConditionalResponse("/api/me/bootstrap", 304);
+    return new NextResponse(null, { status: 304, headers: headers(etag, timing) });
+  }
+  recordConditionalResponse("/api/me/bootstrap", 200);
+  const body = timing.timeSync("serialize", () => appendBlocksToBootstrapJson(base.body, blocks));
+  return new NextResponse(body, {
+    status: 200,
+    headers: { "Content-Type": "application/json", ...headers(etag, timing) },
+  });
 }
 
 export async function GET(request: Request) {
@@ -65,6 +156,8 @@ export async function GET(request: Request) {
     // `auth` = JWT + versão da sessão + rate limit (antes do handler).
     timing.add("auth", timing.totalMs());
     try {
+      if (wantsV2(request)) return await respondV2(request, session.user, timing);
+
       let fullRooms: unknown[] | null = null;
       const [payload, refs] = await Promise.all([
         timing.time("query", () =>

@@ -1,4 +1,5 @@
 import { cache } from "@/lib/cache";
+import { bumpResponseFamilies, RESPONSE_FAMILIES } from "@/lib/cache/response-families";
 import { prismaBase } from "@/lib/prisma-base";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { parseScopeGrants, type ScopeGrants } from "@/lib/authz/scope-grants-shared";
@@ -80,4 +81,7 @@ export async function setScopeGrantsForOrg(
   // Invalida depois de gravar: quem lê em seguida (PUT → GET de
   // confirmação) já vê o valor novo, nesta e nas outras réplicas.
   await cache.del(scopeGrantsCacheKey(organizationId));
+  // É uma linha de `OrganizationSetting` gravada fora do `setOrgSetting`:
+  // sobe a versão para quem depende dela (`channelGrants` do bootstrap v2).
+  await bumpResponseFamilies(organizationId, RESPONSE_FAMILIES.orgSettings);
 }
