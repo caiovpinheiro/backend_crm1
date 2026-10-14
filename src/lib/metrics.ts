@@ -196,6 +196,15 @@ function buildMetrics(registry: Registry): AppMetrics {
     registers: [registry],
   });
 
+  // Respostas condicionais (ETag/If-None-Match): 304 vs 200 por rota.
+  // As rotas incrementam via `recordConditionalResponse`.
+  const conditionalResponses = new Counter({
+    name: "crm_http_conditional_responses_total",
+    help: "Respostas de GET com validador (ETag): 304 (não mudou) vs 200, por rota (template).",
+    labelNames: ["route", "status"] as const,
+    registers: [registry],
+  });
+
   const activityOutboxProcessed = new Counter({
     name: "crm_activity_outbox_processed_total",
     help: "Itens da activity_outbox projetados, em retry ou dead letter.",
@@ -237,6 +246,9 @@ function buildMetrics(registry: Registry): AppMetrics {
     errors,
     cacheHits,
     cacheMisses,
+    apiCost: {
+      conditionalResponses,
+    },
     activityOutbox: {
       processed: activityOutboxProcessed,
       depth: activityOutboxDepth,
@@ -280,6 +292,9 @@ export type AppMetrics = {
   errors: Counter<"scope" | "kind">;
   cacheHits: Counter<"key">;
   cacheMisses: Counter<"key">;
+  apiCost: {
+    conditionalResponses: Counter<"route" | "status">;
+  };
   activityOutbox: {
     processed: Counter<"organization" | "status">;
     depth: Gauge<"organization">;
@@ -393,6 +408,39 @@ export function observeHttpRequest(args: {
       { route, method, status },
       Math.max(0, args.durationMs) / 1000,
     );
+  } catch {
+    // métricas nunca devem quebrar o request
+  }
+}
+
+/**
+ * Hit/miss de cache por FAMÍLIA (ex.: "settings", "channels", "bootstrap").
+ * Reaproveita `crm_cache_hits_total` / `crm_cache_misses_total` (label
+ * `key` = família), as mesmas séries do `lib/cache`. Hit rate no Prometheus:
+ * `sum by (key) (rate(crm_cache_hits_total[5m])) / (… hits + … misses)`.
+ * Nunca lança.
+ */
+export function recordCacheLookup(family: string, hit: boolean): void {
+  try {
+    const label = { key: safeLabel(family) };
+    if (hit) metrics.cacheHits.inc(label);
+    else metrics.cacheMisses.inc(label);
+  } catch {
+    // métricas nunca devem quebrar o request
+  }
+}
+
+/**
+ * Resposta de um GET com validador (ETag / If-None-Match): chame com o
+ * status final (304 quando o cliente já tinha a versão, 200 quando mandou o
+ * corpo). `path` é templatizado (cardinalidade controlada). Nunca lança.
+ */
+export function recordConditionalResponse(path: string, status: number): void {
+  try {
+    metrics.apiCost.conditionalResponses.inc({
+      route: templatizeRoute(path),
+      status: String(status || 0),
+    });
   } catch {
     // métricas nunca devem quebrar o request
   }
