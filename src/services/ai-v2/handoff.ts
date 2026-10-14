@@ -181,7 +181,7 @@ async function routeLeadsDepartment(args: HandoffArgs, departmentId: string | nu
     conversationId: args.conversationId,
     contactId: args.contactId ?? null,
     dealId: args.dealId ?? null,
-    triggerSource: "AI_AGENT",
+    triggerSource: "SYSTEM",
     reassign: true,
     onlyUserIds,
     pendingScope: scope,
