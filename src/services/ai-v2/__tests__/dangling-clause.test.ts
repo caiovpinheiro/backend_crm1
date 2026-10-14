@@ -142,6 +142,21 @@ describe("frase sem oração principal depois de um corte", () => {
       .toBe("A fatura não foi emitida.");
   });
 
+  it("artigo ou preposição colado ao trecho cortado: a frase sai inteira", () => {
+    const reply = "Entendi a dúvida sobre o documento. Você precisa do recibo de quitação assinado pelo setor, não da declaração simples. A equipe consegue emitir o documento certo para você.";
+    expect(trimUnsupportedSentences(reply, ["recibo de quitação assinado pelo setor"])?.reply)
+      .toBe("Entendi a dúvida sobre o documento. A equipe consegue emitir o documento certo para você.");
+  });
+
+  it("condição que pertencia ao aviso de transferência sai junto (vírgula ou travessão)", () => {
+    expect(withoutTransferClause("Poxa, Ana, entendo a frustração — se o pedido continua em análise mesmo após a reclamação, vou te passar para o time."))
+      .toBe("Poxa, Ana, entendo a frustração.");
+    expect(withoutTransferClause("O pedido consta como entregue, para conferir com a transportadora vou chamar alguém da equipe."))
+      .toBe("O pedido consta como entregue.");
+    // Sem oração principal antes, nada sobra.
+    expect(withoutTransferClause("Para conferir com a transportadora, vou chamar alguém da equipe.")).toBe("");
+  });
+
   it("trecho sem fonte no meio, no começo ou no fim: o que sobra não fica pela metade", () => {
     const meio = "Entendo a situação. Como você só consegue pagar no dia 30, a condição de desconto pode não ser mantida, para verificar uma condição específica. A equipe consegue olhar outras formas de pagamento com você.";
     expect(trimUnsupportedSentences(meio, ["a condição de desconto pode não ser mantida"])?.reply)

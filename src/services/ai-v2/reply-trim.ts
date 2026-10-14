@@ -51,9 +51,9 @@ export function standaloneClause(clause: string): string {
   // mas Y"), a de causa vira a principal e leva junto o "mas/e…" que a
   // segue; o que é só finalidade/condição sai. Sem oração de causa, não
   // sobra frase.
-  const pieces = body.split(/,\s+/);
+  const pieces = body.split(PIECE_SEPARATOR);
   const kinds = pieces.map(pieceKind);
-  if (kinds.includes("main")) return s;
+  if (kinds.includes("main")) return withoutTrailingCondition(s);
   const c = kinds.indexOf("causal");
   if (c < 0) return "";
   const kept = [pieces[c].replace(CAUSAL_START, "")];
@@ -63,6 +63,29 @@ export function standaloneClause(clause: string): string {
   // "dessa", "isso" apontavam para o que foi cortado. Sozinha, não diz nada.
   if (/(?<![\p{L}])(?:d?ess[ae]s?|d?est[ae]s?|n?isso|n?isto|disso|disto|dele|dela)(?![\p{L}])/iu.test(rest)) return "";
   return withVocative(rest);
+}
+
+/** Separa as partes da frase: vírgula ou travessão. */
+const PIECE_SEPARATOR = /,\s+|\s+[—–]\s+/;
+
+/**
+ * Condição/finalidade no fim do que sobrou ("entendo a frustração — se o
+ * pedido continua em análise"): ela pertencia à oração que saiu ("…, vou te
+ * passar"). Sai junto, desde que antes dela fique uma oração principal.
+ */
+function withoutTrailingCondition(sentence: string): string {
+  let text = sentence;
+  for (;;) {
+    const seps = [...text.matchAll(new RegExp(PIECE_SEPARATOR.source, "g"))];
+    const last = seps.at(-1);
+    if (!last || last.index === undefined) return text;
+    const tail = text.slice(last.index + last[0].length);
+    if (pieceKind(tail) !== "dependent") return text;
+    const head = text.slice(0, last.index).trim();
+    const hasMain = head.split(PIECE_SEPARATOR).some((p) => pieceKind(p) === "main" && p.trim().split(/\s+/).length >= 2);
+    if (!hasMain) return text;
+    text = head;
+  }
 }
 
 /** Começo de oração ligada à anterior ("mas você não recebeu…"). */
@@ -203,6 +226,9 @@ function removeSpan(unitText: string, flagged: string): string | null {
   // ficava para trás e a resposta saía com "*;" solto.
   while (end < unitText.length && WRAP_CHARS.includes(unitText[end]) && unmatchedWrap(unitText.slice(start, end), OPENER[unitText[end]] ?? unitText[end], unitText[end])) end += 1;
   while (start > 0 && WRAP_CHARS.includes(unitText[start - 1]) && unmatchedWrap(unitText.slice(start, end), unitText[start - 1], CLOSER[unitText[start - 1]] ?? unitText[start - 1])) start -= 1;
+  // Artigo/preposição colado ao trecho ("você precisa do <cortado>, não da
+  // declaração", "pela imagem, o <cortado>."): sem o trecho, não fica de pé.
+  if (/(?:^|[\s,;:(—–])(?:o|a|os|as|um|uma|do|da|dos|das|de|no|na|nos|nas|em|ao|aos|[àa]s?|pelo|pela|pelos|pelas|para|pra|com|seu|sua|seus|suas)$/i.test(unitText.slice(0, start).trimEnd())) return null;
   let rest = `${unitText.slice(0, start)} ${unitText.slice(end)}`;
   rest = rest
     // "Ana, <trecho cortado>, mas o prazo…": sobrava "Ana,, mas o prazo…".
