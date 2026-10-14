@@ -777,6 +777,7 @@ export function buildAgentRulesMarkdown(args: {
   const bh = c.businessHours;
   out.push(
     `- Destino padrão: ${destinationText(c.handoff?.defaultDestination, names)}`,
+    `- Distribuição por leads neste agente: ${c.handoff?.leads?.enabled ? `ligada · papéis ${list(c.handoff.leads.roleIds ?? [])} · pessoas ${list(c.handoff.leads.userIds ?? [])}` : "desligada (vale a distribuição inteligente)"}`,
     `- Mensagem de transferência: ${q(c.handoff?.message)}`,
     `- Pedido de pessoa: ${list([...(c.handoff?.humanRequestKeywords ?? []), ...HUMAN_REQUEST_PHRASES].map((w) => q(w)))}`,
     `- Enquanto espera na fila: ${c.handoff?.whileQueued === "answer" ? "responde" : "só avisa"} (${qd(c.handoff?.queuedMessage, "Você já está na fila de atendimento. Em instantes alguém da equipe continua com você por aqui.")})`,

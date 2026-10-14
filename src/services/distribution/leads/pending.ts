@@ -7,9 +7,12 @@
  * o kill switch do modo é ligado).
  */
 
+import { Prisma } from "@prisma/client";
+
 import type { ScopedTx } from "@/lib/prisma";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
+import { eligibleUserIdsForScope, readLeadsScope, type LeadsRoutingScope } from "@/services/ai-v2/leads-handoff";
 
 const DRAIN_BATCH = 100;
 
@@ -22,6 +25,7 @@ export async function enqueueLeadsPending(
     dealId: string | null;
     conversationId: string | null;
     triggerSource: string;
+    scope?: LeadsRoutingScope | null;
   },
 ): Promise<"created" | "updated"> {
   const existing = await tx.distributionLeadsPending.findFirst({
@@ -32,10 +36,11 @@ export async function enqueueLeadsPending(
     },
     select: { id: true },
   });
+  const scopeData = args.scope ? { scope: args.scope as Prisma.InputJsonValue } : {};
   if (existing) {
     await tx.distributionLeadsPending.update({
       where: { id: existing.id },
-      data: { attempts: { increment: 1 }, lastAttemptAt: new Date() },
+      data: { attempts: { increment: 1 }, lastAttemptAt: new Date(), ...scopeData },
     });
     return "updated";
   }
@@ -48,6 +53,7 @@ export async function enqueueLeadsPending(
       conversationId: args.conversationId,
       triggerSource: args.triggerSource,
       status: "PENDING",
+      ...scopeData,
     },
   });
   return "created";
@@ -93,16 +99,23 @@ export async function drainLeadsPending(): Promise<number> {
   const orgId = getOrgIdOrThrow();
   const { executeLeadsDistribution } = await import("./engine");
   let assigned = 0;
+  // Card da IA esperando o expediente não pode travar o restante da fila.
+  const waitingOnScope: string[] = [];
 
   for (let i = 0; i < DRAIN_BATCH; i++) {
     const next = await prisma.distributionLeadsPending.findFirst({
-      where: { organizationId: orgId, status: "PENDING" },
+      where: {
+        organizationId: orgId,
+        status: "PENDING",
+        ...(waitingOnScope.length > 0 ? { id: { notIn: waitingOnScope } } : {}),
+      },
       orderBy: { createdAt: "asc" },
       select: {
         id: true,
         contactId: true,
         dealId: true,
         conversationId: true,
+        scope: true,
       },
     });
     if (!next) break;
@@ -120,11 +133,14 @@ export async function drainLeadsPending(): Promise<number> {
       continue;
     }
 
+    const scope = readLeadsScope(next.scope);
+    const onlyUserIds = scope ? await eligibleUserIdsForScope(scope) : undefined;
     const result = await executeLeadsDistribution({
       dealId: next.dealId,
       contactId: next.contactId,
       conversationId: next.conversationId,
       triggerSource: "SYSTEM",
+      ...(scope ? { onlyUserIds, pendingScope: scope } : {}),
     });
 
     if (result.reason !== "ASSIGNED" && result.reason !== "DONO_PRESERVADO") {
@@ -132,6 +148,12 @@ export async function drainLeadsPending(): Promise<number> {
         where: { id: next.id },
         data: { attempts: { increment: 1 }, lastAttemptAt: new Date() },
       });
+      // Recorte da IA sem ninguém online agora: segue para o próximo lead.
+      // O rodízio da org pode ter gente; este card espera o expediente dele.
+      if (scope) {
+        waitingOnScope.push(next.id);
+        continue;
+      }
       break;
     }
 

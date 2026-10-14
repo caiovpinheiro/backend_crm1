@@ -70,6 +70,15 @@ export interface ExecuteLeadsDistributionInput {
   automationContextId?: string | null;
   stepId?: string | null;
   occurrence?: number | null;
+  /**
+   * Recorte opcional (repasse da IA). Ausente = rodízio da org, com o
+   * filtro de papel MEMBER de sempre. Lista (mesmo vazia) = só esses
+   * usuários, sem o filtro MEMBER — o chamador já escolheu papel e
+   * departamento. Vazia = ninguém neste momento.
+   */
+  onlyUserIds?: string[];
+  /** Gravado na fila quando ninguém está disponível, para a drenagem repetir o recorte. */
+  pendingScope?: { departmentId: string; roleIds: string[]; userIds: string[] } | null;
 }
 
 interface LeadsTarget {
@@ -276,30 +285,56 @@ interface SelectedSlot {
 async function selectNextSlotTx(
   tx: ScopedTx,
   orgId: string,
+  onlyUserIds?: string[],
 ): Promise<SelectedSlot | null> {
-  const rows = await tx.$queryRaw<
-    {
-      id: string;
-      participantId: string;
-      slotIndex: number;
-      userId: string;
-      userName: string | null;
-    }[]
-  >`
-    SELECT s.id, s."participantId", s."slotIndex", p."userId", u.name AS "userName"
-    FROM "distribution_leads_slots" s
-    JOIN "distribution_leads_participants" p ON p.id = s."participantId"
-    JOIN "users" u ON u.id = p."userId"
-    WHERE s."organizationId" = ${orgId}
-      AND p.status = 'ACTIVE'
-      AND p.weight > 0
-      AND s."slotIndex" < p.weight
-      AND u.type = 'HUMAN'
-      AND u.role = 'MEMBER'
-      AND u."isErased" = false
-    ORDER BY random()
-    LIMIT 1
-  `;
+  if (onlyUserIds && onlyUserIds.length === 0) return null;
+  const rows = onlyUserIds
+    ? await tx.$queryRaw<
+        {
+          id: string;
+          participantId: string;
+          slotIndex: number;
+          userId: string;
+          userName: string | null;
+        }[]
+      >`
+        SELECT s.id, s."participantId", s."slotIndex", p."userId", u.name AS "userName"
+        FROM "distribution_leads_slots" s
+        JOIN "distribution_leads_participants" p ON p.id = s."participantId"
+        JOIN "users" u ON u.id = p."userId"
+        WHERE s."organizationId" = ${orgId}
+          AND p.status = 'ACTIVE'
+          AND p.weight > 0
+          AND s."slotIndex" < p.weight
+          AND u.type = 'HUMAN'
+          AND u."isErased" = false
+          AND p."userId" IN (${Prisma.join(onlyUserIds)})
+        ORDER BY random()
+        LIMIT 1
+      `
+    : await tx.$queryRaw<
+        {
+          id: string;
+          participantId: string;
+          slotIndex: number;
+          userId: string;
+          userName: string | null;
+        }[]
+      >`
+        SELECT s.id, s."participantId", s."slotIndex", p."userId", u.name AS "userName"
+        FROM "distribution_leads_slots" s
+        JOIN "distribution_leads_participants" p ON p.id = s."participantId"
+        JOIN "users" u ON u.id = p."userId"
+        WHERE s."organizationId" = ${orgId}
+          AND p.status = 'ACTIVE'
+          AND p.weight > 0
+          AND s."slotIndex" < p.weight
+          AND u.type = 'HUMAN'
+          AND u.role = 'MEMBER'
+          AND u."isErased" = false
+        ORDER BY random()
+        LIMIT 1
+      `;
   return rows[0] ?? null;
 }
 
@@ -386,7 +421,7 @@ export async function executeLeadsDistribution(
         SELECT pg_advisory_xact_lock(hashtextextended(${orgId + ":leads-rotation"}, 0))
       `;
 
-      const slot = await selectNextSlotTx(tx, orgId);
+      const slot = await selectNextSlotTx(tx, orgId, input.onlyUserIds);
       if (!slot) {
         const pending = await enqueueLeadsPending(tx, {
           organizationId: orgId,
@@ -395,6 +430,7 @@ export async function executeLeadsDistribution(
           dealId: target.dealId,
           conversationId: target.conversationId,
           triggerSource: input.triggerSource,
+          scope: input.pendingScope ?? null,
         });
         const result: LeadsDistributionResult = {
           success: false,

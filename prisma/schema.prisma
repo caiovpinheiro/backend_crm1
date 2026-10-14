@@ -4426,6 +4426,9 @@ model DistributionLeadsPending {
   dealId           String?
   conversationId   String?
   triggerSource    String
+  /// Recorte do repasse da IA (departamento, papéis, pessoas). Null = rodízio
+  /// da org, como a automação. A drenagem recalcula quem está online agora.
+  scope            Json?
   /// PENDING | RESOLVED | CANCELLED
   status           String       @default("PENDING")
   attempts         Int          @default(1)

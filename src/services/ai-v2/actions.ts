@@ -28,7 +28,7 @@ import {
 import { renderMessage, defaultFormatter } from "@/lib/ai-v2/message-render";
 import { recordV2KnowledgeGap } from "./onboarding";
 import { buildSurveyMessage, recordSurveyResponse } from "./survey";
-import { simpleHandoff } from "./handoff";
+import { leadsHandoffOption, simpleHandoff } from "./handoff";
 import type { V2LoadedContext } from "./context";
 import { traceStep } from "./trace";
 
@@ -65,6 +65,7 @@ async function executeHandoff(action: V2Action, ctx: V2ActionContext): Promise<V
       contactId: ctx.contactId,
       dealId: ctx.dealId,
       destination,
+      leads: leadsHandoffOption(ctx.config),
     });
     return { action, ok: true };
   } catch (err) {

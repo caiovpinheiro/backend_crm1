@@ -379,6 +379,11 @@ export const v2AgentConfigSchema = z.object({
     humanRequestWithSubject: z.enum(["answer_first", "transfer"]).optional(),
     whileQueued: z.enum(["notify", "answer"]).optional(),
     queuedMessage: optionalText,
+    leads: z.object({
+      enabled: z.boolean().optional(),
+      roleIds: z.array(z.string()).optional(),
+      userIds: z.array(z.string()).optional(),
+    }).optional(),
   }).optional().default({
     defaultDestination: { type: "department" } as V2Destination,
     message: "Vou transferir para um atendente.",

@@ -344,6 +344,20 @@ export interface V2HandoffConfig {
   whileQueued?: "notify" | "answer";
   /** Aviso de fila (vazio = texto padrão). */
   queuedMessage?: string;
+  /**
+   * Repasse no modo por leads, só deste agente. Desligado (padrão): o destino
+   * departamento segue a distribuição inteligente. Ligado: sorteio pelo peso
+   * do modo por leads, restrito ao departamento do destino, aos papéis e às
+   * pessoas escolhidas, e só quem está online dentro do expediente. Sem
+   * ninguém, espera na fila do modo por leads — não entra na fila inteligente.
+   */
+  leads?: {
+    enabled?: boolean;
+    /** Papéis do CRM (Role). Vazio = qualquer papel dentro do departamento. */
+    roleIds?: string[];
+    /** Pessoas do departamento. Vazio = todas as que passam no papel. */
+    userIds?: string[];
+  };
 }
 
 export type V2PostCloseCaseBehavior =
