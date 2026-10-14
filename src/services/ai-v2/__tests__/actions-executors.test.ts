@@ -25,6 +25,7 @@ const mocks = vi.hoisted(() => ({
   metaClient: vi.fn((_cfg: unknown): Record<string, unknown> => ({ configured: false })),
   enrichTemplate: vi.fn(async (): Promise<{ components: unknown; flowToken: string | null }> => ({ components: undefined, flowToken: null })),
   queryRaw: vi.fn(async (_sql: string, ..._params: unknown[]): Promise<unknown[]> => []),
+  stageFindUnique: vi.fn(async (_args: unknown): Promise<{ isLost: boolean } | null> => ({ isLost: false })),
   sendFollowUpMedia: vi.fn(async (_args: Record<string, unknown>) => 1),
   publishNewMessage: vi.fn(),
   touchLastMessage: vi.fn(async () => undefined),
@@ -38,6 +39,7 @@ vi.mock("@/lib/prisma", () => ({
     whatsAppTemplateConfig: { findFirst: mocks.tplConfigFindFirst },
     aIV2KnowledgeGap: { findFirst: mocks.gapFindFirst, update: mocks.gapUpdate, create: mocks.gapCreate },
     aIAgentSurveyResponse: { create: mocks.surveyCreate },
+    stage: { findUnique: mocks.stageFindUnique },
   },
 }));
 vi.mock("@/lib/prisma-base", () => ({ prismaBase: { $queryRawUnsafe: mocks.queryRaw, $executeRawUnsafe: vi.fn(async () => 0) } }));
@@ -112,6 +114,7 @@ describe("executores de ação", () => {
     mocks.metaClient.mockReturnValue({ configured: false });
     mocks.queryRaw.mockResolvedValue([]);
     mocks.sendFollowUpMedia.mockResolvedValue(1);
+    mocks.stageFindUnique.mockResolvedValue({ isLost: false });
   });
 
   it("add_tag: aplica etiqueta existente; sem contato, sem nome ou etiqueta inexistente falha sem exceção", async () => {
