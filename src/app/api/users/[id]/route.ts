@@ -3,6 +3,11 @@ import bcrypt from "bcryptjs";
 
 import { UserRole } from "@prisma/client";
 
+import {
+  bumpMeBootstrap,
+  bumpResponseFamilies,
+  RESPONSE_FAMILIES,
+} from "@/lib/cache/response-families";
 import { requireAdmin, userOrgFilter } from "@/lib/auth-helpers";
 import { clearLoginLockout } from "@/lib/auth/lockout";
 import {
@@ -200,6 +205,10 @@ export async function PUT(request: Request, context: RouteContext) {
         void _omit;
         return rest;
       });
+      // Lista de usuários em cache (`GET /api/users`, bootstrap).
+      await bumpResponseFamilies(r.session.user.organizationId, RESPONSE_FAMILIES.users);
+      // Perfil (nome, e-mail, papel…) no bootstrap v2 do usuário editado.
+      await bumpMeBootstrap(r.session.user.organizationId, id);
       if (data.hashedPassword) {
         // Reset administrativo de senha tambem destrava o login: o
         // hard-lock de 24h (login_attempts) nao pode sobreviver a ele,
@@ -337,6 +346,11 @@ export async function DELETE(_request: Request, context: RouteContext) {
 
       try {
         await prisma.user.delete({ where: { id: target.id } });
+        await bumpResponseFamilies(
+          target.organizationId,
+          RESPONSE_FAMILIES.users,
+          RESPONSE_FAMILIES.departments,
+        );
         // SV-1: sem linha não há o que incrementar — o refresh do JWT
         // trata "usuário não encontrado" como sessão inválida; aqui só
         // zera os caches deste processo e fecha o SSE em todas as réplicas.
@@ -385,6 +399,11 @@ export async function DELETE(_request: Request, context: RouteContext) {
           await prisma.agentStatus
             .deleteMany({ where: { userId: target.id } })
             .catch(() => null);
+          await bumpResponseFamilies(
+            target.organizationId,
+            RESPONSE_FAMILIES.users,
+            RESPONSE_FAMILIES.departments,
+          );
           log.warn(
             { userId: target.id, code },
             "[users.delete] hard delete blocked by FK; soft-erased user",

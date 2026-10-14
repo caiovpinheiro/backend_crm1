@@ -17,6 +17,12 @@ import { logAudit } from "@/lib/audit/log";
 import { pickFields } from "@/lib/audit/redact";
 import { cache } from "@/lib/cache";
 import { channelKey, invalidateChannelLookups } from "@/lib/cache/keys";
+import { bumpResponseFamilies, RESPONSE_FAMILIES } from "@/lib/cache/response-cache";
+
+/** Lista de canais em cache (`GET /api/channels`, bootstrap): sobe a versão. */
+export async function invalidateChannelsList(orgId: string | null | undefined): Promise<void> {
+  await bumpResponseFamilies(orgId, RESPONSE_FAMILIES.channels);
+}
 
 const CHANNEL_AUDIT_FIELDS = [
   "id",
@@ -293,6 +299,7 @@ export async function createChannel(data: CreateChannelData): Promise<Channel> {
   // e os "não mapeado": cobre o caso de um POST ter cacheado "não mapeado"
   // pouco antes do onboarding do canal novo.
   await invalidateChannelLookups(created.organizationId);
+  await invalidateChannelsList(created.organizationId);
   await logAudit({
     entity: "channel",
     action: "create",
@@ -375,6 +382,7 @@ export async function updateChannel(id: string, data: UpdateChannelData): Promis
   // `channel:<org>`; as outras orgs não perdem o cache.
   await cache.del(channelKey(id));
   await invalidateChannelLookups(updated.organizationId);
+  await invalidateChannelsList(updated.organizationId);
   // Sinaliza eventos de connect/disconnect alem de update generico —
   // util pra investigar interrupcoes de canal sem ler diff.
   let action: "update" | "channel_connect" | "channel_disconnect" = "update";
@@ -405,6 +413,7 @@ export async function deleteChannel(id: string): Promise<Channel> {
   const deleted = await prisma.channel.delete({ where: { id } });
   await cache.del(channelKey(id));
   await invalidateChannelLookups(deleted.organizationId);
+  await invalidateChannelsList(deleted.organizationId);
   await logAudit({
     entity: "channel",
     action: "delete",
@@ -431,6 +440,7 @@ export async function updateChannelStatus(
     data,
   });
   await cache.del(channelKey(id));
+  await invalidateChannelsList(updated.organizationId);
   return updated;
 }
 
@@ -475,5 +485,6 @@ export async function markChannelDisconnected(id: string): Promise<Channel> {
     },
   });
   await cache.del(channelKey(id));
+  await invalidateChannelsList(updated.organizationId);
   return updated;
 }

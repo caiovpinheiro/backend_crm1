@@ -31,6 +31,18 @@
  *
  * O ETag é um hash estável do JSON (sem timestamps), então o cliente que
  * manda `If-None-Match` recebe 304 sem corpo quando nada mudou.
+ *
+ * Estável × volátil (14/10/2026):
+ *   - estável (bootstrap v2, cacheado por usuário — `me-bootstrap-cache.ts`):
+ *     user, profile, preferences, effectivePermissions, organization,
+ *     alertConfig, widgets. Mudam só por escrita (do usuário ou de admin).
+ *   - volátil (`GET /api/me/live`, `buildMeLive`): agentStatus (o usuário
+ *     troca Online/Ausente; a distribuição também), emailUnread (chega
+ *     e-mail), teamChatRooms (chega mensagem: `unread`, `lastMessageAt`,
+ *     `lastPreview`) — e o bloco `/api/team-chat/rooms`, que sai da mesma
+ *     consulta.
+ *   - v1 (sem `x-bootstrap-version: 2`) continua com tudo, para o frontend
+ *     atual durante a transição.
  */
 
 import { createHash } from "node:crypto";
@@ -38,6 +50,7 @@ import { createHash } from "node:crypto";
 import { Prisma, type UserRole } from "@prisma/client";
 
 import { userOrgFilter } from "@/lib/auth-helpers";
+import type { BootstrapBlockUrl } from "@/services/bootstrap-blocks";
 import { can, loadAuthzContext, requirePermission } from "@/lib/authz";
 import { requirePermissionForUser } from "@/lib/authz/resource-policy";
 import {
@@ -56,6 +69,12 @@ import {
   computeEffectivePermissions,
   type EffectivePermissionsPayload,
 } from "@/services/effective-permissions";
+import {
+  loadDepartmentCounts,
+  loadUsersPresence,
+  type DepartmentCount,
+  type UserPresence,
+} from "@/services/me-live";
 import { getActiveWidgetSlugs } from "@/services/organization-widgets";
 import { getOrganizationSummary } from "@/services/organization-summary";
 import { listRooms } from "@/services/team-chat";
@@ -176,6 +195,51 @@ export type MeBootstrapPayload = {
   failedBlocks: BootstrapBlockName[];
 };
 
+/** Campos voláteis: fora do bootstrap v2, em `GET /api/me/live`. */
+export const ME_LIVE_FIELDS = ["agentStatus", "emailUnread", "teamChatRooms"] as const;
+
+/**
+ * Payload base do bootstrap v2 (`x-bootstrap-version: 2`): o v1 sem os
+ * campos voláteis (`ME_LIVE_FIELDS`). Mesma forma em cada campo.
+ */
+export type MeBootstrapStablePayload = Omit<
+  MeBootstrapPayload,
+  "version" | (typeof ME_LIVE_FIELDS)[number]
+> & { version: 2 };
+
+/** Corpo de `GET /api/me/live` (sem `blocks`, que a rota acrescenta). */
+export type MeLivePayload = Pick<MeBootstrapPayload, (typeof ME_LIVE_FIELDS)[number]> & {
+  version: 1;
+  /**
+   * Campos voláteis de `GET /api/users` (fora da variante estável), por
+   * usuário da org. `null` sem org. Formato e merge: `services/me-live.ts`.
+   */
+  usersPresence: Record<string, UserPresence> | null;
+  /**
+   * Conversas abertas por departamento (fora da variante estável de
+   * `GET /api/settings/departments`). `null` fora de ADMIN/MANAGER.
+   */
+  departmentCounts: Record<string, DepartmentCount> | null;
+  /** Blocos voláteis que falharam (vieram `null` por erro). */
+  failedBlocks: BootstrapBlockName[];
+};
+
+/**
+ * Corpo completo de `GET /api/me/bootstrap`: o payload base +
+ *
+ * - `blocks`: `{ [url]: <corpo idêntico ao de GET url> }`, onde `url` é
+ *   EXATAMENTE o path+query que o frontend chama na inicialização
+ *   (`BOOTSTRAP_BLOCK_URLS` em `services/bootstrap-blocks.ts`). URL ausente =
+ *   sem permissão/sem org → o frontend chama a rota individual.
+ * - `blockErrors`: URLs cujo bloco falhou (idem: rota individual).
+ *
+ * Os blocos saem do mesmo cache das rotas (`services/startup-cache.ts`).
+ */
+export type MeBootstrapResponse = MeBootstrapPayload & {
+  blocks: Partial<Record<BootstrapBlockUrl, unknown>>;
+  blockErrors: BootstrapBlockUrl[];
+};
+
 export type BootstrapBlockName =
   | "profile"
   | "preferences"
@@ -185,7 +249,9 @@ export type BootstrapBlockName =
   | "agentStatus"
   | "emailUnread"
   | "teamChatRooms"
-  | "widgets";
+  | "widgets"
+  | "usersPresence"
+  | "departmentCounts";
 
 // ──────────────────────────────────────────────
 // Blocos
@@ -341,6 +407,7 @@ async function loadEmailUnread(
 
 async function loadTeamChatRooms(
   user: MeBootstrapUser,
+  onFullRooms?: (rooms: unknown[]) => void,
 ): Promise<BootstrapTeamChatRooms | null> {
   if (!user.organizationId) return null;
   const denied = await requirePermissionForUser(
@@ -357,6 +424,9 @@ async function loadTeamChatRooms(
     userId: user.id,
     organizationId: user.organizationId,
   });
+  // Lista completa (corpo de `GET /api/team-chat/rooms`) para o bloco
+  // `/api/team-chat/rooms` do bootstrap — a mesma consulta, sem repetir.
+  onFullRooms?.(rooms);
   const summary = rooms.map((r) => ({
     id: r.id,
     kind: r.kind,
@@ -397,11 +467,103 @@ async function settle<T>(
  * Monta o payload completo. Precisa do `RequestContext` ativo
  * (`withOrgContext`/`requireAuth`) porque os serviços usam `prisma` scoped.
  */
+export type BuildMeBootstrapHooks = {
+  /** Recebe a lista completa das salas (mesma de `GET /api/team-chat/rooms`). */
+  onTeamChatRooms?: (rooms: unknown[]) => void;
+};
+
 export async function buildMeBootstrap(
   user: MeBootstrapUser,
+  hooks: BuildMeBootstrapHooks = {},
 ): Promise<MeBootstrapPayload> {
   const failed: BootstrapBlockName[] = [];
+  const [stable, live] = await Promise.all([
+    loadStableParts(user, failed),
+    loadLiveParts(user, failed, hooks),
+  ]);
+  // Ordem das chaves = contrato v1 (o ETag v1 é hash do JSON).
+  return {
+    version: 1,
+    user: bootstrapUser(user),
+    profile: stable.profile,
+    preferences: stable.preferences,
+    effectivePermissions: stable.effectivePermissions,
+    organization: stable.organization,
+    alertConfig: stable.alertConfig,
+    agentStatus: live.agentStatus,
+    emailUnread: live.emailUnread,
+    teamChatRooms: live.teamChatRooms,
+    widgets: stable.widgets,
+    failedBlocks: failed.sort(),
+  };
+}
 
+/**
+ * Payload ESTÁVEL (bootstrap v2, header `x-bootstrap-version: 2`): só o que
+ * muda por ação administrativa ou do próprio usuário. Cacheado por usuário
+ * em `services/me-bootstrap-cache.ts`. Sem `agentStatus`, `emailUnread` e
+ * `teamChatRooms` — esses vêm de `GET /api/me/live` (`buildMeLive`).
+ */
+export async function buildMeBootstrapStable(
+  user: MeBootstrapUser,
+): Promise<MeBootstrapStablePayload> {
+  const failed: BootstrapBlockName[] = [];
+  const stable = await loadStableParts(user, failed);
+  return {
+    version: 2,
+    user: bootstrapUser(user),
+    ...stable,
+    failedBlocks: failed.sort(),
+  };
+}
+
+/**
+ * Payload VOLÁTIL (`GET /api/me/live`): os campos que saíram do bootstrap
+ * v2, com o MESMO formato que tinham no v1.
+ */
+export async function buildMeLive(
+  user: MeBootstrapUser,
+  hooks: BuildMeBootstrapHooks = {},
+): Promise<MeLivePayload> {
+  const failed: BootstrapBlockName[] = [];
+  const [live, usersPresence, departmentCounts] = await Promise.all([
+    loadLiveParts(user, failed, hooks),
+    settle("usersPresence", failed, () => loadUsersPresence(user.organizationId)),
+    settle("departmentCounts", failed, () => loadDepartmentCounts(user)),
+  ]);
+  return {
+    version: 1,
+    ...live,
+    usersPresence,
+    departmentCounts,
+    failedBlocks: failed.sort(),
+  };
+}
+
+function bootstrapUser(user: MeBootstrapUser): MeBootstrapPayload["user"] {
+  return {
+    id: user.id,
+    organizationId: user.organizationId,
+    isSuperAdmin: user.isSuperAdmin,
+  };
+}
+
+type StableParts = Pick<
+  MeBootstrapPayload,
+  | "profile"
+  | "preferences"
+  | "effectivePermissions"
+  | "organization"
+  | "alertConfig"
+  | "widgets"
+>;
+
+type LiveParts = Pick<MeBootstrapPayload, "agentStatus" | "emailUnread" | "teamChatRooms">;
+
+async function loadStableParts(
+  user: MeBootstrapUser,
+  failed: BootstrapBlockName[],
+): Promise<StableParts> {
   // Slugs ativos alimentam dois blocos (widgets e availableKeys das
   // preferências) — uma consulta só. Sem org (super-admin puro) não há
   // widgets instalados.
@@ -409,54 +571,40 @@ export async function buildMeBootstrap(
     ? settle("widgets", failed, () => getActiveWidgetSlugs())
     : Promise.resolve(new Set<string>());
 
-  const [
-    profile,
-    activeSlugs,
-    effectivePermissions,
-    organization,
-    alertConfig,
-    agentStatus,
-    emailUnread,
-    teamChatRooms,
-  ] = await Promise.all([
-    settle("profile", failed, () => loadProfile(user.id)),
-    activeSlugsPromise,
-    settle("effectivePermissions", failed, () => loadEffectivePermissions(user)),
-    settle("organization", failed, () => loadOrganization(user.organizationId)),
-    settle("alertConfig", failed, () => loadAlertConfig(user)),
-    settle("agentStatus", failed, () => loadAgentStatus(user.id)),
-    settle("emailUnread", failed, () => loadEmailUnread(user)),
-    settle("teamChatRooms", failed, () => loadTeamChatRooms(user)),
-  ]);
+  const [profile, activeSlugs, effectivePermissions, organization, alertConfig] =
+    await Promise.all([
+      settle("profile", failed, () => loadProfile(user.id)),
+      activeSlugsPromise,
+      settle("effectivePermissions", failed, () => loadEffectivePermissions(user)),
+      settle("organization", failed, () => loadOrganization(user.organizationId)),
+      settle("alertConfig", failed, () => loadAlertConfig(user)),
+    ]);
 
-  const preferences =
-    activeSlugs === null
-      ? await settle("preferences", failed, () =>
-          loadPreferences(user, new Set<string>()),
-        )
-      : await settle("preferences", failed, () => loadPreferences(user, activeSlugs));
+  const preferences = await settle("preferences", failed, () =>
+    loadPreferences(user, activeSlugs ?? new Set<string>()),
+  );
 
   return {
-    version: 1,
-    user: {
-      id: user.id,
-      organizationId: user.organizationId,
-      isSuperAdmin: user.isSuperAdmin,
-    },
     profile,
     preferences,
     effectivePermissions,
     organization,
     alertConfig,
-    agentStatus,
-    emailUnread,
-    teamChatRooms,
-    widgets:
-      activeSlugs === null
-        ? null
-        : { activeSlugs: [...activeSlugs].sort() },
-    failedBlocks: failed.sort(),
+    widgets: activeSlugs === null ? null : { activeSlugs: [...activeSlugs].sort() },
   };
+}
+
+async function loadLiveParts(
+  user: MeBootstrapUser,
+  failed: BootstrapBlockName[],
+  hooks: BuildMeBootstrapHooks,
+): Promise<LiveParts> {
+  const [agentStatus, emailUnread, teamChatRooms] = await Promise.all([
+    settle("agentStatus", failed, () => loadAgentStatus(user.id)),
+    settle("emailUnread", failed, () => loadEmailUnread(user)),
+    settle("teamChatRooms", failed, () => loadTeamChatRooms(user, hooks.onTeamChatRooms)),
+  ]);
+  return { agentStatus, emailUnread, teamChatRooms };
 }
 
 // ──────────────────────────────────────────────
@@ -466,6 +614,24 @@ export async function buildMeBootstrap(
 /** ETag forte: sha1 do corpo JSON serializado (sem timestamps no payload). */
 export function computeBootstrapEtag(body: string): string {
   return `"${createHash("sha1").update(body).digest("hex")}"`;
+}
+
+/**
+ * ETag do bootstrap com blocos: usuário + payload base + (url, ETag) de cada
+ * bloco, na ordem do contrato. Com os ETags dos blocos já guardados, dá para
+ * responder 304 sem ler nenhum corpo de bloco. Fraco (`W/`): o proxy pode
+ * comprimir a resposta.
+ */
+export function computeBootstrapBlocksEtag(
+  userId: string,
+  baseJson: string,
+  blocks: readonly { url: string; etag: string }[],
+  blockErrors: readonly string[] = [],
+): string {
+  const h = createHash("sha1").update(userId).update("\n").update(baseJson);
+  for (const b of blocks) h.update("\n").update(b.url).update("=").update(b.etag);
+  if (blockErrors.length > 0) h.update("\nerr=").update(blockErrors.join(","));
+  return `W/"${h.digest("hex").slice(0, 32)}"`;
 }
 
 /**

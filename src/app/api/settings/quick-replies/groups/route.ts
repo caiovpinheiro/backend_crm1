@@ -1,34 +1,35 @@
 import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
+import { withOrgContext } from "@/lib/auth-helpers";
+import { bumpResponseFamilies, RESPONSE_FAMILIES, respondWithCachedJson } from "@/lib/cache/response-cache";
 import { prisma } from "@/lib/prisma";
 import { getLogger } from "@/lib/logger";
+import { ServerTiming } from "@/lib/server-timing";
+import { loadQuickReplyGroups, quickReplyGroupsSpec } from "@/services/startup-cache";
 
 const log = getLogger("api/settings/quick-replies/groups");
 
-export async function GET() {
-  try {
-    const session = await auth();
-    const user = session?.user as { id?: string; organizationId?: string | null } | undefined;
-    if (!user?.id || !user.organizationId) {
+// GET passou de `auth()` cru para `withOrgContext` (requireAuth): o 304 só
+// sai depois da autenticação completa (versão da sessão, rate limit).
+export async function GET(request: Request) {
+  const timing = new ServerTiming();
+  return withOrgContext(async (session) => {
+    timing.add("auth", timing.totalMs());
+    const orgId = session.user.organizationId;
+    if (!orgId) {
       return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
     }
-
     try {
-      const groups = await prisma.quickReplyGroup.findMany({
-        where: { organizationId: user.organizationId },
-        orderBy: { order: "asc" },
-        include: { _count: { select: { quickReplies: true } } },
-      });
-      return NextResponse.json(groups);
-    } catch {
-      // Table doesn't exist yet (migration pending) — return empty list.
-      return NextResponse.json([]);
+      // Cache por org + ETag/304 (`services/startup-cache.ts`).
+      const spec = quickReplyGroupsSpec(session.user);
+      if (spec) return await respondWithCachedJson(request, spec, timing);
+      return NextResponse.json(await loadQuickReplyGroups(orgId));
+    } catch (e) {
+      log.error({ err: e }, "GET falhou");
+      return NextResponse.json({ message: "Erro ao listar grupos." }, { status: 500 });
     }
-  } catch (e) {
-    log.error({ err: e }, "GET falhou");
-    return NextResponse.json({ message: "Erro ao listar grupos." }, { status: 500 });
-  }
+  });
 }
 
 export async function POST(request: Request) {
@@ -51,6 +52,7 @@ export async function POST(request: Request) {
       data: { name, order: count, organizationId: user.organizationId },
       include: { _count: { select: { quickReplies: true } } },
     });
+    await bumpResponseFamilies(user.organizationId, RESPONSE_FAMILIES.quickReplies);
     return NextResponse.json(group, { status: 201 });
   } catch (e) {
     log.error({ err: e }, "POST falhou");

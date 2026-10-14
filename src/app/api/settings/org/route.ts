@@ -23,9 +23,11 @@ import {
   getOrgSettingsByPrefix,
   setOrgSetting,
 } from "@/lib/org-settings";
+import { respondWithCachedJson } from "@/lib/cache/response-cache";
 import { getLogger } from "@/lib/logger";
 import { ServerTiming } from "@/lib/server-timing";
 import { timedJson } from "@/lib/server-timing-response";
+import { orgSettingSpec } from "@/services/startup-cache";
 
 const log = getLogger("api/settings/org");
 
@@ -71,6 +73,13 @@ export async function GET(request: Request) {
     }
 
     try {
+      // Cache por org + query, com ETag/304 (`services/startup-cache.ts`).
+      const spec = key
+        ? orgSettingSpec(session.user, { key })
+        : prefix
+          ? orgSettingSpec(session.user, { prefix })
+          : null;
+      if (spec) return await respondWithCachedJson(request, spec, timing);
       if (key) {
         const value = await timing.time("query", () => getOrgSetting(key));
         return timedJson(timing, { key, value });

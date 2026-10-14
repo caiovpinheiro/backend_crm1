@@ -12,6 +12,7 @@ import {
   setScopeGrantsForOrg,
   type CrmActionKey,
 } from "@/lib/authz/scope-grants";
+import { bumpResponseFamilies, RESPONSE_FAMILIES } from "@/lib/cache/response-families";
 import { invalidateCorsTenantOrigin } from "@/lib/cache/keys";
 import { generateUrlToken, hashSecret } from "@/lib/auth/token-hash";
 import { sendInviteEmail, sendWelcomeEmail } from "@/lib/mail/send";
@@ -382,6 +383,8 @@ export async function acceptInvite(input: {
     });
     return user;
   });
+  // Usuário novo aparece em `GET /api/users` (lista em cache).
+  await bumpResponseFamilies(organization.id, RESPONSE_FAMILIES.users);
 
   // Primeiro usuário verificado de uma org criada pelo painel: o subdomínio
   // passa a ser origem confiável no CORS (descarta o negativo em cache).

@@ -5,7 +5,9 @@ import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { canViewPipeline, canViewStage, loadAuthzContext } from "@/lib/authz";
 import { listAllowedPipelineIds, requirePermissionForUser } from "@/lib/authz/resource-policy";
 import { createPipeline, getPipelines } from "@/services/pipelines";
+import { respondWithCachedJson } from "@/lib/cache/response-cache";
 import { getLogger } from "@/lib/logger";
+import { pipelinesSpec } from "@/services/startup-cache";
 
 const log = getLogger("api/pipelines");
 
@@ -60,6 +62,13 @@ export async function GET(request: Request) {
     return await runWithApiUserContext(authResult.user, async () => {
     const denied = await requirePermissionForUser(authResult.user, "pipeline:view");
     if (denied) return denied;
+    // Sessão (navegador): cache por org + perfil de visibilidade, com
+    // ETag/304 (`services/startup-cache.ts`). Token (n8n) segue direto no
+    // banco — `dealCount` sempre fresco para integração.
+    if (!authResult.viaToken) {
+      const spec = await pipelinesSpec(authResult.user);
+      if (spec) return await respondWithCachedJson(request, spec);
+    }
     const allowedPipelineIds = await listAllowedPipelineIds(authResult.user);
     const pipelines = await getPipelines({ allowedPipelineIds });
     const authz = await loadAuthzContext({

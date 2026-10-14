@@ -1,6 +1,7 @@
 import { Prisma, type CustomFieldType } from "@prisma/client";
 import { randomUUID } from "crypto";
 
+import { bumpResponseFamilies, RESPONSE_FAMILIES } from "@/lib/cache/response-families";
 import { parseHighlightRules, resolveHighlight } from "@/lib/highlight";
 import { prisma } from "@/lib/prisma";
 import { prismaBase } from "@/lib/prisma-base";
@@ -110,7 +111,7 @@ export async function getCustomFieldById(id: string) {
   }
 }
 
-export async function createCustomField(data: {
+async function createCustomFieldRow(data: {
   name: string;
   label: string;
   type: CustomFieldType;
@@ -216,7 +217,7 @@ async function createCustomFieldRaw(data: {
   return row ? { ...row, showInDealPanel: false } : null;
 }
 
-export async function updateCustomField(
+async function updateCustomFieldRow(
   id: string,
   data: {
     label?: string;
@@ -325,7 +326,7 @@ async function updateCustomFieldRaw(id: string, baseData: Record<string, unknown
   return row ? { ...row, showInDealPanel: false } : null;
 }
 
-export async function deleteCustomField(id: string) {
+async function deleteCustomFieldRow(id: string) {
   try {
     return await prisma.customField.delete({ where: { id } });
   } catch {
@@ -656,4 +657,39 @@ export async function createDealCustomFieldValues(
     ),
     skipDuplicates: true,
   });
+}
+
+// ── Escritas públicas: sobem a versão das listas em cache ───────────
+//
+// `GET /api/custom-fields/card-extension` (e o bloco do bootstrap) depende
+// das definições; a versão `rc_custom_fields` da org sobe a cada escrita.
+
+async function invalidateCustomFieldsCache(): Promise<void> {
+  await bumpResponseFamilies(getRequestContext()?.organizationId ?? null, RESPONSE_FAMILIES.customFields);
+}
+
+export async function createCustomField(
+  ...args: Parameters<typeof createCustomFieldRow>
+): ReturnType<typeof createCustomFieldRow> {
+  const created = await createCustomFieldRow(...args);
+  await invalidateCustomFieldsCache();
+  return created;
+}
+
+export async function updateCustomField(
+  ...args: Parameters<typeof updateCustomFieldRow>
+): ReturnType<typeof updateCustomFieldRow> {
+  try {
+    return await updateCustomFieldRow(...args);
+  } finally {
+    await invalidateCustomFieldsCache();
+  }
+}
+
+export async function deleteCustomField(
+  ...args: Parameters<typeof deleteCustomFieldRow>
+): ReturnType<typeof deleteCustomFieldRow> {
+  const deleted = await deleteCustomFieldRow(...args);
+  await invalidateCustomFieldsCache();
+  return deleted;
 }

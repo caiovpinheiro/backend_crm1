@@ -10,6 +10,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
+import { bumpResponseFamilies, RESPONSE_FAMILIES } from "@/lib/cache/response-families";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { can, loadAuthzContext } from "@/lib/authz";
 import { prisma } from "@/lib/prisma";
@@ -167,6 +168,8 @@ export async function PATCH(request: Request, context: RouteContext) {
               update: { allowedDepartmentIds: savedIds },
             }),
           ]);
+          // `_count.members` em `GET /api/settings/departments` (cache).
+          await bumpResponseFamilies(orgId, RESPONSE_FAMILIES.departments);
         } catch (e) {
           log.error({ err: e }, "[PATCH responsibles] falha ao sincronizar departamentos");
           return NextResponse.json(

@@ -12,6 +12,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { auth } from "@/lib/auth";
+import { bumpMeBootstrap } from "@/lib/cache/response-families";
 import { saveDashboardPreferences } from "@/services/user-preferences";
 import { getLogger } from "@/lib/logger";
 
@@ -54,6 +55,11 @@ export async function PATCH(request: Request) {
     const dashboard = await saveDashboardPreferences(
       session.user.id,
       parsed.data.blocks,
+    );
+    // `preferences` do bootstrap v2 (cache por usuário).
+    await bumpMeBootstrap(
+      (session.user as { organizationId?: string | null }).organizationId,
+      session.user.id,
     );
     return NextResponse.json({ dashboard });
   } catch (e) {
