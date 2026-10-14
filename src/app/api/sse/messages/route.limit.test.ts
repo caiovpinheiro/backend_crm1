@@ -3,8 +3,9 @@
  * contagem mockado (ele tem teste próprio com Redis falso).
  *
  * - Teto da org: 429 com Retry-After, sem abrir stream nem assinar o bus.
- * - Teto por usuário: a conexão evictada recebe `sse_connection_evicted`
- *   (com `retry:`) e fecha; o slot é liberado.
+ * - Teto por usuário: a conexão mais antiga recebe `superseded`
+ *   (`{"code":"SSE_SUPERSEDED"}`) e o legado `sse_connection_evicted` (com
+ *   `retry:`) e fecha; o slot é liberado.
  * - Heartbeat renova a entrada; teardown libera o slot.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -51,9 +52,8 @@ vi.mock("@/lib/sse-bus", () => ({
     new TextEncoder().encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`),
   sseBus: { subscribe: mocks.subscribe },
 }));
-vi.mock("@/lib/sse-connection-limit", () => ({
-  SSE_EVICTED_EVENT: "sse_connection_evicted",
-  SSE_HEARTBEAT_MS: 25_000,
+vi.mock("@/lib/sse-connection-limit", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/sse-connection-limit")>()),
   acquireSseConnection: mocks.acquire,
 }));
 
@@ -120,14 +120,20 @@ describe("GET /api/sse/messages — teto de conexões", () => {
     await reader.cancel();
   });
 
-  it("evicção: manda sse_connection_evicted com retry e fecha, liberando o slot", async () => {
+  it("evicção: manda superseded (e o legado) com retry e fecha, liberando o slot", async () => {
     const { next } = await open();
     expect(mocks.onEvict).not.toBeNull();
     mocks.onEvict!();
     const frame = await next();
-    expect(frame).toContain("retry: 50000\n");
-    expect(frame).toContain("event: sse_connection_evicted\n");
-    expect(frame).toContain('"reason":"user_limit"');
+    // Contrato exato: `superseded` primeiro (o frontend novo fecha e não
+    // reconecta), depois o legado para o frontend antigo.
+    expect(frame).toBe(
+      "retry: 50000\n" +
+        "event: superseded\n" +
+        'data: {"code":"SSE_SUPERSEDED"}\n\n' +
+        "event: sse_connection_evicted\n" +
+        'data: {"reason":"user_limit","retryAfterMs":50000}\n\n',
+    );
     expect(await next()).toBeNull();
     expect(mocks.unsubscribe).toHaveBeenCalledTimes(1);
     expect(mocks.release).toHaveBeenCalledTimes(1);
@@ -157,7 +163,9 @@ describe("GET /api/sse/messages — teto de conexões", () => {
     expect(res.status).toBe(200);
     const reader = res.body!.getReader();
     const first = await reader.read();
-    expect(new TextDecoder().decode(first.value)).toContain("event: sse_connection_evicted");
+    expect(new TextDecoder().decode(first.value)).toContain(
+      'event: superseded\ndata: {"code":"SSE_SUPERSEDED"}\n\n',
+    );
     expect((await reader.read()).done).toBe(true);
     expect(mocks.release).toHaveBeenCalled();
   });

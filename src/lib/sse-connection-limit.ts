@@ -21,16 +21,33 @@
  * ──────────
  * - Por organização (`SSE_MAX_PER_ORG`, default 200): a nova conexão é
  *   recusada com 429 + `Retry-After`. Ninguém da org é derrubado por isso.
- * - Por usuário (`SSE_MAX_PER_USER`, default 6): a conexão MAIS ANTIGA do
- *   usuário é encerrada (evento `sse_connection_evicted` + `retry:`) e a
+ * - Por usuário (`SSE_MAX_CONNECTIONS_PER_USER`, default 3; alias antigo
+ *   `SSE_MAX_PER_USER`): a conexão MAIS ANTIGA do usuário é encerrada e a
  *   nova entra. Escolha: a aba nova é a que o usuário está olhando; recusar
  *   a nova deixaria a tela ativa sem eventos enquanto abas esquecidas
  *   seguem recebendo. O encerramento cruza réplicas por pub/sub
- *   (`crm:sse:evict`). Risco conhecido: cliente que reconecta na hora após
- *   `sse_connection_evicted` entra em rodízio (cada reconexão derruba a
- *   seguinte); o frame leva `retry:` para o EventSource nativo esperar, e a
- *   conexão única por navegador (frontend, MA-1) elimina o caso na raiz.
+ *   (`crm:sse:evict`).
  * - `0` em qualquer das envs desliga aquele teto.
+ *
+ * Contrato da conexão encerrada (teto por usuário)
+ * ────────────────────────────────────────────────
+ * Antes de fechar, a rota manda UM bloco com dois eventos, nesta ordem:
+ *
+ *     retry: 50000
+ *     event: superseded
+ *     data: {"code":"SSE_SUPERSEDED"}
+ *
+ *     event: sse_connection_evicted
+ *     data: {"reason":"user_limit","retryAfterMs":50000}
+ *
+ * - `superseded` (novo): outra aba do mesmo usuário ocupou a vaga. O
+ *   frontend deve chamar `EventSource.close()` e NÃO reconectar sozinho
+ *   (só por ação do usuário, ex.: voltar a focar a aba). Depois do
+ *   `close()` o navegador não entrega o evento seguinte.
+ * - `sse_connection_evicted` (legado, `reason: "user_limit"`): para o
+ *   frontend que ainda não trata `superseded` — ele espera `retryAfterMs`
+ *   antes de reconectar; o `retry:` faz o EventSource nativo esperar também
+ *   (evita rodízio entre abas reconectando na hora).
  *
  * Falhas
  * ──────
@@ -57,10 +74,32 @@ const log = getLogger("sse");
 export const SSE_HEARTBEAT_MS = 25_000;
 /** Validade de uma entrada sem renovação. */
 export const SSE_CONNECTION_TTL_MS = SSE_HEARTBEAT_MS + 10_000;
-export const DEFAULT_SSE_MAX_PER_USER = 6;
+export const DEFAULT_SSE_MAX_PER_USER = 3;
 export const DEFAULT_SSE_MAX_PER_ORG = 200;
-/** Evento enviado à conexão encerrada para dar lugar a outra do mesmo usuário. */
+/**
+ * Evento legado enviado à conexão encerrada (teto por usuário e parada
+ * graciosa do servidor). Ver o contrato no topo.
+ */
 export const SSE_EVICTED_EVENT = "sse_connection_evicted";
+/** Evento novo da conexão substituída por outra do mesmo usuário. */
+export const SSE_SUPERSEDED_EVENT = "superseded";
+export const SSE_SUPERSEDED_CODE = "SSE_SUPERSEDED";
+/** `retry:` / `retryAfterMs` do aviso de substituição (cliente legado). */
+export const SSE_SUPERSEDED_RETRY_MS = SSE_HEARTBEAT_MS * 2;
+
+/**
+ * Bloco enviado à conexão mais antiga antes de fechá-la: `superseded`
+ * (novo) seguido de `sse_connection_evicted` (legado). Ver o topo.
+ */
+export function sseSupersededFrame(): string {
+  return (
+    `retry: ${SSE_SUPERSEDED_RETRY_MS}\n` +
+    `event: ${SSE_SUPERSEDED_EVENT}\n` +
+    `data: ${JSON.stringify({ code: SSE_SUPERSEDED_CODE })}\n\n` +
+    `event: ${SSE_EVICTED_EVENT}\n` +
+    `data: ${JSON.stringify({ reason: "user_limit", retryAfterMs: SSE_SUPERSEDED_RETRY_MS })}\n\n`
+  );
+}
 
 const EVICT_CHANNEL = "crm:sse:evict";
 const USER_KEY_PREFIX = "sse:conn:u:";
@@ -76,8 +115,15 @@ function readLimit(name: string, fallback: number): number {
   return Math.floor(n);
 }
 
-/** `SSE_MAX_PER_USER` (default 6; 0 desliga; inválido cai no default). */
+/**
+ * `SSE_MAX_CONNECTIONS_PER_USER` (default 3; 0 desliga; inválido cai no
+ * default). Sem ela vale o nome antigo `SSE_MAX_PER_USER`.
+ */
 export function getSseMaxPerUser(): number {
+  const current = process.env.SSE_MAX_CONNECTIONS_PER_USER?.trim();
+  if (current !== undefined && current !== "") {
+    return readLimit("SSE_MAX_CONNECTIONS_PER_USER", DEFAULT_SSE_MAX_PER_USER);
+  }
   return readLimit("SSE_MAX_PER_USER", DEFAULT_SSE_MAX_PER_USER);
 }
 
