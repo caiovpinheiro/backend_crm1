@@ -55,7 +55,7 @@ import { brHolidayName, isBrazilTimezone, nextBrBusinessDay } from "@/lib/br-hol
 import { isMutilated, onlyKeptSentences, trimDroppedTheAnswer, trimUnsupportedSentences } from "./reply-trim";
 import { MATERIAL_ATTACHMENT_LIMITS, attachmentsForDocs, attachmentsPromptSection } from "./material-attachments";
 import { humanRequestTerms } from "@/lib/ai-v2/config";
-import { actionsGuide, allowedActionTypes, allowedFlowIdsFor, allowedMessageModelIdsFor, queryToolRestriction, repairMessageModelId, themeToolRestriction } from "./action-policy";
+import { actionsGuide, allowedActionTypes, allowedFlowIdsFor, allowedMessageModelIdsFor, queryToolRestriction, repairMessageModelId, themeToolRestriction, writableFieldsForGuide } from "./action-policy";
 import { getLogger } from "@/lib/logger";
 
 const log = getLogger("ai-v2.llm");
@@ -1231,6 +1231,7 @@ function buildV2SystemPrompt(
     tags: config.actionOptions?.tags ?? [],
     stages: actionStages,
     lossReasons,
+    fields: writableFieldsForGuide(config),
   });
   if (actions) lines.push(actions);
 

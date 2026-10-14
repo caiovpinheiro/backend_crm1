@@ -141,6 +141,7 @@ Medição por conversa: `node dist/workers/audit-attendance.js --org <slug>`.
 
 ## Decisões técnicas
 
+- 2026-10-14 — Grok 4.7 — **Campo com Gravar a IA preenche**: em O que ele sabe, permissão `write` libera `update_field`. Coluna nativa (nome, e-mail, telefone, título, valor, etapa, dono, motivo) segue o update de sempre. Qualquer outra chave é campo personalizado da org (`name` ou id) e grava em `contact_custom_field_values` / `deal_custom_field_values`. Sem `write`, o campo continua só leitura. Vale para todo agente.
 - 2026-10-14 — Grok 4.7 — **Inatividade pode perder o negócio**: em Começo e fim, `inactivity.lostDeal` (desligado = só encerra a conversa). Ligado, depois da mensagem de encerramento move para a etapa `isLost` escolhida com o rótulo do `LossReason`, e avisa `stage_changed`. Sem etapa perdida ou motivo, não move.
 - 2026-10-14 — Grok 4.7 — **Move da IA dispara automação de etapa**: `executeMoveStage` chama `notifyDealStageChanged` (depth 0) quando a etapa muda. O gatilho `stage_changed` passa a valer para o move do agente v2, como no funil e no passo da automação. Mesma etapa não dispara.
 - 2026-10-14 — Grok 4.7 — **Motivo ao perder, opcional no agente**: em Começo e fim, `closure.lossReasons` (desligado = mover para Perdido não grava motivo). Ligado, o modelo devolve `move_stage.lostReason` com o texto de um `LossReason` da lista; `executeMoveStage` só grava se a etapa de destino é `isLost` e o texto casa com a lista. Fora da lista, a etapa muda e o motivo fica vazio.
