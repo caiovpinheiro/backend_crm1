@@ -189,7 +189,18 @@ async function executeMoveStage(action: V2Action, ctx: V2ActionContext): Promise
       const matched = matchLossReason(choices, raw);
       if (matched) lostReason = matched;
     }
+    const before = await prisma.deal.findUnique({
+      where: { id: ctx.dealId },
+      select: { stageId: true, contactId: true },
+    });
     await updateDeal(ctx.dealId, { stageId, ...(lostReason ? { lostReason } : {}) } as any);
+    if (before?.stageId !== stageId) {
+      const { notifyDealStageChanged } = await import("@/services/automation-triggers");
+      void notifyDealStageChanged(ctx.dealId, before?.stageId, stageId, {
+        contactId: ctx.contactId ?? before?.contactId,
+        depth: 0,
+      });
+    }
     return { action, ok: true, ...(lostReason ? { lostReason } : {}) };
   } catch (err) {
     return { action, ok: false, error: err instanceof Error ? err.message : String(err) };
