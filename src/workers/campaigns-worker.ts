@@ -1034,9 +1034,31 @@ async function persistCampaignOutboundMessage(input: {
   if (input.externalId) {
     const existing = await prisma.message.findFirst({
       where: { externalId: input.externalId },
-      select: { id: true },
+      select: {
+        id: true,
+        conversationId: true,
+        createdAt: true,
+        direction: true,
+        messageType: true,
+        isPrivate: true,
+      },
     });
-    if (existing) return existing.id;
+    if (existing) {
+      // Reenvio do mesmo wamid: a bolha já existe, mas o relógio do contato
+      // pode ter ficado na mensagem anterior. Template e campanha são saída.
+      if (existing.conversationId) {
+        await touchChatLastMessageAt({
+          conversationId: existing.conversationId,
+          message: existing,
+        }).catch((err) => {
+          log.warn(
+            { err, conversationId: existing.conversationId },
+            "[campaign-send] Falha ao gravar a última mensagem (não-fatal)",
+          );
+        });
+      }
+      return existing.id;
+    }
   }
 
   const ensured = await ensureWhatsAppConversationForContact(input.contactId, {
@@ -1100,7 +1122,12 @@ async function persistCampaignOutboundMessage(input: {
       },
     })
     .catch(() => {});
-  await touchChatLastMessageAt({ conversationId, message: saved }).catch(() => {});
+  await touchChatLastMessageAt({ conversationId, message: saved }).catch((err) => {
+    log.warn(
+      { err, conversationId },
+      "[campaign-send] Falha ao gravar a última mensagem (não-fatal)",
+    );
+  });
   await maybeResolveUnansweredOutboundTicket(conversationId).catch(() => {});
 
   // NÃO publicar SSE `new_message` em blast de campanha.

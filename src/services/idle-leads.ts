@@ -6,6 +6,9 @@
  * Sem mensagem: só entra quando a direção é "qualquer um", e o relógio
  * começa em `Deal.createdAt`. Cliente ou consultor/automação exigem
  * `contacts.lastMessageDirection` "in" ou "out".
+ *
+ * "out" é toda mensagem de chat que saiu do CRM para o cliente: consultor,
+ * automação, modelo (template) e campanha. Nota interna não entra.
  */
 
 import { Prisma } from "@prisma/client";
