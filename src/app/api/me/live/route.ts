@@ -9,6 +9,13 @@
  *   emailUnread    = `{ totalUnread, accounts: [{ id, email, unreadCount }] }`
  *                    (`null` sem permissão de e-mail)
  *   teamChatRooms  = resumo das salas (`null` sem `team_chat:view` / sem org)
+ *   usersPresence  = `{ [userId]: { systemOnline, lastSeenAt, agentStatus } }`
+ *                    — o que saiu de `GET /api/users` com
+ *                    `x-bootstrap-version: 2` (`null` sem org)
+ *   departmentCounts = `{ [departmentId]: { openConversations } }` — o
+ *                    `_count.conversations` que saiu de
+ *                    `GET /api/settings/departments` v2 (`null` fora de
+ *                    ADMIN/MANAGER; ausente = 0)
  *   failedBlocks   = campos que vieram `null` por erro
  *   blocks         = `{ [url]: <corpo idêntico ao de GET url> }` para
  *                    `/api/team-chat/rooms` (mesma consulta do resumo) e
@@ -16,9 +23,13 @@
  *   blockErrors    = URLs cujo bloco falhou
  *
  * `Cache-Control: no-store` — muda a todo momento; não há ETag. Custo: as
- * mesmas consultas que o bootstrap v1 fazia para esses campos (status do
- * agente, contas de e-mail com não lidos, salas do team-chat), nada além.
- * Contrato e regras por campo em `services/me-bootstrap.ts` (`buildMeLive`).
+ * consultas que o bootstrap v1 fazia para os 3 primeiros campos (status do
+ * agente, contas de e-mail com não lidos, salas do team-chat) + presença e
+ * contagens da org, estas em cache por org no Redis (presença 30 s e
+ * versionada por `rc_agent_status`; contagens versionadas por
+ * `inbox_tab_counts`) — em regime, 0 consultas para elas. Contrato e merge
+ * no frontend em `services/me-live.ts`; regras por campo em
+ * `services/me-bootstrap.ts` (`buildMeLive`).
  *
  * Permissão: sessão autenticada; cada campo aplica a checagem da rota que
  * espelha e vem `null` quando negado.

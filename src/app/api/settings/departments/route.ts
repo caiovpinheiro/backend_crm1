@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
+import { isBootstrapV2 } from "@/lib/bootstrap-version";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { z } from "zod";
@@ -39,11 +40,16 @@ export async function GET(request: Request) {
     }
     // Corpo por papel (MEMBER: só id/nome; ADMIN/MANAGER: com contagens) —
     // cache por org + papel, com ETag/304 (`services/startup-cache.ts`).
-    const spec = departmentsSpec(session.user);
+    // `x-bootstrap-version: 2`: ADMIN/MANAGER sem `_count.conversations`
+    // (vem de `GET /api/me/live`, `departmentCounts`).
+    const stable = isBootstrapV2(request);
+    const spec = departmentsSpec(session.user, { stable });
     if (spec) return respondWithCachedJson(request, spec, timing);
     const role = session.user.role;
     return NextResponse.json(
-      await loadDepartments(orgId, role === "ADMIN" || role === "MANAGER"),
+      await loadDepartments(orgId, role === "ADMIN" || role === "MANAGER", {
+        openCounts: !stable,
+      }),
     );
   });
 }

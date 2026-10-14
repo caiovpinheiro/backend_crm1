@@ -38,6 +38,7 @@
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
+import { isBootstrapV2 } from "@/lib/bootstrap-version";
 import { RESPONSE_CACHE_CONTROL, RESPONSE_CACHE_VARY } from "@/lib/cache/response-cache";
 import {
   TEAM_CHAT_ROOMS_URL,
@@ -68,23 +69,14 @@ const log = getLogger("api/me/bootstrap");
 
 export const dynamic = "force-dynamic";
 
-/** Header que pede o bootstrap v2 (só o estável). */
-const BOOTSTRAP_VERSION_HEADER = "x-bootstrap-version";
-
-/** A mesma URL tem dois corpos (v1/v2): o navegador separa pela versão. */
-const BOOTSTRAP_VARY = `${RESPONSE_CACHE_VARY}, X-Bootstrap-Version`;
-
 function headers(etag: string, timing: ServerTiming): Record<string, string> {
   return {
     ETag: etag,
     "Cache-Control": RESPONSE_CACHE_CONTROL,
-    Vary: BOOTSTRAP_VARY,
+    // Inclui `X-Bootstrap-Version`: a mesma URL tem dois corpos (v1/v2).
+    Vary: RESPONSE_CACHE_VARY,
     "Server-Timing": timing.header(),
   };
-}
-
-function wantsV2(request: Request): boolean {
-  return request.headers.get(BOOTSTRAP_VERSION_HEADER)?.trim() === "2";
 }
 
 /** ETag do v2: usuário + ETag do payload estável + ETag de cada bloco. */
@@ -106,7 +98,7 @@ async function respondV2(
   const t0 = performance.now();
   const [key, refs] = await Promise.all([
     meBootstrapCacheKey(user),
-    resolveBootstrapBlocks(user),
+    resolveBootstrapBlocks(user, { stable: true }),
   ]);
 
   // 304 só com versões e ETags guardados: nenhum corpo lido, nenhum Prisma.
@@ -156,7 +148,7 @@ export async function GET(request: Request) {
     // `auth` = JWT + versão da sessão + rate limit (antes do handler).
     timing.add("auth", timing.totalMs());
     try {
-      if (wantsV2(request)) return await respondV2(request, session.user, timing);
+      if (isBootstrapV2(request)) return await respondV2(request, session.user, timing);
 
       let fullRooms: unknown[] | null = null;
       const [payload, refs] = await Promise.all([

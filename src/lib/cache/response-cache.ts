@@ -66,8 +66,11 @@ export const RESPONSE_CACHE_CONTROL = "private, no-cache";
  * reaproveite a cópia de outra origem ou de outro usuário (cookie de sessão
  * ou token). Já inclui `Origin`: o `Vary` da rota substitui o que o
  * middleware de CORS pôs, e o middleware não duplica quando já tem `Origin`.
+ * `X-Bootstrap-Version`: com `2`, `/api/users`, `/api/settings/departments`
+ * e o bootstrap devolvem a variante estável (sem presença/contagens) —
+ * mesma URL, dois corpos (`lib/bootstrap-version.ts`).
  */
-export const RESPONSE_CACHE_VARY = "Origin, Cookie, Authorization";
+export const RESPONSE_CACHE_VARY = "Origin, Cookie, Authorization, X-Bootstrap-Version";
 
 const KEY_PREFIX = "resp:";
 const ETAG_SUFFIX = ":etag";

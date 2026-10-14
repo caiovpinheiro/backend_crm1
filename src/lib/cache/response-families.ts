@@ -24,7 +24,11 @@ const log = getLogger("cache/response");
  *   onboarding, motivos de perda que mexem no funil).
  * - `rc_custom_fields`: definições de campo personalizado.
  * - `rc_departments`: departamentos e membros.
- * - `rc_users`: usuários (criar/editar/apagar/papel/status de agente).
+ * - `rc_users`: usuários (criar/editar/apagar/papel). Status de agente NÃO
+ *   sobe mais esta família (14/10): tem a própria, `rc_agent_status`.
+ * - `rc_agent_status`: status de agente (Online/Ausente). Só a variante
+ *   legada de `/api/users` (com `agentStatus`) e a presença do
+ *   `/api/me/live` dependem dela; a variante estável (v2) não.
  * - `rc_field_layout`: layout de campos (admin e por usuário).
  * - `rc_loss_reasons`: motivos de perda.
  */
@@ -36,6 +40,7 @@ export const RESPONSE_FAMILIES = {
   customFields: "rc_custom_fields",
   departments: "rc_departments",
   users: "rc_users",
+  agentStatus: "rc_agent_status",
   fieldLayout: "rc_field_layout",
   lossReasons: "rc_loss_reasons",
   /** Já existia: muda quando um ticket troca de aba (status/departamento). */

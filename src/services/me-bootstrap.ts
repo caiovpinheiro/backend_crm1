@@ -69,6 +69,12 @@ import {
   computeEffectivePermissions,
   type EffectivePermissionsPayload,
 } from "@/services/effective-permissions";
+import {
+  loadDepartmentCounts,
+  loadUsersPresence,
+  type DepartmentCount,
+  type UserPresence,
+} from "@/services/me-live";
 import { getActiveWidgetSlugs } from "@/services/organization-widgets";
 import { getOrganizationSummary } from "@/services/organization-summary";
 import { listRooms } from "@/services/team-chat";
@@ -204,6 +210,16 @@ export type MeBootstrapStablePayload = Omit<
 /** Corpo de `GET /api/me/live` (sem `blocks`, que a rota acrescenta). */
 export type MeLivePayload = Pick<MeBootstrapPayload, (typeof ME_LIVE_FIELDS)[number]> & {
   version: 1;
+  /**
+   * Campos voláteis de `GET /api/users` (fora da variante estável), por
+   * usuário da org. `null` sem org. Formato e merge: `services/me-live.ts`.
+   */
+  usersPresence: Record<string, UserPresence> | null;
+  /**
+   * Conversas abertas por departamento (fora da variante estável de
+   * `GET /api/settings/departments`). `null` fora de ADMIN/MANAGER.
+   */
+  departmentCounts: Record<string, DepartmentCount> | null;
   /** Blocos voláteis que falharam (vieram `null` por erro). */
   failedBlocks: BootstrapBlockName[];
 };
@@ -233,7 +249,9 @@ export type BootstrapBlockName =
   | "agentStatus"
   | "emailUnread"
   | "teamChatRooms"
-  | "widgets";
+  | "widgets"
+  | "usersPresence"
+  | "departmentCounts";
 
 // ──────────────────────────────────────────────
 // Blocos
@@ -508,8 +526,18 @@ export async function buildMeLive(
   hooks: BuildMeBootstrapHooks = {},
 ): Promise<MeLivePayload> {
   const failed: BootstrapBlockName[] = [];
-  const live = await loadLiveParts(user, failed, hooks);
-  return { version: 1, ...live, failedBlocks: failed.sort() };
+  const [live, usersPresence, departmentCounts] = await Promise.all([
+    loadLiveParts(user, failed, hooks),
+    settle("usersPresence", failed, () => loadUsersPresence(user.organizationId)),
+    settle("departmentCounts", failed, () => loadDepartmentCounts(user)),
+  ]);
+  return {
+    version: 1,
+    ...live,
+    usersPresence,
+    departmentCounts,
+    failedBlocks: failed.sort(),
+  };
 }
 
 function bootstrapUser(user: MeBootstrapUser): MeBootstrapPayload["user"] {
