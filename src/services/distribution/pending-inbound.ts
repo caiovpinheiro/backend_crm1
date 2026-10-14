@@ -23,6 +23,7 @@ import { getLogger } from "@/lib/logger";
 
 import { executeDistribution } from "./engine";
 import { isDistributionEnabled } from "./enabled";
+import { ASSIGN_OWNER_VIA, getOrgDistributionModeFresh } from "./mode";
 import {
   ensureConversationInWaitingQueue,
   isDistributionAutoOnInbound,
@@ -201,6 +202,14 @@ export async function maybeDistributeNewInboundTicket(input: {
    */
   skipAiFirstAttendance?: boolean;
 }): Promise<void> {
+  // Modo da org é Por Leads: o inbound do motor inteligente não roda.
+  // Não reavalia fila, status nem expediente e não tira responsável.
+  // Quem atribui é o motor por leads (agente) ou o bloco "Atribuir
+  // responsável" — esse bloco não é "Executar distribuição".
+  if ((await getOrgDistributionModeFresh()) === "leads") {
+    return;
+  }
+
   // Toggle desligado: o inbound não entra. O widget instalado não basta —
   // a reavaliação de expediente zerava o responsável da automação
   // (caso real) antes do gate que ficava no fim desta função.
@@ -231,9 +240,10 @@ export async function maybeDistributeNewInboundTicket(input: {
   }
 
   // ── Guardas do modo leads (antes de qualquer reavaliação) ──
-  // 1) Atribuição feita pelo modo leads é protegida de reavaliação
-  //    automática: dono humano com assignedVia="leads" permanece, mesmo
-  //    offline / fora do expediente / com fila cheia.
+  // 1) Atribuição feita pelo modo leads, ou pelo bloco "Atribuir
+  //    responsável" (assignedVia="assign_owner"), não passa pelo motor
+  //    inteligente: o dono humano permanece, mesmo offline / fora do
+  //    expediente / com fila cheia.
   // 2) Conversa em departamento com distributionMode="leads" fica fora da
   //    distribuição automática smart — a distribuição é do bloco mode="leads".
   // Envolto em try/catch: coluna ausente (drift de migration) NUNCA
@@ -248,8 +258,9 @@ export async function maybeDistributeNewInboundTicket(input: {
         assignedTo: { select: { type: true } },
       },
     });
+    const assignedVia = (convRoute as { assignedVia?: string | null } | null)?.assignedVia;
     if (
-      (convRoute as { assignedVia?: string | null } | null)?.assignedVia === "leads" &&
+      (assignedVia === "leads" || assignedVia === ASSIGN_OWNER_VIA) &&
       input.assignedToId &&
       convRoute?.assignedTo?.type === "HUMAN"
     ) {
