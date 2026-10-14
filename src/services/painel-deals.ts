@@ -11,6 +11,7 @@ import { Prisma, type DealStatus } from "@prisma/client";
 import { analyticsClient, isReplicaConnectionError, tripReplica } from "@/lib/analytics";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { SOURCE_NONE } from "@/services/dashboard";
+import { funnelMessageSql, funnelMessageWhere } from "@/services/idle-leads";
 import {
   buildDealWhereFromFilters,
   type AdvancedDealFilters,
@@ -48,6 +49,10 @@ export type PainelDealFilters = {
   tagIds?: string[];
   ownerIds?: string[];
   sources?: string[];
+  /** Minutos sem mensagem de chat. Não é `stalledDays`. */
+  idleMinutes?: number;
+  /** "in" = cliente, "out" = consultor ou automação. Ausente = qualquer um. */
+  lastMessageDirection?: "in" | "out";
   stalledDays: number;
   section?: string;
   /** Campos personalizados de negócio para cards do painel. */
@@ -559,19 +564,27 @@ export async function getPainelFunnel(f: PainelDealFilters): Promise<PainelFunne
 
   const todayStart = parseDay(dayKeyFromDate(new Date()), false)!;
   const structural = await structuralWhere(f);
+  const messageWhere = funnelMessageWhere(f.idleMinutes, f.lastMessageDirection);
+  const messageFilter = funnelMessageSql(f.idleMinutes, f.lastMessageDirection);
   const lostStageIds = new Set(stages.filter((s) => s.isLost).map((s) => s.id));
   // Estoque da etapa Perdido: como a coluna do kanban, qualquer status (provisório
   // até o backfill de status/closedAt dos importados).
   const [stockRows, lostAgg] = await Promise.all([
     db().deal.groupBy({
       by: ["stageId", "ownerId"],
-      where: and(structural, { status: "OPEN" as DealStatus }),
+      where: messageWhere
+        ? and(structural, { AND: [{ status: "OPEN" as DealStatus }, messageWhere] })
+        : and(structural, { status: "OPEN" as DealStatus }),
       _count: { _all: true },
       _sum: { value: true },
     }),
     lostStageIds.size
       ? db().deal.aggregate({
-          where: and(structural, { stageId: { in: [...lostStageIds] } }),
+          where: messageWhere
+            ? and(structural, {
+                AND: [{ stageId: { in: [...lostStageIds] } }, messageWhere],
+              })
+            : and(structural, { stageId: { in: [...lostStageIds] } }),
           _count: { _all: true },
           _sum: { value: true },
         })
@@ -678,6 +691,7 @@ export async function getPainelFunnel(f: PainelDealFilters): Promise<PainelFunne
         ${stageFilter}
         ${tagFilter}
         ${sourceFilter}
+        ${messageFilter}
       ORDER BY x."dealId", x."stageId", x."enteredAt" ASC,
         (x."eventType" = 'CREATED') DESC
     `),
@@ -719,6 +733,7 @@ export async function getPainelFunnel(f: PainelDealFilters): Promise<PainelFunne
         ${exitStageFilter}
         ${tagFilter}
         ${sourceFilter}
+        ${messageFilter}
       ORDER BY x."dealId", x."fromStageId", x."exitedAt" ASC
     `),
   ]);
