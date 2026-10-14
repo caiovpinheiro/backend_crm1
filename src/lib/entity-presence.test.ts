@@ -102,9 +102,9 @@ describe("entity-presence com Redis (2 processos)", () => {
     const b = await newProcess();
     await a.touchViewer(user("u1"));
     await b.touchViewer(user("u2"));
-    vi.advanceTimersByTime(60_000);
+    vi.advanceTimersByTime(100_000);
     await b.touchViewer(user("u2")); // u2 segue vivo
-    vi.advanceTimersByTime(40_000); // u1: 100 s sem heartbeat
+    vi.advanceTimersByTime(60_000); // u1: 160 s sem batida (TTL 150 s)
     h.published.length = 0;
 
     // Leitura já filtra o vencido, antes de qualquer varredura.
@@ -125,9 +125,9 @@ describe("entity-presence com Redis (2 processos)", () => {
     const b = await newProcess();
     await a.touchViewer(user("u1"));
     await a.touchViewer(user("u2"));
-    vi.advanceTimersByTime(60_000);
+    vi.advanceTimersByTime(100_000);
     await a.touchViewer(user("u2"));
-    vi.advanceTimersByTime(35_000);
+    vi.advanceTimersByTime(55_000); // u1: 155 s sem batida (TTL 150 s)
     h.published.length = 0;
 
     await b.touchViewer(user("u1"));
@@ -158,31 +158,86 @@ function ROOM_USER(userId: string) {
   return { ...ROOM, userId };
 }
 
-describe("dedup de escrita por ciclo", () => {
-  it("PRESENCE_HEARTBEAT_DEDUP_MS: padrão 20 s, 0 desliga, limitado a 1–30 s", async () => {
+describe("TTL e batida em lote", () => {
+  it("TTL do viewer = 2,5 × PRESENCE_BEAT_INTERVAL_MS (150 s no padrão)", async () => {
     const a = await newProcess();
-    expect(a.entityPresenceDedupMs({})).toBe(20_000);
-    expect(a.entityPresenceDedupMs({ PRESENCE_HEARTBEAT_DEDUP_MS: "0" })).toBe(0);
-    expect(a.entityPresenceDedupMs({ PRESENCE_HEARTBEAT_DEDUP_MS: "10" })).toBe(1_000);
-    expect(a.entityPresenceDedupMs({ PRESENCE_HEARTBEAT_DEDUP_MS: "120000" })).toBe(30_000);
-    expect(a.entityPresenceDedupMs({ PRESENCE_HEARTBEAT_DEDUP_MS: "abc" })).toBe(20_000);
-    // Ciclo sempre bem abaixo do TTL do viewer.
-    expect(a.entityPresenceDedupMs({ PRESENCE_HEARTBEAT_DEDUP_MS: "120000" })).toBeLessThan(
-      a.ENTITY_PRESENCE_TTL_MS / 2,
-    );
+    expect(a.ENTITY_PRESENCE_TTL_MS).toBe(150_000);
+    const cfg = await import("@/lib/presence-beat-config");
+    expect(cfg.presenceViewerTtlMs({})).toBe(150_000);
+    expect(cfg.presenceViewerTtlMs({ PRESENCE_BEAT_INTERVAL_MS: "120000" })).toBe(300_000);
+    // Fora da faixa: limitado a 15–300 s.
+    expect(cfg.presenceViewerTtlMs({ PRESENCE_BEAT_INTERVAL_MS: "1000" })).toBe(37_500);
+    expect(cfg.presenceViewerTtlMs({ PRESENCE_BEAT_INTERVAL_MS: "abc" })).toBe(150_000);
+    // Limite por usuário nunca passa do intervalo.
+    expect(cfg.presenceBeatMinIntervalMs({})).toBe(30_000);
+    expect(
+      cfg.presenceBeatMinIntervalMs({
+        PRESENCE_BEAT_INTERVAL_MS: "20000",
+        PRESENCE_BEAT_MIN_INTERVAL_MS: "45000",
+      }),
+    ).toBe(20_000);
+    // "CRM aberto": max(300 s, 5 × intervalo).
+    expect(cfg.systemPresenceStaleMs({})).toBe(300_000);
+    expect(cfg.systemPresenceStaleMs({ PRESENCE_BEAT_INTERVAL_MS: "120000" })).toBe(600_000);
   });
 
-  it("claim entre réplicas: só o primeiro do ciclo escreve; release libera", async () => {
+  it("viewer vive 150 s sem batida: visível em 149,999 s, some em 150,001 s", async () => {
     const a = await newProcess();
-    const b = await newProcess();
-    const p = ROOM_USER("u1");
-    expect(await a.claimViewerWrite(p)).toBe(true);
-    expect(await b.claimViewerWrite(p)).toBe(false);
-    expect(await a.claimViewerWrite(ROOM_USER("u2"))).toBe(true);
-    await b.releaseViewerWrite(p);
-    expect(await a.claimViewerWrite(p)).toBe(true);
-    vi.advanceTimersByTime(20_000);
-    expect(await b.claimViewerWrite(p)).toBe(true);
+    await a.touchViewer(user("u1"));
+    vi.advanceTimersByTime(149_999);
+    expect(ids(await a.listViewers(ROOM))).toEqual(["u1"]);
+    vi.advanceTimersByTime(2);
+    expect(await a.listViewers(ROOM)).toEqual([]);
+  });
+
+  it("beatViewers: renova várias, remove as que saíram e grava a lista — um MULTI", async () => {
+    const a = await newProcess();
+    const d2 = { entityType: "deal", entityId: "d2" };
+    const d1 = { entityType: "deal", entityId: "d1" };
+    await a.touchViewer({ ...user("u1"), entityId: "d2" });
+    h.redis.calls.length = 0;
+    h.published.length = 0;
+    const out = await a.beatViewers({
+      orgId: "org1",
+      userId: "u1",
+      name: "Nome u1",
+      avatarUrl: null,
+      touch: [d1, { entityType: "conversation", entityId: "c1" }],
+      remove: [d2],
+      alsoSet: { key: "lista", value: "[]", ttlMs: 1_000 },
+    });
+    expect(h.redis.calls).toEqual(["MULTI 11"]);
+    expect(Object.keys(out)).toEqual(["deal:d1", "conversation:c1"]);
+    expect(ids(out["deal:d1"]!)).toEqual(["u1"]);
+    expect(fakeRedisRaw(h.redis, "presence:viewers:org1:deal:d2")).toBeNull();
+    expect(fakeRedisRaw(h.redis, "lista")).toBe("[]");
+    // Entrada em d1 e c1 + saída de d2 = 3 broadcasts.
+    expect(h.published.map((p) => p.entityId).sort()).toEqual(["c1", "d1", "d2"]);
+
+    // Renovação de quem já está: sem broadcast.
+    h.published.length = 0;
+    await a.beatViewers({
+      orgId: "org1",
+      userId: "u1",
+      name: "Nome u1",
+      avatarUrl: null,
+      touch: [d1],
+      remove: [],
+    });
+    expect(h.published).toEqual([]);
+  });
+
+  it("listViewersMany lê várias entidades num PIPELINE, sem escrever", async () => {
+    const a = await newProcess();
+    await a.touchViewer(user("u1"));
+    h.redis.calls.length = 0;
+    const out = await a.listViewersMany("org1", [
+      { entityType: "deal", entityId: "d1" },
+      { entityType: "deal", entityId: "d9" },
+    ]);
+    expect(h.redis.calls).toEqual(["PIPELINE 2"]);
+    expect(ids(out["deal:d1"]!)).toEqual(["u1"]);
+    expect(out["deal:d9"]).toEqual([]);
   });
 
   it("listViewers só lê (HGETALL) e filtra vencidos", async () => {

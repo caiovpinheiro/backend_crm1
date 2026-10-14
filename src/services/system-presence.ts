@@ -2,9 +2,11 @@
  * Serviço de PRESENÇA DE USO do CRM ("aba aberta").
  *
  * Independente de `AgentStatus` (disponibilidade manual da Distribuição).
- * O ping do cliente (`POST /api/agents/me/ping`) chama `recordHeartbeat`
- * a cada ~180s enquanto a aba estiver visível. Um sweeper fecha sessões
- * cujo último heartbeat expirou.
+ * A batida do cliente (`POST /api/presence/beat`, aba líder a cada 60 s;
+ * no frontend antigo `POST /api/agents/me/ping` ~90 s e o heartbeat de
+ * entidade) chama `recordHeartbeatThrottled` quando passa pelo limite de 1
+ * batida por usuário a cada 30 s. Um sweeper fecha sessões cujo último
+ * heartbeat expirou.
  *
  * Modelo:
  *   - Uma linha em `system_usage_sessions` por sessão. Enquanto
@@ -25,15 +27,18 @@ import { prismaBase } from "@/lib/prisma-base";
 import { publishSystemPresenceUpdate } from "@/lib/realtime-events";
 import { getLogger } from "@/lib/logger";
 import { scheduleBackgroundTimeout, scheduleBackgroundInterval } from "@/lib/background-timers";
+import { presenceBeatIntervalMs, systemPresenceStaleMs } from "@/lib/presence-beat-config";
 
 const log = getLogger("system-presence");
 
 /**
- * Cadência do heartbeat (client) — 180s, pausado com aba oculta.
- * O `STALE_MS` precisa ser MAIOR pra tolerar jitter/aba em background.
+ * Cadência recomendada da batida (`PRESENCE_BEAT_INTERVAL_MS`, 60 s).
+ * `STALE_MS` = max(300 s, 5 × cadência): tolera batidas perdidas, aba líder
+ * em segundo plano (timers estrangulados) e o limite de 1 gravação a cada
+ * 45 s abaixo — com 60 s, offline só depois de 5 batidas sem gravação.
  */
-export const SYSTEM_PRESENCE_HEARTBEAT_MS = 180_000;
-export const SYSTEM_PRESENCE_STALE_MS = 300_000;
+export const SYSTEM_PRESENCE_HEARTBEAT_MS = presenceBeatIntervalMs();
+export const SYSTEM_PRESENCE_STALE_MS = systemPresenceStaleMs();
 
 const SWEEP_INTERVAL_MS = 60_000;
 
@@ -109,9 +114,10 @@ export async function recordHeartbeat(params: {
 /**
  * Intervalo mínimo entre GRAVAÇÕES de heartbeat do mesmo usuário.
  *
- * O ping chega a cada ~90 s por aba, mais um imediato a cada foco/volta de
- * visibilidade; com várias abas eram dezenas de UPDATE por minuto em
- * `system_usage_sessions` só para empurrar `lastHeartbeatAt` alguns segundos.
+ * A batida já passa por um limite de 1 por usuário a cada 30 s
+ * (`claimPresenceBeat`); este claim de 45 s é a segunda trava, no banco:
+ * com várias abas/navegadores e rotas antigas eram dezenas de UPDATE por
+ * minuto em `system_usage_sessions` só para empurrar `lastHeartbeatAt`.
  *
  * 45 s é seguro porque o usuário só é dado como offline (sweeper e
  * `getSystemPresenceMap`) depois de `SYSTEM_PRESENCE_STALE_MS` = 300 s sem
