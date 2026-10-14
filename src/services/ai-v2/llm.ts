@@ -1054,7 +1054,7 @@ function buildV2SystemPrompt(
   prefetchedChunks: PrefetchedChunk[] = [],
   messageModels: V2MessageModelSummary[] = [],
   mediaNote = "",
-  actionStages: Array<{ id: string; name: string }> = [],
+  actionStages: Array<{ id: string; name: string; lost?: boolean }> = [],
   nothingRelevant = false,
   attachmentsSection = "",
   humanRequestWithQuestion = false,
@@ -1063,6 +1063,7 @@ function buildV2SystemPrompt(
   transparentTransfer = false,
   /** Mensagem do cliente: liga um aviso temporário pelos gatilhos dele. */
   userMessageForNotices = "",
+  lossReasons: string[] = [],
 ): string {
   const timezone = config.businessHours?.timezone || "America/Sao_Paulo";
   const lines: string[] = [];
@@ -1229,6 +1230,7 @@ function buildV2SystemPrompt(
   const actions = actionsGuide(allowedActionTypes(config, activeTheme(config, themeId)), {
     tags: config.actionOptions?.tags ?? [],
     stages: actionStages,
+    lossReasons,
   });
   if (actions) lines.push(actions);
 
@@ -1266,17 +1268,21 @@ function buildV2SystemPrompt(
 }
 
 /** Nome das etapas liberadas para "mover etapa" (funil › etapa). */
-async function actionStageNames(config: V2AgentConfig, theme: ReturnType<typeof activeTheme>): Promise<Array<{ id: string; name: string }>> {
+async function actionStageNames(config: V2AgentConfig, theme: ReturnType<typeof activeTheme>): Promise<Array<{ id: string; name: string; lost?: boolean }>> {
   const ids = config.actionOptions?.stageIds ?? [];
   if (ids.length === 0 || !allowedActionTypes(config, theme).has("move_stage")) return [];
   try {
     // Import tardio: o prompt não precisa do banco quando não há etapas.
     const { prisma } = await import("@/lib/prisma");
-    const rows: Array<{ id: string; name: string; pipeline?: { name: string } | null }> = await (prisma as any).stage.findMany({
+    const rows: Array<{ id: string; name: string; isLost?: boolean; pipeline?: { name: string } | null }> = await (prisma as any).stage.findMany({
       where: { id: { in: ids } },
-      select: { id: true, name: true, pipeline: { select: { name: true } } },
+      select: { id: true, name: true, isLost: true, pipeline: { select: { name: true } } },
     });
-    return rows.map((r) => ({ id: r.id, name: r.pipeline?.name ? `${r.pipeline.name} › ${r.name}` : r.name }));
+    return rows.map((r) => ({
+      id: r.id,
+      name: r.pipeline?.name ? `${r.pipeline.name} › ${r.name}` : r.name,
+      ...(r.isLost ? { lost: true } : {}),
+    }));
   } catch (err) {
     log.warn(
       { err: err instanceof Error ? err.message : err },
@@ -1331,7 +1337,7 @@ export async function callV2LLM(args: {
   // materiais continua com a chave OpenAI), títulos dos materiais, mensagens
   // prontas e etapas: leituras independentes, em paralelo — em série cada
   // uma somava sua ida ao banco à espera do cliente.
-  const [chatKey, docTitleMap, messageModels, actionStages, flows] = await Promise.all([
+  const [chatKey, docTitleMap, messageModels, actionStages, flows, lossReasonLabels] = await Promise.all([
     getAgentChatKey(args.agentId, args.config.model, apiKey),
     // Títulos dos materiais permitidos: ajudam o modelo a decidir quando
     // chamar knowledge_search e a contextualizar a resposta.
@@ -1360,6 +1366,15 @@ export async function callV2LLM(args: {
       );
       return [] as Array<{ id: string; name: string }>;
     }),
+    import("./loss-reason")
+      .then(({ configuredLossReasons }) => configuredLossReasons(args.config).then((rows) => rows.map((r) => r.label)))
+      .catch((err) => {
+        log.warn(
+          { err: err instanceof Error ? err.message : err },
+          "[ai-v2] Erro ao carregar motivos de perda",
+        );
+        return [] as string[];
+      }),
   ]);
   const knowledgeDocTitles = promptDocIds.map((id) => docTitleMap.get(id)).filter((t): t is string => Boolean(t));
   // Texto das mensagens prontas só no modo "combinar" e só das 3 mais ligadas à
@@ -1444,6 +1459,7 @@ export async function callV2LLM(args: {
     args.priorSummary ?? null,
     args.transparentTransfer === true,
     userMessage,
+    lossReasonLabels,
   );
 
   const messages: Array<{ role: "user" | "assistant"; content: string }> = [

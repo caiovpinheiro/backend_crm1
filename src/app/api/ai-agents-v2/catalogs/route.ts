@@ -35,6 +35,7 @@ export async function GET() {
       tabulationRows,
       roleRows,
       memberRows,
+      lossReasonRows,
     ] = await Promise.all([
       p.department.findMany({ where: { organizationId }, select: { id: true, name: true } }),
       p.distributionRule.findMany({ where: { organizationId }, select: { id: true, name: true } }),
@@ -125,6 +126,13 @@ export async function GET() {
           select: { departmentId: true, userId: true },
         }) ?? [],
       ).catch(() => []),
+      Promise.resolve(
+        p.lossReason?.findMany?.({
+          where: { organizationId, isActive: true },
+          select: { id: true, label: true },
+          orderBy: { position: "asc" },
+        }) ?? [],
+      ).catch(() => []),
     ]);
 
     const tabulations = (tabulationRows as Array<{ id: string; path: string; departmentName: string }>).map((t) => ({
@@ -179,6 +187,10 @@ export async function GET() {
       })),
       roles: roleRows ?? [],
       departmentMembers: memberRows ?? [],
+      lossReasons: (lossReasonRows ?? []).map((r: { id: string; label: string }) => ({
+        id: r.id,
+        name: r.label,
+      })),
     });
   } catch (err) {
     log.error({ err }, "[GET /api/ai-agents-v2/catalogs] falhou");

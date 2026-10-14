@@ -120,7 +120,7 @@ export function actionValueAllowed(config: V2AgentConfig, action: V2Action): boo
  * via os nomes, e só quando o assunto restringia: não sabia que campos
  * mandar, e etiqueta e etapa saíam inventadas.
  */
-export function actionsGuide(allowed: Set<string>, options: { tags: string[]; stages: Array<{ id: string; name: string }> }): string {
+export function actionsGuide(allowed: Set<string>, options: { tags: string[]; stages: Array<{ id: string; name: string; lost?: boolean }>; lossReasons?: string[] }): string {
   const lines: string[] = [];
   if (allowed.has("ask_with_options")) {
     lines.push('- Perguntar com botões: {"type":"ask_with_options","options":["Opção 1","Opção 2"]}. A pergunta vai na reply; de 2 a 3 opções curtas. Use quando o cliente precisa escolher entre caminhos definidos.');
@@ -133,7 +133,12 @@ export function actionsGuide(allowed: Set<string>, options: { tags: string[]; st
     );
   }
   if (allowed.has("move_stage") && options.stages.length > 0) {
-    lines.push(`- Mover o negócio de etapa: {"type":"move_stage","stageId":"<id>"}. Etapas: ${options.stages.map((s) => `${s.id} (${s.name})`).join("; ")}. Só quando as instruções pedirem.`);
+    const reasons = (options.lossReasons ?? []).map((r) => r.trim()).filter(Boolean);
+    const reasonField = reasons.length > 0 ? `,"lostReason":"<motivo>"` : "";
+    const reasonNote = reasons.length > 0
+      ? ` Se a etapa estiver marcada como perdido, inclua lostReason com o texto exato de um destes motivos: ${reasons.join("; ")}. Qualquer outro texto não é gravado.`
+      : "";
+    lines.push(`- Mover o negócio de etapa: {"type":"move_stage","stageId":"<id>"${reasonField}}. Etapas: ${options.stages.map((s) => `${s.id} (${s.name})${s.lost ? " [perdido]" : ""}`).join("; ")}. Só quando as instruções pedirem.${reasonNote}`);
   }
   if (allowed.has("create_activity")) {
     lines.push('- Criar tarefa para a equipe: {"type":"create_activity","activityType":"TASK","content":"o que precisa ser feito e por quê"}. Use quando algo depende da equipe e não precisa transferir agora.');
