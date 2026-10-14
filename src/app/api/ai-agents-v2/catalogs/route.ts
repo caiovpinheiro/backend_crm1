@@ -35,6 +35,7 @@ export async function GET() {
       tabulationRows,
       roleRows,
       memberRows,
+      roleAssignmentRows,
       lossReasonRows,
     ] = await Promise.all([
       p.department.findMany({ where: { organizationId }, select: { id: true, name: true } }),
@@ -126,6 +127,14 @@ export async function GET() {
           select: { departmentId: true, userId: true },
         }) ?? [],
       ).catch(() => []),
+      // Cargo de verdade (user_role_assignments). User.role=MEMBER não basta:
+      // quase todo mundo fica MEMBER e o papel exibido é a atribuição.
+      Promise.resolve(
+        p.userRoleAssignment?.findMany?.({
+          where: { organizationId },
+          select: { userId: true, roleId: true },
+        }) ?? [],
+      ).catch(() => []),
       Promise.resolve(
         p.lossReason?.findMany?.({
           where: { organizationId, isActive: true },
@@ -187,6 +196,7 @@ export async function GET() {
       })),
       roles: roleRows ?? [],
       departmentMembers: memberRows ?? [],
+      roleAssignments: roleAssignmentRows ?? [],
       lossReasons: (lossReasonRows ?? []).map((r: { id: string; label: string }) => ({
         id: r.id,
         name: r.label,

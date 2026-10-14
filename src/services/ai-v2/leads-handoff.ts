@@ -65,17 +65,19 @@ export function canReceiveLeadNow(
 }
 
 /**
- * Pessoas do departamento que passam no papel, na lista (se houver) e
- * estão online no expediente. Quem não está no rodízio por leads (peso 0
- * ou inativo) é descartado depois, no sorteio.
+ * Quem pode entrar no sorteio deste repasse: o cargo escolhido (atribuição
+ * do papel, na org inteira — não só quem está em department_members), as
+ * pessoas marcadas e, no departamento, quem casa com o preset do papel.
+ * Online e dentro do expediente. Peso zero ou inativo sai depois, no sorteio.
  */
 export async function eligibleUserIdsForScope(scope: LeadsRoutingScope, now: Date = new Date()): Promise<string[]> {
   const members = await prisma.departmentMember.findMany({
     where: { departmentId: scope.departmentId },
     select: { userId: true },
   });
-  let ids = [...new Set(members.map((m) => m.userId))];
-  if (scope.roleIds.length > 0 && ids.length > 0) {
+  const memberIds = [...new Set(members.map((m) => m.userId))];
+  let ids = memberIds;
+  if (scope.roleIds.length > 0) {
     const roles = await prisma.role.findMany({
       where: { id: { in: scope.roleIds } },
       select: { systemPreset: true },
@@ -83,20 +85,19 @@ export async function eligibleUserIdsForScope(scope: LeadsRoutingScope, now: Dat
     const presets = roles
       .map((r) => r.systemPreset)
       .filter((p): p is "ADMIN" | "MANAGER" | "MEMBER" => p === "ADMIN" || p === "MANAGER" || p === "MEMBER");
-    const [assigned, byPreset] = await Promise.all([
-      prisma.userRoleAssignment.findMany({
-        where: { roleId: { in: scope.roleIds }, userId: { in: ids } },
-        select: { userId: true },
-      }),
-      presets.length > 0
-        ? prisma.user.findMany({
-            where: { id: { in: ids }, role: { in: presets } },
-            select: { id: true },
-          })
-        : Promise.resolve([] as Array<{ id: string }>),
-    ]);
-    const allowed = new Set([...assigned.map((a) => a.userId), ...byPreset.map((u) => u.id)]);
-    ids = ids.filter((id) => allowed.has(id));
+    const assigned = await prisma.userRoleAssignment.findMany({
+      where: { roleId: { in: scope.roleIds } },
+      select: { userId: true },
+    });
+    const byRole = new Set(assigned.map((a) => a.userId));
+    if (presets.length > 0 && memberIds.length > 0) {
+      const byPreset = await prisma.user.findMany({
+        where: { id: { in: memberIds }, role: { in: presets } },
+        select: { id: true },
+      });
+      for (const u of byPreset) byRole.add(u.id);
+    }
+    ids = [...byRole];
   }
   if (scope.userIds.length > 0) {
     const picked = new Set(scope.userIds);
