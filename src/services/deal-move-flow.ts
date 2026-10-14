@@ -153,11 +153,16 @@ export async function moveDealForUser(args: {
     // pra manter paridade com PUT /status.
     const fromStatus = existing.status;
     const newStatus = (deal as { status?: string }).status;
+    const appliedLostReason =
+      (typeof lostReason === "string" ? lostReason.trim() : "") ||
+      (typeof (deal as { lostReason?: string | null }).lostReason === "string"
+        ? (deal as { lostReason?: string | null }).lostReason!.trim()
+        : "");
     if (newStatus && newStatus !== fromStatus) {
       createDealEvent(dealId, uid, "STATUS_CHANGED", {
         from: fromStatus,
         to: newStatus,
-        ...(newStatus === "LOST" && lostReason ? { lostReason } : {}),
+        ...(newStatus === "LOST" && appliedLostReason ? { lostReason: appliedLostReason } : {}),
       }).catch(() => {});
       if (newStatus === "WON") {
         fireTrigger("deal_won", {
@@ -169,7 +174,7 @@ export async function moveDealForUser(args: {
         fireTrigger("deal_lost", {
           dealId,
           contactId: existing.contactId ?? undefined,
-          data: { fromStatus, lostReason },
+          data: { fromStatus, lostReason: appliedLostReason || undefined },
         }).catch(() => {});
       }
     }

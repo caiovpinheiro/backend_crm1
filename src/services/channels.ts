@@ -87,6 +87,43 @@ export async function getChannels(): Promise<ChannelWithOrgSlug[]> {
   return channels.map(attachOrgSlug);
 }
 
+/** Canal de WhatsApp para o seletor da integração (n8n). Sem config, sessão ou QR. */
+export type WhatsAppChannelOption = {
+  id: string;
+  name: string;
+  phoneNumber: string | null;
+  provider: ChannelProvider;
+  status: ChannelStatus;
+};
+
+const WHATSAPP_STATUS_RANK: Record<string, number> = {
+  CONNECTED: 0,
+  CONNECTING: 1,
+  QR_READY: 2,
+  DISCONNECTED: 3,
+  FAILED: 4,
+};
+
+export async function listWhatsAppChannels(): Promise<WhatsAppChannelOption[]> {
+  const rows = await prisma.channel.findMany({
+    where: { type: "WHATSAPP" },
+    select: {
+      id: true,
+      name: true,
+      phoneNumber: true,
+      provider: true,
+      status: true,
+    },
+  });
+  rows.sort((a, b) => {
+    const byStatus =
+      (WHATSAPP_STATUS_RANK[a.status] ?? 9) - (WHATSAPP_STATUS_RANK[b.status] ?? 9);
+    if (byStatus !== 0) return byStatus;
+    return a.name.localeCompare(b.name, "pt");
+  });
+  return rows;
+}
+
 /** Prefixo de id sintético: conversas cujo Channel foi hard-deleted (channelId SetNull). */
 export const INBOX_FILTER_MISSING_PREFIX = "__missing__:";
 /** Conversas sem channelId e sem inboxName (canal excluído sem nome gravado). */

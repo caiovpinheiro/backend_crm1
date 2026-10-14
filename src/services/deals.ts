@@ -2572,7 +2572,7 @@ export async function moveDeal(
 
           const deal = await tx.deal.findUnique({
             where: { id: dealId },
-            select: { id: true, stageId: true, position: true, status: true },
+            select: { id: true, stageId: true, position: true, status: true, lostReason: true },
           });
           if (!deal) throw new Error("NOT_FOUND");
 
@@ -2596,13 +2596,28 @@ export async function moveDeal(
           // posições continua funcionando (origem decrementa, destino incrementa
           // — ambos escopados por stageId, então não há colisão entre funis).
 
+          // Motivo novo da requisição, senão o que o negócio já tem.
+          // Mover para Perdido sem repetir o motivo não pode falhar
+          // (nem apagar o texto) quando `Deal.lostReason` já está preenchido.
+          const requestedLostReason = options?.lostReason?.trim() || "";
+          const storedLostReason =
+            typeof deal.lostReason === "string" ? deal.lostReason.trim() : "";
+          const effectiveLostReason = targetStage.isLost
+            ? requestedLostReason || storedLostReason
+            : requestedLostReason;
+
           if (targetStage.isLost) {
             const pipe = await tx.pipeline.findUnique({
               where: { id: targetStage.pipelineId },
               select: { lossReasonRequired: true },
             });
-            if (pipe?.lossReasonRequired && !options?.lostReason?.trim()) {
+            if (pipe?.lossReasonRequired && !effectiveLostReason) {
               throw new Error("LOST_REASON_REQUIRED");
+            }
+            // Motivo novo já foi validado antes da transação. O que já
+            // estava no card passa pelo catálogo do funil de destino.
+            if (effectiveLostReason && !requestedLostReason) {
+              await assertLostReasonAllowed(effectiveLostReason, targetStage.pipelineId);
             }
           }
 
@@ -2610,7 +2625,7 @@ export async function moveDeal(
           const statusPatch = buildStatusSyncPatch(
             deal.status,
             targetStage,
-            options?.lostReason,
+            targetStage.isLost ? effectiveLostReason || undefined : options?.lostReason,
           );
           becameWon = deal.status !== "WON" && targetStage.isWon;
           becameLost = deal.status !== "LOST" && targetStage.isLost;

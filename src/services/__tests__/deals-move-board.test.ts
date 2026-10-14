@@ -172,14 +172,25 @@ function stageLookup(args: { where: { id: string } }) {
 }
 
 /** Deal em `stageId` com status informado (default OPEN). */
-function seedDeal(stageId: string, status: "OPEN" | "WON" | "LOST" = "OPEN") {
+function seedDeal(
+  stageId: string,
+  status: "OPEN" | "WON" | "LOST" = "OPEN",
+  extras?: { lostReason?: string | null },
+) {
+  const lostReason = extras?.lostReason ?? null;
   const peek = { id: "deal-1", stage: { pipelineId: STAGES[stageId]!.pipelineId } };
   h.prisma.deal.findUnique.mockImplementation(async (args: { select?: unknown }) =>
     args.select && (args.select as { customFields?: unknown }).customFields
       ? { stageId, customFields: [] }
-      : { ...peek, stageId, position: 0, status },
+      : { ...peek, stageId, position: 0, status, lostReason },
   );
-  h.tx.deal.findUnique.mockResolvedValue({ id: "deal-1", stageId, position: 0, status });
+  h.tx.deal.findUnique.mockResolvedValue({
+    id: "deal-1",
+    stageId,
+    position: 0,
+    status,
+    lostReason,
+  });
 }
 
 /**
@@ -411,6 +422,16 @@ describe("moveDeal", () => {
     await withOrg(ORG, () => moveDeal("deal-1", "stage-lost", 0, { lostReason: "Sem interesse" }));
     const data = h.tx.deal.update.mock.calls[0]![0].data as Record<string, unknown>;
     expect(data).toMatchObject({ status: "LOST", lostReason: "Sem interesse" });
+    expect(data.closedAt).toBeInstanceOf(Date);
+  });
+
+  it("aceita o motivo já gravado no negócio ao mover para Perdido", async () => {
+    seedDeal("stage-a", "OPEN", { lostReason: "Preço" });
+    h.tx.pipeline.findUnique.mockResolvedValue({ lossReasonRequired: true });
+
+    await withOrg(ORG, () => moveDeal("deal-1", "stage-lost", 0));
+    const data = h.tx.deal.update.mock.calls[0]![0].data as Record<string, unknown>;
+    expect(data).toMatchObject({ status: "LOST", lostReason: "Preço" });
     expect(data.closedAt).toBeInstanceOf(Date);
   });
 
