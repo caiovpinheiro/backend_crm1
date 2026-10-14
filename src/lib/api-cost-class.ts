@@ -84,6 +84,7 @@ export const API_COST_RULES: readonly Rule[] = [
   { methods: WRITE, pattern: p("/api/agents/me/activity"), cls: "essential", note: "renova a sessão por inatividade" },
 
   // ── (d) acessórias ────────────────────────────────────────────────────
+  { methods: "*", pattern: p("/api/presence/beat"), cls: "accessory", note: "batida única: presença de uso + quem está vendo" },
   { methods: "*", pattern: p("/api/presence/heartbeat"), cls: "accessory", note: "quem está vendo" },
   { methods: "*", pattern: p("/api/agents/me/ping"), cls: "accessory", note: "presença de uso" },
   { methods: "*", pattern: p("/api/conversations/:id/typing"), cls: "accessory", note: "digitando…" },

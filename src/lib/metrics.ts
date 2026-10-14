@@ -228,6 +228,16 @@ function buildMetrics(registry: Registry): AppMetrics {
     registers: [registry],
   });
 
+  // Presença: batida aceita (escreveu) vs descartada pelo limite de 1 por
+  // usuário a cada PRESENCE_BEAT_MIN_INTERVAL_MS, por rota (`beat` nova;
+  // `ping` e `heartbeat` antigas, que dividem o mesmo limite).
+  const presenceBeats = new Counter({
+    name: "crm_presence_beats_total",
+    help: "Batidas de presença por rota (beat|ping|heartbeat) e resultado (written|deduped).",
+    labelNames: ["route", "result"] as const,
+    registers: [registry],
+  });
+
   const activityOutboxProcessed = new Counter({
     name: "crm_activity_outbox_processed_total",
     help: "Itens da activity_outbox projetados, em retry ou dead letter.",
@@ -275,6 +285,7 @@ function buildMetrics(registry: Registry): AppMetrics {
       eventLoopDelay,
       overloadLevel,
     },
+    presenceBeats,
     activityOutbox: {
       processed: activityOutboxProcessed,
       depth: activityOutboxDepth,
@@ -324,6 +335,7 @@ export type AppMetrics = {
     eventLoopDelay: Gauge<"quantile">;
     overloadLevel: Gauge;
   };
+  presenceBeats: Counter<"route" | "result">;
   activityOutbox: {
     processed: Counter<"organization" | "status">;
     depth: Gauge<"organization">;
@@ -482,6 +494,22 @@ export function recordConditionalResponse(path: string, status: number): void {
       route: templatizeRoute(path),
       status: String(status || 0),
     });
+  } catch {
+    // métricas nunca devem quebrar o request
+  }
+}
+
+export type PresenceBeatRoute = "beat" | "ping" | "heartbeat";
+export type PresenceBeatResult = "written" | "deduped";
+
+/**
+ * Conta uma batida de presença: `crm_presence_beats_total{route, result}`.
+ * Escritas por minuto na org: `sum(rate(crm_presence_beats_total{result="written"}[5m])) * 60`.
+ * Nunca lança.
+ */
+export function recordPresenceBeat(route: PresenceBeatRoute, result: PresenceBeatResult): void {
+  try {
+    metrics.presenceBeats.inc({ route, result });
   } catch {
     // métricas nunca devem quebrar o request
   }
