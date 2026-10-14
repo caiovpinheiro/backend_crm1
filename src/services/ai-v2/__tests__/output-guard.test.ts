@@ -57,6 +57,13 @@ describe("guardV2Output — scrub de campos só 'Ler'", () => {
     expect(guardV2Output("Sua senha de acesso é *Ana@123678*.", [], ctx).text).toContain("Ana@123678");
     expect(guardV2Output("Sua senha é Xyz@987654.", [], ctx).text).not.toContain("Xyz@987654");
   });
+
+  it("senha que não pode sair leva a frase inteira; o marcador nunca chega ao cliente", () => {
+    const ctx = { contact: {}, citableContact: {}, selectedDeal: null, citableDeal: null };
+    const out = guardV2Output("O link de acesso expirou e precisa ser gerado de novo. Enquanto isso, sua senha provisória é Xyz@987654", [], ctx).text;
+    expect(out).toBe("O link de acesso expirou e precisa ser gerado de novo.");
+    expect(out).not.toContain("removid");
+  });
 });
 
 describe("campo só-leitura — informação pública e marcador nunca visível", () => {

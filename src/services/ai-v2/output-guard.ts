@@ -3,7 +3,7 @@
  * Nenhum domínio de cliente.
  */
 
-import { maskOutgoing } from "./sensitive";
+import { CARD_REMOVED, maskOutgoing, SECRET_REMOVED } from "./sensitive";
 
 // O endereço inteiro, com ?parâmetros; a pontuação final da frase fica fora
 // (splitUrl). Antes o "?" cortava o link e sobrava "?id=…" no texto.
@@ -176,6 +176,36 @@ export function scrubNonCitableFields(
   return { text: scrubbedFields.length > 0 ? tidyScrubMarkers(result) : result, scrubbedFields };
 }
 
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/** "sua senha provisória é [senha removida]" — do nome do segredo até o marcador. */
+const SECRET_SPAN = new RegExp(
+  `(?:\\b(?:sua|seu|a|o)\\s+)?\\b(?:senha|password|pass|pin|c[oó]digo)\\b[^.!?\\n]*?${escapeRe(SECRET_REMOVED)}[.,;:]?`,
+  "gi",
+);
+
+/**
+ * O marcador de senha/cartão removido nunca chega ao cliente ("sua senha é
+ * [senha removida]"). Sai o trecho do segredo; se o que sobra da frase não
+ * fica de pé ("Enquanto isso,"), sai a frase inteira. Cartão: frase inteira.
+ */
+export function withoutMarkerSentences(text: string): string {
+  if (!text.includes(SECRET_REMOVED) && !text.includes(CARD_REMOVED)) return text;
+  const fixSentence = (s: string): string => {
+    if (s.includes(CARD_REMOVED)) return "";
+    if (!s.includes(SECRET_REMOVED)) return s;
+    const rest = s.replace(SECRET_SPAN, " ").replace(/\s{2,}/g, " ").trim().replace(/[\s,;:—–-]+$/, "");
+    if (!rest || rest.includes(SECRET_REMOVED)) return "";
+    if (rest.split(/\s+/).length < 3 && !/[@\d]|https?:/.test(rest)) return "";
+    return /[.!?]$/.test(rest) ? rest : `${rest}.`;
+  };
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.split(/(?<=[.!?])\s+/).map(fixSentence).filter(Boolean).join(" "))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 export function guardV2Output(
   text: string,
   allowedDomains: string[],
@@ -207,7 +237,9 @@ export function guardV2Output(
   );
   const sensitive = maskOutgoing(replyText, citable);
   if (sensitive.kinds.length > 0) {
-    replyText = sensitive.text;
+    // A frase que trazia a senha/cartão sai inteira: "sua senha é [senha
+    // removida]" chegava ao cliente com o marcador interno.
+    replyText = withoutMarkerSentences(sensitive.text);
     warnings.push(`Dado sensível removido/mascarado da resposta: ${sensitive.kinds.join(", ")}.`);
   }
   const urlResult = removeUnauthorizedUrls(replyText, allowedDomains, (ctx?.ownerTexts ?? []).flatMap(extractUrls));
