@@ -18,6 +18,7 @@ import {
 import { chatMessageSqlFilter } from "@/lib/conversation-last-message";
 import { prisma } from "@/lib/prisma";
 import { getRequestContext } from "@/lib/request-context";
+import { idleDealWhere, parseIdleMinutes } from "@/services/idle-leads";
 import type { ServerTiming } from "@/lib/server-timing";
 
 /**
@@ -911,6 +912,11 @@ export type AdvancedDealFilters = {
   conversationStatus?: "open" | "closed";
   windowState?: "open" | "closed";
   lastMessageDirection?: "in" | "out";
+  /**
+   * Minutos sem mensagem de chat (`contacts.lastMessageAt`).
+   * Não é `stalledDays` (`Deal.updatedAt`).
+   */
+  idleMinutes?: number;
 
   /** Exceções do Painel → lista filtrada do pipeline. */
   exception?: "no_task" | "stalled" | "overdue" | "empty_value";
@@ -1373,13 +1379,18 @@ export async function buildDealWhereFromFilters(
     });
   }
 
+  if (filters.idleMinutes) {
+    conditions.push(idleDealWhere(filters.idleMinutes, filters.lastMessageDirection));
+  }
+
   // Filtros de conversa (status + direção da última mensagem). Combinados no
   // MESMO `some` para casar a mesma conversation quando ambos estão ativos.
+  // Com `idleMinutes`, a direção já está no predicado da última mensagem.
   {
     const convSome: Prisma.ConversationWhereInput = {};
     if (filters.conversationStatus === "open") convSome.status = { not: "RESOLVED" };
     else if (filters.conversationStatus === "closed") convSome.status = "RESOLVED";
-    const dir = filters.lastMessageDirection;
+    const dir = filters.idleMinutes ? undefined : filters.lastMessageDirection;
     if ((dir === "in" || dir === "out") && !filters.conversationStatus) {
       conditions.push(
         ...(await buildLastDirectionConditions(dir, getRequestContext()?.organizationId)),
@@ -1673,6 +1684,8 @@ export function parseAdvancedDealFilters(input: unknown): AdvancedDealFilters {
   if (o.lastMessageDirection === "in" || o.lastMessageDirection === "out") {
     out.lastMessageDirection = o.lastMessageDirection;
   }
+  const idleMinutes = parseIdleMinutes(o.idleMinutes);
+  if (idleMinutes) out.idleMinutes = idleMinutes;
 
   if (
     o.exception === "no_task" ||

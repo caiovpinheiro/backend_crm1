@@ -6,6 +6,7 @@ import {
   parseDealSections,
   type PainelDealFilters,
 } from "@/services/painel-deals";
+import { parseIdleMinutes } from "@/services/idle-leads";
 import {
   computePainelRange,
   parseStalledDays,
@@ -87,6 +88,11 @@ export async function GET(request: Request) {
         tagIds: csv(searchParams.get("tags")),
         ownerIds: csv(searchParams.get("owners")),
         sources: csv(searchParams.get("sources")),
+        idleMinutes: parseIdleMinutes(searchParams.get("idle")),
+        lastMessageDirection:
+          searchParams.get("dir") === "in" || searchParams.get("dir") === "out"
+            ? (searchParams.get("dir") as "in" | "out")
+            : undefined,
         stalledDays: parseStalledDays(searchParams.get("stalledDays")),
         fieldIds: csv(searchParams.get("fieldIds")),
       };
