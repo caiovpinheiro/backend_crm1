@@ -17,7 +17,7 @@ import { prisma } from "@/lib/prisma";
  *   - limit           int (default 50, max 200)
  *   - entityType      EventEntityType (csv aceito: "DEAL,CONTACT")
  *   - actorType       ActorType (csv aceito)
- *   - actorUserId     userId
+ *   - actorUserId     userId ou csv (responsável do evento; vários = união)
  *   - type            string ou csv (filtra tipos de evento)
  *   - dateFrom        ISO date
  *   - dateTo          ISO date
@@ -72,7 +72,9 @@ export async function GET(req: Request) {
     const entityTypes = parseCsv(sp.get("entityType"));
     const actorTypes = parseCsv(sp.get("actorType"));
     const types = parseCsv(sp.get("type"));
-    const actorUserId = sp.get("actorUserId");
+    const actorUserIds = (
+      parseCsv(sp.get("actorUserIds")) ?? parseCsv(sp.get("actorUserId"))
+    )?.slice(0, 100);
     const entityId = sp.get("entityId");
     const dealId = sp.get("dealId");
     const contactId = sp.get("contactId");
@@ -113,7 +115,11 @@ export async function GET(req: Request) {
     } else if (tabulatedOnly) {
       where.type = "CONVERSATION_TABULATED";
     }
-    if (actorUserId) where.actorUserId = actorUserId;
+    if (actorUserIds?.length === 1) {
+      where.actorUserId = actorUserIds[0];
+    } else if (actorUserIds && actorUserIds.length > 1) {
+      where.actorUserId = { in: actorUserIds };
+    }
     if (entityId) where.entityId = entityId;
     if (dealId) where.dealId = dealId;
     if (contactId) where.contactId = contactId;
