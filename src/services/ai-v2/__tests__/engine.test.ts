@@ -3045,6 +3045,24 @@ describe("processV2Turn — correções do motor", () => {
     expect(r.sentReply).toBe("Estou por aqui! Me conta o que você precisa que eu te ajudo.");
     expect(mocks.sendText).toHaveBeenCalledTimes(1);
   });
+
+  it("resposta vazia depois de mover a etapa não pergunta de novo o que o cliente precisa", async () => {
+    const config = baseConfig({ enabledTools: ["move_stage"] } as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.getState.mockResolvedValue(makeState("active"));
+    mocks.executeActions.mockImplementation(async (actions: Array<{ type: string }>) => ({
+      results: actions.map((a) => ({ action: a, ok: true })),
+      anyHandoff: false,
+      anyClose: false,
+    }));
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "", actions: [{ type: "move_stage", stageId: "stage-1" }] as any }));
+
+    const r = await run("formulário preenchido");
+
+    expect(r.sentReply).toBeUndefined();
+    expect(mocks.sendText).not.toHaveBeenCalled();
+    expect(mocks.simpleHandoff).not.toHaveBeenCalled();
+  });
 });
 
 /**

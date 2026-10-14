@@ -363,6 +363,45 @@ export function onlyKeptSentences(rewritten: string, original: string, removed: 
 /** Número do passo: "1.", "1)", "Passo 1:" ou o emoji "1️⃣". */
 const STEP_NUMBER = /^(\s*(?:(?:passo|etapa)\s+)?)(\d{1,2})(\uFE0F?\u20E3|\s*[.):-])/i;
 
+const PRESCRIBED_REPLY = /(?:\breply\b|\bresposta\b)[^"\n“”]{0,60}:\s*[“"]([^"”]{8,300})[”"]/gi;
+
+/** Frases que a configuração manda o agente dizer, entre aspas, depois de "resposta" ou "reply". */
+export function prescribedCustomerReplies(texts: readonly string[]): string[] {
+  const out: string[] = [];
+  for (const text of texts) {
+    if (!text) continue;
+    for (const m of text.matchAll(PRESCRIBED_REPLY)) {
+      const sentence = m[1].trim();
+      if (sentence) out.push(sentence);
+    }
+  }
+  return [...new Set(out)];
+}
+
+/**
+ * A frase literal da configuração que a resposta apagada estava tentando dizer.
+ * Só devolve quando uma frase casa com o que foi apagado e ainda não foi a
+ * mensagem anterior. Duas candidatas: não escolhe.
+ */
+export function prescribedReplyMatching(
+  texts: readonly string[],
+  wipedReply: string,
+  lastAgentMessage?: string | null,
+): string | null {
+  const wiped = new Set(contentWords(wipedReply));
+  if (wiped.size === 0) return null;
+  const last = lastAgentMessage ? new Set(contentWords(lastAgentMessage)) : null;
+  const hits = prescribedCustomerReplies(texts).filter((sentence) => {
+    const tokens = contentWords(sentence);
+    if (tokens.length < 3) return false;
+    const covered = (bag: Set<string>) => tokens.filter((w) => bag.has(w)).length / tokens.length;
+    if (covered(wiped) < 0.75) return false;
+    if (last && covered(last) >= 0.85) return false;
+    return true;
+  });
+  return hits.length === 1 ? hits[0] : null;
+}
+
 /**
  * Renumera cada lista numerada depois de um passo retirado ("1, 3, 4" vira
  * "1, 2, 3"), mantendo o estilo do número. Linha de texto entre passos
