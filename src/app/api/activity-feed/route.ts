@@ -44,6 +44,24 @@ function parseCursor(raw: string | null): { occurredAt: Date; id: string } | nul
   return { occurredAt: new Date(ts), id };
 }
 
+/** Casa a fase de origem (`from`) ou destino (`to`) do STAGE_CHANGED. */
+function stageRefMatch(
+  side: "from" | "to",
+  ids: string[],
+): Prisma.ActivityEventWhereInput {
+  return {
+    OR: ids.flatMap((id) => {
+      const column: Prisma.ActivityEventWhereInput =
+        side === "from" ? { fromStageId: id } : { toStageId: id };
+      return [
+        { meta: { path: [side, "id"], equals: id } },
+        { meta: { path: [side], equals: id } },
+        column,
+      ];
+    }),
+  };
+}
+
 function parseCsv(raw: string | null): string[] | null {
   if (!raw) return null;
   const arr = raw
@@ -84,7 +102,9 @@ export async function GET(req: Request) {
     const q = sp.get("q")?.trim();
 
     // Transição de fase — quando qualquer eixo (pipeline / from / to) é
-    // informado, força type = STAGE_CHANGED e filtra pelos ids no meta JSON.
+    // informado, força type = STAGE_CHANGED. O id da fase fica em
+    // meta.from.id / meta.to.id (o move grava `{ from, to }`, não
+    // fromStageId/toStageId na raiz do meta).
     const stagePipelineId = sp.get("stagePipelineId");
     const stageFrom = parseCsv(sp.get("stageFrom"));
     const stageTo = parseCsv(sp.get("stageTo"));
@@ -108,8 +128,7 @@ export async function GET(req: Request) {
     }
     if (types) where.type = { in: types };
 
-    // Se transição de fase foi solicitada, sobrescreve o filtro de tipo
-    // (STAGE_CHANGED é o único que carrega fromStageId/toStageId no meta).
+    // Se transição de fase foi solicitada, sobrescreve o filtro de tipo.
     if (hasStageTransition) {
       where.type = "STAGE_CHANGED";
     } else if (tabulatedOnly) {
@@ -140,29 +159,20 @@ export async function GET(req: Request) {
       ];
     }
 
-    // Filtros de transição de fase — JSON path filter no meta.
-    // Estrutura gravada em STAGE_CHANGED (deals routes):
-    //   meta.fromStageId, meta.toStageId, meta.to.pipelineId, meta.pipelineId
+    // STAGE_CHANGED grava `{ from: { id, pipelineId }, to: { id, pipelineId } }`.
+    // Evento antigo pode ter `from`/`to` como o id puro. A coluna
+    // fromStageId/toStageId/pipelineId entra no mesmo OU quando estiver preenchida.
+    // Com fase de origem ou destino, o id da etapa já recorta o funil.
     if (hasStageTransition) {
       const stageAnd: Prisma.ActivityEventWhereInput[] = [];
-      if (stageFrom) {
-        stageAnd.push({
-          OR: stageFrom.map((id) => ({
-            meta: { path: ["fromStageId"], equals: id },
-          })),
-        });
-      }
-      if (stageTo) {
-        stageAnd.push({
-          OR: stageTo.map((id) => ({
-            meta: { path: ["toStageId"], equals: id },
-          })),
-        });
-      }
-      if (stagePipelineId) {
+      if (stageFrom) stageAnd.push(stageRefMatch("from", stageFrom));
+      if (stageTo) stageAnd.push(stageRefMatch("to", stageTo));
+      if (stagePipelineId && !stageFrom && !stageTo) {
         stageAnd.push({
           OR: [
+            { pipelineId: stagePipelineId },
             { meta: { path: ["pipelineId"], equals: stagePipelineId } },
+            { meta: { path: ["from", "pipelineId"], equals: stagePipelineId } },
             { meta: { path: ["to", "pipelineId"], equals: stagePipelineId } },
           ],
         });
