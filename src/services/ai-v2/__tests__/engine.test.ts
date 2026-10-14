@@ -2531,6 +2531,25 @@ describe("processV2Turn — correções do motor", () => {
       expect(sentTexts()).toEqual([]);
     });
 
+    it("mesmo rótulo do clique anterior, mas como resposta à pergunta nova com botões: vira turno", async () => {
+      mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: baseConfig(), active: true });
+      mocks.getState.mockResolvedValue(makeState("active", "agente", { pendingOptions: ["Plano mensal", "Plano anual"] }));
+      mocks.messageFindMany.mockImplementation(async (args: { take?: number }) =>
+        args.take === 3
+          ? [
+              { direction: "out", content: "Você escolheu as duas opções. Qual delas você quer contratar?", messageType: "interactive" },
+              { direction: "in", content: "Plano anual", messageType: "interactive" },
+            ]
+          : [],
+      );
+      mocks.callLLM.mockResolvedValue(llmOut({ reply: "Combinado: plano anual. Para contratar, acesse Minha conta e toque em Planos." }));
+
+      await run("Plano anual", { messageType: "interactive", messageIds: ["m-cur"] });
+
+      expect(mocks.callLLM).toHaveBeenCalled();
+      expect(sentTexts().join(" ")).toContain("plano anual");
+    });
+
     it("atalho com mensagem fixa responde uma vez: na segunda vez a mensagem vai para o agente", async () => {
       const config = baseConfig({
         rules: [{ id: "r-fixo", name: "Assinatura", order: 1, conditions: [{ type: "keywords", values: ["assinatura"] }], actions: [{ type: "send_message", message: "A assinatura é feita no portal, com os dados de acesso." }] } as any],
@@ -2677,6 +2696,17 @@ describe("processV2Turn — correções do motor", () => {
       expect(mocks.simpleHandoff).toHaveBeenCalledWith(expect.objectContaining({ destination: expect.objectContaining({ type: "department", id: "dep-dec" }) }));
       expect(sentTexts().join(" ")).toContain("Vou te passar para o setor responsável");
       expect(sentTexts().join(" ")).not.toContain("poderia ajudar você a continuar?");
+    });
+
+    it("pergunta que não chegou ao cliente não conta como troca sem avanço", async () => {
+      const config = baseConfig({ themes: [PROBING_THEME as any], limits: { ...baseConfig().limits, maxStalledExchanges: 2 } } as any);
+      mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+      mocks.getState.mockResolvedValue({ ...makeState("active", "agente", { stalledExchanges: 1 }), themeId: "t-dec" });
+      mocks.callLLM.mockResolvedValue(llmOut({ reply: "Entendo. O que tem dificultado: tempo, acesso ou outra situação?", theme: "t-dec" }));
+      mocks.sendText.mockResolvedValue({ sent: false, reason: "superseded" });
+      await run("Não estou conseguindo acompanhar");
+      const saved = mocks.upsertState.mock.calls.map((c) => c[0] as { counters?: { stalledExchanges?: number } }).filter((c) => c.counters).at(-1)?.counters?.stalledExchanges;
+      expect(saved).toBe(1);
     });
 
     it("pergunta seguida sem resolver conta; orientação ou dado coletado zera", async () => {
