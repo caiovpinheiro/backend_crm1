@@ -109,6 +109,18 @@ export interface V2InactivityConfig {
   closeMessage?: string;
   /** Lembretes antes de encerrar (até 3). Vazio: vale o aviso único (nudgeAfter). */
   followUps?: V2FollowUpStep[];
+  /**
+   * Depois da mensagem de encerramento, move o negócio para uma etapa de
+   * perdido com um motivo do catálogo. Desligado: a conversa encerra e o
+   * card fica na etapa em que está.
+   */
+  lostDeal?: {
+    enabled?: boolean;
+    /** Etapa com isLost. */
+    stageId?: string;
+    /** Id de LossReason. O texto gravado é o rótulo. */
+    reasonId?: string;
+  };
 }
 
 /**
