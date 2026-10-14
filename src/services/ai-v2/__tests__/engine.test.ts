@@ -96,6 +96,11 @@ vi.mock("../summary", () => ({
 
 vi.mock("../handoff", () => ({
   simpleHandoff: mocks.simpleHandoff,
+  leadsHandoffOption: (config: { handoff?: { leads?: { enabled?: boolean; roleIds?: string[]; userIds?: string[] } } }) => {
+    const leads = config.handoff?.leads;
+    if (!leads?.enabled) return undefined;
+    return { enabled: true as const, roleIds: leads.roleIds ?? [], userIds: leads.userIds ?? [] };
+  },
 }));
 
 vi.mock("../state", () => ({

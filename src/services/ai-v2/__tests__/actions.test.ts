@@ -36,6 +36,7 @@ vi.mock("@/lib/sse-bus", () => ({
 
 vi.mock("../handoff", () => ({
   simpleHandoff: vi.fn().mockResolvedValue(undefined),
+  leadsHandoffOption: () => undefined,
 }));
 
 function ctx(overrides: Record<string, unknown> = {}) {

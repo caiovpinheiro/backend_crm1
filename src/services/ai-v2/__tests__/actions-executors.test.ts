@@ -57,7 +57,7 @@ vi.mock("@/services/deals", () => ({ createDeal: mocks.createDeal, updateDeal: m
 vi.mock("@/services/activities", () => ({ createActivity: mocks.createActivity }));
 vi.mock("@/lib/meta-whatsapp/client", () => ({ metaClientFromConfig: mocks.metaClient }));
 vi.mock("@/lib/meta-whatsapp/enrich-template-flow", () => ({ enrichTemplateComponentsForFlowSend: mocks.enrichTemplate }));
-vi.mock("../handoff", () => ({ simpleHandoff: vi.fn(async () => undefined) }));
+vi.mock("../handoff", () => ({ simpleHandoff: vi.fn(async () => undefined), leadsHandoffOption: () => undefined }));
 vi.mock("../sent-materials", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../sent-materials")>()),
   lastV2ResetAt: vi.fn(async () => null),
