@@ -413,7 +413,7 @@ describe("simulateV2Turn — igual à produção", () => {
   });
 
   it("assunto criado sem lista de ações não bloqueia as ações liberadas no agente", async () => {
-    mocks.callV2LLMTest.mockResolvedValue(llm({ reply: "Qual opção?", actions: [{ type: "ask_with_options", options: ["Boleto", "Cartão"] }] }));
+    mocks.callV2LLMTest.mockResolvedValue(llm({ reply: "Qual opção?", actions: [{ type: "ask_with_options", options: ["Fatura", "Cartão"] }] }));
     const cfg = baseConfig({
       enabledTools: ["ask_with_options"],
       themes: [{ id: "pag", name: "Pagamento", when: ["pagamento"], examples: [], instructions: "", allowedTools: [] }],
@@ -421,7 +421,7 @@ describe("simulateV2Turn — igual à produção", () => {
     const { simulateV2Turn } = await import("../test-turn");
     const r = await simulateV2Turn("agent-1", cfg, "dúvida sobre pagamento", history);
     expect(r.discardedActions).toHaveLength(0);
-    expect(r.reply).toBe(["Qual opção?", "1. Boleto\n2. Cartão"].join("\n\n"));
+    expect(r.reply).toBe(["Qual opção?", "1. Fatura\n2. Cartão"].join("\n\n"));
   });
 
   it("mantém o assunto da mensagem anterior", async () => {

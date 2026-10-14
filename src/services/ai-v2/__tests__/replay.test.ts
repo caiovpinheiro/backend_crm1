@@ -72,7 +72,7 @@ describe("summarizeReplay", () => {
     const s = summarizeReplay([
       item({ verdict: v({ desfecho: "igual", causa: "ok" }) }),
       item({ verdict: v({ desfecho: "diferente", causa: "material" }) }),
-      item({ themeName: null, verdict: v({ desfecho: "parcial", causa: "integracao", assunto: "Boleto", humanoConsultouSistema: true }), agentHandoff: true }),
+      item({ themeName: null, verdict: v({ desfecho: "parcial", causa: "integracao", assunto: "Fatura", humanoConsultouSistema: true }), agentHandoff: true }),
       item({ skipReason: "Resposta da pessoa só em mídia (áudio/arquivo)" }),
       item({ error: "falhou" }),
     ]);
@@ -81,7 +81,7 @@ describe("summarizeReplay", () => {
     expect(s.erros).toBe(1);
     expect(s.geral.avaliados).toBe(3);
     expect(s.geral.resolveuComoHumano).toBe(2);
-    expect(s.porAssunto.map((a) => a.assunto)).toEqual(["Cancelamento", "Boleto"]);
+    expect(s.porAssunto.map((a) => a.assunto)).toEqual(["Cancelamento", "Fatura"]);
     expect(s.causas).toEqual({ ok: 1, material: 1, integracao: 1 });
     expect(s.geral.resultados).toEqual({ igual: 1, diferente: 1, transferiu_certo: 1 });
     const soma = Object.values(s.geral.resultados).reduce((a, b) => a + (b ?? 0), 0);

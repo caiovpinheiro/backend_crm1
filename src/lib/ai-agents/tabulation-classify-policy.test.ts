@@ -88,7 +88,7 @@ describe("isIdleClosingText / classifyInboundIdleIntent", () => {
     expect(isIdleClosingText("como recupero a senha?")).toBe(false);
     expect(classifyInboundIdleIntent("ok")).toBe("idle");
     expect(classifyInboundIdleIntent("oi")).toBe("greeting");
-    expect(classifyInboundIdleIntent("preciso de ajuda no boleto")).toBe(
+    expect(classifyInboundIdleIntent("preciso de ajuda na fatura")).toBe(
       "demand",
     );
   });
@@ -264,7 +264,7 @@ describe("formatTabulationCatalogText", () => {
     {
       id: "leaf-fin",
       number: 2,
-      path: "Financeiro > Boleto",
+      path: "Financeiro > Fatura",
       departmentId: "fin",
       departmentName: "Financeiro",
     },
@@ -280,7 +280,7 @@ describe("formatTabulationCatalogText", () => {
   it("prioriza o departamento da conversa e não oferece fallback de encerramento", () => {
     const text = formatTabulationCatalogText(leaves, "atd");
     expect(text.indexOf("Atendimento / Acesso > Senha")).toBeLessThan(
-      text.indexOf("Financeiro / Financeiro > Boleto"),
+      text.indexOf("Financeiro / Financeiro > Fatura"),
     );
     expect(text).toContain("Departamento da conversa (preferido)");
     expect(text).not.toMatch(/fallback de encerramento:/i);

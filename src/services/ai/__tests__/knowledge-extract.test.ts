@@ -65,10 +65,10 @@ describe("extractKnowledgeText", () => {
   });
 
   it("extrai texto de .pdf de várias páginas, sem marcador de página", async () => {
-    const result = await extractKnowledgeText("calendario.pdf", pdfBuffer(["Calendario 2026", "Segundo semestre"]));
+    const result = await extractKnowledgeText("calendario.pdf", pdfBuffer(["Calendario 2026", "Segundo periodo"]));
     expect(result.mimeType).toBe("application/pdf");
     expect(result.text).toContain("Calendario 2026");
-    expect(result.text).toContain("Segundo semestre");
+    expect(result.text).toContain("Segundo periodo");
     expect(result.text).not.toMatch(/-- \d+ of \d+ --/);
   }, 30_000);
 
@@ -112,8 +112,8 @@ describe("stripCalendarGrid", () => {
     const { stripCalendarGrid } = await import("@/services/ai/knowledge-extract");
     const text = [
       "DIA/PERÍODO ATIVIDADE",
-      "D S T Q Q S S 01 Início das aulas do mês",
-      "1 2 3 02 a 05 Realização da prova",
+      "D S T Q Q S S 01 Início do ciclo do mês",
+      "1 2 3 02 a 05 Realização da entrega",
       "4 5 6 7 8 9 10 06 Solicitação de recursos",
       "11 12 13 14 15 16 17 18 Evento no dia seguinte da grade",
       "25 26 27 28 29 30 31 19 Liberação de notas",
@@ -123,8 +123,8 @@ describe("stripCalendarGrid", () => {
     expect(stripCalendarGrid(text)).toBe(
       [
         "DIA/PERÍODO ATIVIDADE",
-        "01 Início das aulas do mês",
-        "02 a 05 Realização da prova",
+        "01 Início do ciclo do mês",
+        "02 a 05 Realização da entrega",
         "06 Solicitação de recursos",
         "18 Evento no dia seguinte da grade",
         "19 Liberação de notas",

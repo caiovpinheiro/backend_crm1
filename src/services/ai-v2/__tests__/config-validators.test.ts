@@ -244,7 +244,7 @@ describe("2. gatilhos de assunto", () => {
 
 describe("3. calendário", () => {
   it("monthsInTitle lê nome do mês e dd/mm, ignora fração e abreviação solta", () => {
-    expect(monthsInTitle("Prova de setembro")).toEqual([9]);
+    expect(monthsInTitle("Entrega de setembro")).toEqual([9]);
     expect(monthsInTitle("Entrega até 15/11")).toEqual([11]);
     expect(monthsInTitle("Prazo 05/03/2027")).toEqual([3]);
     expect(monthsInTitle("Parcela 2/12")).toEqual([]);
@@ -252,8 +252,8 @@ describe("3. calendário", () => {
     expect(monthsInTitle("Reunião 15 set")).toEqual([9]);
     expect(monthsInTitle("Início das aulas de MARÇO")).toEqual([3]);
     // Mês de referência, não do evento.
-    expect(monthsInTitle("Realização da Prova A1 - Ref. Disc. De Fevereiro")).toEqual([]);
-    expect(monthsInTitle("Liberação de Notas da Disciplina de Março")).toEqual([]);
+    expect(monthsInTitle("Entrega do lote A1 - Ref. Pedidos De Fevereiro")).toEqual([]);
+    expect(monthsInTitle("Divulgação do resultado da campanha de Março")).toEqual([]);
     expect(monthsInTitle("Início do período de inscrição, ingresso em Abril")).toEqual([]);
   });
 

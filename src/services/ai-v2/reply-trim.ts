@@ -187,7 +187,7 @@ function contentStems(text: string): string[] {
  * O corte tirou justamente a parte que respondia a pergunta: a resposta
  * original falava do que o cliente perguntou (2+ palavras da pergunta) e o
  * que sobrou não fala de nada disso. Mandar o resto parecia resposta e não
- * respondia ("o conteúdo cobrado é o das aulas X?" → "a avaliação compõe a nota").
+ * respondia ("o frete vale para o pedido X?" → "o valor aparece no resumo").
  */
 export function trimDroppedTheAnswer(question: string, original: string, trimmed: string): boolean {
   const q = [...new Set(contentStems(question))];

@@ -14,7 +14,7 @@ describe("o que sobra de uma frase cortada fica de pé", () => {
     expect(standaloneClause("Ana, para informar o valor com segurança")).toBe("");
     expect(standaloneClause("Ana, como o prazo terminou")).toBe("Ana, o prazo terminou");
     expect(standaloneClause("Para acessar sua conta, você precisa do e-mail")).toBe("Para acessar sua conta, você precisa do e-mail");
-    expect(standaloneClause("O boleto vence em 3 dias úteis")).toBe("O boleto vence em 3 dias úteis");
+    expect(standaloneClause("A fatura vence em 3 dias úteis")).toBe("A fatura vence em 3 dias úteis");
   });
 
   it("aviso de transferência: não deixa \"Como X.\" nem \"X;.\"", () => {
@@ -36,9 +36,9 @@ describe("o que sobra de uma frase cortada fica de pé", () => {
     const r = trimUnsupportedSentences(reply, ["a senha provisória é enviada ao e-mail cadastrado em até 24 horas"]);
     expect(r?.reply).toBe("Entendo sua dúvida sobre o acesso. Se o e-mail não chegar, confira a caixa de spam e o endereço usado na compra antes de tentar de novo.");
 
-    const causal = "Separei as informações do seu pedido. Como o boleto vence em 3 dias úteis, pague até sexta-feira pelo aplicativo da loja. A segunda via fica em Minha conta, na parte de pedidos.";
+    const causal = "Separei as informações do seu pedido. Como a fatura vence em 3 dias úteis, pague até sexta-feira pelo aplicativo da loja. A segunda via fica em Minha conta, na parte de pedidos.";
     const c = trimUnsupportedSentences(causal, ["pague até sexta-feira pelo aplicativo da loja"]);
-    expect(c?.reply).toBe("Separei as informações do seu pedido. O boleto vence em 3 dias úteis. A segunda via fica em Minha conta, na parte de pedidos.");
+    expect(c?.reply).toBe("Separei as informações do seu pedido. A fatura vence em 3 dias úteis. A segunda via fica em Minha conta, na parte de pedidos.");
   });
 });
 
@@ -78,7 +78,7 @@ describe("checagem por modelo — afirmação em várias frases e passo de uma p
   it("passo de uma palavra: vale com o mesmo verbo na mesma frase da fonte", () => {
     expect(claimFoundInSources("Escolha *Telefone*.", sources)).toBe(true);
     expect(claimFoundInSources("Toque em *Telefone*.", sources)).toBe(false);
-    expect(claimFoundInSources("Escolha *Boleto*.", sources)).toBe(false);
+    expect(claimFoundInSources("Escolha *Carnê*.", sources)).toBe(false);
   });
 });
 
