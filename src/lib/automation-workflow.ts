@@ -363,6 +363,15 @@ function asRecord(v: unknown): Record<string, unknown> {
     : {};
 }
 
+/**
+ * Esta automação pode começar mesmo com um agente de IA na conversa.
+ * Padrão desligado: fluxo que fala com o cliente não inicia nesse caso.
+ * A chave da org `automations.startWhileAiAttends` continua valendo para todas.
+ */
+export function automationOptedIntoAiAttendance(triggerConfig: unknown): boolean {
+  return asRecord(triggerConfig).startWhileAiAttends === true;
+}
+
 export function summarizeTriggerConfig(
   triggerType: string,
   triggerConfig: unknown,

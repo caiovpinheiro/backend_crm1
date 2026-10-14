@@ -22,6 +22,7 @@ import {
   readStepAllowedChannelIds,
   resolveStepDistributionScope,
   triggerTypeLabel,
+  automationOptedIntoAiAttendance,
   automationTalksToClient,
 } from "@/lib/automation-workflow";
 import { defaultDealTitleForContact } from "@/lib/display-name";
@@ -5229,12 +5230,14 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
   // (duas vozes na mesma conversa; o clique nos botões do fluxo iria para
   // o agente de qualquer jeito). Os silenciosos (etapa, tag, campo, nota)
   // seguem. Campanha e execução manual não entram: o operador escolheu
-  // disparar. Chave na org para religar.
+  // disparar. A automação pode ligar isso no gatilho; a chave da org liga
+  // para todas.
   if (
     runConvIdForMeta &&
     !AI_GATE_EXEMPT_EVENTS.has(context.event) &&
     automationTalksToClient(automation.steps) &&
     (await conversationAttendedByAi(runConvIdForMeta)) &&
+    !automationOptedIntoAiAttendance(automation.triggerConfig) &&
     !(await startFlowsWhileAiAttends())
   ) {
     await logStep({
@@ -5242,7 +5245,7 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
       contactId: context.contactId,
       dealId: context.dealId,
       status: "SKIPPED",
-      message: `Conversa com agente de IA — fluxo que fala com o cliente não inicia (chave ${START_FLOWS_WHILE_AI_ATTENDS_KEY} para permitir)`,
+      message: `Conversa com agente de IA — fluxo que fala com o cliente não inicia (ligue "Iniciar com agente de IA" nesta automação, ou a chave ${START_FLOWS_WHILE_AI_ATTENDS_KEY})`,
       payload: inboundEventPayload(context.event, contextData),
     });
     return;

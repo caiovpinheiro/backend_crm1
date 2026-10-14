@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { automationTalksToClient } from "@/lib/automation-workflow";
+import { automationOptedIntoAiAttendance, automationTalksToClient } from "@/lib/automation-workflow";
 
 describe("automationTalksToClient", () => {
   it("fluxo com mensagem, botões, pergunta ou espera fala com o cliente", () => {
@@ -11,5 +11,14 @@ describe("automationTalksToClient", () => {
   it("fluxo só de CRM (etapa, tag, campo, nota, distribuição) não fala com o cliente", () => {
     expect(automationTalksToClient([{ type: "move_stage" }, { type: "add_tag" }, { type: "update_field" }, { type: "create_conversation_note" }, { type: "execute_distribution" }])).toBe(false);
     expect(automationTalksToClient([])).toBe(false);
+  });
+});
+
+describe("automationOptedIntoAiAttendance", () => {
+  it("só liga quando a automação marca startWhileAiAttends", () => {
+    expect(automationOptedIntoAiAttendance({ startWhileAiAttends: true })).toBe(true);
+    expect(automationOptedIntoAiAttendance({ startWhileAiAttends: false, tagName: "CLT" })).toBe(false);
+    expect(automationOptedIntoAiAttendance({})).toBe(false);
+    expect(automationOptedIntoAiAttendance(null)).toBe(false);
   });
 });
