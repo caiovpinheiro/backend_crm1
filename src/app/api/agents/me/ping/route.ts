@@ -8,8 +8,10 @@ import {
   consumePresencePingUserSlot,
   presenceTabId,
 } from "@/lib/presence-ping-limit";
+import { claimPresenceBeat } from "@/lib/presence-beat";
 import { recordHeartbeatThrottled } from "@/services/system-presence";
 import { getLogger } from "@/lib/logger";
+import { recordPresenceBeat } from "@/lib/metrics";
 
 const log = getLogger("api/agents/me/ping");
 
@@ -37,8 +39,15 @@ async function readLastInteractionAt(request: Request, now: number): Promise<num
 }
 
 /**
- * Heartbeat de PRESENÇA DE USO ("CRM aberto") enviado pelo cliente
- * (`usePresenceHeartbeat`) a cada ~90s enquanto houver uma aba do CRM aberta.
+ * Heartbeat de PRESENÇA DE USO ("CRM aberto") do frontend ANTIGO
+ * (`usePresenceHeartbeat`, a cada ~90 s pela aba líder). O frontend novo usa
+ * `POST /api/presence/beat`, que faz ping + heartbeat numa chamada só.
+ *
+ * Batida única por usuário: depois dos limites abaixo, o ping disputa o
+ * MESMO limite da batida nova (`claimPresenceBeat`, 1 a cada
+ * `PRESENCE_BEAT_MIN_INTERVAL_MS` = 30 s por usuário somando beat + ping +
+ * heartbeat). Perdeu → 200 `{ ok: true, systemOnline: true, deduped: true,
+ * sessionIdleMs }` sem gravar nada.
  *
  * IMPORTANTE — separação vs Distribuição:
  *   Antes este ping mexia em `AgentStatus` (promovia AWAY→ONLINE e alimentava
@@ -99,6 +108,13 @@ export async function POST(request: Request) {
       // Super-admin sem org não tem presença por org.
       return NextResponse.json({ ok: true, systemOnline: true, sessionIdleMs });
     }
+
+    const beat = await claimPresenceBeat({ userId });
+    if (!beat.accepted) {
+      recordPresenceBeat("ping", "deduped");
+      return NextResponse.json({ ok: true, systemOnline: true, deduped: true, sessionIdleMs });
+    }
+    recordPresenceBeat("ping", "written");
 
     try {
       // No máximo 1 gravação por usuário a cada 45 s (claim no Redis); os

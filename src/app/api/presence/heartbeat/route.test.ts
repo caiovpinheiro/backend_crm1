@@ -1,8 +1,9 @@
 /**
- * POST /api/presence/heartbeat — presença deduplicada: N abas do mesmo
- * usuário no mesmo deal contam como 1 viewer e cabem em 1 escrita no Redis
- * por ciclo (`PRESENCE_HEARTBEAT_DEDUP_MS`, 20 s); as outras respondem 200
- * com a lista atual, sem escrever. Redis falso compartilhado por 2 "réplicas".
+ * POST /api/presence/heartbeat (frontend antigo) — obedece o limite único da
+ * batida: 1 escrita por USUÁRIO a cada `PRESENCE_BEAT_MIN_INTERVAL_MS` (30 s),
+ * somando abas, deals e as outras rotas; as demais respondem 200 com a lista
+ * atual e `deduped: true`, sem escrever. Redis falso compartilhado por 2
+ * "réplicas".
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -18,6 +19,7 @@ const h = vi.hoisted(() => {
     },
     published: 0,
     userId: "u1",
+    systemPresence: 0,
   };
 });
 
@@ -35,6 +37,12 @@ vi.mock("@/lib/realtime-events", () => ({
 vi.mock("@/lib/auth-helpers", () => ({
   withOrgContext: (fn: (s: unknown) => unknown) =>
     fn({ user: { id: h.userId, organizationId: "org1" } }),
+}));
+vi.mock("@/services/system-presence", () => ({
+  recordHeartbeatThrottled: async () => {
+    h.systemPresence += 1;
+    return { created: false, written: true };
+  },
 }));
 vi.mock("@/lib/prisma", () => ({
   prisma: {
@@ -76,60 +84,77 @@ beforeEach(() => {
   h.redis.down = false;
   h.published = 0;
   h.userId = "u1";
-  delete process.env.PRESENCE_HEARTBEAT_DEDUP_MS;
+  h.systemPresence = 0;
+  delete process.env.PRESENCE_BEAT_MIN_INTERVAL_MS;
 });
 
 afterEach(() => {
   vi.useRealTimers();
 });
 
-describe("POST /api/presence/heartbeat — dedup por usuário+entidade", () => {
-  it("5 abas do mesmo usuário no mesmo deal (2 réplicas): 1 viewer e 1 escrita no ciclo", async () => {
+describe("POST /api/presence/heartbeat — limite único por usuário", () => {
+  it("5 abas do mesmo usuário no mesmo deal (2 réplicas): 1 viewer e 1 escrita a cada 30 s", async () => {
     const a = await replica();
     const b = await replica();
+    const deduped: boolean[] = [];
     for (const r of [a, b, a, b, a]) {
       const res = await beat(r);
       expect(res.status).toBe(200);
-      expect((await res.json()).viewers.map((v: { userId: string }) => v.userId)).toEqual(["u1"]);
+      const json = await res.json();
+      deduped.push(json.deduped === true);
+      expect(json.viewers.map((v: { userId: string }) => v.userId)).toEqual(["u1"]);
     }
+    expect(deduped).toEqual([false, true, true, true, true]);
     expect(writes()).toBe(1);
     expect(h.published).toBe(1);
+    // A batida aceita também grava a presença de uso ("CRM aberto").
+    expect(h.systemPresence).toBe(1);
 
-    // Ciclo seguinte: de novo 1 escrita, por mais abas que batam.
-    vi.advanceTimersByTime(20_000);
+    vi.advanceTimersByTime(29_999);
+    await beat(a);
+    expect(writes()).toBe(1);
+    vi.advanceTimersByTime(1);
     await beat(a);
     await beat(b);
     await beat(a);
     expect(writes()).toBe(2);
   });
 
-  it("outro usuário e outro deal escrevem à parte", async () => {
+  it("outro deal do mesmo usuário divide o limite; outro usuário escreve à parte", async () => {
     const a = await replica();
     await beat(a, "d1");
-    await beat(a, "d2");
+    const other = await beat(a, "d2");
+    expect(await other.json()).toEqual({ viewers: [], deduped: true });
     h.userId = "u2";
     const res = await beat(a, "d1");
     expect((await res.json()).viewers.map((v: { userId: string }) => v.userId)).toEqual([
       "u1",
       "u2",
     ]);
-    expect(writes()).toBe(3);
+    expect(writes()).toBe(2);
   });
 
-  it("leave remove na hora e solta o ciclo: a aba que ficou volta a escrever", async () => {
+  it("leave remove na hora sem passar pelo limite (e sem gastar a batida)", async () => {
     const a = await replica();
     await beat(a);
     const left = await beat(a, "d1", "leave");
     expect((await left.json()).viewers).toEqual([]);
+    // A aba que ficou no deal volta na próxima batida aceita (≤ 30 s).
     const back = await beat(a);
-    expect((await back.json()).viewers.map((v: { userId: string }) => v.userId)).toEqual(["u1"]);
+    expect(await back.json()).toEqual({ viewers: [], deduped: true });
+    vi.advanceTimersByTime(30_000);
+    const later = await beat(a);
+    expect((await later.json()).viewers.map((v: { userId: string }) => v.userId)).toEqual(["u1"]);
     expect(writes()).toBe(3); // touch, leave, touch
   });
 
-  it("PRESENCE_HEARTBEAT_DEDUP_MS=0 desliga o dedup", async () => {
-    process.env.PRESENCE_HEARTBEAT_DEDUP_MS = "0";
+  it("PRESENCE_BEAT_MIN_INTERVAL_MS muda o limite", async () => {
+    process.env.PRESENCE_BEAT_MIN_INTERVAL_MS = "5000";
     const a = await replica();
     await beat(a);
+    await beat(a);
+    expect(writes()).toBe(1);
+    vi.advanceTimersByTime(5_000);
     await beat(a);
     expect(writes()).toBe(2);
   });

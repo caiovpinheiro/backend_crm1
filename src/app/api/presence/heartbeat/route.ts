@@ -1,54 +1,43 @@
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
-import {
-  claimViewerWrite,
-  listViewers,
-  releaseViewerWrite,
-  removeViewer,
-  touchViewer,
-} from "@/lib/entity-presence";
-import { prisma } from "@/lib/prisma";
+import { listViewers, removeViewer, touchViewer } from "@/lib/entity-presence";
+import { getLogger } from "@/lib/logger";
+import { recordPresenceBeat } from "@/lib/metrics";
+import { claimPresenceBeat } from "@/lib/presence-beat";
+import { getPresenceUserInfo } from "@/lib/presence-user-info";
+import { recordHeartbeatThrottled } from "@/services/system-presence";
+
+const log = getLogger("api/presence/heartbeat");
 
 export const dynamic = "force-dynamic";
 
-/** Entidades que suportam presença "quem está vendo". Allowlist evita salas
- *  arbitrárias criadas por payload malicioso. */
+/** Entidades que suportam presença "quem está vendo" no heartbeat ANTIGO.
+ *  Allowlist evita salas arbitrárias criadas por payload malicioso. */
 const ALLOWED_ENTITIES = new Set(["deal"]);
 
-/** Cache curto de nome/avatar por usuário — evita 1 query a cada heartbeat
- *  (25s, enviado só pela aba líder do navegador; TTL do viewer 90s em
- *  `entity-presence.ts`). TTL de 5 min cobre trocas de foto sem custo
- *  relevante. */
-const userInfoCache = new Map<
-  string,
-  { name: string; avatarUrl: string | null; ts: number }
->();
-const USER_CACHE_TTL_MS = 5 * 60_000;
-
-async function getUserInfo(userId: string): Promise<{ name: string; avatarUrl: string | null }> {
-  const cached = userInfoCache.get(userId);
-  if (cached && Date.now() - cached.ts < USER_CACHE_TTL_MS) {
-    return { name: cached.name, avatarUrl: cached.avatarUrl };
-  }
-  const u = await prisma.user.findUnique({
-    where: { id: userId },
-    select: { name: true, avatarUrl: true },
-  });
-  const info = { name: u?.name ?? "Usuário", avatarUrl: u?.avatarUrl ?? null };
-  userInfoCache.set(userId, { ...info, ts: Date.now() });
-  return info;
-}
-
 /**
- * Heartbeat de presença por entidade. Corpo: `{ entityType, entityId,
- * action? }`. `action: "leave"` (enviado por `navigator.sendBeacon` no
- * unmount / aba fechada) remove o viewer imediatamente; qualquer outro valor
- * registra/renova. Sempre devolve a lista atual de viewers da entidade.
+ * Heartbeat de presença por entidade do frontend ANTIGO (1 chamada por
+ * entidade aberta, ~25 s). O frontend novo usa `POST /api/presence/beat`,
+ * que manda todas as entidades e a presença do sistema numa chamada só.
  *
- * Dedup: no mesmo ciclo (`PRESENCE_HEARTBEAT_DEDUP_MS`, 20 s) só o primeiro
- * heartbeat de usuário+entidade escreve no Redis; os das outras abas
- * respondem 200 com a lista atual, sem escrever.
+ * Corpo: `{ entityType, entityId, action? }`. Sempre devolve a lista atual
+ * de viewers da entidade (`{ viewers }`).
+ *
+ * - `action: "leave"` (`navigator.sendBeacon` no unmount / aba fechada):
+ *   remove o viewer na hora. Não passa pelo limite e não gasta a batida
+ *   (saída é rara e precisa ser imediata).
+ * - Demais: disputa o limite único por usuário (`claimPresenceBeat`, 1 a
+ *   cada `PRESENCE_BEAT_MIN_INTERVAL_MS` = 30 s somando beat + ping +
+ *   heartbeat). Ganhou → renova o viewer e grava também a presença do
+ *   sistema ("CRM aberto"), para o ping que perder a disputa não deixar o
+ *   usuário offline. Perdeu → 200 `{ viewers, deduped: true }` lido do
+ *   Redis, sem escrever.
+ *
+ * Limitação conhecida (só no frontend antigo): com 2+ deals abertos ao
+ * mesmo tempo, as batidas de um deal podem ganhar sempre a disputa e o
+ * outro deixar de mostrar o usuário. O `/beat` não tem isso (manda todas as
+ * entidades juntas).
  */
 export async function POST(req: Request) {
   return withOrgContext(async (session) => {
@@ -59,18 +48,14 @@ export async function POST(req: Request) {
 
     let body: { entityType?: unknown; entityId?: unknown; action?: unknown } = {};
     try {
-      body = await req.json();
+      // sendBeacon pode mandar texto puro: lê como texto e parseia.
+      body = JSON.parse(await req.text());
     } catch {
-      // sendBeacon pode mandar texto puro; tenta parsear manualmente.
-      try {
-        body = JSON.parse(await req.text());
-      } catch {
-        body = {};
-      }
+      body = {};
     }
 
-    const entityType = String(body.entityType ?? "");
-    const entityId = String(body.entityId ?? "");
+    const entityType = String(body?.entityType ?? "");
+    const entityId = String(body?.entityId ?? "");
     if (!ALLOWED_ENTITIES.has(entityType) || !entityId) {
       return NextResponse.json({ viewers: [] }, { status: 400 });
     }
@@ -79,20 +64,24 @@ export async function POST(req: Request) {
 
     if (body.action === "leave") {
       const viewers = await removeViewer({ orgId, entityType, entityId, userId });
-      // Outra aba do mesmo usuário que siga no deal volta a escrever já.
-      await releaseViewerWrite({ orgId, entityType, entityId, userId });
       return NextResponse.json({ viewers });
     }
 
-    // N abas do mesmo usuário no mesmo deal = 1 viewer e 1 escrita por
-    // ciclo (`claimViewerWrite`); as demais respondem a lista sem escrever.
-    if (!(await claimViewerWrite({ orgId, entityType, entityId, userId }))) {
+    const beat = await claimPresenceBeat({ userId });
+    if (!beat.accepted) {
+      recordPresenceBeat("heartbeat", "deduped");
       const viewers = await listViewers({ orgId, entityType, entityId });
-      return NextResponse.json({ viewers });
+      return NextResponse.json({ viewers, deduped: true });
     }
 
-    const { name, avatarUrl } = await getUserInfo(userId);
-    const viewers = await touchViewer({ orgId, entityType, entityId, userId, name, avatarUrl });
+    const { name, avatarUrl } = await getPresenceUserInfo(userId);
+    const [viewers] = await Promise.all([
+      touchViewer({ orgId, entityType, entityId, userId, name, avatarUrl }),
+      recordHeartbeatThrottled({ userId, organizationId: orgId }).catch((err: unknown) => {
+        log.warn({ err: err instanceof Error ? err.message : err }, "presença do sistema falhou");
+      }),
+    ]);
+    recordPresenceBeat("heartbeat", "written");
     return NextResponse.json({ viewers });
   });
 }

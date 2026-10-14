@@ -2,6 +2,8 @@
  * POST /api/agents/me/ping — limite de 1 ping a cada 20 s por usuário e aba
  * (`x-tab-id`), com Redis falso em memória; fail-open com Redis fora.
  * Inatividade informada pelo cliente (`lastInteractionAt`) e `sessionIdleMs`.
+ * Limite único da batida: 1 ping que grava por usuário a cada 30 s; os
+ * demais (que passam pelos limites de aba/usuário) respondem 200 deduplicado.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -58,6 +60,7 @@ beforeEach(() => {
   delete process.env.SESSION_IDLE_HOURS;
   delete process.env.SESSION_IDLE_TIMEOUT_HOURS;
   delete process.env.PRESENCE_PING_USER_MAX_PER_MIN;
+  delete process.env.PRESENCE_BEAT_MIN_INTERVAL_MS;
 });
 
 afterEach(() => {
@@ -152,7 +155,9 @@ describe("POST /api/agents/me/ping — lastInteractionAt (inatividade do cliente
 
   it("valor no futuro ou ilegível → campo ignorado (200)", async () => {
     expect((await ping("aba-1", { lastInteractionAt: T0 + HOUR })).status).toBe(200);
+    vi.setSystemTime(T0 + 30_000);
     expect((await ping("aba-2", { lastInteractionAt: "ontem" })).status).toBe(200);
+    vi.setSystemTime(T0 + 60_000);
     expect((await ping("aba-3", { lastInteractionAt: null })).status).toBe(200);
     expect(h.recordHeartbeatThrottled).toHaveBeenCalledTimes(3);
   });
@@ -184,7 +189,9 @@ describe("POST /api/agents/me/ping — teto por usuário (todas as abas)", () =>
     expect(res.status).toBe(429);
     expect(await res.json()).toEqual({ retryAfterMs: 30_000 });
     expect(res.headers.get("Retry-After")).toBe("30");
-    expect(h.recordHeartbeatThrottled).toHaveBeenCalledTimes(6);
+    // Dos 6 aceitos, só o 1º grava: os outros caem no limite único da
+    // batida (1 por usuário a cada 30 s) e respondem 200 deduplicado.
+    expect(h.recordHeartbeatThrottled).toHaveBeenCalledTimes(1);
 
     // Outro usuário não é afetado.
     h.user = { id: "u2", organizationId: "org1" };
@@ -215,5 +222,44 @@ describe("POST /api/agents/me/ping — teto por usuário (todas as abas)", () =>
     for (let i = 1; i <= 8; i++) expect((await ping(`aba-${i}`)).status).toBe(200);
     h.client.current = null;
     for (let i = 1; i <= 8; i++) expect((await ping(`aba-${i}`)).status).toBe(200);
+  });
+});
+
+describe("POST /api/agents/me/ping — limite único da batida (beat + ping + heartbeat)", () => {
+  it("2º ping do usuário em < 30 s (outra aba) → 200 deduplicado, sem gravar; aos 30 s grava", async () => {
+    expect(await (await ping("aba-1")).json()).toEqual({
+      ok: true,
+      systemOnline: true,
+      created: false,
+      sessionIdleMs: 12 * HOUR,
+    });
+    vi.setSystemTime(T0 + 5_000);
+    const res = await ping("aba-2");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      ok: true,
+      systemOnline: true,
+      deduped: true,
+      sessionIdleMs: 12 * HOUR,
+    });
+    vi.setSystemTime(T0 + 29_999);
+    expect((await (await ping("aba-3")).json()).deduped).toBe(true);
+    expect(h.recordHeartbeatThrottled).toHaveBeenCalledTimes(1);
+
+    vi.setSystemTime(T0 + 30_000);
+    expect((await (await ping("aba-4")).json()).deduped).toBeUndefined();
+    expect(h.recordHeartbeatThrottled).toHaveBeenCalledTimes(2);
+  });
+
+  it("o limite é por usuário: outro usuário grava no mesmo instante", async () => {
+    await ping("aba-1");
+    h.user = { id: "u2", organizationId: "org1" };
+    expect((await (await ping("aba-1")).json()).deduped).toBeUndefined();
+    expect(h.recordHeartbeatThrottled).toHaveBeenCalledTimes(2);
+  });
+
+  it("ping recusado por inatividade (401) não gasta a batida", async () => {
+    expect((await ping("aba-1", { lastInteractionAt: T0 - 13 * HOUR })).status).toBe(401);
+    expect((await (await ping("aba-2")).json()).deduped).toBeUndefined();
   });
 });

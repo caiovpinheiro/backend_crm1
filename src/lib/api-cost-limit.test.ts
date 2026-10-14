@@ -102,6 +102,7 @@ describe("classifyApiRequest — mapa central", () => {
     ["GET", "/api/conversations/c1/messages", "heavy_read"],
     ["GET", "/api/deals/d1", "heavy_read"],
     // (d) acessórias
+    ["POST", "/api/presence/beat", "accessory"],
     ["POST", "/api/presence/heartbeat", "accessory"],
     ["POST", "/api/agents/me/ping", "accessory"],
     ["POST", "/api/conversations/c1/typing", "accessory"],

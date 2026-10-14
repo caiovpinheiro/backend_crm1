@@ -68,8 +68,9 @@ const log = getLogger("sse-bus");
  * invalida `["scheduled-messages", conversationId]`.
  *
  * Presença "quem está vendo" (`entity_viewers`, `src/lib/entity-presence.ts`):
- * TTL do viewer 90s; heartbeat de 25s enviado só pela aba líder do
- * navegador, que agrega as entidades abertas em todas as abas. As salas
+ * TTL do viewer 150 s (2,5 × a batida); uma batida (`/api/presence/beat`)
+ * a cada 60 s enviada só pela aba líder do navegador, com as entidades
+ * abertas em todas as abas. As salas
  * moram no Redis (hash `presence:viewers:*`), então valem entre réplicas;
  * sem Redis, `Map` do processo.
  */
