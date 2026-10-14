@@ -5,6 +5,7 @@ import {
   noteFailure,
   noteSuccess,
 } from "@/lib/cache/redis-client";
+import { presenceViewerTtlMs } from "@/lib/presence-beat-config";
 import { publishEntityViewers } from "@/lib/realtime-events";
 
 /**
@@ -35,7 +36,7 @@ import { publishEntityViewers } from "@/lib/realtime-events";
  * A varredura de expiração roda em cada processo, mas só sobre as salas em
  * que ESTE processo recebeu heartbeat (sem SCAN). Se o único processo que
  * conhecia uma sala cair, ninguém publica a expiração; os outros viewers
- * corrigem a pilha na resposta do próprio heartbeat (≤ 25 s), que já vem
+ * corrigem a pilha na resposta da própria batida (≤ 60 s), que já vem
  * filtrada por `lastSeen`.
  *
  * ## Sem Redis
@@ -53,16 +54,18 @@ export type EntityViewer = {
 };
 
 /**
- * Viewer expira depois de `TTL_MS` sem heartbeat. O cliente bate a cada
- * 25s, mas quem envia é só a aba LÍDER do navegador (eleita por Web Locks;
- * `src/hooks/use-sse.ts` / `presence-sync.ts` no frontend), agregando as
- * entidades abertas em todas as abas. Quando o líder fecha, a aba seguinte
- * assume em < 2s — mas se o líder estava em segundo plano (timers
- * estrangulados) o intervalo entre dois heartbeats pode passar de 60s.
- * 90s cobre esse gap sem que o viewer suma e volte (30s derrubava). Sobe
- * para 90s junto com a eleição de líder (MA-1/MA-2, set/26).
+ * Viewer expira depois de `TTL_MS` sem batida. O cliente novo manda UMA
+ * batida por navegador (`POST /api/presence/beat`, aba líder, a cada
+ * `PRESENCE_BEAT_INTERVAL_MS` = 60 s) com as entidades abertas em todas as
+ * abas; o servidor aceita no máximo 1 por usuário a cada 30 s. TTL = 2,5 ×
+ * intervalo (150 s com 60 s): uma batida perdida ou atrasada (aba líder em
+ * segundo plano, timers estrangulados) não derruba o avatar.
+ *
+ * Consequência aceita: quem fecha o navegador sem a batida seguinte some da
+ * pilha em até ~150 s (fechar só uma aba remove na batida seguinte, ≤ 60 s,
+ * porque a entidade sai da lista).
  */
-export const ENTITY_PRESENCE_TTL_MS = 90_000;
+export const ENTITY_PRESENCE_TTL_MS = presenceViewerTtlMs();
 const TTL_MS = ENTITY_PRESENCE_TTL_MS;
 const REAP_MS = 10_000; // varredura de expiração
 
@@ -385,89 +388,143 @@ export async function listViewers(p: RoomMeta): Promise<EntityViewer[]> {
   return publicList(room).filter((v) => isLive(v, now));
 }
 
-// ── Dedup de escrita: N abas do mesmo usuário na mesma entidade ──────────
+// ── Batida: várias entidades numa ida ao Redis ───────────────────────────
 //
-// Cada aba (ou navegador) do mesmo usuário aberta no mesmo deal manda o seu
-// heartbeat. Todas renovam o MESMO campo (userId) — contam como 1 viewer —,
-// mas cada uma custava um MULTI de escrita no Redis. Agora só o primeiro
-// heartbeat do ciclo escreve: `SET presence:viewer-write:<org>:<tipo>:<id>:<user>
-// 1 PX <ciclo> NX`. Quem perde o claim responde a lista atual (HGETALL, só
-// leitura). O ciclo (padrão 20 s, `PRESENCE_HEARTBEAT_DEDUP_MS`) fica bem
-// abaixo do TTL do viewer (90 s), então quem está na tela nunca expira.
+// `POST /api/presence/beat` renova o usuário em TODAS as entidades abertas
+// no navegador e o tira das que saíram da lista — num único MULTI (1 ida),
+// em vez de 1 heartbeat por entidade. A leitura da batida descartada pelo
+// limite usa um pipeline de HGETALL (1 ida, sem escrita).
 
-export const ENTITY_PRESENCE_DEDUP_MS_DEFAULT = 20_000;
-const DEDUP_MIN_MS = 1_000;
-/** Teto: um terço do TTL — dois ciclos perdidos ainda não derrubam o viewer. */
-const DEDUP_MAX_MS = Math.floor(TTL_MS / 3);
-const DEDUP_KEY_PREFIX = "presence:viewer-write:";
-const DEDUP_MEMORY_MAX_KEYS = 10_000;
+export type EntityRef = { entityType: string; entityId: string };
 
-/** `PRESENCE_HEARTBEAT_DEDUP_MS` (1.000–30.000; padrão 20.000; `0` desliga). */
-export function entityPresenceDedupMs(
-  env: Record<string, string | undefined> = process.env,
-): number {
-  const raw = env.PRESENCE_HEARTBEAT_DEDUP_MS?.trim();
-  if (!raw) return ENTITY_PRESENCE_DEDUP_MS_DEFAULT;
-  const n = Number(raw);
-  if (n === 0) return 0;
-  if (!Number.isFinite(n) || n < 0) return ENTITY_PRESENCE_DEDUP_MS_DEFAULT;
-  return Math.min(DEDUP_MAX_MS, Math.max(DEDUP_MIN_MS, Math.floor(n)));
+/** Chave da entidade na resposta da batida: `"<tipo>:<id>"`. */
+export function entityRefKey(ref: EntityRef): string {
+  return `${ref.entityType}:${ref.entityId}`;
 }
 
-export function entityPresenceDedupKey(p: PresenceArgs): string {
-  return `${DEDUP_KEY_PREFIX}${p.orgId}:${p.entityType}:${p.entityId}:${p.userId}`;
-}
+export type ViewerBeatInput = {
+  orgId: string;
+  userId: string;
+  name: string;
+  avatarUrl: string | null;
+  /** Entidades abertas agora (renova o viewer). */
+  touch: EntityRef[];
+  /** Entidades que saíram da lista desde a última batida (remove o viewer). */
+  remove: EntityRef[];
+  /** `SET key value PX ttlMs` no mesmo MULTI (lista da batida). */
+  alsoSet?: { key: string; value: string; ttlMs: number };
+};
 
-/** Claims do ciclo sem Redis: chave → expira em (ms). */
-const memoryWriteClaims = new Map<string, number>();
-
-function claimMemory(key: string, ms: number): boolean {
+async function beatRedis(
+  client: IORedisClient,
+  p: ViewerBeatInput,
+): Promise<Record<string, EntityViewer[]>> {
   const now = Date.now();
-  const exp = memoryWriteClaims.get(key);
-  if (exp !== undefined && exp > now) return false;
-  if (memoryWriteClaims.size >= DEDUP_MEMORY_MAX_KEYS) {
-    for (const [k, e] of memoryWriteClaims) if (e <= now) memoryWriteClaims.delete(k);
-    if (memoryWriteClaims.size >= DEDUP_MEMORY_MAX_KEYS) memoryWriteClaims.clear();
+  const raw: EntityViewer = {
+    userId: p.userId,
+    name: p.name,
+    avatarUrl: p.avatarUrl,
+    lastSeen: now,
+  };
+  const json = JSON.stringify(raw);
+  const multi = client.multi();
+  for (const ref of p.touch) {
+    const key = entityPresenceRedisKey(p.orgId, ref.entityType, ref.entityId);
+    multi.hget(key, p.userId).hset(key, p.userId, json).pexpire(key, TTL_MS).hgetall(key);
   }
-  memoryWriteClaims.set(key, now + ms);
-  return true;
+  for (const ref of p.remove) {
+    const key = entityPresenceRedisKey(p.orgId, ref.entityType, ref.entityId);
+    multi.hdel(key, p.userId).hgetall(key);
+  }
+  if (p.alsoSet) multi.set(p.alsoSet.key, p.alsoSet.value, "PX", p.alsoSet.ttlMs);
+  const replies = execReplies(await multi.exec());
+
+  const out: Record<string, EntityViewer[]> = {};
+  let i = 0;
+  for (const ref of p.touch) {
+    const previous = replies[i];
+    const all = replies[i + 3];
+    i += 4;
+    const key = entityPresenceRedisKey(p.orgId, ref.entityType, ref.entityId);
+    const meta = { orgId: p.orgId, entityType: ref.entityType, entityId: ref.entityId };
+    redisRooms.set(key, meta);
+    const viewers = liveFromHash(all, now);
+    const prev = parseViewer(previous);
+    if (!prev || !isLive(prev, now)) broadcastList(meta, viewers);
+    out[entityRefKey(ref)] = viewers;
+  }
+  for (const ref of p.remove) {
+    const removed = replies[i];
+    const all = replies[i + 1];
+    i += 2;
+    const key = entityPresenceRedisKey(p.orgId, ref.entityType, ref.entityId);
+    const meta = { orgId: p.orgId, entityType: ref.entityType, entityId: ref.entityId };
+    if (Number(removed) > 0) broadcastList(meta, liveFromHash(all, now));
+    if (hashEntries(all).length === 0) redisRooms.delete(key);
+  }
+  return out;
+}
+
+function beatMemory(p: ViewerBeatInput): Record<string, EntityViewer[]> {
+  const out: Record<string, EntityViewer[]> = {};
+  for (const ref of p.touch) {
+    out[entityRefKey(ref)] = touchMemory({ ...p, ...ref });
+  }
+  for (const ref of p.remove) removeMemory({ orgId: p.orgId, userId: p.userId, ...ref });
+  return out;
 }
 
 /**
- * `true` = este heartbeat é o primeiro do ciclo para usuário+entidade e deve
- * escrever (`touchViewer`); `false` = já escrito no ciclo, só ler. Falha no
- * Redis → `true` (melhor escrever de novo do que sumir da pilha).
+ * Batida do usuário: renova o viewer em `touch`, remove de `remove` (com
+ * broadcast só de quem entrou/saiu) e grava `alsoSet` — tudo num MULTI.
+ * Devolve os viewers vivos de cada entidade de `touch` (`"<tipo>:<id>"`).
+ * Redis fora: `Map` do processo.
  */
-export async function claimViewerWrite(p: PresenceArgs): Promise<boolean> {
-  const ms = entityPresenceDedupMs();
-  if (ms === 0) return true;
-  const key = entityPresenceDedupKey(p);
+export async function beatViewers(p: ViewerBeatInput): Promise<Record<string, EntityViewer[]>> {
+  if (p.touch.length === 0 && p.remove.length === 0 && !p.alsoSet) return {};
   const client = getCacheClient();
   if (client) {
     try {
-      const won = await client.set(key, "1", "PX", ms, "NX");
+      const out = await beatRedis(client, p);
       noteSuccess();
-      return won === "OK";
+      // Pode ter entrado pelo fallback enquanto o Redis estava fora.
+      for (const ref of p.remove) removeMemory({ orgId: p.orgId, userId: p.userId, ...ref });
+      return out;
     } catch (err) {
-      noteFailure(err, key, "presence");
-      return true;
+      noteFailure(err, "presence:beat", "presence");
     }
   }
-  return claimMemory(key, ms);
+  return beatMemory(p);
 }
 
-/** Solta o claim do ciclo (saída explícita): a próxima aba escreve na hora. */
-export async function releaseViewerWrite(p: PresenceArgs): Promise<void> {
-  const key = entityPresenceDedupKey(p);
-  memoryWriteClaims.delete(key);
+/** Viewers vivos de várias entidades, sem escrever (1 pipeline de HGETALL). */
+export async function listViewersMany(
+  orgId: string,
+  refs: EntityRef[],
+): Promise<Record<string, EntityViewer[]>> {
+  const out: Record<string, EntityViewer[]> = {};
+  if (refs.length === 0) return out;
+  const now = Date.now();
   const client = getCacheClient();
-  if (!client) return;
-  try {
-    await client.del(key);
-    noteSuccess();
-  } catch (err) {
-    noteFailure(err, key, "presence");
+  if (client) {
+    try {
+      const pipe = client.pipeline();
+      for (const ref of refs) pipe.hgetall(entityPresenceRedisKey(orgId, ref.entityType, ref.entityId));
+      const replies = execReplies(await pipe.exec());
+      noteSuccess();
+      refs.forEach((ref, idx) => {
+        out[entityRefKey(ref)] = liveFromHash(replies[idx], now);
+      });
+      return out;
+    } catch (err) {
+      noteFailure(err, "presence:list-many", "presence");
+    }
   }
+  for (const ref of refs) {
+    const room = rooms.get(roomKey(orgId, ref.entityType, ref.entityId));
+    out[entityRefKey(ref)] = publicList(room).filter((v) => isLive(v, now));
+  }
+  return out;
 }
 
 /** Só para testes: esquece salas locais (memória e conhecidas no Redis). */
@@ -475,7 +532,6 @@ export function resetEntityPresenceForTests(): void {
   rooms.clear();
   keyMeta.clear();
   redisRooms.clear();
-  memoryWriteClaims.clear();
 }
 
 // ── Reaper: expira viewers inativos e faz broadcast das salas que mudaram ──

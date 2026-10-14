@@ -22,6 +22,9 @@
  * Dois processos = dois módulos (`vi.resetModules()`) sobre o mesmo
  * `state`.
  *
+ * `multi()` registra `MULTI <n>`; `pipeline()` registra `PIPELINE <n>` (uma
+ * ida, sem transação) — os testes contam escritas pelos `MULTI`.
+ *
  * `EVAL`: scripts com marcador `-- crm:<nome>` na 1ª linha são emulados
  * por nome (ver `FAKE_SCRIPTS`); sem marcador, é o compare-and-delete do
  * lock do cache.
@@ -172,10 +175,23 @@ export function fakeIoredisModule(state: FakeRedisState) {
       }
       return ttl;
     },
+    // Limite da batida de presença: SET NX PX; ganhou → [1, lista anterior
+    // ou ""]; perdeu → [0, PTTL em texto].
+    "presence-beat-gate": ([gateKey, listKey], [windowMs]) => {
+      if (ops.set(gateKey!, "1", "NX", "PX", Number(windowMs)) === "OK") {
+        return [1, listKey ? (ops.get(listKey) ?? "") : ""];
+      }
+      return [0, String(ops.pttl(gateKey!))];
+    },
   };
 
   class FakeMulti {
     private queue: Queued[] = [];
+    /** `MULTI` (transação) ou `PIPELINE` (só agrupa) no registro de chamadas. */
+    private readonly label: "MULTI" | "PIPELINE";
+    constructor(label: "MULTI" | "PIPELINE" = "MULTI") {
+      this.label = label;
+    }
     set(key: string, value: string, ...args: unknown[]) {
       this.queue.push(() => ops.set(key, value, ...args));
       return this;
@@ -213,7 +229,7 @@ export function fakeIoredisModule(state: FakeRedisState) {
       return this;
     }
     async exec(): Promise<Array<[Error | null, unknown]>> {
-      guard(`MULTI ${this.queue.length}`);
+      guard(`${this.label} ${this.queue.length}`);
       return this.queue.map((run) => [null, run()]);
     }
   }
@@ -301,7 +317,10 @@ export function fakeIoredisModule(state: FakeRedisState) {
       return 0;
     }
     multi() {
-      return new FakeMulti();
+      return new FakeMulti("MULTI");
+    }
+    pipeline() {
+      return new FakeMulti("PIPELINE");
     }
   }
 

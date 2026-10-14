@@ -75,7 +75,11 @@ vi.mock("@/lib/api-access-audit", () => ({
   resolveResponseStatus: (r: unknown) =>
     r && typeof r === "object" && "status" in r ? (r as { status: number }).status : 200,
 }));
-vi.mock("@/lib/metrics", () => ({ observeHttpRequest: vi.fn(), metrics: {} }));
+vi.mock("@/lib/metrics", () => ({
+  observeHttpRequest: vi.fn(),
+  recordPresenceBeat: vi.fn(),
+  metrics: {},
+}));
 vi.mock("@/lib/cache/redis-client", () => ({
   getCacheClient: () => h.client.current,
   noteSuccess: vi.fn(),
