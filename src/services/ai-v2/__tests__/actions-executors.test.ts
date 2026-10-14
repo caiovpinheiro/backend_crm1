@@ -26,6 +26,8 @@ const mocks = vi.hoisted(() => ({
   enrichTemplate: vi.fn(async (): Promise<{ components: unknown; flowToken: string | null }> => ({ components: undefined, flowToken: null })),
   queryRaw: vi.fn(async (_sql: string, ..._params: unknown[]): Promise<unknown[]> => []),
   stageFindUnique: vi.fn(async (_args: unknown): Promise<{ isLost: boolean } | null> => ({ isLost: false })),
+  dealFindUnique: vi.fn(async (_args: unknown): Promise<{ stageId: string; contactId: string } | null> => ({ stageId: "st-1", contactId: "contact-1" })),
+  notifyStage: vi.fn(async () => undefined),
   sendFollowUpMedia: vi.fn(async (_args: Record<string, unknown>) => 1),
   publishNewMessage: vi.fn(),
   touchLastMessage: vi.fn(async () => undefined),
@@ -40,6 +42,7 @@ vi.mock("@/lib/prisma", () => ({
     aIV2KnowledgeGap: { findFirst: mocks.gapFindFirst, update: mocks.gapUpdate, create: mocks.gapCreate },
     aIAgentSurveyResponse: { create: mocks.surveyCreate },
     stage: { findUnique: mocks.stageFindUnique },
+    deal: { findUnique: mocks.dealFindUnique },
   },
 }));
 vi.mock("@/lib/prisma-base", () => ({ prismaBase: { $queryRawUnsafe: mocks.queryRaw, $executeRawUnsafe: vi.fn(async () => 0) } }));
@@ -60,6 +63,7 @@ vi.mock("@/services/activities", () => ({ createActivity: mocks.createActivity }
 vi.mock("@/lib/meta-whatsapp/client", () => ({ metaClientFromConfig: mocks.metaClient }));
 vi.mock("@/lib/meta-whatsapp/enrich-template-flow", () => ({ enrichTemplateComponentsForFlowSend: mocks.enrichTemplate }));
 vi.mock("../handoff", () => ({ simpleHandoff: vi.fn(async () => undefined), leadsHandoffOption: () => undefined }));
+vi.mock("@/services/automation-triggers", () => ({ notifyDealStageChanged: mocks.notifyStage }));
 vi.mock("../sent-materials", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../sent-materials")>()),
   lastV2ResetAt: vi.fn(async () => null),
@@ -115,6 +119,7 @@ describe("executores de ação", () => {
     mocks.queryRaw.mockResolvedValue([]);
     mocks.sendFollowUpMedia.mockResolvedValue(1);
     mocks.stageFindUnique.mockResolvedValue({ isLost: false });
+    mocks.dealFindUnique.mockResolvedValue({ stageId: "st-1", contactId: "contact-1" });
   });
 
   it("add_tag: aplica etiqueta existente; sem contato, sem nome ou etiqueta inexistente falha sem exceção", async () => {
@@ -139,6 +144,7 @@ describe("executores de ação", () => {
   it("move_stage: move o negócio da conversa; sem negócio ou sem etapa falha", async () => {
     expect(await run({ type: "move_stage", stageId: "st-9" })).toMatchObject({ ok: true });
     expect(mocks.updateDeal).toHaveBeenCalledWith("deal-1", { stageId: "st-9" });
+    expect(mocks.notifyStage).toHaveBeenCalledWith("deal-1", "st-1", "st-9", { contactId: "contact-1", depth: 0 });
     expect(await run({ type: "move_stage" })).toMatchObject({ ok: false, error: "Missing stageId" });
     expect(await run({ type: "move_stage", stageId: "st-9" }, ctx({ dealId: undefined }))).toMatchObject({ ok: false, error: "No deal" });
   });
