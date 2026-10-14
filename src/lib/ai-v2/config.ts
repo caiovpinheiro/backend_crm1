@@ -262,6 +262,10 @@ const closureConfigSchema = z.object({
   newDemandBehavior: z.enum(["no_reply", "short_reply", "reopen_and_route", "ask_with_options", "handoff"]).optional().default("reopen_and_route"),
   ambiguousBehavior: z.enum(["no_reply", "short_reply", "reopen_and_route", "ask_with_options", "handoff"]).optional().default("ask_with_options"),
   goodbyeMessage: optionalText,
+  lossReasons: z.object({
+    enabled: z.boolean().optional(),
+    reasonIds: z.array(z.string()).optional(),
+  }).optional(),
   returnToOriginStage: z.boolean().optional().default(true),
   nextAutomationStepId: z.string().optional(),
   fieldUpdates: z

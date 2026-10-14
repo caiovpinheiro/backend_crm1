@@ -755,6 +755,7 @@ export function buildAgentRulesMarkdown(args: {
     mediaLine("audio", "Áudio"), mediaLine("image", "Imagem"), mediaLine("document", "Documento"),
     `- Confirma o que entendeu da mídia: ${yesNo(c.media?.confirmUnderstanding)}`,
     `- Despedida: ${q(c.closure?.goodbyeMessage)} (sem despedida, sai a resposta do agente)`,
+    `- Motivo ao perder: ${c.closure?.lossReasons?.enabled ? list(c.closure.lossReasons.reasonIds ?? []) : "desligado"}`,
     `- Depois de encerrar (${c.closure?.postCloseWindowHours ?? "—"} h):`,
     `  - cortesia → ${POST_CLOSE[c.closure?.courtesyBehavior ?? "no_reply"]}${c.closure?.postCloseMessages?.courtesy ? ` (${q(c.closure.postCloseMessages.courtesy)})` : ""}`,
     `  - pedido novo → ${POST_CLOSE[c.closure?.newDemandBehavior ?? "reopen_and_route"]}${c.closure?.postCloseMessages?.new_demand ? ` (${q(c.closure.postCloseMessages.new_demand)})` : ""}`,

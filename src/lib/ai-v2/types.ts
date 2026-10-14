@@ -392,6 +392,15 @@ export interface V2ClosureConfig {
   ambiguousBehavior: V2PostCloseCaseBehavior;
   /** Mensagem de despedida ao encerrar. */
   goodbyeMessage?: string;
+  /**
+   * Motivos que ele pode gravar ao mover o negócio para uma etapa de perdido.
+   * Desligado: a etapa muda e o motivo fica vazio, como antes.
+   */
+  lossReasons?: {
+    enabled?: boolean;
+    /** Ids de LossReason. Só estes textos são gravados. */
+    reasonIds?: string[];
+  };
   /** Se deve devolver o card à etapa de origem ao fechar. */
   returnToOriginStage: boolean;
   /** Step da automação para continuar ao encerrar, se houver. */

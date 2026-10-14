@@ -177,8 +177,20 @@ async function executeMoveStage(action: V2Action, ctx: V2ActionContext): Promise
   const stageId = typeof action.stageId === "string" ? action.stageId : "";
   if (!stageId) return { action, ok: false, error: "Missing stageId" };
   try {
-    await updateDeal(ctx.dealId, { stageId } as any);
-    return { action, ok: true };
+    const stage = await prisma.stage.findUnique({
+      where: { id: stageId },
+      select: { isLost: true },
+    });
+    let lostReason: string | undefined;
+    if (stage?.isLost) {
+      const raw = typeof action.lostReason === "string" ? action.lostReason : "";
+      const { configuredLossReasons, matchLossReason } = await import("./loss-reason");
+      const choices = await configuredLossReasons(ctx.config);
+      const matched = matchLossReason(choices, raw);
+      if (matched) lostReason = matched;
+    }
+    await updateDeal(ctx.dealId, { stageId, ...(lostReason ? { lostReason } : {}) } as any);
+    return { action, ok: true, ...(lostReason ? { lostReason } : {}) };
   } catch (err) {
     return { action, ok: false, error: err instanceof Error ? err.message : String(err) };
   }
