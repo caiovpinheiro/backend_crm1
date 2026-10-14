@@ -11,6 +11,7 @@ import {
   publishSupportTicketUpdated,
 } from "@/lib/realtime-events";
 import { enqueueProcessPendingOrRun } from "@/services/distribution";
+import { drainLeadsPending } from "@/services/distribution/leads/pending";
 import { drainSupportQueue } from "@/services/support/distribution";
 import { getLogger } from "@/lib/logger";
 
@@ -133,6 +134,17 @@ export async function PUT(req: Request, ctx: Ctx) {
               }),
             );
             // #endregion
+          }
+
+          // Fila do modo por leads (repasse da IA com departamento). Quem
+          // acabou de ficar online entra no sorteio se estiver no expediente.
+          try {
+            await drainLeadsPending();
+          } catch (e) {
+            log.warn(
+              { err: e instanceof Error ? e.message : e },
+              "[/api/agents/[id]/status] drainLeadsPending falhou",
+            );
           }
 
           // Também drena a fila do chat interno de suporte (tickets

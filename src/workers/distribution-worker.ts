@@ -24,6 +24,7 @@ import { processDistributionRedistributeJob } from "@/jobs/distribution/redistri
 import { processDistributionStuckInboundJob } from "@/jobs/distribution/stuck-inbound.job";
 import { truncateErrorMessage } from "@/jobs/leads/_update-progress";
 import { prismaBase } from "@/lib/prisma-base";
+import { runWithContext } from "@/lib/request-context";
 import { installGracefulShutdown } from "@/workers/graceful-shutdown";
 
 const log = getLogger("worker.distribution");
@@ -160,6 +161,15 @@ export async function startDistributionWorker() {
     );
   });
 
+  // Cards do repasse da IA esperam o expediente (ex.: entra às 13h já
+  // online). A cada minuto, só orgs com fila recortada (scope preenchido).
+  const leadsScopeTimer = setInterval(() => {
+    void drainAiLeadsScopes().catch((err) => {
+      log.warn({ err: truncateErrorMessage(err) }, "drenagem do recorte por leads falhou");
+    });
+  }, 60_000);
+  if (typeof leadsScopeTimer.unref === "function") leadsScopeTimer.unref();
+
   log.info(
     {
       drainConcurrency,
@@ -177,13 +187,47 @@ export async function startDistributionWorker() {
     steps: [
       {
         name: "bullmq",
-        run: () => Promise.all([drainWorker.close(), executeWorker.close()]),
+        run: () => {
+          clearInterval(leadsScopeTimer);
+          return Promise.all([drainWorker.close(), executeWorker.close()]);
+        },
       },
       { name: "prisma", run: () => prismaBase.$disconnect() },
     ],
   });
 
   return { drainWorker, executeWorker };
+}
+
+/** Fila por leads com recorte da IA: recalcula online + expediente. */
+async function drainAiLeadsScopes(): Promise<void> {
+  let rows: Array<{ organizationId: string }>;
+  try {
+    rows = await prismaBase.$queryRaw<Array<{ organizationId: string }>>`
+      SELECT DISTINCT "organizationId"
+      FROM "distribution_leads_pending"
+      WHERE status = 'PENDING' AND scope IS NOT NULL
+    `;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    // Coluna nova: até o migrate, o timer não fica gritando a cada minuto.
+    if (msg.includes("42703")) return;
+    throw err;
+  }
+  for (const row of rows) {
+    await runWithContext(
+      {
+        organizationId: row.organizationId,
+        userId: "system",
+        isSuperAdmin: false,
+        actor: { type: "SYSTEM", label: "Sistema" },
+      },
+      async () => {
+        const { drainLeadsPending } = await import("@/services/distribution/leads/pending");
+        await drainLeadsPending();
+      },
+    );
+  }
 }
 
 if (require.main === module) {

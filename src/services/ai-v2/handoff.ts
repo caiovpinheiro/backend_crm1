@@ -6,7 +6,7 @@
 import { prisma } from "@/lib/prisma";
 import { executeDistribution } from "@/services/distribution";
 import { isAgentAvailable } from "@/services/lead-distribution";
-import type { V2Destination } from "@/lib/ai-v2/types";
+import type { V2AgentConfig, V2Destination } from "@/lib/ai-v2/types";
 import { traceStep } from "./trace";
 import { getLogger } from "@/lib/logger";
 
@@ -19,7 +19,22 @@ type HandoffArgs = {
   destination: V2Destination;
   /** Turno em andamento: com destino agente de IA, ele responde as mesmas mensagens. */
   turnId?: string;
+  /**
+   * Só deste agente, quando a config pede modo por leads. Ausente = distribuição
+   * inteligente, como os outros agentes.
+   */
+  leads?: { enabled: true; roleIds: string[]; userIds: string[] };
 };
+
+/** Opção da config. Desligada ou ausente = este agente não muda o repasse. */
+export function leadsHandoffOption(
+  config: Pick<V2AgentConfig, "handoff">,
+): HandoffArgs["leads"] {
+  const leads = config.handoff?.leads;
+  if (!leads?.enabled) return undefined;
+  const ids = (list: string[] | undefined) => (list ?? []).map((id) => id.trim()).filter(Boolean);
+  return { enabled: true, roleIds: ids(leads.roleIds), userIds: ids(leads.userIds) };
+}
 
 export async function simpleHandoff(args: HandoffArgs): Promise<void> {
   try {
@@ -73,6 +88,10 @@ async function routeHandoff(args: HandoffArgs): Promise<void> {
   const destination = args.destination;
 
   if (destination.type === "department") {
+    if (args.leads?.enabled) {
+      await routeLeadsDepartment(args, destination.id ?? null);
+      return;
+    }
     await executeDistribution({
       conversationId: args.conversationId,
       contactId: args.contactId ?? null,
@@ -134,6 +153,47 @@ async function routeHandoff(args: HandoffArgs): Promise<void> {
     reassign: true,
     allowOrgWideFallback: false,
   });
+}
+
+/**
+ * Destino departamento com a opção deste agente: modo por leads, só pessoas
+ * daquele departamento (papel e lista da config), online e no expediente.
+ * Sem ninguém, a fila é a do modo por leads. Não chama a distribuição inteligente.
+ */
+async function routeLeadsDepartment(args: HandoffArgs, departmentId: string | null): Promise<void> {
+  if (!departmentId) {
+    traceStep("transferência", "Por leads ligado, mas o destino não tem departamento → conversa fica sem responsável, fora da fila inteligente");
+    return;
+  }
+  const scope = {
+    departmentId,
+    roleIds: args.leads?.roleIds ?? [],
+    userIds: args.leads?.userIds ?? [],
+  };
+  await prisma.conversation.update({
+    where: { id: args.conversationId },
+    data: { departmentId },
+  });
+  const { eligibleUserIdsForScope } = await import("./leads-handoff");
+  const { executeLeadsDistribution } = await import("@/services/distribution/leads/engine");
+  const onlyUserIds = await eligibleUserIdsForScope(scope);
+  const result = await executeLeadsDistribution({
+    conversationId: args.conversationId,
+    contactId: args.contactId ?? null,
+    dealId: args.dealId ?? null,
+    triggerSource: "AI_AGENT",
+    reassign: true,
+    onlyUserIds,
+    pendingScope: scope,
+  });
+  if (result.success) {
+    traceStep("transferência", `Por leads: ${result.selectedUserName ?? result.selectedUserId} no departamento ${departmentId}`);
+    return;
+  }
+  traceStep(
+    "transferência",
+    `Por leads: ninguém disponível no departamento agora (${result.reason}). O card espera na fila do modo por leads, sem a fila inteligente.`,
+  );
 }
 
 async function assignConversation(conversationId: string, userId: string): Promise<void> {

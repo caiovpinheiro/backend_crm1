@@ -50,7 +50,7 @@ import { applyBoldPolicy } from "./reply-format";
 import { MESSAGE_MODEL_MIN_COVERAGE, MESSAGE_MODEL_REPEATED, announcesSending, introBeforeMaterial, lastV2ResetAt, mediaResendPlan, messageModelCoverage, pickPromisedModelId, recentMediaDeliveries, recentlySentMessageModels, resendWindowStart, saysNotReceived, recentlyAppliedRuleIds, RULE_REPLY_ACTION_TYPES } from "./sent-materials";
 import { attachmentsBlockedByResend } from "./material-attachments";
 import { buildV2Interactive, matchPendingOption, type V2InteractivePayload } from "./interactive";
-import { simpleHandoff } from "./handoff";
+import { leadsHandoffOption, simpleHandoff } from "./handoff";
 import { formatCampaignDispatchBlock, hydrateOutboundTemplateContent, loadLastCampaignDispatchContext } from "@/services/ai/campaign-context";
 import { pickQueueNotice, queuedMessageFor } from "./queue-notice";
 import {
@@ -1440,6 +1440,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       dealId: loadedContext.dealId,
       destination: mediaDestination,
       turnId: input.turnId,
+      leads: leadsHandoffOption(config),
     });
     await upsertV2ConversationState({
       organizationId: orgId,
@@ -3010,6 +3011,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       dealId: loadedContext.dealId,
       destination,
       turnId: input.turnId,
+      leads: leadsHandoffOption(config),
     });
     traceStep("transferência", `Transferido para ${destination.type}${destination.id ? ` (${destination.id})` : ""}`);
     return sent;
@@ -3237,6 +3239,7 @@ async function handoffAndReply(
     dealId: loadedContext.dealId,
     destination: fallbackDestination,
     turnId: input.turnId,
+    leads: leadsHandoffOption(config),
   });
   await upsertV2ConversationState({
     organizationId: orgId,

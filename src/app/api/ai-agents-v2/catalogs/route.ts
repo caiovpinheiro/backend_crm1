@@ -33,6 +33,8 @@ export async function GET() {
       contacts,
       tags,
       tabulationRows,
+      roleRows,
+      memberRows,
     ] = await Promise.all([
       p.department.findMany({ where: { organizationId }, select: { id: true, name: true } }),
       p.distributionRule.findMany({ where: { organizationId }, select: { id: true, name: true } }),
@@ -108,6 +110,21 @@ export async function GET() {
       import("@/services/tabulations")
         .then(({ listActiveTabulationLeaves }) => runInSessionContext(r.session, () => listActiveTabulationLeaves({ organizationId })))
         .catch(() => []),
+      // Papéis e membros de departamento: extras do repasse por leads.
+      // Ausência do model no mock/cliente antigo não derruba o catálogo.
+      Promise.resolve(
+        p.role?.findMany?.({
+          where: { organizationId },
+          select: { id: true, name: true },
+          orderBy: { name: "asc" },
+        }) ?? [],
+      ).catch(() => []),
+      Promise.resolve(
+        p.departmentMember?.findMany?.({
+          where: { organizationId },
+          select: { departmentId: true, userId: true },
+        }) ?? [],
+      ).catch(() => []),
     ]);
 
     const tabulations = (tabulationRows as Array<{ id: string; path: string; departmentName: string }>).map((t) => ({
@@ -160,6 +177,8 @@ export async function GET() {
         phone: c.phone,
         email: c.email,
       })),
+      roles: roleRows ?? [],
+      departmentMembers: memberRows ?? [],
     });
   } catch (err) {
     log.error({ err }, "[GET /api/ai-agents-v2/catalogs] falhou");
