@@ -248,3 +248,25 @@ describe("cookie com token revogado (marcado pelo callback jwt)", () => {
     });
   });
 });
+
+describe("flag de busca para a classe de custo (x-crm-api-search)", () => {
+  const forwarded = (res: Response) => res.headers.get("x-middleware-request-x-crm-api-search");
+
+  it("GET com search/q preenchido marca 1; sem busca, não marca; valor do cliente não vale", async () => {
+    getToken.mockResolvedValue({ id: "user_1", isSuperAdmin: false });
+    expect(forwarded(await middleware(request("/api/contacts?search=ana")))).toBe("1");
+    expect(forwarded(await middleware(request("/api/deals?q=119")))).toBe("1");
+    expect(forwarded(await middleware(request("/api/contacts?search=")))).toBeNull();
+    expect(
+      forwarded(
+        await middleware(request("/api/contacts", { headers: { "x-crm-api-search": "1" } })),
+      ),
+    ).toBeNull();
+    // Path segue no header de auditoria (sem a query).
+    expect(
+      (await middleware(request("/api/contacts?search=ana"))).headers.get(
+        "x-middleware-request-x-crm-api-path",
+      ),
+    ).toBe("/api/contacts");
+  });
+});

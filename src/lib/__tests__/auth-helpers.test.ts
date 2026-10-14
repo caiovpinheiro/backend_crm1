@@ -36,7 +36,7 @@ vi.mock("@/lib/metrics", () => ({
   metrics: {},
   safeLabel: (v: unknown) => String(v),
 }));
-vi.mock("@/lib/rate-limit", () => ({ enforceSessionApiRateLimit: h.sessionRpm }));
+vi.mock("@/lib/api-cost-limit", () => ({ enforceApiCostLimits: h.sessionRpm }));
 vi.mock("@/lib/org-rate-limit", () => ({ enforceOrgApiRateLimit: h.orgRpm }));
 vi.mock("@/lib/prisma-base", () => ({
   prismaBase: {
@@ -230,7 +230,7 @@ describe("requireAuth", () => {
     expect(r.ok).toBe(true);
   });
 
-  it("rate limit da sessão/org devolve a resposta 429 do limitador", async () => {
+  it("limite por classe de custo / org devolve a resposta 429 do limitador", async () => {
     h.auth.mockResolvedValue(session());
     const limited = NextResponse.json({ message: "slow" }, { status: 429 });
     h.sessionRpm.mockResolvedValueOnce(limited);
@@ -262,7 +262,16 @@ describe("requireAuth", () => {
       isSuperAdmin: false,
       actor: { type: "HUMAN", label: "Bia" },
     });
-    expect(h.sessionRpm).toHaveBeenCalledWith({ userId: "user-ctx", organizationId: "org-ctx" });
+    // Classe de custo pela rota/método dos headers do middleware (GET /api/x
+    // fora do mapa → leitura comum).
+    expect(h.sessionRpm).toHaveBeenCalledWith({
+      userId: "user-ctx",
+      organizationId: "org-ctx",
+      cls: "cached_read",
+      method: "GET",
+      path: "/api/x",
+      requestToken: undefined,
+    });
     expect(h.orgRpm).toHaveBeenCalledWith({
       organizationId: "org-ctx",
       isSuperAdmin: false,

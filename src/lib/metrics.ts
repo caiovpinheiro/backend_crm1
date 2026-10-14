@@ -196,6 +196,15 @@ function buildMetrics(registry: Registry): AppMetrics {
     registers: [registry],
   });
 
+  // Limite por classe de custo (api-cost-limit.ts / overload-guard.ts):
+  // 429 = bucket da classe vazio; 503 = proteção contra sobrecarga.
+  const apiCostRejections = new Counter({
+    name: "crm_api_cost_rejections_total",
+    help: "Requisições recusadas por classe de custo (status 429 limite, 503 sobrecarga).",
+    labelNames: ["class", "status"] as const,
+    registers: [registry],
+  });
+
   // Respostas condicionais (ETag/If-None-Match): 304 vs 200 por rota.
   // As rotas incrementam via `recordConditionalResponse`.
   const conditionalResponses = new Counter({
@@ -247,6 +256,7 @@ function buildMetrics(registry: Registry): AppMetrics {
     cacheHits,
     cacheMisses,
     apiCost: {
+      rejections: apiCostRejections,
       conditionalResponses,
     },
     activityOutbox: {
@@ -293,6 +303,7 @@ export type AppMetrics = {
   cacheHits: Counter<"key">;
   cacheMisses: Counter<"key">;
   apiCost: {
+    rejections: Counter<"class" | "status">;
     conditionalResponses: Counter<"route" | "status">;
   };
   activityOutbox: {

@@ -7,13 +7,11 @@ import {
 } from "@/lib/api-public-access";
 import { auth } from "@/lib/auth";
 import { revokedReasonOf, sessionRevokedResponse } from "@/lib/auth/revoked-session";
+import { classifyApiRequest, hasSearchParam } from "@/lib/api-cost-class";
+import { enforceApiCostLimits } from "@/lib/api-cost-limit";
 import { observeHttpRequest } from "@/lib/metrics";
 import { enforceOrgApiRateLimit } from "@/lib/org-rate-limit";
-import {
-  consumeRateLimit,
-  enforceSessionApiRateLimit,
-  type RateLimitDecision,
-} from "@/lib/rate-limit";
+import { consumeRateLimit, type RateLimitDecision } from "@/lib/rate-limit";
 import { logRateLimitReject } from "@/lib/rate-limit-reject-log";
 import { validateToken } from "@/services/api-tokens";
 import {
@@ -194,11 +192,26 @@ export async function authenticateApiRequest(
       label: sessionUser.name ?? sessionUser.email ?? sessionUser.id,
     },
   };
-  const sessionRpm = await enforceSessionApiRateLimit({
+  // Limite por classe de custo (mesma regra do `requireAuth`).
+  let url: URL | null = null;
+  try {
+    url = new URL(request.url);
+  } catch {
+    url = null;
+  }
+  const costLimited = await enforceApiCostLimits({
     userId: sessionApiUser.id,
     organizationId: sessionApiUser.organizationId,
+    cls: classifyApiRequest({
+      method: request.method,
+      path: url?.pathname,
+      hasSearch: hasSearchParam(url?.searchParams),
+    }),
+    method: request.method,
+    path: url?.pathname,
+    requestToken: request,
   });
-  if (sessionRpm) return { ok: false, response: sessionRpm };
+  if (costLimited) return { ok: false, response: costLimited };
 
   const orgRpm = await rejectIfOrgRateLimited(request, sessionApiUser, false);
   if (orgRpm) return { ok: false, response: orgRpm };

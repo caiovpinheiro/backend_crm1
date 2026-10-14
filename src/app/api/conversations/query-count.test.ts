@@ -57,7 +57,6 @@ vi.mock("ioredis", async () => {
 vi.mock("@/lib/auth", () => ({ auth: async () => h.session }));
 vi.mock("@/lib/rate-limit", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/rate-limit")>()),
-  enforceSessionApiRateLimit: async () => null,
 }));
 vi.mock("@/lib/org-rate-limit", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/org-rate-limit")>()),
