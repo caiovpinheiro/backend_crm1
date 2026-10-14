@@ -2744,7 +2744,14 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       const clientSaidSomething =
         !chosenOption && !isFillerMessage(input.userMessage) && !isShortAckText(input.userMessage) && !isGreetingOnlyMessage(input.userMessage);
       const nothingToSay = fallback === systemMessage(config, "stillHere");
-      if (clientSaidSomething && nothingToSay && !anyHandoff && !anyClose) {
+      // Só imagem/arquivo, sem palavra do cliente, e a resposta repetiria a
+      // anterior: ele reenviou o mesmo recibo/print. A resposta anterior
+      // já cobre; "ficou alguma dúvida sobre o que te passei?" em cima de um
+      // reenvio soava como se ele tivesse perguntado algo.
+      const mediaOnlyResend = !chosenOption && input.userMessage.trim() !== "" && clientWordsOnly(input.userMessage) === "";
+      if (mediaOnlyResend) {
+        traceStep("resposta", "Cliente reenviou imagem/arquivo sem texto e a resposta repetiria a anterior → nada a mandar (a anterior já cobre)");
+      } else if (clientSaidSomething && nothingToSay && !anyHandoff && !anyClose) {
         // O cliente disse o que precisa e o agente só repetiria a pergunta:
         // "Estou por aqui! Me conta o que você precisa" em cima disso é
         // surdez. Sai pela saída do assunto (ou encerra), como no limite de
