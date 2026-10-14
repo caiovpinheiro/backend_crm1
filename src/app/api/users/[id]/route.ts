@@ -3,7 +3,11 @@ import bcrypt from "bcryptjs";
 
 import { UserRole } from "@prisma/client";
 
-import { bumpResponseFamilies, RESPONSE_FAMILIES } from "@/lib/cache/response-families";
+import {
+  bumpMeBootstrap,
+  bumpResponseFamilies,
+  RESPONSE_FAMILIES,
+} from "@/lib/cache/response-families";
 import { requireAdmin, userOrgFilter } from "@/lib/auth-helpers";
 import { clearLoginLockout } from "@/lib/auth/lockout";
 import {
@@ -203,6 +207,8 @@ export async function PUT(request: Request, context: RouteContext) {
       });
       // Lista de usuários em cache (`GET /api/users`, bootstrap).
       await bumpResponseFamilies(r.session.user.organizationId, RESPONSE_FAMILIES.users);
+      // Perfil (nome, e-mail, papel…) no bootstrap v2 do usuário editado.
+      await bumpMeBootstrap(r.session.user.organizationId, id);
       if (data.hashedPassword) {
         // Reset administrativo de senha tambem destrava o login: o
         // hard-lock de 24h (login_attempts) nao pode sobreviver a ele,
