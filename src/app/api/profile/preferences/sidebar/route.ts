@@ -12,6 +12,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { withOrgContext } from "@/lib/auth-helpers";
+import { bumpMeBootstrap } from "@/lib/cache/response-families";
 import { can, loadAuthzContext } from "@/lib/authz";
 import { getActiveWidgetSlugs } from "@/services/organization-widgets";
 import {
@@ -79,6 +80,8 @@ export async function PATCH(request: Request) {
             parsed.data.items ?? [],
             availableKeys,
           );
+      // `preferences` do bootstrap v2 (cache por usuário).
+      await bumpMeBootstrap(session.user.organizationId, session.user.id);
       return NextResponse.json({
         sidebar: bundle.sidebar,
         roleSidebar: bundle.roleSidebar,

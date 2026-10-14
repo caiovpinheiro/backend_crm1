@@ -503,6 +503,7 @@ describe("GET /api/me/bootstrap — blocks", () => {
     "/api/settings/quick-replies/groups": quickReplyGroupsGet as (r: Request) => Promise<Response>,
     "/api/custom-fields/card-extension": cardExtensionGet as (r: Request) => Promise<Response>,
     "/api/field-layout?context=deal_panel_v2&forUser=true": fieldLayoutGet as (r: Request) => Promise<Response>,
+    "/api/settings/departments": departmentsGet as (r: Request) => Promise<Response>,
   };
 
   async function bootstrap(etag?: string | null) {

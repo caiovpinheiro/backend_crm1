@@ -24,7 +24,11 @@ const log = getLogger("cache/response");
  *   onboarding, motivos de perda que mexem no funil).
  * - `rc_custom_fields`: definições de campo personalizado.
  * - `rc_departments`: departamentos e membros.
- * - `rc_users`: usuários (criar/editar/apagar/papel/status de agente).
+ * - `rc_users`: usuários (criar/editar/apagar/papel). Status de agente NÃO
+ *   sobe mais esta família (14/10): tem a própria, `rc_agent_status`.
+ * - `rc_agent_status`: status de agente (Online/Ausente). Só a variante
+ *   legada de `/api/users` (com `agentStatus`) e a presença do
+ *   `/api/me/live` dependem dela; a variante estável (v2) não.
  * - `rc_field_layout`: layout de campos (admin e por usuário).
  * - `rc_loss_reasons`: motivos de perda.
  */
@@ -36,6 +40,7 @@ export const RESPONSE_FAMILIES = {
   customFields: "rc_custom_fields",
   departments: "rc_departments",
   users: "rc_users",
+  agentStatus: "rc_agent_status",
   fieldLayout: "rc_field_layout",
   lossReasons: "rc_loss_reasons",
   /** Já existia: muda quando um ticket troca de aba (status/departamento). */
@@ -45,6 +50,39 @@ export const RESPONSE_FAMILIES = {
 } as const;
 
 export type ResponseFamily = (typeof RESPONSE_FAMILIES)[keyof typeof RESPONSE_FAMILIES];
+
+/**
+ * Família POR USUÁRIO do bootstrap estável (`GET /api/me/bootstrap` com
+ * `x-bootstrap-version: 2`, ver `services/me-bootstrap-cache.ts`):
+ * `cache:v:rc_me:<org>:<usuário>`. Prefixo `rc_` = sem memória local da
+ * versão (`versions.ts`): a outra réplica enxerga o bump na próxima leitura.
+ *
+ * Escritores (o dado do PRÓPRIO usuário que entra no bootstrap): perfil
+ * (`PUT /api/profile`), preferências (sidebar/dashboard/aparência), edição e
+ * exclusão do usuário pela Equipe (`/api/users/:id`), papel/atribuição
+ * (`invalidateAuthzForUser`), `AgentPermission` do usuário e anonimização
+ * (LGPD). O que é da org inteira (papéis, departamentos, settings, marca,
+ * widgets, canais) entra pelas famílias da org.
+ */
+export const ME_BOOTSTRAP_FAMILY = "rc_me";
+
+export function meBootstrapVersionName(orgId: string, userId: string): string {
+  return cacheVersionName(ME_BOOTSTRAP_FAMILY, orgId, userId);
+}
+
+/** Invalida o bootstrap estável dos usuários (um INCR cada). Nunca lança. */
+export async function bumpMeBootstrap(
+  orgId: string | null | undefined,
+  ...userIds: (string | null | undefined)[]
+): Promise<void> {
+  const ids = userIds.filter((id): id is string => Boolean(id));
+  if (!orgId || ids.length === 0) return;
+  try {
+    await bumpCacheVersion(...ids.map((id) => meBootstrapVersionName(orgId, id)));
+  } catch (err) {
+    log.warn({ err, orgId, userIds: ids }, "[response-cache] bump do bootstrap falhou");
+  }
+}
 
 /**
  * Invalida as famílias da org (um INCR por família). Nunca lança: o cache

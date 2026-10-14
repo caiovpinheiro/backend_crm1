@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
 
 import { requireAdmin, requireAuth } from "@/lib/auth-helpers";
+import { isBootstrapV2 } from "@/lib/bootstrap-version";
 import { syncUserRoleAssignment } from "@/lib/authz/sync-user-role";
 import { prisma } from "@/lib/prisma";
 import { nextUserNumber } from "@/lib/public-id";
@@ -23,9 +24,12 @@ export async function GET(request: Request) {
       new URL(request.url).searchParams.get("includeAi") === "true";
 
     // Cache por org + variante (ETag/304), TTL 60 s por causa da presença.
-    const spec = usersSpec(r.session.user, includeAi);
+    // `x-bootstrap-version: 2`: variante estável, sem presença/status de
+    // agente (vêm de `GET /api/me/live`), TTL 10 min.
+    const stable = isBootstrapV2(request);
+    const spec = usersSpec(r.session.user, includeAi, { stable });
     if (spec) return await respondWithCachedJson(request, spec);
-    return NextResponse.json(await loadUsersList(r.session.user, includeAi));
+    return NextResponse.json(await loadUsersList(r.session.user, includeAi, { stable }));
   } catch (e) {
     log.error({ err: e }, "GET falhou");
     return NextResponse.json({ message: "Erro ao listar usuários." }, { status: 500 });

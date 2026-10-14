@@ -71,8 +71,10 @@ export async function PUT(req: Request, ctx: Ctx) {
         create: withOrgFromCtx({ userId: id, status, availableForVoiceCalls }),
         update: { status, availableForVoiceCalls },
       });
-      // Status do agente aparece em `GET /api/users` (lista em cache).
-      await bumpResponseFamilies(getOrgIdOrNull(), RESPONSE_FAMILIES.users);
+      // Status do agente aparece na variante legada de `GET /api/users` e
+      // na presença do `/api/me/live` — família própria: a lista estável
+      // (v2) e o bootstrap v2 não mudam com o status.
+      await bumpResponseFamilies(getOrgIdOrNull(), RESPONSE_FAMILIES.agentStatus);
 
       const statusChanged = !existing || existing.status !== status;
       // #region agent log
