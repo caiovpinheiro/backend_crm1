@@ -18,7 +18,7 @@ const TRIED = /\b(?:ja|j)\s*(?:tentei|fiz|refiz|enviei|mandei|solicitei|pedi)\b|
 
 /** O resultado continua ruim: "não deu certo", "continua dando erro", "mesmo erro", "indeferido de novo". */
 const FAILED =
-  /\bnao\s+(?:deu certo|funcionou|funciona|resolveu|resolve|consegui|consigo|foi|aceitou|aceita|passou|passa|aparece|apareceu|libera|liberou|chegou|carrega|carregou|abre|abriu|entra|entrou|ta dando|esta dando|esta funcionando|ta funcionando)\b|\bcontinua\s+(?:dando|com|sem|igual|o mesmo|a mesma|aparecendo|sem funcionar)\b|\bmesm[oa]\s+(?:erro|problema|coisa|mensagem|situacao)\b|\b(?:de novo|novamente|outra vez|mais uma vez)\b|\b(?:indeferid|recusad|negad|rejeitad|reprovad|cancelad|bloquead)[oa]s?\b|\bda\s+(?:erro|indeferimento|recusa|negativa|problema)\b|\bsem sucesso\b|\bnada\s+(?:ainda|acontece|aconteceu|muda|mudou)\b|\be nada\b|\bnada\s*$/;
+  /\bnao\s+(?:deu certo|funcionou|funciona|resolveu|resolve|consegui|consigo|foi|aceitou|aceita|passou|passa|aparece|apareceu|libera|liberou|chegou|carrega|carregou|abre|abriu|entra|entrou|ta dando|esta dando|esta funcionando|ta funcionando)\b|\bcontinua\s+(?:dando|com|sem|igual|o mesmo|a mesma|aparecendo|sem funcionar)\b|\bmesm[oa]\s+(?:erro|problema|coisa|mensagem|situacao)\b|\b(?:de novo|novamente|outra vez|mais uma vez)\b|\b(?:indeferid|recusad|negad|rejeitad|reprovad|cancelad|bloquead)[oa]s?\b|\b(?:da|deu)\s+(?:erro|indeferimento|recusa|negativa|problema)\b|\bsem sucesso\b|\bnada\s+(?:ainda|acontece|aconteceu|muda|mudou)\b|\be nada\b|\bnada\s*$/;
 
 /**
  * Mensagem de erro de tela colada pelo cliente ("Não localizamos os dados
@@ -46,9 +46,12 @@ export function saysTriedAndFailed(text: string | null | undefined): boolean {
   const tried = TRIED.test(t);
   const failed = FAILED.test(t);
   if (tried && failed) return true;
+  // Sem "tentei", a falha precisa ser dita além da repetição: "vou tentar
+  // novamente" tem só a repetição — e é um plano, não uma falha.
+  const failedBeyondRepeat = FAILED.test(t.replace(/\b(?:de novo|novamente|outra vez|mais uma vez)\b/g, " "));
   // Falha com repetição explícita, sem precisar dizer "tentei".
-  if (failed && /\b(?:continua|de novo|novamente|outra vez|mais uma vez|mesm[oa]|ainda)\b/.test(t)) return true;
+  if (failedBeyondRepeat && /\b(?:continua|de novo|novamente|outra vez|mais uma vez|mesm[oa]|ainda)\b/.test(t)) return true;
   // "Deu indeferimento 3 vezes" / "3 tentativas e nada".
-  if (/\b\d+\s*(?:vez|vezes|tentativas?)\b/.test(t) && failed) return true;
+  if (/\b\d+\s*(?:vez|vezes|tentativas?)\b/.test(t) && failedBeyondRepeat) return true;
   return false;
 }

@@ -33,6 +33,9 @@ describe("já tentei e não deu certo", () => {
       "não funcionou",
       "quero cancelar",
       "como faço para solicitar?",
+      "Vou tentar novamente",
+      "vou fazer de novo agora",
+      "ok, vou tentar outra vez mais tarde",
     ]) {
       expect(saysTriedAndFailed(t), t).toBe(false);
     }
