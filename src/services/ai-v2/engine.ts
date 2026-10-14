@@ -857,7 +857,10 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   let lastAgentMessage: string | null = null;
   let historyLength = 0;
   let versionId: string | undefined = stateRow?.versionId ?? agent.versionId ?? undefined;
-  if ((input.messageType ?? "").toLowerCase() === "interactive" && (await isRepeatedInteractiveReply(input.conversationId, input.userMessage, input.messageIds))) {
+  // Clique numa opção da pergunta que o agente acabou de mandar é resposta,
+  // mesmo com o mesmo rótulo do clique anterior: o agente perguntou de novo
+  // ("você escolheu as duas, qual delas?") e o cliente respondeu.
+  if (!chosenOption && (input.messageType ?? "").toLowerCase() === "interactive" && (await isRepeatedInteractiveReply(input.conversationId, input.userMessage, input.messageIds))) {
     traceStep("opções", "Clique repetido na opção que acabou de ser respondida → sem novo turno");
     await logV2Turn({
       organizationId: orgId, conversationId: input.conversationId, agentId: resolved.agentConfigId, turnId: input.turnId,
@@ -2680,6 +2683,10 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     classifyReply(coreReply) !== "procedure" &&
     !materialFollows && outboundActions.length === 0 &&
     Object.keys(llmOutput.collected ?? {}).length === 0;
+  // A pergunta só conta depois de sair: a que não foi enviada (o cliente
+  // mandou outra mensagem enquanto o agente pensava, envio barrado) não é
+  // troca sem avanço — antes duas perguntas que nem chegaram estouravam o limite.
+  let stallPending = false;
   if (probingOnly && !asksClient(input.userMessage)) {
     if (shouldStopStalled(config, counters)) {
       const stalledAction = config.limits.stalledExchangesAction;
@@ -2696,7 +2703,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
         noteV2Fact("handoffCause", "limit", { keepFirst: true });
       }
     } else {
-      counters.stalledExchanges += 1;
+      stallPending = true;
     }
   } else if (!probingOnly) {
     counters.stalledExchanges = 0;
@@ -2775,6 +2782,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     // Não enviada fica fora do log do turno: antes o log dizia que o agente
     // respondeu e o cliente não tinha recebido nada.
   }
+  if (stallPending && sentReply) counters.stalledExchanges = (counters.stalledExchanges ?? 0) + 1;
 
   // Mensagens prontas/produtos/modelos: depois da reply. Não saem quando o
   // turno transfere ou quando um limite de parada bloqueou a resposta.
