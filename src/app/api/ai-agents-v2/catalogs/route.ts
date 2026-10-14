@@ -73,7 +73,7 @@ export async function GET() {
       }),
       p.pipeline.findMany({
         where: { organizationId },
-        include: { stages: { select: { id: true, name: true }, orderBy: { position: "asc" } } },
+        include: { stages: { select: { id: true, name: true, isLost: true }, orderBy: { position: "asc" } } },
         orderBy: { name: "asc" },
       }),
       p.customField.findMany({

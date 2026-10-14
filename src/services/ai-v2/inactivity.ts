@@ -23,6 +23,56 @@ export const FOLLOWUP_PROCEDURE_DEFAULT = "Conseguiu fazer? Se travou em algum p
 export const FOLLOWUP_QUESTION_DEFAULT = "Ainda está por aí? Fico no aguardo da sua resposta para continuar.";
 
 const MINUTE = 60 * 1000;
+
+/**
+ * Depois da mensagem de encerramento: etapa de perdido + motivo, se a config
+ * deste agente pedir. Falha aqui não impede o encerramento da conversa.
+ */
+async function loseIdleDeal(
+  config: V2AgentConfig,
+  dealId: string | null,
+  contactId: string | null,
+): Promise<{ stageId: string; lostReason?: string } | null> {
+  const cfg = config.inactivity?.lostDeal;
+  if (!cfg?.enabled || !cfg.stageId || !dealId) return null;
+  try {
+    const { prisma } = await import("@/lib/prisma");
+    const { updateDeal } = await import("@/services/deals");
+    const stage = await prisma.stage.findUnique({
+      where: { id: cfg.stageId },
+      select: { isLost: true },
+    });
+    if (!stage?.isLost) return null;
+    let lostReason: string | undefined;
+    if (cfg.reasonId) {
+      const reason = await prisma.lossReason.findFirst({
+        where: { id: cfg.reasonId, isActive: true },
+        select: { label: true },
+      });
+      const label = reason?.label?.trim();
+      if (label) lostReason = label;
+    }
+    const before = await prisma.deal.findUnique({
+      where: { id: dealId },
+      select: { stageId: true, contactId: true },
+    });
+    await updateDeal(dealId, { stageId: cfg.stageId, ...(lostReason ? { lostReason } : {}) });
+    if (before?.stageId !== cfg.stageId) {
+      const { notifyDealStageChanged } = await import("@/services/automation-triggers");
+      void notifyDealStageChanged(dealId, before?.stageId, cfg.stageId, {
+        contactId: contactId ?? before?.contactId,
+        depth: 0,
+      });
+    }
+    return { stageId: cfg.stageId, ...(lostReason ? { lostReason } : {}) };
+  } catch (err) {
+    log.warn(
+      { err: err instanceof Error ? err.message : err, dealId },
+      "[ai-v2 inatividade] não moveu o negócio para perdido",
+    );
+    return null;
+  }
+}
 const WINDOW_24H = 24 * 60 * MINUTE;
 
 export type V2IdleKind = "procedure" | "question" | "other";
@@ -305,6 +355,7 @@ export async function processIdleV2(now: Date = new Date()): Promise<{ nudged: n
               humanBehavior: v2HumanBehavior(config),
             });
           let reply: string | undefined;
+          let lostMove: { stageId: string; lostReason?: string } | null = null;
           if (decision.action === "followup") {
             const step = followUpSteps(inactivity)[decision.index];
             const minutes = Math.round((now.getTime() - progress.anchorAt.getTime()) / MINUTE);
@@ -330,6 +381,10 @@ export async function processIdleV2(now: Date = new Date()): Promise<{ nudged: n
             const closeText = inactivity?.closeMessage?.trim() ? renderMessage(inactivity.closeMessage, vars, defaultFormatter()) : "";
             const canText = !!row.last_inbound_at && now.getTime() - new Date(row.last_inbound_at).getTime() < WINDOW_24H;
             if (closeText && canText && (await send(closeText)).sent) reply = closeText;
+            lostMove = await loseIdleDeal(config, row.deal_id, row.contact_id);
+            if (lostMove) {
+              traceStep("inatividade", `Negócio movido para perdido${lostMove.lostReason ? ` · motivo ${lostMove.lostReason}` : ""}`);
+            }
             await closeState(
               row.organization_id, row.conversation_id, row.agent_config_id, row.deal_id ?? undefined, config, undefined,
               "inactivity", row.contact_id, {}, getV2ThemeById(config, row.theme_id ?? undefined),
@@ -345,7 +400,9 @@ export async function processIdleV2(now: Date = new Date()): Promise<{ nudged: n
             crmContext: { contact: null, deals: [], selectedDeal: null, fields: { contact: [], deal: [] } },
             prompt: "inactivity",
             ...(reply ? { reply } : {}),
-            executedActions: [],
+            executedActions: lostMove
+              ? [{ action: { type: "move_stage", stageId: lostMove.stageId, ...(lostMove.lostReason ? { lostReason: lostMove.lostReason } : {}) }, ok: true }]
+              : [],
             discardedActions: [],
             handoff: false,
             ...(decision.action === "close" ? { closed: true } : {}),

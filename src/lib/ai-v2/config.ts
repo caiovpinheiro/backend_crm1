@@ -204,6 +204,11 @@ const inactivitySchema = z.object({
    * Lembretes antes de encerrar (até 3), cada um com o próprio prazo desde a
    * última mensagem do agente. Vazio: vale o aviso único (nudgeAfter).
    */
+  lostDeal: z.object({
+    enabled: z.boolean().optional(),
+    stageId: z.string().optional(),
+    reasonId: z.string().optional(),
+  }).optional(),
   followUps: z.preprocess(
     (v) => (Array.isArray(v) ? v.filter((s) => s && typeof s === "object" && Number((s as { after?: unknown }).after) > 0).slice(0, 3) : []),
     z.array(z.object({

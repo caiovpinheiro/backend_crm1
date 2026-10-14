@@ -764,7 +764,7 @@ export function buildAgentRulesMarkdown(args: {
     `- Campos gravados ao encerrar: ${list((c.closure?.fieldUpdates ?? []).map((u) => `${fieldName(u.key, names)} (${u.entity === "deal" ? "negócio" : "contato"}) = ${q(u.value)}`))}`,
     ...(c.closure?.nextAutomationStepId ? [`- Ao encerrar, segue a automação no passo ${c.closure.nextAutomationStepId}`] : []),
     `- Volta o negócio para a etapa de origem ao encerrar: ${yesNo(c.closure?.returnToOriginStage)}`,
-    `- Inatividade: ${c.inactivity?.enabled ? `aviso em ${c.inactivity.nudgeAfter ?? "—"} min (${qd(c.inactivity.nudgeMessage, "Ainda está por aí?")}), encerra em ${c.inactivity.closeAfter ?? "—"} min (${q(c.inactivity.closeMessage)})` : "desligada"}`,
+    `- Inatividade: ${c.inactivity?.enabled ? `aviso em ${c.inactivity.nudgeAfter ?? "—"} min (${qd(c.inactivity.nudgeMessage, "Ainda está por aí?")}), encerra em ${c.inactivity.closeAfter ?? "—"} min (${q(c.inactivity.closeMessage)})${c.inactivity.lostDeal?.enabled ? `, depois move para perdido (${c.inactivity.lostDeal.stageId ?? "—"}) motivo ${c.inactivity.lostDeal.reasonId ?? "—"}` : ""}` : "desligada"}`,
     `- Tabulação: ${c.tabulation?.enabled ? `${c.tabulation.strategy === "ai" ? "o agente avalia" : "fixa"} · ${TAB_WHEN[c.tabulation.when ?? "on_close"] ?? c.tabulation.when} · padrão: ${c.tabulation.fallbackId ? names.tabulations[c.tabulation.fallbackId] ?? c.tabulation.fallbackId : "—"}${c.tabulation.strategy === "ai" ? ` · pode escolher: ${list((c.tabulation.allowedIds ?? []).map((id) => names.tabulations[id] ?? id))}` : ""}${c.tabulation.instructions ? ` · instruções: ${q(c.tabulation.instructions)}` : ""}` : "desligada"}`,
     ...(c.survey?.enabled ? [`- Pesquisa de satisfação: ${q(c.survey.question)}`] : []),
   );
