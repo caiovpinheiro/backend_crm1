@@ -84,11 +84,15 @@ export const API_COST_RULES: readonly Rule[] = [
   { methods: WRITE, pattern: p("/api/agents/me/activity"), cls: "essential", note: "renova a sessão por inatividade" },
 
   // ── (d) acessórias ────────────────────────────────────────────────────
+  { methods: "*", pattern: p("/api/presence/beat"), cls: "accessory", note: "batida única: presença de uso + quem está vendo" },
   { methods: "*", pattern: p("/api/presence/heartbeat"), cls: "accessory", note: "quem está vendo" },
   { methods: "*", pattern: p("/api/agents/me/ping"), cls: "accessory", note: "presença de uso" },
   { methods: "*", pattern: p("/api/conversations/:id/typing"), cls: "accessory", note: "digitando…" },
   { methods: READ, pattern: p("/api/activities/alerts"), cls: "accessory", note: "alertas de atividade (polling)" },
   { methods: READ, pattern: p("/api/agents/:id/status"), cls: "accessory", note: "status de agente (leitura)" },
+
+  // ── (b) leituras comuns explícitas ────────────────────────────────────
+  { methods: READ, pattern: p("/api/me/live"), cls: "cached_read", note: "voláteis do shell (status do agente, não lidas) — fora do bootstrap v2" },
 
   // ── (c) leituras pesadas ──────────────────────────────────────────────
   { methods: READ, pattern: p("/api/pipelines/:id/board"), cls: "heavy_read", note: "board do funil" },
