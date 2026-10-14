@@ -52,7 +52,7 @@ import { MAIN_SOURCE_SIMILARITY, WEAK_MATCH_SIMILARITY, knowledgeMinSimilarity }
 import { checkClaimsWithModel, clientDocumentTexts, sameClaim, worthClaimCheck } from "./claim-check";
 import { activeNotices, noticesForTurn, noticesPromptSection } from "./notices";
 import { brHolidayName, isBrazilTimezone, nextBrBusinessDay } from "@/lib/br-holidays";
-import { isMutilated, onlyKeptSentences, trimDroppedTheAnswer, trimUnsupportedSentences } from "./reply-trim";
+import { isMutilated, onlyKeptSentences, prescribedReplyMatching, trimDroppedTheAnswer, trimUnsupportedSentences } from "./reply-trim";
 import { MATERIAL_ATTACHMENT_LIMITS, attachmentsForDocs, attachmentsPromptSection } from "./material-attachments";
 import { humanRequestTerms } from "@/lib/ai-v2/config";
 import { actionsGuide, allowedActionTypes, allowedFlowIdsFor, allowedMessageModelIdsFor, queryToolRestriction, repairMessageModelId, themeToolRestriction, writableFieldsForGuide } from "./action-policy";
@@ -1990,6 +1990,28 @@ export async function callV2LLM(args: {
           }
         }
         if (still.length === 0) {
+          // Reescrita vazia não é resposta: o motor perguntava "o que você
+          // precisa" em cima de um formulário que acabou de ser conferido.
+          // Se a configuração manda uma frase e era essa que a resposta
+          // tentava dizer, ela sai. Senão a resposta fica vazia e a ação
+          // do turno (etapa, campo) segue — sem transferência.
+          if (!fixed.reply.trim() && output.reply.trim()) {
+            const prescribed = prescribedReplyMatching(
+              [args.themeInstructions ?? "", ...args.config.globalRules],
+              output.reply,
+              [...previousMessages].reverse().find((m) => m.role === "assistant")?.content,
+            );
+            if (prescribed) {
+              traceStep("verificação", `A reescrita apagou a resposta; sai a frase da configuração: "${prescribed}"`);
+              noteV2Fact("verification", { unsupported: labelsOf(flags), rewritten: true, forcedHandoff: false, prescribed: true });
+              r.output = { ...output, reply: prescribed };
+              return;
+            }
+            traceStep("verificação", "A reescrita apagou a resposta inteira — não pergunta de novo o que o cliente precisa");
+            noteV2Fact("verification", { unsupported: labelsOf(flags), rewritten: true, forcedHandoff: false, replyCleared: true });
+            r.output = { ...output, reply: "" };
+            return;
+          }
           traceStep("verificação", "Reescrita só com o material");
           noteV2Fact("verification", { unsupported: labelsOf(flags), rewritten: true, forcedHandoff: false });
           r.output = fixed;

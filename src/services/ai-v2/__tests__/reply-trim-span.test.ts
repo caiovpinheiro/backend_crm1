@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { isMutilated, splitReplyUnits, trimUnsupportedSentences } from "../reply-trim";
+import { isMutilated, prescribedReplyMatching, splitReplyUnits, trimUnsupportedSentences } from "../reply-trim";
 
 const URL = "https://painel.exemplo.com/entrar";
 
@@ -89,5 +89,30 @@ describe("trecho cortado entre o vocativo e o “mas”", () => {
     const reply = "Ana, um projeto de leitura em grupo pode contar como atividade de extensão cultural, mas o enquadramento precisa ser confirmado conforme as regras da sua turma. Fale com o responsável para validar.";
     const r = trimUnsupportedSentences(reply, ["um projeto de leitura em grupo pode contar como atividade de extensão cultural"]);
     expect(r?.reply).toBe("Ana, o enquadramento precisa ser confirmado conforme as regras da sua turma. Fale com o responsável para validar.");
+  });
+});
+
+describe("frase literal da configuração quando a reescrita apaga a resposta", () => {
+  const rules = [
+    'A resposta é só: "Vou te enviar o formulário. Preencha para eu seguir com o seu cadastro."',
+    'A resposta é exatamente: "Cadastro recebido. Vou seguir com o seu perfil."',
+  ];
+  const wiped = "Cadastro recebido e preenchido corretamente. Vou seguir com a análise para encontrar oportunidades compatíveis com o seu perfil.";
+  const formSent = "Vou te enviar o formulário. Preencha para eu seguir com o seu cadastro.";
+
+  it("devolve a frase que a resposta tentou dizer, e não a que já saiu", () => {
+    expect(prescribedReplyMatching(rules, wiped, formSent)).toBe("Cadastro recebido. Vou seguir com o seu perfil.");
+  });
+
+  it("duas frases que cabem no que foi apagado: não escolhe", () => {
+    const both = [
+      'A resposta é exatamente: "Cadastro recebido. Vou seguir com o seu perfil."',
+      'A resposta é exatamente: "Cadastro recebido. Vou seguir com o perfil."',
+    ];
+    expect(prescribedReplyMatching(both, wiped, formSent)).toBeNull();
+  });
+
+  it("nada parecido na configuração: não inventa frase", () => {
+    expect(prescribedReplyMatching(['Não prometa vaga.'], wiped, formSent)).toBeNull();
   });
 });

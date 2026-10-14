@@ -2628,9 +2628,19 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
 
   // Resposta vazia do modelo (sem transferir, encerrar, material ou botões):
   // o cliente ficava sem nada. Pergunta o que ele precisa.
+  // Etapa, campo, etiqueta ou nota já gravados neste turno: a pessoa acabou
+  // de concluir o pedido. "Estou por aqui, me conta o que você precisa"
+  // ignora isso. Sem frase, fica em silêncio — não pergunta de novo.
+  const stateActionDone = executedActions.some(
+    (r) => r.ok && (r.action.type === "move_stage" || r.action.type === "update_field" || r.action.type === "add_tag" || r.action.type === "add_note"),
+  );
   if (!anyHandoff && !anyClose && !replyText.trim() && outboundActions.length === 0 && replyOptions.length === 0 && !stopLimits.blocksReply) {
-    replyText = repeatFallback(lastAgentMessage, config);
-    traceStep("resposta", "O modelo devolveu uma resposta vazia → pede ao cliente que diga o que precisa");
+    if (stateActionDone) {
+      traceStep("resposta", "A resposta ficou vazia depois de gravar a ação → não pergunta de novo o que o cliente precisa");
+    } else {
+      replyText = repeatFallback(lastAgentMessage, config);
+      traceStep("resposta", "O modelo devolveu uma resposta vazia → pede ao cliente que diga o que precisa");
+    }
   }
 
   // Saudação que ficou para trás: o cliente mandou "Oi" e logo o pedido, e o

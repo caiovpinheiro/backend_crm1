@@ -141,6 +141,7 @@ Medição por conversa: `node dist/workers/audit-attendance.js --org <slug>`.
 
 ## Decisões técnicas
 
+- 2026-10-14 — Grok 4.7 — **Reescrita vazia não vira "Estou por aqui"**: quando a checagem apaga a resposta inteira, o motor usa a frase entre aspas da configuração ("a resposta é: …") se era essa que o modelo tentou dizer e ela ainda não saiu. Sem frase e com etapa, campo, etiqueta ou nota já gravados no turno, não pergunta de novo o que o cliente precisa. Sem ação gravada, o pedido de sempre continua.
 - 2026-10-14 — Grok 4.7 — **Campo com Gravar a IA preenche**: em O que ele sabe, permissão `write` libera `update_field`. Coluna nativa (nome, e-mail, telefone, título, valor, etapa, dono, motivo) segue o update de sempre. Qualquer outra chave é campo personalizado da org (`name` ou id) e grava em `contact_custom_field_values` / `deal_custom_field_values`. Sem `write`, o campo continua só leitura. Vale para todo agente.
 - 2026-10-14 — Grok 4.7 — **Inatividade pode perder o negócio**: em Começo e fim, `inactivity.lostDeal` (desligado = só encerra a conversa). Ligado, depois da mensagem de encerramento move para a etapa `isLost` escolhida com o rótulo do `LossReason`, e avisa `stage_changed`. Sem etapa perdida ou motivo, não move.
 - 2026-10-14 — Grok 4.7 — **Move da IA dispara automação de etapa**: `executeMoveStage` chama `notifyDealStageChanged` (depth 0) quando a etapa muda. O gatilho `stage_changed` passa a valer para o move do agente v2, como no funil e no passo da automação. Mesma etapa não dispara.
