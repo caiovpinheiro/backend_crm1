@@ -32,6 +32,11 @@
  * }
  * ```
  *
+ * Bootstrap v2 (`stable`): `/api/users` e `/api/settings/departments` saem
+ * na variante estável — o mesmo corpo que a rota devolve com
+ * `x-bootstrap-version: 2` (sem presença/status de agente/contagem de
+ * abertas; esses vêm de `GET /api/me/live`).
+ *
  * Os blocos não custam consultas novas com o cache quente: cada um é lido do
  * Redis (texto já serializado, sem `JSON.parse`) e entra no corpo por
  * concatenação. Exceção: `/api/team-chat/rooms` é por usuário e muda a cada
@@ -121,6 +126,7 @@ export function teamChatRoomsBlock(orgId: string, rooms: unknown[]): BootstrapBl
 async function specFor(
   url: CachedBlockUrl,
   user: StartupCacheUser,
+  stable: boolean,
 ): Promise<CachedResponseSpec | null> {
   switch (url) {
     case "/api/pipelines": {
@@ -140,7 +146,7 @@ async function specFor(
     case "/api/channels":
       return channelsSpec(user);
     case "/api/users":
-      return usersSpec(user, false);
+      return usersSpec(user, false, { stable });
     case "/api/settings/quick-replies":
       return settingsQuickRepliesSpec(user);
     case "/api/settings/quick-replies/groups":
@@ -152,7 +158,7 @@ async function specFor(
     case "/api/settings/departments":
       // A rota só exige org (sem permission); corpo por papel (MEMBER sem
       // contagens), mesma variante da rota.
-      return departmentsSpec(user);
+      return departmentsSpec(user, { stable });
   }
 }
 
@@ -171,11 +177,12 @@ export type BootstrapBlockRef = {
  */
 export async function resolveBootstrapBlocks(
   user: StartupCacheUser,
+  { stable = false }: { stable?: boolean } = {},
 ): Promise<BootstrapBlockRef[]> {
   const refs = await Promise.all(
     CACHED_BLOCK_URLS.map(async (url): Promise<BootstrapBlockRef | null> => {
       try {
-        const spec = await specFor(url, user);
+        const spec = await specFor(url, user, stable);
         if (!spec) return null;
         const key = await responseCacheKey(spec);
         return { url, spec, key, knownEtag: await peekResponseEtag(key, spec.ttlSec) };

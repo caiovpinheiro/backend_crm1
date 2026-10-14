@@ -291,8 +291,17 @@ function isManagerUp(role: string | null | undefined): boolean {
   return role === "ADMIN" || role === "MANAGER";
 }
 
-/** Corpo de `GET /api/settings/departments` para o papel. */
-export async function loadDepartments(orgId: string, managerUp: boolean): Promise<unknown> {
+/**
+ * Corpo de `GET /api/settings/departments` para o papel. `openCounts: false`
+ * (variante estável, `x-bootstrap-version: 2`): ADMIN/MANAGER recebem o
+ * mesmo corpo sem `_count.conversations` — a contagem de abertas vem de
+ * `GET /api/me/live` (`departmentCounts`).
+ */
+export async function loadDepartments(
+  orgId: string,
+  managerUp: boolean,
+  { openCounts = true }: { openCounts?: boolean } = {},
+): Promise<unknown> {
   if (!managerUp) {
     return prisma.department.findMany({
       where: { organizationId: orgId },
@@ -313,15 +322,24 @@ export async function loadDepartments(orgId: string, managerUp: boolean): Promis
       where: { organizationId: orgId },
       include: {
         _count: {
-          select: {
-            conversations: { where: { status: "OPEN" } },
-            members: true,
-          },
+          select: openCounts
+            ? { conversations: { where: { status: "OPEN" } }, members: true }
+            : { members: true },
         },
       },
       orderBy: { name: "asc" },
     });
   } catch {
+    if (!openCounts) {
+      try {
+        return await prisma.department.findMany({
+          where: { organizationId: orgId },
+          orderBy: { name: "asc" },
+        });
+      } catch {
+        return [];
+      }
+    }
     // A contagem de `members` depende da tabela `department_members`
     // (migração add_department_members). Se ela ainda não existe neste
     // ambiente, NÃO escondemos todos os departamentos — reconsultamos
@@ -347,10 +365,23 @@ export async function loadDepartments(orgId: string, managerUp: boolean): Promis
  * (sobe quando um ticket muda de aba/status/departamento, no máximo a cada
  * 15 s por org) entra na chave dessa variante.
  */
-export function departmentsSpec(user: StartupCacheUser): CachedResponseSpec | null {
+export function departmentsSpec(
+  user: StartupCacheUser,
+  { stable = false }: { stable?: boolean } = {},
+): CachedResponseSpec | null {
   const orgId = orgOf(user);
   if (!orgId) return null;
   const managerUp = isManagerUp(user.role);
+  if (managerUp && stable) {
+    // Estável (v2): sem contagem de abertas, então sem `inbox_tab_counts`.
+    return {
+      name: "departments",
+      orgId,
+      families: [RESPONSE_FAMILIES.departments],
+      variant: "manager_stable",
+      load: () => loadDepartments(orgId, true, { openCounts: false }),
+    };
+  }
   return {
     name: "departments",
     orgId,
@@ -452,16 +483,29 @@ export function settingsQuickRepliesSpec(user: StartupCacheUser): CachedResponse
 /**
  * TTL curto (60 s) e não 10 min: o corpo traz presença de uso
  * (`systemOnline`/`lastSeenAt`), que muda com o tempo e com o heartbeat das
- * abas — não há escrita para invalidar. O resto (cadastro, papel, status de
- * agente) invalida na hora pela família `rc_users` (+ `authz` para nomes de
- * funções). O frontend já tratava a lista como fresca por 60 s.
+ * abas — não há escrita para invalidar. O resto invalida na hora: cadastro
+ * e papel pela família `rc_users` (+ `authz` para nomes de funções), status
+ * de agente por `rc_agent_status`. O frontend já tratava a lista como fresca
+ * por 60 s. Só vale para a variante legada; a estável (v2) usa 10 min.
  */
 export const USERS_RESPONSE_TTL_SEC = 60;
 
-/** Corpo de `GET /api/users` (`includeAi` = `?includeAi=1`). */
+/**
+ * Campos de `GET /api/users` que mudam sem ação administrativa: status do
+ * agente (o próprio agente / a distribuição), presença de uso (heartbeat
+ * das abas). A variante estável (`x-bootstrap-version: 2`) sai sem eles;
+ * vêm de `GET /api/me/live` em `usersPresence[userId]`.
+ */
+export const USERS_VOLATILE_FIELDS = ["agentStatus", "systemOnline", "lastSeenAt"] as const;
+
+/**
+ * Corpo de `GET /api/users` (`includeAi` = `?includeAi=1`). `stable`: sem
+ * `USERS_VOLATILE_FIELDS` (nem a consulta de presença).
+ */
 export async function loadUsersList(
   user: StartupCacheUser,
   includeAi: boolean,
+  { stable = false }: { stable?: boolean } = {},
 ): Promise<unknown[]> {
   const orgFilter = userOrgFilter({
     user: { organizationId: user.organizationId, isSuperAdmin: Boolean(user.isSuperAdmin) },
@@ -500,13 +544,17 @@ export async function loadUsersList(
           role: { select: { id: true, name: true, systemPreset: true } },
         },
       },
-      agentStatus: {
-        select: {
-          status: true,
-          availableForVoiceCalls: true,
-          updatedAt: true,
-        },
-      },
+      ...(stable
+        ? {}
+        : {
+            agentStatus: {
+              select: {
+                status: true,
+                availableForVoiceCalls: true,
+                updatedAt: true,
+              },
+            },
+          }),
     },
   });
 
@@ -515,7 +563,7 @@ export async function loadUsersList(
   // da Distribuição. Nunca combinar esses dois conceitos.
   const orgId = user.organizationId;
   let presence: Awaited<ReturnType<typeof getSystemPresenceMap>> = new Map();
-  if (orgId) {
+  if (orgId && !stable) {
     try {
       presence = await getSystemPresenceMap({
         organizationId: orgId,
@@ -546,6 +594,13 @@ export async function loadUsersList(
   const shaped = users.map((u) => {
     const { roleAssignments, organizationId: _organizationId, ...rest } = u;
     const p = presence.get(u.id);
+    if (stable) {
+      return {
+        ...rest,
+        assignedRoles: roleAssignments.map((a) => a.role),
+        ...(telephony ? { telephony: telephony.get(u.id) ?? null } : {}),
+      };
+    }
     return {
       ...rest,
       assignedRoles: roleAssignments.map((a) => a.role),
@@ -558,18 +613,35 @@ export async function loadUsersList(
   return shaped;
 }
 
-/** Variante: `includeAi` + se quem pede é ADMIN (só ADMIN recebe `telephony`). */
+/**
+ * Variante: `includeAi` + se quem pede é ADMIN (só ADMIN recebe `telephony`).
+ *
+ * `stable` (`x-bootstrap-version: 2`): entrada separada (`users_v2`), sem
+ * `USERS_VOLATILE_FIELDS`, só com `rc_users` + `authz` e TTL de 10 min — o
+ * status de agente sobe `rc_agent_status`, que só a variante legada lê.
+ */
 export function usersSpec(
   user: StartupCacheUser,
   includeAi: boolean,
+  { stable = false }: { stable?: boolean } = {},
 ): CachedResponseSpec | null {
   const orgId = orgOf(user);
   if (!orgId) return null;
+  const variant = JSON.stringify({ includeAi, telephony: user.role === "ADMIN" });
+  if (stable) {
+    return {
+      name: "users_v2",
+      orgId,
+      families: [RESPONSE_FAMILIES.users, RESPONSE_FAMILIES.authz],
+      variant,
+      load: () => loadUsersList(user, includeAi, { stable: true }),
+    };
+  }
   return {
     name: "users",
     orgId,
-    families: [RESPONSE_FAMILIES.users, RESPONSE_FAMILIES.authz],
-    variant: JSON.stringify({ includeAi, telephony: user.role === "ADMIN" }),
+    families: [RESPONSE_FAMILIES.users, RESPONSE_FAMILIES.authz, RESPONSE_FAMILIES.agentStatus],
+    variant,
     ttlSec: USERS_RESPONSE_TTL_SEC,
     load: () => loadUsersList(user, includeAi),
   };
