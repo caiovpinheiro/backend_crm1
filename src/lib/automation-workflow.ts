@@ -619,8 +619,16 @@ export function summarizeStepConfig(stepType: string, config: unknown, lookup?: 
       }
       return parts.join(" · ");
     }
-    case "wait_for_document":
-      return "Arquivo ou mensagem de texto";
+    case "wait_for_document": {
+      const timeoutMs = Number(c.timeoutMs ?? 0);
+      const parts: string[] = ["Arquivo ou mensagem de texto"];
+      if (timeoutMs > 0) {
+        if (timeoutMs >= 3_600_000) parts.push(`⏱ ${timeoutMs / 3_600_000}h`);
+        else if (timeoutMs >= 60_000) parts.push(`⏱ ${timeoutMs / 60_000}min`);
+        else parts.push(`⏱ ${timeoutMs / 1000}s`);
+      }
+      return parts.join(" · ");
+    }
     case "closing_protocol": {
       const waitMs = Number(c.waitMs ?? c.timeoutMs ?? 0);
       const closeMs = Number(c.closingWaitMs ?? 0);
@@ -913,6 +921,8 @@ export function defaultStepConfig(stepType: string): Record<string, unknown> {
       return {
         documentGotoStepId: "",
         textGotoStepId: "",
+        timeoutGotoStepId: "",
+        timeoutMs: 86_400_000,
         saveToVariable: "lastDocument",
       };
     case "closing_protocol":

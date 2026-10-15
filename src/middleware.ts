@@ -290,6 +290,15 @@ export async function middleware(req: NextRequest) {
 
     if (
       !reqAuth &&
+      pathname.startsWith("/api/storage/") &&
+      req.nextUrl.searchParams.has("t")
+    ) {
+      // Link da mídia recebida (foto/PDF no campo). A rota confere o token.
+      return nextWithSecurityAndAudit(req);
+    }
+
+    if (
+      !reqAuth &&
       pathname.startsWith("/api/") &&
       !pathname.startsWith("/api/auth") &&
       !pathname.startsWith("/api/sse")
