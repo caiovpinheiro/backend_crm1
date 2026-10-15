@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/prisma";
 import { publishMessageDeleted } from "@/lib/realtime-events";
+import { noteMessageChange } from "@/lib/cache/message-versions";
 
 /**
  * Descarta um rascunho da IA. Hard-delete: a mensagem some do
@@ -34,6 +35,7 @@ export async function POST(
       );
     }
     await prisma.message.delete({ where: { id: messageId } });
+    void noteMessageChange(draft.organizationId, draft.conversationId, "del", messageId);
     publishMessageDeleted({
       organizationId: draft.organizationId,
       conversationId: draft.conversationId,

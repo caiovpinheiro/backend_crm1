@@ -3,6 +3,8 @@ import { NextResponse } from "next/server";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { requireConversationAccess } from "@/lib/conversation-access";
 import { prisma } from "@/lib/prisma";
+import { publishMessageDeleted, publishMessageUpdated } from "@/lib/realtime-events";
+import { noteMessageChange } from "@/lib/cache/message-versions";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -15,7 +17,7 @@ const MAX_NOTE_LENGTH = 4000;
 async function findEditableNote(id: string) {
   return prisma.message.findFirst({
     where: { id, isPrivate: true },
-    select: { id: true, conversationId: true },
+    select: { id: true, conversationId: true, organizationId: true },
   });
 }
 
@@ -48,6 +50,13 @@ export async function PATCH(request: Request, ctx: Ctx) {
       data: { content },
       select: { id: true, content: true, conversationId: true },
     });
+    void noteMessageChange(note.organizationId, note.conversationId, "upd", note.id);
+    publishMessageUpdated({
+      organizationId: note.organizationId,
+      conversationId: note.conversationId,
+      messageId: note.id,
+      status: "edited",
+    });
     return NextResponse.json(updated);
   });
 }
@@ -71,6 +80,13 @@ export async function DELETE(_request: Request, ctx: Ctx) {
       });
       // FavoriteMessage / PinnedMessage caem por cascade.
       await tx.message.delete({ where: { id: note.id } });
+    });
+    // Depois do commit: a versão nova só aparece com a nota já apagada.
+    void noteMessageChange(note.organizationId, note.conversationId, "del", note.id);
+    publishMessageDeleted({
+      organizationId: note.organizationId,
+      conversationId: note.conversationId,
+      messageId: note.id,
     });
 
     return NextResponse.json({ id: note.id, conversationId: note.conversationId });

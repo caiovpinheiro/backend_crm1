@@ -5,6 +5,7 @@ import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import { prisma } from "@/lib/prisma";
 import { publishMessageUpdated } from "@/lib/realtime-events";
 import { getLogger } from "@/lib/logger";
+import { noteMessageChange } from "@/lib/cache/message-versions";
 
 const log = getLogger("api/ai-agents/drafts/[messageId]/approve");
 
@@ -128,6 +129,7 @@ export async function POST(
           senderName,
         },
       });
+      void noteMessageChange(approved.organizationId, approved.conversationId, "upd", approved.id, approved.externalId);
       await prisma.conversation
         .update({
           where: { id: draft.conversation.id },

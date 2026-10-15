@@ -21,6 +21,7 @@ import {
   publishNewMessage,
 } from "@/lib/realtime-events";
 import { botOutboundReplyMark } from "@/lib/conversation-reply-marking";
+import { noteMessageChange } from "@/lib/cache/message-versions";
 
 async function aiSenderName(agentUserId: string): Promise<string> {
   const u = await prisma.user.findUnique({
@@ -436,6 +437,7 @@ export async function sendAgentMessage(args: {
         sendStatus: "sent",
       }),
     });
+    void noteMessageChange(saved.organizationId, saved.conversationId, "new", saved.id, saved.externalId);
     await prisma.conversation
       .update({
         where: { id: args.conversationId },
@@ -498,6 +500,7 @@ export async function sendAgentMessage(args: {
           sendStatus: "pending",
         }),
       });
+      void noteMessageChange(saved.organizationId, saved.conversationId, "new", saved.id, saved.externalId);
 
       await enqueueBaileysOutbound({
         channelId,
@@ -560,6 +563,7 @@ async function saveDraft(
       sendStatus: "draft",
     }),
   });
+  void noteMessageChange(saved.organizationId, saved.conversationId, "new", saved.id, saved.externalId);
   publishNewMessage({
     organizationId: getOrgIdOrNull(),
     conversationId,

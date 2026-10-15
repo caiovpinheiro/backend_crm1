@@ -4,6 +4,8 @@ import { withOrgContext } from "@/lib/auth-helpers";
 import { requireConversationAccess } from "@/lib/conversation-access";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { noteMessageChange } from "@/lib/cache/message-versions";
+import { getOrgIdOrNull } from "@/lib/request-context";
 import { getLogger } from "@/lib/logger";
 
 const log = getLogger("api/messages/[id]/favorite");
@@ -58,6 +60,10 @@ export async function POST(request: Request, ctx: Ctx) {
         });
       } else if (!nextFavorited && existing) {
         await prisma.favoriteMessage.delete({ where: { id: existing.id } });
+      }
+      if (nextFavorited !== Boolean(existing)) {
+        // `favoritedByMe` vem na bolha: o delta reenvia esta mensagem.
+        void noteMessageChange(getOrgIdOrNull(), message.conversationId, "upd", message.id);
       }
 
       return NextResponse.json({ favorited: nextFavorited });
