@@ -161,8 +161,8 @@ export async function startDistributionWorker() {
     );
   });
 
-  // Cards do repasse da IA esperam o expediente (ex.: entra às 13h já
-  // online). A cada minuto, só orgs com fila recortada (scope preenchido).
+  // Linhas antigas de distribution_leads_pending. A cada minuto, só orgs
+  // que ainda têm linha PENDING com recorte. O modo por leads não cria fila nova.
   const leadsScopeTimer = setInterval(() => {
     void drainAiLeadsScopes().catch((err) => {
       log.warn({ err: truncateErrorMessage(err) }, "drenagem do recorte por leads falhou");
