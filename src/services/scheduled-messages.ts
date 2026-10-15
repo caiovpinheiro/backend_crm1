@@ -27,6 +27,7 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { prismaBase } from "@/lib/prisma-base";
 import { ScheduledMessageStatus } from "@prisma/client";
 import { publishScheduledMessageUpdated } from "@/lib/realtime-events";
+import { bumpScheduledMessages } from "@/lib/cache/scheduled-versions";
 import { createDealEvent } from "@/services/deals";
 
 type ScheduledMessageEventType =
@@ -175,6 +176,9 @@ export async function createScheduledMessage(input: CreateScheduledMessageInput)
     }),
   });
 
+  // Versão da lista antes do evento: quem refaz o GET pelo SSE já recebe
+  // o ETag novo (gate de carga 15/10, `lib/cache/scheduled-versions.ts`).
+  await bumpScheduledMessages(created.organizationId, input.conversationId);
   // Banner de agendados das outras abas/agentes (SSE; sem isso só o poll
   // de 60s mostrava o item novo).
   publishScheduledMessageUpdated({
@@ -269,6 +273,7 @@ export async function cancelPendingForConversation(
   });
 
   if (result.count > 0) {
+    await bumpScheduledMessages(pendingIds[0]?.organizationId, conversationId);
     // Um evento por conversa (não por item): o cliente só invalida a lista.
     publishScheduledMessageUpdated({
       organizationId: pendingIds[0]?.organizationId,
@@ -316,6 +321,7 @@ export async function cancelScheduledMessage(
     },
   });
 
+  await bumpScheduledMessages(updated.organizationId, existing.conversationId);
   publishScheduledMessageUpdated({
     organizationId: updated.organizationId,
     conversationId: existing.conversationId,
@@ -386,6 +392,7 @@ export async function markAsSent(
   const updated = await prisma.scheduledMessage.findUnique({ where: { id } });
   if (!updated) return null;
 
+  await bumpScheduledMessages(updated.organizationId, updated.conversationId);
   publishScheduledMessageUpdated({
     organizationId: updated.organizationId,
     conversationId: updated.conversationId,
@@ -424,6 +431,7 @@ export async function markAsFailed(id: string, reason: string) {
   if (!updated) return null;
 
   // FAILED também sai da lista de pendentes — o banner precisa saber.
+  await bumpScheduledMessages(updated.organizationId, updated.conversationId);
   publishScheduledMessageUpdated({
     organizationId: updated.organizationId,
     conversationId: updated.conversationId,
