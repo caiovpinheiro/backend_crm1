@@ -1,5 +1,6 @@
 import type { Prisma } from "@prisma/client";
 
+import { probeInboundMedia } from "@/lib/ai-agents/media-placeholder";
 import { messageHasMedia } from "@/lib/ai-agents/tabulation-classify-policy";
 import { getLogger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
