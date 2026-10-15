@@ -1444,7 +1444,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       destination: mediaDestination,
       turnId: input.turnId,
       leads: leadsHandoffOption(config),
-      moveToStageId: config.handoff.moveToStageId,
+      moveToStageId: config.handoff?.moveToStageId,
     });
     await upsertV2ConversationState({
       organizationId: orgId,
@@ -3038,7 +3038,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       destination,
       turnId: input.turnId,
       leads: leadsHandoffOption(config),
-      moveToStageId: config.handoff.moveToStageId,
+      moveToStageId: config.handoff?.moveToStageId,
     });
     traceStep("transferência", `Transferido para ${destination.type}${destination.id ? ` (${destination.id})` : ""}`);
     return sent;
@@ -3267,7 +3267,7 @@ async function handoffAndReply(
     destination: fallbackDestination,
     turnId: input.turnId,
     leads: leadsHandoffOption(config),
-    moveToStageId: config.handoff.moveToStageId,
+    moveToStageId: config.handoff?.moveToStageId,
   });
   await upsertV2ConversationState({
     organizationId: orgId,
