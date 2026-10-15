@@ -38,7 +38,7 @@ import { noteV2Fact, peekV2Fact, runWithV2Trace, traceStep, v2TraceWasLogged } f
 import { evaluateV2StopLimits, parseV2Counters, shouldStopStalled, type V2Counters } from "./limits";
 import { answerToPostCloseQuestion, classifyPostCloseMessage, getPostCloseBehavior, isGreetingOnlyMessage, keepOpenOnNewRequest, postCloseHandoffMessage, postCloseQuestion, postCloseShortReply, isExplicitResolution } from "./closure";
 import { isConfusionMessage, rephraseAfterConfusion } from "./confusion";
-import { answersBeforeHandoff, applyNoSourceGuard, conditionalHandoff, handoffExplanation, type V2PrefetchFact } from "./no-source";
+import { announcesTransfer, answersBeforeHandoff, applyNoSourceGuard, conditionalHandoff, handoffExplanation, type V2PrefetchFact } from "./no-source";
 import { NONSENSE_LIMIT_REASON } from "./limits";
 import { applyV2Tabulation } from "./tabulation";
 import { withoutChoiceQuestionAfterSteps, applyReplyEnding, asksClient, classifyReply, effectiveReplyEnding, isGreetingOnlyReply, replyEndingButtons, replyEndingPhrases, withoutReplyEndings } from "./reply-ending";
@@ -463,7 +463,9 @@ async function previousAgentAnnouncedTransfer(conversationId: string, previousAg
       orderBy: { createdAt: "desc" },
       select: { reply: true },
     });
-    return !t || !!t.reply?.trim();
+    // Texto qualquer não é aviso: o anterior mandou um passo a passo (o
+    // aviso tinha sido tirado da resposta) e este transferia calado.
+    return !t || (!!t.reply?.trim() && announcesTransfer(t.reply));
   } catch {
     return true;
   }

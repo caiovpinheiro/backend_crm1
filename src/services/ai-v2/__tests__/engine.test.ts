@@ -1770,6 +1770,12 @@ describe("processV2Turn — correções do motor", () => {
     await run("Não recebi o produto", { messageIds: ["m-cur"] });
     expect(mocks.sendText.mock.calls.map((c) => (c[0] as { text: string }).text).join("|")).toContain("Vou transferir");
 
+    // O anterior respondeu com texto, mas sem anunciar a transferência → este avisa.
+    mocks.sendText.mockClear();
+    mocks.turnLogFindFirst.mockResolvedValue({ reply: "Para ver o pedido: 1. Abra o app. 2. Toque em Meus pedidos." });
+    await run("Não recebi o produto", { messageIds: ["m-cur"] });
+    expect(mocks.sendText.mock.calls.map((c) => (c[0] as { text: string }).text).join("|")).toContain("Vou transferir");
+
     // Com aviso do anterior, continua sem repetir.
     mocks.sendText.mockClear();
     mocks.turnLogFindFirst.mockResolvedValue({ reply: "Vou te passar para a equipe." });
