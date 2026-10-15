@@ -227,6 +227,18 @@ function buildMetrics(registry: Registry): AppMetrics {
     help: "Nível de sobrecarga do processo: 0 normal, 1 recusa acessórias, 2 também leituras pesadas.",
     registers: [registry],
   });
+  // Aquecimento (OVERLOAD_WARMUP_MS): o nível é medido, mas nada é recusado.
+  const overloadWarmup = new Gauge({
+    name: "crm_overload_warmup",
+    help: "1 enquanto o processo está no aquecimento da proteção de sobrecarga (mede, não recusa).",
+    registers: [registry],
+  });
+  const overloadWarmupSpared = new Counter({
+    name: "crm_overload_warmup_spared_total",
+    help: "Chamadas que receberiam 503 de sobrecarga mas passaram por estar no aquecimento do processo.",
+    labelNames: ["class"] as const,
+    registers: [registry],
+  });
 
   // Presença: batida aceita (escreveu) vs descartada pelo limite de 1 por
   // usuário a cada PRESENCE_BEAT_MIN_INTERVAL_MS, por rota (`beat` nova;
@@ -284,6 +296,8 @@ function buildMetrics(registry: Registry): AppMetrics {
       conditionalResponses,
       eventLoopDelay,
       overloadLevel,
+      overloadWarmup,
+      warmupSpared: overloadWarmupSpared,
     },
     presenceBeats,
     activityOutbox: {
@@ -334,6 +348,8 @@ export type AppMetrics = {
     conditionalResponses: Counter<"route" | "status">;
     eventLoopDelay: Gauge<"quantile">;
     overloadLevel: Gauge;
+    overloadWarmup: Gauge;
+    warmupSpared: Counter<"class">;
   };
   presenceBeats: Counter<"route" | "result">;
   activityOutbox: {
@@ -389,6 +405,7 @@ async function snapshotEventLoop(): Promise<void> {
     metrics.apiCost.eventLoopDelay.set({ quantile: "0.5" }, snap.p50Ms);
     metrics.apiCost.eventLoopDelay.set({ quantile: "0.99" }, snap.p99Ms);
     metrics.apiCost.overloadLevel.set(snap.level);
+    metrics.apiCost.overloadWarmup.set(mod.isOverloadWarmingUp() ? 1 : 0);
   } catch {
     // medidor indisponível — ok.
   }
