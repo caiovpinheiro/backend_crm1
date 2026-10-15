@@ -24,6 +24,8 @@ type HandoffArgs = {
    * inteligente, como os outros agentes.
    */
   leads?: { enabled: true; roleIds: string[]; userIds: string[] };
+  /** Move o negócio para esta etapa antes de distribuir. Só se a config pedir. */
+  moveToStageId?: string;
 };
 
 /** Opção da config. Desligada ou ausente = este agente não muda o repasse. */
@@ -36,7 +38,32 @@ export function leadsHandoffOption(
   return { enabled: true, roleIds: ids(leads.roleIds), userIds: ids(leads.userIds) };
 }
 
+async function moveDealBeforeHandoff(dealId: string, stageId: string, contactId?: string | null): Promise<void> {
+  const before = await prisma.deal.findUnique({
+    where: { id: dealId },
+    select: { stageId: true, contactId: true },
+  });
+  if (!before || before.stageId === stageId) return;
+  const { updateDeal } = await import("@/services/deals");
+  await updateDeal(dealId, { stageId });
+  const { notifyDealStageChanged } = await import("@/services/automation-triggers");
+  void notifyDealStageChanged(dealId, before.stageId, stageId, {
+    contactId: contactId ?? before.contactId,
+    depth: 0,
+  });
+  traceStep("transferência", `Negócio movido para a etapa ${stageId} antes da distribuição`);
+}
+
 export async function simpleHandoff(args: HandoffArgs): Promise<void> {
+  if (args.moveToStageId && args.dealId) {
+    try {
+      await moveDealBeforeHandoff(args.dealId, args.moveToStageId, args.contactId);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.warn({ err: msg, dealId: args.dealId }, "[ai-v2] não moveu o negócio antes da transferência");
+      traceStep("transferência", `Não moveu o negócio para ${args.moveToStageId} (${msg}) → segue a distribuição`);
+    }
+  }
   try {
     await routeHandoff(args);
   } catch (err) {
