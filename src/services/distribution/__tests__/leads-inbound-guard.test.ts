@@ -32,7 +32,7 @@ const humanWasAssignedInThisConversation = vi.fn(async (..._a: unknown[]) => fal
 const isDistributionAutoOnInbound = vi.fn(async (..._a: unknown[]) => true);
 const hasOrganizationWidget = vi.fn(async (..._a: unknown[]) => true);
 const isDistributionEnabled = vi.fn(async (..._a: unknown[]) => true);
-const getOrgDistributionModeFresh = vi.fn(async () => "smart" as const);
+const getOrgDistributionModeFresh = vi.fn(async (): Promise<"smart" | "leads"> => "smart");
 
 vi.mock("@/lib/debug-log", () => ({
   debugInfo: vi.fn(),

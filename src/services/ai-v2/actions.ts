@@ -683,7 +683,7 @@ async function executeSendWhatsappFlow(action: V2Action, ctx: V2ActionContext): 
     }
     await touchConversationLastMessageAt({
       conversationId: ctx.conversationId,
-      message: saved,
+      at: saved.createdAt,
     }).catch(() => null);
     const { publishNewMessage } = await import("@/lib/realtime-events");
     publishNewMessage({
