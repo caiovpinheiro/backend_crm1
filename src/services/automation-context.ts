@@ -99,6 +99,7 @@ export const PAUSING_STEP_TYPES = new Set([
   "send_whatsapp_template",
   "send_whatsapp_message",
   "wait_for_reply",
+  "wait_for_document",
   "closing_protocol",
 ]);
 
@@ -298,6 +299,36 @@ export type InteractiveMenuDecision =
   | { action: "no_match" };
 
 export type InteractiveOnNonText = "stay" | "else";
+
+const DOCUMENT_MEDIA_KINDS = new Set(["image", "video", "audio", "document", "sticker"]);
+
+/**
+ * Arquivo enviado pelo contato: foto, PDF, Word, imagem, áudio, vídeo,
+ * figurinha ou qualquer outra mídia. Texto, clique de botão, localização
+ * e contato compartilhado não contam.
+ */
+export function inboundIsDocument(input: {
+  messageContent: string;
+  messageType?: string | null;
+  mediaUrl?: string | null;
+}): boolean {
+  const type = (input.messageType ?? "").trim().toLowerCase();
+  if (type === "text" || type === "interactive" || type === "button") return false;
+  if (type === "unsupported") return true;
+  if (
+    (input.mediaUrl ?? "").trim() &&
+    type !== "location" &&
+    type !== "contact" &&
+    type !== "contacts"
+  ) {
+    return true;
+  }
+  const probe = probeInboundMedia({
+    content: input.messageContent,
+    messageType: type || null,
+  });
+  return Boolean(probe.kind && DOCUMENT_MEDIA_KINDS.has(probe.kind));
+}
 
 /** Imagem, áudio, documento, sticker, álbum Meta `unsupported` — não é clique do menu. */
 export function isNonTextMenuInbound(input: {
@@ -910,6 +941,24 @@ export type SalesbotProcessResult = {
   contextId?: string;
 };
 
+async function latestInboundFile(conversationId: string | null | undefined): Promise<{
+  mediaUrl: string | null;
+  messageType: string | null;
+}> {
+  const id = conversationId?.trim();
+  if (!id) return { mediaUrl: null, messageType: null };
+  try {
+    const row = await prisma.message.findFirst({
+      where: { conversationId: id, direction: "in" },
+      orderBy: { createdAt: "desc" },
+      select: { mediaUrl: true, messageType: true },
+    });
+    return { mediaUrl: row?.mediaUrl ?? null, messageType: row?.messageType ?? null };
+  } catch {
+    return { mediaUrl: null, messageType: null };
+  }
+}
+
 export async function processIncomingMessage(
   contactId: string,
   messageContent: string,
@@ -1150,6 +1199,27 @@ export async function processIncomingMessage(
           );
         }
       }
+    } else if (currentStep.type === "wait_for_document") {
+      const file = await latestInboundFile(inboundConversationId);
+      const messageType = (opts?.messageType ?? file.messageType ?? "").trim();
+      const isDocument = inboundIsDocument({
+        messageContent,
+        messageType,
+        mediaUrl: file.mediaUrl,
+      });
+      const varName = replyVariableName(config);
+      variables = {
+        ...variables,
+        [varName]: messageContent,
+        documentMessageType: messageType,
+        documentMediaUrl: isDocument ? (file.mediaUrl ?? "") : "",
+        documentReceived: isDocument ? "sim" : "nao",
+      };
+      const gotoKey = isDocument ? "documentGotoStepId" : "textGotoStepId";
+      nextStepId = readStepRef(config, gotoKey);
+      log.info(
+        `wait_for_document ${isDocument ? "documento recebido" : "mensagem de texto"} — auto=${ctx.automation.name} contato=${contactId} type=${messageType || "-"} → step=${nextStepId ?? "(fim)"}`,
+      );
     } else if (currentStep.type === "send_whatsapp_flow") {
       const varName = String(config.saveToVariable ?? "lastResponse");
       const awaiting = readAwaitingFlow(variables);
