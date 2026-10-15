@@ -124,3 +124,18 @@ describe("resposta que reescreve a mensagem do cliente", () => {
     expect(echoesClientText("Ok, entendi.", "ok")).toBe(false);
   });
 });
+
+describe("pergunta devolvida: o cliente pede um dado dele e o agente pede de volta", () => {
+  it("detecta a devolução; resposta que informa ou orienta não conta", async () => {
+    const { asksBackOwnData } = await import("../ground-reply");
+    expect(asksBackOwnData("Qual o meu código de cliente?", "Use a senha provisória e me diga se você tem um código de cliente com final 00.")).toBe("codigo de cliente");
+    expect(asksBackOwnData("esqueci meu número de contrato", "Você sabe qual é o seu número de contrato? Ele fica no e-mail de boas-vindas.")).toBe("numero de contrato");
+    expect(asksBackOwnData("Qual o meu código de cliente?", "Seu código de cliente é 4521.")).toBeNull();
+    expect(asksBackOwnData("Qual o meu código de cliente?", "O código não aparece no seu cadastro. Para consultar, acesse Minha conta > Dados.")).toBeNull();
+    expect(asksBackOwnData("Como faço para pagar?", "Você tem o aplicativo instalado?")).toBeNull();
+    // Pedir outro dado para localizar o pedido é identificação, não devolução.
+    expect(asksBackOwnData("Qual o meu código de cliente?", "Me diga qual o seu CPF para eu localizar o código de cliente.")).toBeNull();
+    expect(asksBackOwnData("qual é a minha fatura deste mês?", "Me informe o seu e-mail para eu localizar a fatura.")).toBeNull();
+    expect(asksBackOwnData("Qual é o meu código de cliente?", "Qual é o seu código de cliente?")).toBe("codigo de cliente");
+  });
+});

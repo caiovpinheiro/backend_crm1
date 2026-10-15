@@ -1200,6 +1200,23 @@ describe("escopo e repetição", () => {
     expect(r.output.handoff).toBe(false);
   });
 
+  it("cliente pede um dado dele e a resposta devolve a pergunta: pede outra; se repetir, transfere", async () => {
+    const config = baseConfig({ groundingCheck: "rules" } as Partial<V2AgentConfig>);
+    const context = { contact: null, deals: [], selectedDeal: null, fields: baseConfig().contextFields };
+    (generateWithTools as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: 'Use a senha provisória e me diga se você tem um código de cliente com final 00.', actions: [] })))
+      .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: 'O código de cliente não aparece no seu cadastro. Para consultar, acesse Minha conta e toque em Dados.', actions: [] })));
+    const r = await callV2LLM({ agentId: "agent-1", config, context, userMessage: 'Qual o meu código de cliente?', stage: "active" });
+    expect(r.output.reply).toBe('O código de cliente não aparece no seu cadastro. Para consultar, acesse Minha conta e toque em Dados.');
+
+    (generateWithTools as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: 'Use a senha provisória e me diga se você tem um código de cliente com final 00.', actions: [] })))
+      .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: 'Use a senha provisória e me diga se você tem um código de cliente com final 00.', actions: [] })));
+    const r2 = await callV2LLM({ agentId: "agent-1", config, context, userMessage: 'Qual o meu código de cliente?', stage: "active" });
+    expect(r2.output.reply).toBe("");
+    expect(r2.output.handoff).toBe(true);
+  });
+
   it("resposta que só reescreve a mensagem do cliente (na voz dele) pede outra; se repetir, transfere", async () => {
     const config = baseConfig({ groundingCheck: "rules" } as Partial<V2AgentConfig>);
     const context = { contact: null, deals: [], selectedDeal: null, fields: baseConfig().contextFields };

@@ -39,7 +39,7 @@ import {
 import { knowledgeDocTitleMapByIds } from "@/services/ai/knowledge-docs";
 import { describeV2MessageModels, type V2MessageModelSummary } from "./tools";
 import { knowledgeDocIdsFor } from "./themes";
-import { echoesClientText, clientNamesBoundToFacts, hasSearchableQuestion, admittedMissingInstructions, isNearDuplicateReply, repeatFallback, knowledgeChunkTexts, lookupResultTexts, moneyDerivations, unsupportedFacts, unsupportedFigures, unsupportedHedges, unsupportedMenuPaths, unsupportedQuotedTerms } from "./ground-reply";
+import { asksBackOwnData, echoesClientText, clientNamesBoundToFacts, hasSearchableQuestion, admittedMissingInstructions, isNearDuplicateReply, repeatFallback, knowledgeChunkTexts, lookupResultTexts, moneyDerivations, unsupportedFacts, unsupportedFigures, unsupportedHedges, unsupportedMenuPaths, unsupportedQuotedTerms } from "./ground-reply";
 import { noteV2Fact, traceStep } from "./trace";
 import { SensitiveVault } from "./sensitive";
 import { boldInstruction, breakInlineSteps } from "./reply-format";
@@ -1874,6 +1874,47 @@ export async function callV2LLM(args: {
       } else {
         r.output = { ...r.output, reply: "", handoff: true, reason: "A resposta só reescrevia a mensagem do cliente." };
         traceStep("verificação", "A nova resposta também só reescrevia a mensagem do cliente → transfere");
+        return;
+      }
+    }
+
+    // Pergunta devolvida: o cliente pediu um dado dele e a resposta pede o
+    // mesmo dado a ele ("me diga se você tem…"). Ele perguntou porque não
+    // sabe; devolver a pergunta o deixava em círculo até desistir.
+    const askedTerm = r.output.handoff ? null : asksBackOwnData(userMessage, r.output.reply);
+    if (askedTerm) {
+      traceStep("verificação", `O cliente pediu "${askedTerm}" e a resposta devolveu a pergunta a ele → pedindo outra resposta`);
+      let fixedAsk: V2LLMOutput | null = null;
+      try {
+        const res = await generateWithTools({
+          model: args.config.model,
+          apiKey: chatKey,
+          system: [system, "# REVISÃO", `O cliente perguntou um dado dele ("${askedTerm}") e sua resposta pediu esse mesmo dado a ele. Ele perguntou porque não sabe: não devolva a pergunta. Se o dado está nos dados do cliente e pode ser dito, informe. Se não está, ou o valor não é o que ele pediu, diga que não aparece no cadastro e passe o caminho para obtê-lo que estiver nas fontes; se as fontes não trazem esse caminho, diga que vai chamar a equipe e marque handoff=true. Devolva o JSON completo no formato exigido.`].join("\n\n"),
+          messages: [...messages, { role: "assistant", content: JSON.stringify(r.output) }] as any,
+          temperature: 0,
+          maxOutputTokens: responseLengthToMaxTokens(args.config.responseLength),
+          maxSteps: 1,
+          jsonMode,
+        });
+        r.inputTokens += res.inputTokens;
+        r.outputTokens += res.outputTokens;
+        const raw = res.text.trim().replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
+        const json = extractFirstJSONObject(raw);
+        const parsed = json ? v2LLMOutputSchema.safeParse(JSON.parse(json)) : undefined;
+        if (parsed?.success) {
+          const candidate = parsed.data as V2LLMOutput;
+          candidate.reply = renderMessage(candidate.reply, renderVars) ?? candidate.reply;
+          if (candidate.handoff || !asksBackOwnData(userMessage, candidate.reply)) fixedAsk = candidate;
+        }
+      } catch {
+        fixedAsk = null;
+      }
+      if (fixedAsk) {
+        r.output = fixedAsk;
+        traceStep("verificação", fixedAsk.handoff ? "Nova resposta: o dado não está nas fontes → transfere" : "Nova resposta responde ao dado pedido");
+      } else {
+        r.output = { ...r.output, reply: "", handoff: true, reason: "O cliente pediu um dado dele que o agente não tinha; a resposta devolvia a pergunta." };
+        traceStep("verificação", "A nova resposta também devolvia a pergunta → transfere");
         return;
       }
     }

@@ -367,6 +367,40 @@ function dateKeys(sources: string): Set<string> {
  * do cliente, sem responder nada). 70%+ das palavras de conteúdo da resposta
  * vêm da mensagem dele, com as duas longas o bastante para comparar.
  */
+/**
+ * O cliente perguntou um dado dele ("qual é o meu código de cliente?",
+ * "esqueci minha senha de acesso", "me passa meu número de contrato") e a
+ * resposta devolve a pergunta ("me diga se você tem o código…", "você sabe
+ * qual é o seu código?"). Devolve o termo pedido quando é isso; senão null.
+ */
+export function asksBackOwnData(clientMessage: string, reply: string): string | null {
+  const fold = (s: string) => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const c = fold(clientMessage);
+  const m =
+    c.match(/\b(?:qual|quais)\s+(?:e|eh|seria|sao|era)?\s*(?:o|a|os|as)?\s*(?:meu|minha|meus|minhas)\s+([a-z0-9\- ]{3,40}?)\s*(?:\?|$|[.,!;])/) ??
+    c.match(/\b(?:me\s+)?(?:passa|passe|informa|informe|diz|diga|manda|mande|envia|envie)\s+(?:o|a|os|as)\s+(?:meu|minha|meus|minhas)\s+([a-z0-9\- ]{3,40}?)\s*(?:\?|$|[.,!;])/) ??
+    c.match(/\b(?:nao\s+sei|esqueci|nao\s+lembro)\s+(?:qual\s+(?:e\s+)?)?(?:o|a|os|as)?\s*(?:meu|minha|meus|minhas)\s+([a-z0-9\- ]{3,40}?)\s*(?:\?|$|[.,!;])/);
+  if (!m) return null;
+  const term = m[1].trim();
+  const keys = term.split(/[^a-z0-9]+/).filter((w) => w.length >= 4);
+  if (keys.length === 0) return null;
+  // O pedido de volta precisa ter o dado pedido como objeto ("você tem o
+  // código…", "me diga o seu código…", "qual é o seu código?"). Pedir outro
+  // dado para localizar o pedido ("me diga seu CPF para localizar o código")
+  // é identificação, não devolução.
+  const lead =
+    "(?:voce\\s+(?:tem|possui|lembra(?:\\s+d[eoa])?|sabe(?:\\s+qual(?:\\s+e)?)?|consegue\\s+(?:ver|me\\s+(?:passar|informar|dizer)))" +
+    "|me\\s+(?:diga|informe|passe|mande|envie|confirme)(?:\\s+se\\s+voce\\s+(?:tem|possui|sabe))?" +
+    "|qual(?:\\s+e)?)";
+  const object = "\\s+(?:(?:o|a|os|as|um|uma|seu|sua|seus|suas)\\s+){0,2}";
+  const sentences = fold(reply).split(/(?<=[.!?])\s+|\n+/);
+  const hit = keys.some((k) => {
+    const re = new RegExp(`\\b${lead}${object}(?:[a-z0-9-]+\\s+)?[a-z0-9-]*${k}`);
+    return sentences.some((s) => re.test(s));
+  });
+  return hit ? term : null;
+}
+
 export function echoesClientText(reply: string, clientMessage: string): boolean {
   const words = (s: string) => normalize(s).split(/[^\p{L}\p{N}]+/u).filter((w) => w.length >= 4);
   const r = words(reply);
