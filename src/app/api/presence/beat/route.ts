@@ -14,6 +14,7 @@ import { getLogger } from "@/lib/logger";
 import { recordPresenceBeat } from "@/lib/metrics";
 import {
   claimPresenceBeat,
+  entityListSignature,
   parseBeatEntities,
   parseClientId,
   presenceBeatListKey,
@@ -90,13 +91,20 @@ function onlyListed(
  * tipos aceitos: deal, conversation; outros são ignorados).
  *
  * Respostas:
+ * - 204 sem corpo (no-op): a MESMA lista de entidades (normalizada e
+ *   ordenada) da última batida GRAVADA do usuário, há menos de
+ *   `PRESENCE_BEAT_NOOP_WINDOW_MS` (45 s) — outro navegador/perfil/WebView
+ *   do mesmo usuário, ou aba com cadência própria. Nada é escrito nem lido
+ *   além do script do limite; os viewers dessas entidades já foram renovados
+ *   pela batida gravada. A janela conta da última escrita: a batida de
+ *   cadência (60 s) de um navegador sozinho sempre grava.
  * - 200 escrita: `{ ok: true, sessionIdleMs, nextBeatMs, viewers, systemOnline: true }`
  *   — grava `system_usage_sessions.lastHeartbeatAt` (no máximo 1 UPDATE a
  *   cada 45 s por usuário), renova o usuário em todas as entidades listadas
  *   e o REMOVE das que estavam na batida anterior e saíram da lista (mesmo
  *   `clientId`, ou do usuário se não vier `clientId`) — um MULTI no Redis.
  * - 200 deduplicada: `{ ok: true, deduped: true, sessionIdleMs, nextBeatMs, retryAfterMs, viewers }`
- *   — já houve batida aceita do usuário nos últimos
+ *   — lista DIFERENTE da gravada, e já houve batida aceita do usuário nos últimos
  *   `PRESENCE_BEAT_MIN_INTERVAL_MS` (30 s; somando abas, navegadores, ping e
  *   heartbeat antigos). Nada é escrito; `viewers` vem do Redis. Não é 429 de
  *   propósito (não vira erro nem retentativa no cliente). `retryAfterMs` =
@@ -132,7 +140,17 @@ export async function POST(request: Request) {
     }
 
     const listKey = presenceBeatListKey(orgId, userId, parseClientId(body.clientId));
-    const gate = await claimPresenceBeat({ userId, listKey });
+    const signature = entityListSignature(entities);
+    const gate = await claimPresenceBeat({
+      userId,
+      listKey,
+      noop: { mode: "same", signature },
+      writeSignature: signature,
+    });
+    if (!gate.accepted && gate.noop) {
+      recordPresenceBeat("beat", "noop_204");
+      return new NextResponse(null, { status: 204 });
+    }
     if (!gate.accepted) {
       recordPresenceBeat("beat", "deduped");
       const viewers = await listViewersMany(orgId, entities);

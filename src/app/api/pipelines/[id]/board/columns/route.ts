@@ -4,7 +4,20 @@ import { withOrgContext } from "@/lib/auth-helpers";
 import { canViewStage, loadAuthzContext } from "@/lib/authz";
 import { funnelDealWhere, andDealWhere } from "@/lib/authz/funnel-visibility";
 import { requirePipelineScope } from "@/lib/authz/resource-policy";
-import { getVisibilityFilter } from "@/lib/visibility";
+import {
+  boardEtagFreshness,
+  boardEtagMatches,
+  boardNotModified,
+  computeBoardEtag,
+  withBoardEtag,
+} from "@/lib/cache/board-etag";
+import { getOrgIdOrNull } from "@/lib/request-context";
+import { getDealVisibilityFilter } from "@/lib/visibility";
+import {
+  boardStageScope,
+  canonicalBoardFilters,
+  canonicalValue,
+} from "@/services/board-cache-variant";
 import {
   BoardColumnPageError,
   getBoardColumnPages,
@@ -65,6 +78,10 @@ type RouteContext = { params: Promise<{ id: string }> };
  * Autorização idêntica à do POST /board (mesma sequência: authz, escopo do
  * pipeline, visibilidade do usuário, visibilidade de funil) e etapa que o
  * usuário não pode ver não é consultada.
+ *
+ * ETag como o do board (`lib/cache/board-etag.ts`): pedido canônico (filtros,
+ * ordenação, colunas com cursor/limite) + perfil de visibilidade + versões do
+ * board. `If-None-Match` igual → 304 sem corpo e sem banco.
  */
 export async function POST(request: Request, context: RouteContext) {
   return withOrgContext(async (session) => {
@@ -87,7 +104,7 @@ export async function POST(request: Request, context: RouteContext) {
       const [meta, scopeDenied, visibility] = await Promise.all([
         resolved ? Promise.resolve(resolved) : getPipelineMeta(pipelineId),
         requirePipelineScope(session.user, "view", pipelineId),
-        getVisibilityFilter(user),
+        getDealVisibilityFilter(user),
       ]);
 
       if (!meta) {
@@ -129,18 +146,35 @@ export async function POST(request: Request, context: RouteContext) {
             ? (statusParam as "OPEN" | "WON" | "LOST")
             : undefined;
 
-      const pages = await getBoardColumnPages(
+      const dealWhere = andDealWhere(visibility.dealWhere, funnelDealWhere(authz));
+      const filters = parseAdvancedDealFilters(body.filters);
+      const sortField = parseBoardSortField(body.sort);
+      const sortDirection = parseBoardSortDirection(body.direction);
+      const canonicalFilters = canonicalBoardFilters(filters, pipelineId);
+      const etag = await computeBoardEtag({
+        orgId: getOrgIdOrNull() ?? session.user.organizationId ?? "_",
         pipelineId,
-        andDealWhere(visibility.dealWhere, funnelDealWhere(authz)),
-        statusFilter,
-        parseAdvancedDealFilters(body.filters),
-        {
-          sortField: parseBoardSortField(body.sort),
-          sortDirection: parseBoardSortDirection(body.direction),
-          columns,
-        },
-      );
-      return NextResponse.json({ columns: pages });
+        kind: "columns",
+        variant: JSON.stringify({
+          v: canonicalValue(dealWhere) ?? null,
+          sv: boardStageScope(authz),
+          s: statusFilter ?? "OPEN",
+          f: canonicalFilters,
+          o: sortField ?? "position",
+          // `position` ignora a direção.
+          d: sortField && sortField !== "position" ? (sortDirection ?? "asc") : null,
+          c: columns.map((c) => [c.stageId, c.cursor, c.limit ?? null]),
+        }),
+        freshness: boardEtagFreshness({ sortField, filters: canonicalFilters }),
+      });
+      if (boardEtagMatches(request, etag)) return boardNotModified(request, etag);
+
+      const pages = await getBoardColumnPages(pipelineId, dealWhere, statusFilter, filters, {
+        sortField,
+        sortDirection,
+        columns,
+      });
+      return withBoardEtag(request, NextResponse.json({ columns: pages }), etag);
     } catch (e) {
       if (e instanceof BoardColumnPageError) {
         return NextResponse.json({ message: e.message, code: e.code }, { status: 400 });

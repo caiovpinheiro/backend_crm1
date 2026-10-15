@@ -1,5 +1,6 @@
 import { Prisma } from "@prisma/client";
 
+import { noteBoardCardWrite } from "@/lib/board-card-writes";
 import { prismaBase } from "@/lib/prisma-base";
 import {
   assertUniqueWhereOrg,
@@ -460,6 +461,8 @@ function extend(base: typeof prismaBase = prismaBase) {
     query: {
       $allModels: {
         async $allOperations({ args, query, operation, model }) {
+          // Escrita que muda card do board: troca (adiada) o ETag dele.
+          noteBoardCardWrite(model, operation, args);
           if (!SCOPED_MODELS.has(model as Prisma.ModelName)) {
             return query(args);
           }

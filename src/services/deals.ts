@@ -1217,6 +1217,17 @@ export async function invalidateBoardsForPipelines(
   }
 }
 
+/** Etapa e funil atuais do negócio (antes de uma troca de etapa). */
+async function stageRefOfDeal(
+  dealId: string,
+): Promise<{ stageId: string; pipelineId: string | null } | null> {
+  const row = await prisma.deal.findUnique({
+    where: { id: dealId },
+    select: { stageId: true, stage: { select: { pipelineId: true } } },
+  });
+  return row ? { stageId: row.stageId, pipelineId: row.stage?.pipelineId ?? null } : null;
+}
+
 async function pipelineIdOfDeal(dealId: string): Promise<string | null> {
   const row = await prisma.deal.findUnique({
     where: { id: dealId },
@@ -1244,7 +1255,21 @@ export type UpdateDealInput = {
   propagateToChat?: boolean;
 };
 
-export async function updateDeal(id: string, data: UpdateDealInput) {
+export type UpdateDealOptions = {
+  /**
+   * Publica o card atualizado (`deal_moved` com o `card`; mesma etapa quando
+   * não mudou) para os outros clientes aplicarem no board sem recarregar.
+   * Padrão `true`. A importação em lote desliga: milhares de eventos custam
+   * mais que a recarga (o ETag do board já mudou pelo bump).
+   */
+  publishCard?: boolean;
+};
+
+export async function updateDeal(
+  id: string,
+  data: UpdateDealInput,
+  options: UpdateDealOptions = {},
+) {
   // Importante: usar UncheckedUpdateInput evita conflito com a extension
   // multi-tenant que injeta `organizationId` em `data` no update.
   // No checked input (`DealUpdateInput`), `organizationId` não é aceito.
@@ -1276,12 +1301,13 @@ export async function updateDeal(id: string, data: UpdateDealInput) {
 
   // Troca de estágio pode ser cross-pipeline: guarda o funil de origem
   // pra invalidar os dois boards depois do commit.
-  const previousPipelineId =
-    data.stageId === undefined ? null : await pipelineIdOfDeal(id);
+  const previous = data.stageId === undefined ? null : await stageRefOfDeal(id);
+  const previousPipelineId = previous?.pipelineId ?? null;
 
   // REGRA DE HERANÇA DE RESPONSÁVEL (ver `assignDealOwner` abaixo).
   let chatAssigneeChanges: ConversationAssigneeChange[] = [];
   let siblingPipelineIds: Array<string | null> = [];
+  let siblingIds: string[] = [];
   const updated = await prisma.$transaction(async (tx) => {
     // Troca de etapa fora do `moveDeal` (importação em modo update, ferramentas
     // de IA, closure do agente v2): mesma sincronização de status do move.
@@ -1324,6 +1350,7 @@ export async function updateDeal(id: string, data: UpdateDealInput) {
             data: { ownerId: data.ownerId },
           });
           siblingPipelineIds = siblings.map((s) => s.stage?.pipelineId ?? null);
+          siblingIds = siblings.map((s) => s.id);
         }
       }
       chatAssigneeChanges = await propagateOwnerToContactAndChat(
@@ -1340,11 +1367,27 @@ export async function updateDeal(id: string, data: UpdateDealInput) {
     await logConversationAssigneeChanges(chatAssigneeChanges);
   }
 
-  await invalidateBoardsForPipelines([
-    updated.stage?.pipelineId,
-    previousPipelineId,
-    ...siblingPipelineIds,
-  ]);
+  if (options.publishCard === false) {
+    await invalidateBoardsForPipelines([
+      updated.stage?.pipelineId,
+      previousPipelineId,
+      ...siblingPipelineIds,
+    ]);
+    return updated;
+  }
+
+  // Board: versão de card dos funis (origem, destino, irmãos) e o card novo
+  // para os outros clientes (`deal_moved`; edição sem troca de etapa sai com
+  // `fromStageId === toStageId`, o mesmo contrato da troca de dono).
+  await syncBoardsAfterDealChanges({
+    changes: [
+      previous && previous.stageId !== updated.stageId
+        ? { dealId: updated.id, fromStageId: previous.stageId, fromPipelineId: previousPipelineId }
+        : { dealId: updated.id },
+      ...siblingIds.map((dealId) => ({ dealId })),
+    ],
+    extraPipelineIds: [updated.stage?.pipelineId, previousPipelineId, ...siblingPipelineIds],
+  });
 
   return updated;
 }
@@ -2258,7 +2301,9 @@ function toDealMovedCard(
             type: typeof owner.type === "string" || owner.type === null ? owner.type : null,
           }
         : null,
-    ...(tags && tags.length > 0 ? { tags } : {}),
+    // Lista vazia vai também: o cliente substitui as tags do card em cache
+    // (tirar a última tag precisa chegar). Sem `tags` = linha sem a relação.
+    ...(tags ? { tags } : {}),
   };
 }
 
