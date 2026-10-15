@@ -38,7 +38,10 @@ vi.mock("@/lib/authz/funnel-visibility", () => ({
 vi.mock("@/lib/authz/resource-policy", () => ({
   requirePipelineScope: h.requirePipelineScope,
 }));
-vi.mock("@/lib/visibility", () => ({ getVisibilityFilter: h.getVisibilityFilter }));
+vi.mock("@/lib/visibility", () => ({
+  getVisibilityFilter: h.getVisibilityFilter,
+  getDealVisibilityFilter: h.getVisibilityFilter,
+}));
 vi.mock("@/services/pipelines", () => ({
   resolvePipelineByPublicRef: h.resolvePipelineByPublicRef,
   getPipelineMeta: h.getPipelineMeta,
