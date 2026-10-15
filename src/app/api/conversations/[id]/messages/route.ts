@@ -522,35 +522,31 @@ async function respondTimelineDelta(a: DeltaArgs): Promise<NextResponse | null> 
     debugLog(`[messages] delta reset conv=${a.conv.id} motivo=${planned.reason}`);
     return null;
   }
-  let plan: Extract<typeof planned, { kind: "delta" }>;
-  if (planned.kind === "unchanged") {
-    if (cursorStillFresh(a.base)) {
-      const tag = encodeTimelineCursor(a.base);
-      if (cursorEtagMatches(ifNoneMatch, a.current)) {
-        return messagesNotModified(timelineEtag(tag), a.routePath);
-      }
-      recordConditionalResponse(a.routePath, 200);
-      return NextResponse.json(
-        { delta: true, reset: false, items: [], changed: [], deleted: [], cursor: tag },
-        { headers: messagesCacheHeaders(timelineEtag(tag)) },
-      );
-    }
-    // Janela de 24 h / fixada venceu: só a sessão e as fixadas mudam.
-    plan = {
-      kind: "delta",
-      created: new Set(),
-      updated: new Set(),
-      deleted: new Set(),
-      meta: true,
-      byEntry: [],
-    };
-  } else {
-    // Nada mudou desde a última resposta deste delta (o navegador guarda o
-    // corpo): 304 sem banco.
-    const same = cursorEtagMatches(ifNoneMatch, a.current);
-    if (same) return messagesNotModified(timelineEtag(encodeTimelineCursor(same)), a.routePath);
-    plan = planned;
+  // Nada mudou desde a última resposta deste delta (o navegador guarda o
+  // corpo e revalida a mesma URL): 304 sem banco.
+  const same = cursorEtagMatches(ifNoneMatch, a.current);
+  if (same) return messagesNotModified(timelineEtag(encodeTimelineCursor(same)), a.routePath);
+  if (planned.kind === "unchanged" && cursorStillFresh(a.base)) {
+    const tag = encodeTimelineCursor(a.base);
+    recordConditionalResponse(a.routePath, 200);
+    return NextResponse.json(
+      { delta: true, reset: false, items: [], changed: [], deleted: [], cursor: tag },
+      { headers: messagesCacheHeaders(timelineEtag(tag)) },
+    );
   }
+  // `unchanged` com o prazo vencido (janela de 24 h / fixada): só a sessão
+  // e as fixadas mudam.
+  const plan: Extract<typeof planned, { kind: "delta" }> =
+    planned.kind === "delta"
+      ? planned
+      : {
+          kind: "delta",
+          created: new Set(),
+          updated: new Set(),
+          deleted: new Set(),
+          meta: true,
+          byEntry: [],
+        };
 
   const wanted = [...new Set([...plan.created, ...plan.updated])];
   const [rows, pins, session] = await Promise.all([

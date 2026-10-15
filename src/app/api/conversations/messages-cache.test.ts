@@ -47,9 +47,12 @@ vi.mock("ioredis", async () => {
       probe.redisStore.set(k, v);
     },
   });
+  type EvalResult = ReturnType<InstanceType<typeof probe.FakeRedis>["eval"]>;
   class FakeWithMsgs extends probe.FakeRedis {
-    eval(script: string, n: number, ...rest: string[]) {
-      if (/--\s*crm:msgs-/.test(script)) return Promise.resolve(h.emu!.eval(script, n, rest));
+    eval(script: string, n: number, ...rest: string[]): EvalResult {
+      if (/--\s*crm:msgs-/.test(script)) {
+        return Promise.resolve(h.emu!.eval(script, n, rest)) as unknown as EvalResult;
+      }
       return super.eval(script, n, rest[0]!, rest[1]!);
     }
   }
