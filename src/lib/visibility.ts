@@ -139,6 +139,111 @@ export async function getDepartmentScopeForConversations(
 }
 
 /**
+ * Papel personalizado pode ampliar (nunca reduzir) a visibilidade do papel
+ * legado. Fora de RequestContext (jobs) a org não é conhecida e vale a
+ * visibilidade do papel legado — `null` aqui.
+ */
+function visibilityOrgId(role: AppUserRole): string | null {
+  if (role === "ADMIN") return null;
+  try {
+    return getOrgIdOrThrow();
+  } catch {
+    return null;
+  }
+}
+
+type DealVisibilityAxis = {
+  mode: VisibilityMode;
+  includeUnassigned: boolean;
+  authzCtx: AuthzContext | null;
+};
+
+/**
+ * Eixos own/all e pool livre do papel (settings da org + papéis atribuídos).
+ * Settings e contexto authz são cacheados (Redis/memória): nenhuma ida ao
+ * Postgres no caminho quente.
+ */
+async function resolveDealVisibilityAxis(
+  user: SessionUser,
+  role: AppUserRole,
+  orgId: string | null,
+  memo: RequestMemo | undefined,
+): Promise<DealVisibilityAxis> {
+  const authzPromise: Promise<AuthzContext | null> = orgId
+    ? authzContextOnce(memo, {
+        userId: user.id,
+        organizationId: orgId,
+        isSuperAdmin: false,
+      }).catch(() => null)
+    : Promise.resolve(null);
+  const [settings, unassignedSettings, authzCtx] = await Promise.all([
+    loadVisibilityMap(memo),
+    loadUnassignedMap(memo),
+    authzPromise,
+  ]);
+  let mode = getModeForRole(settings, role);
+  // Ver ou não os itens SEM responsável (pool livre). Eixo ortogonal a own/all.
+  let includeUnassigned = getUnassignedForRole(unassignedSettings, role);
+  // OR entre os papéis atribuídos; default false não muda nada.
+  if (authzCtx) {
+    if (authzCtx.seeTeam) mode = "all";
+    if (authzCtx.seeUnassigned) includeUnassigned = true;
+  }
+  return { mode, includeUnassigned, authzCtx };
+}
+
+/**
+ * `where` de negócios do eixo: "all" com pool = `{}`; "all" sem pool = só
+ * com dono; "own" com pool = próprios + sem dono; "own" sem pool = próprios.
+ */
+function dealWhereFor(
+  mode: VisibilityMode,
+  includeUnassigned: boolean,
+  userId: string,
+): Prisma.DealWhereInput {
+  if (mode === "all") return includeUnassigned ? {} : { ownerId: { not: null } };
+  return includeUnassigned
+    ? { OR: [{ ownerId: userId }, { ownerId: null }] }
+    : { ownerId: userId };
+}
+
+/** Só a parte de negócios de `VisibilityResult`. */
+export type DealVisibilityResult = Pick<
+  VisibilityResult,
+  "canSeeAll" | "dealWhere" | "includeUnassigned"
+>;
+
+/**
+ * Visibilidade de NEGÓCIOS do usuário — o mesmo `dealWhere`/`canSeeAll` de
+ * `getVisibilityFilter`, sem o recorte de conversas.
+ *
+ * O board e o "carregar mais" só usam o `dealWhere`. O escopo de
+ * departamento (a única leitura no Postgres de `getVisibilityFilter`, a cada
+ * requisição) e a flag do "own" estrito só recortam CONVERSAS, então ficam
+ * de fora: o 304 do board (ETag) não toca no banco.
+ */
+export async function getDealVisibilityFilter(
+  user: SessionUser,
+  opts: { memo?: RequestMemo } = {},
+): Promise<DealVisibilityResult> {
+  const role = user.role;
+  if (!role || !DEFAULTS[role]) {
+    return { canSeeAll: true, dealWhere: {}, includeUnassigned: true };
+  }
+  const { mode, includeUnassigned } = await resolveDealVisibilityAxis(
+    user,
+    role,
+    visibilityOrgId(role),
+    opts.memo,
+  );
+  return {
+    canSeeAll: mode === "all",
+    dealWhere: dealWhereFor(mode, includeUnassigned, user.id),
+    includeUnassigned,
+  };
+}
+
+/**
  * Filtro de visibilidade (own/all, pool livre, departamento) do usuário.
  *
  * Os insumos são independentes entre si e saem juntos: escopo de
@@ -166,24 +271,7 @@ export async function getVisibilityFilter(
     };
   }
 
-  // Papel personalizado pode ampliar (nunca reduzir) a visibilidade do
-  // papel legado. Fora de RequestContext (jobs) ou se a leitura falhar,
-  // permanece a visibilidade do papel legado — `null` aqui.
-  let orgId: string | null = null;
-  if (role !== "ADMIN") {
-    try {
-      orgId = getOrgIdOrThrow();
-    } catch {
-      orgId = null;
-    }
-  }
-  const authzPromise: Promise<AuthzContext | null> = orgId
-    ? authzContextOnce(memo, {
-        userId: user.id,
-        organizationId: orgId,
-        isSuperAdmin: false,
-      }).catch(() => null)
-    : Promise.resolve(null);
+  const orgId = visibilityOrgId(role);
   // A flag só decide o "own estrito" de quem não é MEMBER (MEMBER já é
   // estrito) nem ADMIN (sempre "all").
   const granularPromise: Promise<boolean> =
@@ -191,29 +279,16 @@ export async function getVisibilityFilter(
       ? featureEnabledOnce(memo, "rbac_granular_scope_v1", orgId).catch(() => false)
       : Promise.resolve(false);
 
-  const [deptScope, settings, unassignedSettings, authzCtx, granularScope] =
-    await Promise.all([
-      getDepartmentScopeForConversations(user, memo),
-      loadVisibilityMap(memo),
-      loadUnassignedMap(memo),
-      authzPromise,
-      granularPromise,
-    ]);
-  let mode = getModeForRole(settings, role);
-  // Ver ou não os itens SEM responsável (pool livre). Eixo ortogonal a own/all.
-  let includeUnassigned = getUnassignedForRole(unassignedSettings, role);
-
-  // OR entre os papéis atribuídos; default false não muda nada.
-  if (authzCtx) {
-    if (authzCtx.seeTeam) mode = "all";
-    if (authzCtx.seeUnassigned) includeUnassigned = true;
-  }
+  const [deptScope, axis, granularScope] = await Promise.all([
+    getDepartmentScopeForConversations(user, memo),
+    resolveDealVisibilityAxis(user, role, orgId, memo),
+    granularPromise,
+  ]);
+  const { mode, includeUnassigned, authzCtx } = axis;
 
   // Deal sem dono só aparece quando o papel pode ver o pool livre; caso
   // contrário exige `ownerId` presente. `{}` = todos (dono ou não).
-  const dealWhereAll: Prisma.DealWhereInput = includeUnassigned
-    ? {}
-    : { ownerId: { not: null } };
+  const dealWhereAll = dealWhereFor("all", includeUnassigned, user.id);
 
   // Conversas atribuídas dentro do escopo (base para o modo "all" sem pool).
   const assignedInScope = composeDepartmentScope(
@@ -273,9 +348,7 @@ export async function getVisibilityFilter(
   // Com o eixo "sem responsável" ligado, o own passa a incluir o pool livre:
   // próprios + itens sem dono (o modelo de distribuição em que o operador
   // puxa da fila). Sem ele, own segue estrito (só os próprios).
-  const ownDealWhere: Prisma.DealWhereInput = includeUnassigned
-    ? { OR: [{ ownerId: user.id }, { ownerId: null }] }
-    : { ownerId: user.id };
+  const ownDealWhere = dealWhereFor("own", includeUnassigned, user.id);
   // Pool livre de conversas respeita o isolamento por departamento; as
   // próprias (`assignedToMe`) permanecem sempre visíveis, dentro ou fora dele.
   const unassignedPool = composeDepartmentScope({ assignedToId: null }, deptScope);

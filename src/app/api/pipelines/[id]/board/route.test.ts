@@ -127,14 +127,15 @@ vi.mock("@/lib/authz/resource-policy", async () => {
     ),
   };
 });
-vi.mock("@/lib/visibility", () => ({
-  getVisibilityFilter: vi.fn(async () => ({
+vi.mock("@/lib/visibility", () => {
+  const visibility = vi.fn(async () => ({
     dealWhere: h.authz.ownOnly ? { ownerId: "u0" } : {},
     conversationWhere: {},
     canSeeAll: !h.authz.ownOnly,
     includeUnassigned: true,
-  })),
-}));
+  }));
+  return { getVisibilityFilter: visibility, getDealVisibilityFilter: visibility };
+});
 vi.mock("@/services/pipelines", () => ({
   resolvePipelineByPublicRef: vi.fn(async (ref: string) => ({ id: ref, name: "Funil" })),
   getPipelineMeta: vi.fn(async (id: string) => ({ id, name: "Funil" })),
@@ -522,7 +523,20 @@ vi.mock("@/lib/prisma", () => ({
 }));
 
 import { GET, POST } from "@/app/api/pipelines/[id]/board/route";
+import { resetCacheVersionsForTests } from "@/lib/cache/versions";
 import { resetContactLastMessageReadyForTests } from "@/services/kanban-filters";
+
+/**
+ * Esvazia o Redis falso E a memória local das versões. Só limpar o store
+ * deixava a versão de atividade (`board_act`, com memória no processo) da
+ * leitura anterior valendo até a memória expirar; aí ela era semeada de novo
+ * com outro `Date.now()` no meio do teste, a chave mudava e o "hit"
+ * esperado virava "miss" (intermitente, conforme o tempo do benchmark).
+ */
+function clearCache(): void {
+  h.redis.store.clear();
+  resetCacheVersionsForTests();
+}
 
 type Measure = {
   scenario: string;
@@ -574,9 +588,9 @@ async function measure(
   } | null = null;
   let cpuMicros = 0;
   for (let i = 0; i < RUNS; i++) {
-    if (!opts.warm) h.redis.store.clear();
+    if (!opts.warm) clearCache();
     else if (i === 0) {
-      h.redis.store.clear();
+      clearCache();
       await (await send()).text(); // aquece o cache
     }
     h.pg.length = 0;
@@ -618,7 +632,7 @@ const OPEN = { status: "OPEN" };
 
 describe("board sintético 7×200 (benchmark local)", () => {
   beforeEach(() => {
-    h.redis.store.clear();
+    clearCache();
   });
   afterAll(() => {
     const out = process.env.BOARD_BENCH_OUT;
@@ -791,7 +805,7 @@ function cacheDesc(res: Response): string | undefined {
 
 describe("rota do board: cache canônico e checagens", () => {
   beforeEach(() => {
-    h.redis.store.clear();
+    clearCache();
     h.authz.isAdmin = true;
     h.authz.stageDeny = [];
     h.authz.pipelineDenied = false;
