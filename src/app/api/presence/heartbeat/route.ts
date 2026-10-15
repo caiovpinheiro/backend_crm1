@@ -4,7 +4,7 @@ import { withOrgContext } from "@/lib/auth-helpers";
 import { listViewers, removeViewer, touchViewer } from "@/lib/entity-presence";
 import { getLogger } from "@/lib/logger";
 import { recordPresenceBeat } from "@/lib/metrics";
-import { claimPresenceBeat } from "@/lib/presence-beat";
+import { claimPresenceBeat, entityListSignature } from "@/lib/presence-beat";
 import { getPresenceUserInfo } from "@/lib/presence-user-info";
 import { recordHeartbeatThrottled } from "@/services/system-presence";
 
@@ -33,6 +33,9 @@ const ALLOWED_ENTITIES = new Set(["deal"]);
  *   sistema ("CRM aberto"), para o ping que perder a disputa não deixar o
  *   usuário offline. Perdeu → 200 `{ viewers, deduped: true }` lido do
  *   Redis, sem escrever.
+ * - No-op (antes do limite): a entidade estava na lista da última batida
+ *   GRAVADA do usuário, há menos de `PRESENCE_BEAT_NOOP_WINDOW_MS` (45 s) →
+ *   204 sem corpo e sem escrita (o viewer já foi renovado).
  *
  * Limitação conhecida (só no frontend antigo): com 2+ deals abertos ao
  * mesmo tempo, as batidas de um deal podem ganhar sempre a disputa e o
@@ -67,7 +70,16 @@ export async function POST(req: Request) {
       return NextResponse.json({ viewers });
     }
 
-    const beat = await claimPresenceBeat({ userId });
+    const ref = { entityType, entityId };
+    const beat = await claimPresenceBeat({
+      userId,
+      noop: { mode: "contains", entityKey: `${entityType}:${entityId}` },
+      writeSignature: entityListSignature([ref]),
+    });
+    if (!beat.accepted && beat.noop) {
+      recordPresenceBeat("heartbeat", "noop_204");
+      return new NextResponse(null, { status: 204 });
+    }
     if (!beat.accepted) {
       recordPresenceBeat("heartbeat", "deduped");
       const viewers = await listViewers({ orgId, entityType, entityId });

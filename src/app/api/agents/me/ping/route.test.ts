@@ -61,10 +61,14 @@ beforeEach(() => {
   delete process.env.SESSION_IDLE_TIMEOUT_HOURS;
   delete process.env.PRESENCE_PING_USER_MAX_PER_MIN;
   delete process.env.PRESENCE_BEAT_MIN_INTERVAL_MS;
+  // Estes testes medem os limites (aba, usuário, 30 s): o no-op de 45 s
+  // (204) tem testes próprios em `presence/beat/route.test.ts`.
+  process.env.PRESENCE_BEAT_NOOP_WINDOW_MS = "0";
 });
 
 afterEach(() => {
   vi.useRealTimers();
+  delete process.env.PRESENCE_BEAT_NOOP_WINDOW_MS;
 });
 
 describe("POST /api/agents/me/ping — limite por usuário e aba", () => {
