@@ -595,6 +595,7 @@ async function respondTimelineDelta(a: DeltaArgs): Promise<NextResponse | null> 
 
   const presented = await presentDeltaRows(rows, {
     conversationId: a.conv.id,
+    knownChannelId: a.conv.channelId,
     userId: a.userId,
     orgFilter: a.orgFilter,
   });
@@ -634,7 +635,13 @@ async function respondTimelineDelta(a: DeltaArgs): Promise<NextResponse | null> 
 /** Enriquecimento das linhas do delta (o mesmo da página, só destas linhas). */
 async function presentDeltaRows(
   rows: MsgRow[],
-  ctx: { conversationId: string; userId: string; orgFilter: ReturnType<typeof userOrgFilter> },
+  ctx: {
+    conversationId: string;
+    /** Canal da conversa: o cliente já tem no mapa da página. */
+    knownChannelId: string | null;
+    userId: string;
+    orgFilter: ReturnType<typeof userOrgFilter>;
+  },
 ): Promise<{ messages: InboxMessageDto[]; channels: Record<string, ConnectionRefDto> }> {
   if (rows.length === 0) return { messages: [], channels: {} };
   const contents = rows.map((r) => r.content);
@@ -647,7 +654,11 @@ async function presentDeltaRows(
     ),
   );
   const channelIds = [
-    ...new Set(rows.map((r) => r.channelId).filter((v): v is string => Boolean(v))),
+    ...new Set(
+      rows
+        .map((r) => r.channelId)
+        .filter((v): v is string => Boolean(v) && v !== ctx.knownChannelId),
+    ),
   ];
   const loadedById = new Map(rows.map((r) => [r.id, r]));
   const replyDisplay = new Map<string, string>();
