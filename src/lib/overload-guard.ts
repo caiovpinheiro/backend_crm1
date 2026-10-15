@@ -26,11 +26,23 @@
  * Resposta 503: `{ message, code: "OVERLOADED", class, retryAfterMs }` +
  * `Retry-After`, `retryAfterMs` = `OVERLOAD_RETRY_AFTER_MS` (5000, entre 2 e
  * 5 s). `OVERLOAD_P99_MS=0` desliga a proteção.
+ *
+ * Aquecimento (gate de carga, item E — deploy sem pico de sobrecarga)
+ * ──────────────────────────────────────────────────────────────────
+ * Nos primeiros `OVERLOAD_WARMUP_MS` (60 s) de vida do PROCESSO o event loop
+ * atrasa por motivos que passam sozinhos (JIT, conexões novas com banco e
+ * Redis, cache frio) — justamente quando todas as abas reconectam depois do
+ * deploy. Nesse período a guarda MEDE (nível, p50/p99 e métricas seguem
+ * valendo) mas NÃO recusa: a chamada que seria 503 passa e conta em
+ * `crm_overload_warmup_spared_total{class}`. Depois disso o nível medido
+ * vale na hora (inclusive o que já vinha acima). `OVERLOAD_WARMUP_MS=0`
+ * desliga o aquecimento.
  */
 import { monitorEventLoopDelay, type IntervalHistogram } from "node:perf_hooks";
 
 import type { ApiCostClass } from "@/lib/api-cost-class";
 import { getLogger } from "@/lib/logger";
+import { metrics } from "@/lib/metrics";
 
 const log = getLogger("overload-guard");
 
@@ -43,12 +55,15 @@ export type OverloadConfig = {
   heavyThresholdMs: number;
   recoverMs: number;
   retryAfterMs: number;
+  /** Vida do processo (ms) em que a guarda mede mas não recusa. 0 = sem aquecimento. */
+  warmupMs: number;
 };
 
 export const OVERLOAD_DEFAULTS = {
   thresholdMs: 200,
   windowMs: 10_000,
   retryAfterMs: 5_000,
+  warmupMs: 60_000,
 } as const;
 const SLICES_PER_WINDOW = 5;
 
@@ -73,6 +88,7 @@ export function getOverloadConfig(env: Env = process.env): OverloadConfig {
     heavyThresholdMs: heavy !== null && heavy > thresholdMs ? heavy : thresholdMs * 2.5,
     recoverMs: recover !== null && recover < thresholdMs ? recover : thresholdMs * 0.75,
     retryAfterMs: Math.min(5_000, Math.max(2_000, retry)),
+    warmupMs: num(env.OVERLOAD_WARMUP_MS) ?? OVERLOAD_DEFAULTS.warmupMs,
   };
 }
 
@@ -159,6 +175,8 @@ export class OverloadGuard {
 
 type ProcessState = {
   guard: OverloadGuard | null;
+  /** Vida do processo em ms (injetável nos testes). */
+  uptimeMs: () => number;
   histogram: IntervalHistogram | null;
   timer: ReturnType<typeof setInterval> | null;
   /** Medidor indisponível neste runtime: não tenta de novo a cada requisição. */
@@ -171,6 +189,7 @@ function processState(): ProcessState {
   if (!globalForOverload.__crmOverloadGuard) {
     globalForOverload.__crmOverloadGuard = {
       guard: null,
+      uptimeMs: processUptimeMs,
       histogram: null,
       timer: null,
       failed: false,
@@ -180,6 +199,15 @@ function processState(): ProcessState {
 }
 
 const NS_PER_MS = 1e6;
+
+function processUptimeMs(): number {
+  return process.uptime() * 1_000;
+}
+
+/** Processo ainda no aquecimento (`OVERLOAD_WARMUP_MS`)? */
+export function isOverloadWarmingUp(cfg: OverloadConfig = getOverloadConfig()): boolean {
+  return cfg.warmupMs > 0 && processState().uptimeMs() < cfg.warmupMs;
+}
 
 /**
  * Liga o medidor deste processo (idempotente). Só roda onde a API atende
@@ -230,20 +258,43 @@ export function getOverloadSnapshot(): OverloadSnapshot {
 
 /**
  * Decide se a chamada desta classe recebe 503 agora. `null` = segue.
- * Nunca recusa `essential` nem `cached_read`.
+ * Nunca recusa `essential` nem `cached_read`. No aquecimento do processo
+ * (`OVERLOAD_WARMUP_MS`) mede mas não recusa: conta a chamada poupada.
  */
 export function checkOverload(cls: ApiCostClass): { retryAfterMs: number } | null {
   if (cls === "essential" || cls === "cached_read") return null;
   const cfg = getOverloadConfig();
   if (cfg.thresholdMs <= 0) return null;
+  // Liga o medidor já na 1ª chamada, mesmo no aquecimento.
   const { level } = getOverloadSnapshot();
-  return overloadRejectsClass(level, cls) ? { retryAfterMs: cfg.retryAfterMs } : null;
+  if (!overloadRejectsClass(level, cls)) return null;
+  if (isOverloadWarmingUp(cfg)) {
+    try {
+      metrics.apiCost.warmupSpared.inc({ class: cls });
+    } catch {
+      /* métrica nunca derruba a requisição */
+    }
+    return null;
+  }
+  return { retryAfterMs: cfg.retryAfterMs };
 }
 
-/** Só testes: injeta uma guarda (medidor/relógio falsos) ou limpa. */
-export function setOverloadGuardForTests(guard: OverloadGuard | null): void {
+/**
+ * Só testes: injeta uma guarda (medidor/relógio falsos) ou limpa. Com guarda
+ * injetada o processo conta como já aquecido, salvo `uptimeMs` próprio.
+ */
+export function setOverloadGuardForTests(
+  guard: OverloadGuard | null,
+  opts: { uptimeMs?: () => number } = {},
+): void {
   const s = processState();
   if (s.timer) clearInterval(s.timer);
   s.histogram?.disable();
-  globalForOverload.__crmOverloadGuard = { guard, histogram: null, timer: null, failed: false };
+  globalForOverload.__crmOverloadGuard = {
+    guard,
+    uptimeMs: opts.uptimeMs ?? (guard ? () => Number.POSITIVE_INFINITY : processUptimeMs),
+    histogram: null,
+    timer: null,
+    failed: false,
+  };
 }
