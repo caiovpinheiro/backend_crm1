@@ -6,7 +6,7 @@ import { isPlaceholderContactName } from "../context";
 
 describe("nome genérico no cadastro não é nome de pessoa", () => {
   it("rótulo, número ou palavra técnica: descartado", () => {
-    for (const n of ["Negócio", "negocio", "Cliente", "Contato 123", "Lead", "Novo contato", "5511999990000", "+55 11 99999-0000", "WhatsApp", "-"]) {
+    for (const n of ["Negócio", "negocio", "Cliente", "Contato 123", "Lead", "Novo contato", "5511999990000", "+55 11 99999-0000", "WhatsApp", "-", "Duplicado 2", "DUPLICADA", "Cópia de Ana", "Não usar", "Teste 3"]) {
       expect(isPlaceholderContactName(n), n).toBe(true);
     }
   });
