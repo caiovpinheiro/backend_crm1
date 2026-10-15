@@ -85,6 +85,25 @@ const DEAL_BUILTIN = new Set([
   "lostReason",
   "expectedClose",
 ]);
+const PLACEHOLDER_NAMES = new Set([
+  "negocio", "cliente", "contato", "lead", "novo contato", "novo lead", "novo cliente", "sem nome",
+  "desconhecido", "usuario", "whatsapp", "nome", "name", "unknown", "null", "undefined", "teste",
+]);
+
+/** Valor do campo de nome que não é nome de pessoa (rótulo, número, vazio de fato). */
+export function isPlaceholderContactName(name: unknown): boolean {
+  const t = String(name ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  // Só número, telefone ou símbolo ("-", "."): não é nome.
+  if (!/[a-z]/.test(t)) return String(name ?? "").trim() !== "";
+  return PLACEHOLDER_NAMES.has(t) || /^(?:negocio|lead|contato|cliente)\s*\d+$/.test(t);
+}
+
 const squashName = (s: string) => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]/g, "");
 
 /**
@@ -169,6 +188,10 @@ async function loadContactFields(
     } as Record<string, unknown>,
   });
   if (!contact) return {};
+  // Nome genérico no cadastro ("Negócio", "Cliente", só número) não é nome de
+  // pessoa: o agente cumprimentava "Boa tarde, Negócio!". Sem nome, ele fala
+  // sem chamar pelo nome.
+  if (isPlaceholderContactName((contact as { name?: unknown }).name)) (contact as { name?: unknown }).name = null;
 
   const out: Record<string, unknown> = {};
   for (const key of allowedKeys) {
