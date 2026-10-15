@@ -36,6 +36,7 @@ import { waitForMessageSendStatus } from "@/lib/wait-message-send-status";
 import { getLogger } from "@/lib/logger";
 import { ServerTiming } from "@/lib/server-timing";
 import { logEvent } from "@/services/activity-log";
+import { noteMessageChange } from "@/lib/cache/message-versions";
 
 const log = getLogger("api/conversations/[id]/attachments");
 
@@ -567,6 +568,7 @@ export async function POST(request: Request, context: RouteContext) {
             mediaUrl: publicUrl,
           }),
         });
+        void noteMessageChange(saved.organizationId, saved.conversationId, "new", saved.id, saved.externalId);
         const noteText = displayContent || `📎 ${fileName}`;
         void (async () => {
           const openDeal = conv.contactId
@@ -645,6 +647,7 @@ export async function POST(request: Request, context: RouteContext) {
             ...(isAudio ? { sendStatus: "pending" } : {}),
           }),
         });
+        void noteMessageChange(msgRow.organizationId, msgRow.conversationId, "new", msgRow.id, msgRow.externalId);
         const baileysResult = await sendWhatsAppMedia({
           conversationId: conv.id,
           contactId: conv.contactId,
@@ -665,6 +668,7 @@ export async function POST(request: Request, context: RouteContext) {
               data: { sendStatus: "failed", sendError: metaSendError },
             })
             .catch(() => {});
+          void noteMessageChange(msgRow.organizationId, msgRow.conversationId, "upd", msgRow.id);
         }
 
         try {
@@ -756,6 +760,7 @@ export async function POST(request: Request, context: RouteContext) {
             sendStatus: "pending",
           }),
         });
+        void noteMessageChange(msgRow.organizationId, msgRow.conversationId, "new", msgRow.id, msgRow.externalId);
 
         // Antes do enqueue (não em paralelo): o worker pode marcar
         // `hasError: true` ao falhar, e este update não pode sobrescrever.
@@ -819,6 +824,7 @@ export async function POST(request: Request, context: RouteContext) {
               data: { sendStatus: "failed", sendError: errMsg },
             })
             .catch(() => {});
+          void noteMessageChange(msgRow.organizationId, msgRow.conversationId, "upd", msgRow.id);
           await prisma.conversation
             .update({ where: { id: conv.id }, data: { hasError: true } })
             .catch(() => {});
@@ -874,6 +880,7 @@ export async function POST(request: Request, context: RouteContext) {
           mediaUrl: publicUrl,
         }),
       });
+      void noteMessageChange(localMsg.organizationId, localMsg.conversationId, "new", localMsg.id, localMsg.externalId);
 
       try {
         await prisma.conversation.update({

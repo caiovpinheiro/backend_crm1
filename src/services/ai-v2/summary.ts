@@ -19,6 +19,7 @@ import { getAgentChatKey, tryGetAgentApiKey } from "@/services/ai/agent-key";
 import { generateWithTools } from "@/services/ai/provider";
 import { maskSensitive } from "./sensitive";
 import { traceStep } from "./trace";
+import { noteMessageRowChange } from "@/lib/cache/message-versions";
 
 const log = getLogger("ai-v2.summary");
 
@@ -296,7 +297,7 @@ export async function writeV2Summary(args: {
       verbosity: cfg.verbosity,
     });
     const text = maskSensitive(renderSummary({ ...items, ...(args.tabulation ? { tabulacao: args.tabulation } : {}) }, cfg.verbosity)).text;
-    await prisma.message.create({
+    const summaryRow = await prisma.message.create({
       data: {
         organizationId: args.organizationId,
         conversationId: args.conversationId,
@@ -308,6 +309,7 @@ export async function writeV2Summary(args: {
         senderName: args.config.name,
       },
     });
+    void noteMessageRowChange(summaryRow, "new");
     traceStep("resumo", `${args.moment === "close" ? "Ao encerrar" : "Ao transferir"}: resumo gravado para a equipe (${source === "model" ? "pelo modelo" : "pelo histórico"}): "${summaryOneLine(text).slice(0, 90)}"`);
     return text;
   } catch (err) {

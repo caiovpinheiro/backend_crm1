@@ -48,6 +48,7 @@ import {
 import { ScheduledMessageStatus } from "@prisma/client";
 import { getLogger } from "@/lib/logger";
 import { scheduleBackgroundTimeout, scheduleBackgroundInterval } from "@/lib/background-timers";
+import { noteMessageChange } from "@/lib/cache/message-versions";
 
 const log = getLogger("scheduled-messages-worker");
 
@@ -292,6 +293,7 @@ async function sendViaText(
       senderName,
     }),
   });
+  void noteMessageChange(saved.organizationId, saved.conversationId, "new", saved.id, saved.externalId);
 
   const result = await sendWhatsAppText({
     conversationId: conv.id,
@@ -316,6 +318,7 @@ async function sendViaText(
         data: { sendStatus: "failed", sendError: result.error ?? "send failed" },
       })
       .catch(() => {});
+    void noteMessageChange(saved.organizationId, saved.conversationId, "upd", saved.id);
     // A bolha falhada fica no chat (e na prévia do card): mesma ordem.
     await touchConversationLastMessageAt({
       conversationId: conv.id,
@@ -437,6 +440,7 @@ async function sendViaMetaTemplate(
       ...(templateConfigId ? { templateConfigId } : {}),
     }),
   });
+  void noteMessageChange(saved.organizationId, saved.conversationId, "new", saved.id, saved.externalId);
 
   await prisma.conversation
     .update({

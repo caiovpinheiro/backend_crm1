@@ -14,6 +14,7 @@ import { fireTrigger, buildMessageTriggerData } from "@/services/automation-trig
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
 import { maskPhone } from "@/lib/pii-mask";
 import { getLogger } from "@/lib/logger";
+import { noteMessageChange } from "@/lib/cache/message-versions";
 
 const log = getLogger("api/conversations/[id]/forward");
 
@@ -174,6 +175,7 @@ export async function POST(request: Request, context: RouteContext) {
           senderName,
         }),
       });
+      void noteMessageChange(saved.organizationId, saved.conversationId, "new", saved.id, saved.externalId);
 
       let externalId: string | null = null;
       let sendErrorMsg: string | null = null;
@@ -194,6 +196,7 @@ export async function POST(request: Request, context: RouteContext) {
             where: { id: saved.id },
             data: { externalId, sendStatus: "sent" },
           });
+          void noteMessageChange(saved.organizationId, saved.conversationId, "upd", saved.id, externalId);
         }
       } catch (sendErr) {
         sendErrorMsg = formatMetaSendError(sendErr);
@@ -201,6 +204,7 @@ export async function POST(request: Request, context: RouteContext) {
           where: { id: saved.id },
           data: { sendStatus: "failed", sendError: sendErrorMsg },
         }).catch(() => {});
+        void noteMessageChange(saved.organizationId, saved.conversationId, "upd", saved.id);
       }
 
       try {

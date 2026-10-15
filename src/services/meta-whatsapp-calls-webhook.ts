@@ -24,6 +24,7 @@ import {
   wasWhatsappCallPickedUp,
 } from "@/lib/whatsapp-call-chat";
 import { getLogger } from "@/lib/logger";
+import { noteMessageRowChange } from "@/lib/cache/message-versions";
 
 const log = getLogger("meta-whatsapp-calls-webhook");
 
@@ -205,7 +206,7 @@ export async function processMetaWhatsappCallsWebhook(
           select: { id: true },
         });
         if (!already) {
-          await prisma.message.create({
+          const connectRow = await prisma.message.create({
             data: withOrgFromCtx({
               conversationId: conv.id,
               content: chatLine,
@@ -216,6 +217,7 @@ export async function processMetaWhatsappCallsWebhook(
               sendStatus: "delivered",
             }),
           });
+          void noteMessageRowChange(connectRow, "new");
           await prisma.conversation
             .update({
               where: { id: conv.id },
@@ -421,7 +423,7 @@ export async function processMetaWhatsappCallsWebhook(
       direction === "BUSINESS_INITIATED" ? "out" : "in";
 
     if (chatLine && !already) {
-      await prisma.message.create({
+      const callRow = await prisma.message.create({
         data: withOrgFromCtx({
           conversationId: conv.id,
           content: chatLine,
@@ -436,6 +438,7 @@ export async function processMetaWhatsappCallsWebhook(
           sendStatus: "delivered",
         }),
       });
+      void noteMessageRowChange(callRow, "new");
 
       try {
         await prisma.conversation.update({
@@ -491,7 +494,7 @@ export async function processMetaWhatsappCallsWebhook(
             ? `WhatsApp · chamada · ${agentName.trim()}`
             : "WhatsApp · chamada";
         try {
-          await prisma.message.create({
+          const recordingRow = await prisma.message.create({
             data: withOrgFromCtx({
               conversationId: conv.id,
               content: timelineBody,
@@ -508,6 +511,7 @@ export async function processMetaWhatsappCallsWebhook(
               sendStatus: "delivered",
             }),
           });
+          void noteMessageRowChange(recordingRow, "new");
           await prisma.conversation
             .update({
               where: { id: conv.id },

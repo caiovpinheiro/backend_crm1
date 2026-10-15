@@ -33,6 +33,7 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { publishNewMessage } from "@/lib/realtime-events";
 import { logEvent } from "@/services/activity-log";
 import { createDealEvent } from "@/services/deals";
+import { noteMessageChange } from "@/lib/cache/message-versions";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -139,6 +140,7 @@ export async function POST(request: Request, ctx: Ctx) {
             }),
             select: { id: true, createdAt: true },
           });
+          void noteMessageChange(conv.organizationId, conv.id, "new", savedMsg.id);
           mirroredMessageId = savedMsg.id;
           mirroredConversationId = conv.id;
 

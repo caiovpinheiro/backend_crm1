@@ -38,6 +38,7 @@ import {
   parseWhatsappOrder,
   type WhatsappOrderSnapshot,
 } from "@/lib/whatsapp-catalog-order";
+import { noteMessageChange, noteMessageRowChange } from "@/lib/cache/message-versions";
 
 /**
  * Scope multi-tenancy do webhook. Quando presente:
@@ -514,7 +515,7 @@ async function claimLocalOutboundForEcho(args: {
   }
   if (!targetId) return false;
   try {
-    await prisma.message.update({
+    const claimed = await prisma.message.update({
       where: { id: targetId },
       data: {
         externalId: args.waMessageId,
@@ -522,6 +523,7 @@ async function claimLocalOutboundForEcho(args: {
         sendError: null,
       },
     });
+    void noteMessageRowChange(claimed, "upd");
   } catch (err) {
     const code = (err as { code?: string }).code;
     if (code !== "P2002") throw err;
@@ -652,10 +654,11 @@ async function applyIncomingReaction(params: {
     ? [...withoutFrom, { emoji, from: fromWaId, at: at.toISOString() }]
     : withoutFrom;
 
-  await prisma.message.update({
+  const reacted = await prisma.message.update({
     where: { id: target.id },
     data: { reactions: next as unknown as object[] },
   });
+  void noteMessageRowChange(reacted, "upd");
 }
 
 /**
@@ -2000,6 +2003,12 @@ async function processStatusUpdate(
               : s === "delivered" || s === "read"
                 ? null
                 : undefined,
+            // A versão das mensagens sobe só depois do flush (gravado).
+            change: {
+              organizationId: msg.organizationId,
+              conversationId: msg.conversationId,
+              ids: [msg.id, msg.externalId],
+            },
           });
         } else {
           await prisma.message.update({
@@ -2015,6 +2024,7 @@ async function processStatusUpdate(
                   : {}),
             },
           });
+          void noteMessageChange(msg.organizationId, msg.conversationId, "upd", msg.id, msg.externalId);
         }
 
         // Mantém a linha em cache coerente com o banco para o caso de o
@@ -3289,6 +3299,8 @@ export async function processMetaWebhookPayload(
             });
           }),
           );
+          // Fora da transação (já commitada): a versão sobe com a linha visível.
+          void noteMessageRowChange(msgCreated, "new");
 
           if (echoOut) {
             if (msgCreated) {

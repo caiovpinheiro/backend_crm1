@@ -202,8 +202,13 @@ function measure(name: string, entries: IoEntry[]): Counts {
   };
   const before = ANTES[name];
   expect(before, `sem medição "antes" para: ${name}`).toBeDefined();
+  // GET /messages: +1 ida ao Redis (EVAL das versões das mensagens, ETag/304
+  // e delta do gate de carga de 15/10) — troca as leituras de mensagem do
+  // 304 por essa ida. As consultas ao Postgres seguem com o mesmo teto.
+  const extraRedis = name.startsWith("messages /") ? 1 : 0;
   for (const key of Object.keys(depois) as (keyof Counts)[]) {
-    expect(depois[key], `${name}: ${key} piorou`).toBeLessThanOrEqual(before![key]);
+    const allowance = key === "redis" || key === "redisEmSerie" ? extraRedis : 0;
+    expect(depois[key], `${name}: ${key} piorou`).toBeLessThanOrEqual(before![key] + allowance);
   }
   return depois;
 }
@@ -365,7 +370,7 @@ describe("GET /api/conversations/:id/messages — consultas por fase", () => {
 
       const c = measure("messages / operador, conversa própria, flag off", warm.entries);
       dentroDaMeta(c);
-      expect(c).toEqual({ consultas: 8, fases: 3, redis: 2, redisEmSerie: 1 });
+      expect(c).toEqual({ consultas: 8, fases: 3, redis: 3, redisEmSerie: 2 });
     });
 
     it("operador abre a própria conversa pelo número (bookmark ?c=101)", async () => {
@@ -379,7 +384,7 @@ describe("GET /api/conversations/:id/messages — consultas por fase", () => {
         warm.entries,
       );
       dentroDaMeta(c);
-      expect(c).toEqual({ consultas: 8, fases: 3, redis: 2, redisEmSerie: 1 });
+      expect(c).toEqual({ consultas: 8, fases: 3, redis: 3, redisEmSerie: 2 });
     });
 
     it("operador abre a própria conversa (flag ligada, regra de canal por usuário)", async () => {
@@ -393,7 +398,7 @@ describe("GET /api/conversations/:id/messages — consultas por fase", () => {
         warm.entries,
       );
       dentroDaMeta(c);
-      expect(c).toEqual({ consultas: 8, fases: 3, redis: 3, redisEmSerie: 2 });
+      expect(c).toEqual({ consultas: 8, fases: 3, redis: 4, redisEmSerie: 3 });
     });
 
     it("gestor abre conversa de outro agente (flag desligada)", async () => {
@@ -403,7 +408,7 @@ describe("GET /api/conversations/:id/messages — consultas por fase", () => {
 
       const c = measure("messages / gestor, conversa de outro agente, flag off", warm.entries);
       dentroDaMeta(c);
-      expect(c).toEqual({ consultas: 8, fases: 3, redis: 4, redisEmSerie: 2 });
+      expect(c).toEqual({ consultas: 8, fases: 3, redis: 5, redisEmSerie: 3 });
     });
 
     it("admin abre conversa de outro agente (flag ligada)", async () => {
@@ -413,7 +418,7 @@ describe("GET /api/conversations/:id/messages — consultas por fase", () => {
 
       const c = measure("messages / admin, conversa de outro agente, flag on", warm.entries);
       dentroDaMeta(c);
-      expect(c).toEqual({ consultas: 7, fases: 3, redis: 5, redisEmSerie: 3 });
+      expect(c).toEqual({ consultas: 7, fases: 3, redis: 6, redisEmSerie: 4 });
     });
 
     it("operador rola para a página anterior (?before)", async () => {
@@ -424,7 +429,7 @@ describe("GET /api/conversations/:id/messages — consultas por fase", () => {
 
       const c = measure("messages / operador, página anterior (?before)", warm.entries);
       dentroDaMeta(c);
-      expect(c).toEqual({ consultas: 7, fases: 3, redis: 2, redisEmSerie: 1 });
+      expect(c).toEqual({ consultas: 7, fases: 3, redis: 3, redisEmSerie: 2 });
     });
   });
 
@@ -439,7 +444,7 @@ describe("GET /api/conversations/:id/messages — consultas por fase", () => {
         "messages / operador, conversa própria, flag on (canal por papel)",
         warm.entries,
       );
-      expect(c).toEqual({ consultas: 9, fases: 3, redis: 3, redisEmSerie: 2 });
+      expect(c).toEqual({ consultas: 9, fases: 3, redis: 4, redisEmSerie: 3 });
 
       await probe.run(clearCaches);
       setup("manager", { rbacFlag: true, scopeGrants: CHANNEL_BY_ROLE });
@@ -450,7 +455,7 @@ describe("GET /api/conversations/:id/messages — consultas por fase", () => {
           "messages / gestor, conversa de outro agente, flag on (canal por papel)",
           gestor.entries,
         ),
-      ).toEqual({ consultas: 9, fases: 3, redis: 5, redisEmSerie: 3 });
+      ).toEqual({ consultas: 9, fases: 3, redis: 6, redisEmSerie: 4 });
     });
 
     it("veredito que depende do banco (operador abre conversa da fila): +1 consulta e +1 fase", async () => {
@@ -466,8 +471,8 @@ describe("GET /api/conversations/:id/messages — consultas por fase", () => {
       expect(measure("messages / operador, conversa da fila, flag off", warm.entries)).toEqual({
         consultas: 9,
         fases: 4,
-        redis: 4,
-        redisEmSerie: 2,
+        redis: 5,
+        redisEmSerie: 3,
       });
 
       await probe.run(clearCaches);
@@ -484,7 +489,7 @@ describe("GET /api/conversations/:id/messages — consultas por fase", () => {
           "messages / operador, conversa da fila, flag on (canal por papel)",
           comPapel.entries,
         ),
-      ).toEqual({ consultas: 10, fases: 4, redis: 5, redisEmSerie: 3 });
+      ).toEqual({ consultas: 10, fases: 4, redis: 6, redisEmSerie: 4 });
     });
 
     it("histórico (?history=1): os tickets antigos são lidos um a um — 4 fases", async () => {
@@ -492,7 +497,7 @@ describe("GET /api/conversations/:id/messages — consultas por fase", () => {
       const warm = await openWarm(CONV.mine, "?history=1");
       expect(warm.status).toBe(200);
       const c = measure("messages / operador, histórico (?history=1)", warm.entries);
-      expect(c).toEqual({ consultas: 7, fases: 4, redis: 2, redisEmSerie: 1 });
+      expect(c).toEqual({ consultas: 7, fases: 4, redis: 3, redisEmSerie: 2 });
     });
 
     it("extras da página (outro canal, citação fora da página, template legado, evento genérico, flow): +1 cada, na fase 3", async () => {
@@ -500,7 +505,7 @@ describe("GET /api/conversations/:id/messages — consultas por fase", () => {
       const warm = await openWarm(CONV.mine);
       expect(warm.status).toBe(200);
       const c = measure("messages / operador, conversa com extras", warm.entries);
-      expect(c).toEqual({ consultas: 13, fases: 3, redis: 2, redisEmSerie: 1 });
+      expect(c).toEqual({ consultas: 13, fases: 3, redis: 3, redisEmSerie: 2 });
     });
 
     it("versão do cache fora da memória do processo: as consultas não mudam, o Redis ganha um GET de versão antes do valor", async () => {
@@ -510,7 +515,7 @@ describe("GET /api/conversations/:id/messages — consultas por fase", () => {
       const res = await openConversation(CONV.mine);
       expect(res.status).toBe(200);
       const c = measure("messages / operador, conversa própria, versão do cache expirada", res.entries);
-      expect(c).toEqual({ consultas: 8, fases: 3, redis: 3, redisEmSerie: 2 });
+      expect(c).toEqual({ consultas: 8, fases: 3, redis: 4, redisEmSerie: 3 });
     });
   });
 });

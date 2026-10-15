@@ -2,6 +2,7 @@ import { Prisma } from "@prisma/client";
 import { prismaBase } from "@/lib/prisma-base";
 import { getLogger } from "@/lib/logger";
 import { metrics } from "@/lib/metrics";
+import { noteMessageChanges } from "@/lib/cache/message-versions";
 
 /**
  * Buffer de escrita para `Message.sendStatus` e `CampaignRecipient.status`
@@ -104,6 +105,16 @@ type MessageWrite = {
   sendStatus: string;
   // undefined = não tocar no campo; null = limpar; string = gravar.
   sendError?: string | null;
+  /**
+   * Conversa da mensagem: depois do flush (status já no banco) a versão das
+   * mensagens dela sobe (`noteMessageChanges`) — o 304/delta do
+   * `GET /messages` não pode ver a versão nova antes do dado.
+   */
+  change?: {
+    organizationId: string | null | undefined;
+    conversationId: string;
+    ids: (string | null | undefined)[];
+  };
 };
 
 type Pending = {
@@ -192,6 +203,10 @@ async function flush(): Promise<void> {
     // Só limpa DEPOIS do sucesso — ver catch.
     buf.recipients.clear();
     buf.messages.clear();
+    const changes = messages.flatMap((w) =>
+      w.change ? [{ ...w.change, kind: "upd" as const }] : [],
+    );
+    if (changes.length > 0) void noteMessageChanges(changes);
   } catch (err) {
     // Re-insere os writes falhados SEM rebaixar um write novo que chegou
     // durante o flush com prioridade maior (mesma regra de colapso).

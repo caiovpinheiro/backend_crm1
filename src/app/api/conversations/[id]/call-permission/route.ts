@@ -22,6 +22,7 @@ import { WhatsappCallConsentStatus } from "@prisma/client";
 
 import type { InboxMessageDto } from "../messages/route";
 import { getLogger } from "@/lib/logger";
+import { noteMessageChange } from "@/lib/cache/message-versions";
 
 const log = getLogger("api/conversations/[id]/call-permission");
 
@@ -121,6 +122,7 @@ async function dispatchCallPermissionTemplate(args: {
           sendError: msg.slice(0, 500),
         }),
       });
+      void noteMessageChange(failedRow.organizationId, failedRow.conversationId, "new", failedRow.id, failedRow.externalId);
       await touchConversationLastMessageAt({
         conversationId: args.conv.id,
         at: failedRow.createdAt,
@@ -159,6 +161,7 @@ async function dispatchCallPermissionTemplate(args: {
       ...(externalId ? { externalId } : {}),
     }),
   });
+  void noteMessageChange(savedMsg.organizationId, savedMsg.conversationId, "new", savedMsg.id, savedMsg.externalId);
 
   if (!keepGranted) {
     await prisma.conversation.update({

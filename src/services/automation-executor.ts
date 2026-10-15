@@ -106,6 +106,7 @@ import {
   maybeResolveUnansweredOutboundTicket,
 } from "@/services/whatsapp-conversation";
 import { activeConversationOnAccountWhere } from "@/services/conversations";
+import { noteMessageChange, noteMessageRowChange } from "@/lib/cache/message-versions";
 
 const log = getLogger("automation");
 
@@ -303,6 +304,7 @@ async function persistFailedAutomationOutbound(opts: {
       log.warn("Falha ao persistir mensagem de erro:", e);
       return null;
     });
+  void noteMessageRowChange(failedRow, "new");
   if (failedRow) {
     await touchAutomationLastMessageAt(opts.conversationId, failedRow.createdAt);
   }
@@ -3267,6 +3269,7 @@ export async function executeStep(
             ...(resolvedChannelId ? { channelId: resolvedChannelId } : {}),
           }),
         });
+        void noteMessageChange(saved.organizationId, saved.conversationId, "new", saved.id, saved.externalId);
 
         await prisma.conversation.update({
           where: { id: conversationId },
@@ -3600,6 +3603,7 @@ export async function executeStep(
             ...(tplChannelId ? { channelId: tplChannelId } : {}),
           }),
         });
+        void noteMessageChange(saved.organizationId, saved.conversationId, "new", saved.id, saved.externalId);
 
         await prisma.conversation.update({
           where: { id: tplConversationId },
@@ -3816,6 +3820,7 @@ export async function executeStep(
             ...(mediaChannelId ? { channelId: mediaChannelId } : {}),
           }),
         });
+        void noteMessageChange(saved.organizationId, saved.conversationId, "new", saved.id, saved.externalId);
         await touchAutomationLastMessageAt(mediaConversationId, saved.createdAt);
         publishNewMessage({
           organizationId: getOrgIdOrNull(),
@@ -3941,6 +3946,7 @@ export async function executeStep(
             ...(interactiveChannelId ? { channelId: interactiveChannelId } : {}),
           }),
         });
+        void noteMessageChange(saved.organizationId, saved.conversationId, "new", saved.id, saved.externalId);
         await touchAutomationLastMessageAt(conversationId, saved.createdAt);
         publishNewMessage({
           organizationId: getOrgIdOrNull(),
@@ -4108,6 +4114,7 @@ export async function executeStep(
             ...(listChannelId ? { channelId: listChannelId } : {}),
           }),
         });
+        void noteMessageChange(saved.organizationId, saved.conversationId, "new", saved.id, saved.externalId);
         await touchAutomationLastMessageAt(conversationId, saved.createdAt);
         publishNewMessage({
           organizationId: getOrgIdOrNull(),
@@ -4244,6 +4251,7 @@ export async function executeStep(
             ...(flowChannelId ? { channelId: flowChannelId } : {}),
           }),
         });
+        void noteMessageChange(saved.organizationId, saved.conversationId, "new", saved.id, saved.externalId);
         await touchAutomationLastMessageAt(conversationId, saved.createdAt);
         publishNewMessage({
           organizationId: getOrgIdOrNull(),
@@ -4657,6 +4665,7 @@ export async function executeStep(
           const saved = await prisma.message.create({
             data: withOrgFromCtx({ conversationId: conv.id, content: interpolated, direction: "out", messageType: "text", senderName: rt.automationName ?? "Automação", authorType: "bot", ...(rt.triggeredByName ? { triggeredByName: rt.triggeredByName } : {}), externalId, ...(questionChannelId ? { channelId: questionChannelId } : {}) }),
           });
+          void noteMessageChange(saved.organizationId, saved.conversationId, "new", saved.id, saved.externalId);
           await touchAutomationLastMessageAt(conv.id, saved.createdAt);
           publishNewMessage({ organizationId: getOrgIdOrNull(), conversationId: conv.id, contactId: rt.contactId, direction: "out", content: interpolated });
 

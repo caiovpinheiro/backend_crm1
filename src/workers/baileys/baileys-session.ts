@@ -32,6 +32,7 @@ import { registerLidMapping, getMapSize, clearChannelMap, loadPersistedMappings,
 import { attachContactTyping, detachContactTyping } from "./contact-typing";
 import { maskPhone } from "@/lib/pii-mask";
 import { getLogger } from "@/lib/logger";
+import { noteMessageChange } from "@/lib/cache/message-versions";
 
 const log = getLogger("worker.baileys.baileys-session");
 
@@ -296,6 +297,7 @@ export class BaileysSession {
           where: { id: msg.id },
           data: { sendStatus: s },
         });
+        void noteMessageChange(orgId, msg.conversationId, "upd", msg.id, msg.externalId);
 
         // O front usa `externalId ?? id` como id da bolha; publicar só o
         // UUID interno faz o update otimista do tick (incl. read azul)
