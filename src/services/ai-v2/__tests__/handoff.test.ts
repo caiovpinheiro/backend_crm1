@@ -18,7 +18,14 @@ const mocks = vi.hoisted(() => ({
   traceStep: vi.fn((_step: string, _detail: string) => undefined),
   dealFindUnique: vi.fn(async (_args: unknown): Promise<{ stageId: string; contactId: string | null } | null> => null),
   updateDeal: vi.fn(async (_id: string, _data: unknown) => ({})),
-  notifyStage: vi.fn(async () => undefined),
+  notifyStage: vi.fn(
+    async (
+      _dealId: string,
+      _fromStageId: string | null,
+      _toStageId: string,
+      _extra: { contactId?: string | null; depth: number },
+    ) => undefined,
+  ),
 }));
 
 vi.mock("@/lib/prisma", () => ({
