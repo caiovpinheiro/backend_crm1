@@ -30,6 +30,10 @@ const SENTENCE_BOUNDARY = /(?<=[.!?])\s+|(?<=https?:\/\/[^\s]+)\s+(?=\p{Lu})/u;
 const CAUSAL_START = /^(?:como|j[áa] que|uma vez que|visto que|dado que|pois|porque)\s+/i;
 /** Oração que sozinha não é frase: finalidade, condição, tempo ("Para o primeiro acesso, …"). */
 const DEPENDENT_START = /^(?:para|pra|se|caso|quando|assim que|antes de|depois de|ap[óo]s|at[ée] que|enquanto|embora|mesmo que|apesar de|conforme)\s/i;
+/** Abertura que só nomeia o assunto ("Sobre o prazo…", "Quanto ao valor…"). */
+const TOPIC_START = /^(?:sobre|quanto (?:a|ao|aos|[àa]s?)|em rela[çc][ãa]o (?:a|ao|aos|[àa]s?)|com rela[çc][ãa]o (?:a|ao|aos|[àa]s?)|a respeito d[aeo]s?)\s/i;
+/** Verbo comum: com ele a frase de assunto já diz algo ("Sobre isso, não consigo…"). */
+const COMMON_VERB = /(?<![\p{L}])(?:[ée]|est[áa]|est[ãa]o|s[ãa]o|foi|fica|ficam|tem|t[êe]m|tenho|temos|h[áa]|pode|podem|posso|consigo|consegue|precisa|precisam|preciso|vai|v[ãa]o|vou|deve|devem|existe|n[ãa]o|quer|quero|sei|sabe)(?![\p{L}])/iu;
 
 /**
  * O que sobra de uma frase depois de tirar a oração principal (o aviso de
@@ -93,10 +97,12 @@ const CONTINUATION_PIECE = /^(?:mas|por[ée]m|e|ou|contudo|entretanto|no entanto
 /** Locução curta sem verbo ("No Portal do Cliente"): sozinha não diz nada. */
 const PREPOSITION_START = /^(?:em|no|na|nos|nas|pelo|pela|pelos|pelas|com|sem|sobre|ao|aos|[àa]s?)\s/i;
 
-function pieceKind(piece: string): "main" | "causal" | "dependent" | "continuation" {
+function pieceKind(piece: string): "main" | "causal" | "dependent" | "topic" | "continuation" {
   const p = piece.trim();
   if (CAUSAL_START.test(p)) return "causal";
   if (DEPENDENT_START.test(p)) return "dependent";
+  // Só o assunto, sem dois-pontos nem verbo: "Sobre o tempo para concluir o curso".
+  if (TOPIC_START.test(p) && !p.includes(":") && !COMMON_VERB.test(p)) return "topic";
   if (CONTINUATION_PIECE.test(p)) return "continuation";
   if (PREPOSITION_START.test(p) && p.split(/\s+/).length <= 4) return "dependent";
   return "main";
