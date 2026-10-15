@@ -29,8 +29,17 @@ vi.mock("@/lib/prisma", () => ({
     deal: { findUnique: mocks.dealFindUnique },
   },
 }));
-vi.mock("@/services/deals", () => ({ updateDeal: (...a: unknown[]) => mocks.updateDeal(...a) }));
-vi.mock("@/services/automation-triggers", () => ({ notifyDealStageChanged: (...a: unknown[]) => mocks.notifyStage(...a) }));
+vi.mock("@/services/deals", () => ({
+  updateDeal: (id: string, data: { stageId: string }) => mocks.updateDeal(id, data),
+}));
+vi.mock("@/services/automation-triggers", () => ({
+  notifyDealStageChanged: (
+    dealId: string,
+    fromStageId: string | null,
+    toStageId: string,
+    extra: { contactId?: string | null; depth: number },
+  ) => mocks.notifyStage(dealId, fromStageId, toStageId, extra),
+}));
 vi.mock("@/services/distribution", () => ({ executeDistribution: mocks.executeDistribution }));
 vi.mock("@/services/lead-distribution", () => ({ isAgentAvailable: mocks.isAgentAvailable }));
 vi.mock("@/services/ai/turn-manager", () => ({ requeueTurnForAssignee: mocks.requeueTurn }));
