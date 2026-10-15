@@ -141,6 +141,7 @@ Medição por conversa: `node dist/workers/audit-attendance.js --org <slug>`.
 
 ## Decisões técnicas
 
+- 2026-10-15 — Claude Opus 5.5 — **Aquecimento da proteção de sobrecarga**: nos primeiros `OVERLOAD_WARMUP_MS` (60 s) de vida do processo o `overload-guard` mede mas não recusa; o que seria 503 conta em `crm_overload_warmup_spared_total{class}`. `0` desliga.
 - 2026-10-15 — Claude Opus 5.5 — **Batida repetida → 204**: `POST /api/presence/beat` com a mesma lista de entidades (ordenada) da última batida GRAVADA do usuário há menos de `PRESENCE_BEAT_NOOP_WINDOW_MS` (45 s) responde 204 sem corpo e sem escrita. Ping antigo: 204 com qualquer batida gravada na janela; heartbeat antigo: 204 se a entidade estava na lista. A janela conta da última escrita. Métrica `crm_presence_beats_total{result="noop_204"}`.
 - 2026-10-15 — Grok 4.7 — **Imagem do aguardar documento no campo do negócio**: no ramo de documento, `lastResponse` é a URL do arquivo no storage (`documentMediaUrl` igual). Texto segue na variável configurada (`lastDocument`). `{{lastResponse}}` no `update_field` grava essa URL no custom field do deal. O aguardar resposta não muda.
 - 2026-10-15 — Grok 4.7 — **Aguardar documento**: passo `wait_for_document`. Pausa o fluxo e separa mídia de texto. Foto, PDF, Word, imagem, áudio, vídeo ou outra mídia segue `documentGotoStepId`. Texto segue `textGotoStepId`. Grava `documentMediaUrl`, `documentMessageType` e o texto ou nome do arquivo em `saveToVariable` (padrão `lastDocument`). Sem saída de cronômetro. O aguardar resposta não muda.
