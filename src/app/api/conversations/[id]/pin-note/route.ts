@@ -3,6 +3,8 @@ import { NextResponse } from "next/server";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { requireConversationAccess } from "@/lib/conversation-access";
 import { prisma } from "@/lib/prisma";
+import { noteMessageChange } from "@/lib/cache/message-versions";
+import { getOrgIdOrNull } from "@/lib/request-context";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -32,6 +34,7 @@ export async function PUT(req: Request, ctx: Ctx) {
       data: { pinnedNoteId: noteId },
       select: { id: true, pinnedNoteId: true },
     });
+    void noteMessageChange(getOrgIdOrNull(), updated.id, "meta");
 
     return NextResponse.json(updated);
   });

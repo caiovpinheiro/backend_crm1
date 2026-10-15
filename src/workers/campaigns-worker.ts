@@ -63,6 +63,7 @@ import {
 import { randomUUID } from "node:crypto";
 import { getLogger } from "@/lib/logger";
 import { installGracefulShutdown } from "@/workers/graceful-shutdown";
+import { noteMessageChange } from "@/lib/cache/message-versions";
 
 const log = getLogger("worker.campaigns");
 
@@ -1103,6 +1104,7 @@ async function persistCampaignOutboundMessage(input: {
       ...(input.createdAt ? { createdAt: input.createdAt } : {}),
     }),
   });
+  void noteMessageChange(saved.organizationId, saved.conversationId, "new", saved.id, saved.externalId);
 
   // Modelo de ticket para campanhas: após gravar o disparo, fecha o ticket
   // se o aluno ainda não respondeu (`lastInboundAt` null). Cobre tanto

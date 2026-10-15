@@ -19,6 +19,7 @@ import { noteContactActivity } from "./contact-typing";
 import type { AnyMessageContent } from "@whiskeysockets/baileys";
 import { maskPhone } from "@/lib/pii-mask";
 import { getLogger } from "@/lib/logger";
+import { noteMessageChange, noteMessageRowChange } from "@/lib/cache/message-versions";
 
 const log = getLogger("worker.baileys.outbound-consumer");
 
@@ -126,12 +127,13 @@ export function startOutboundConsumer(
                   ? "ptt"
                   : "audio";
               if (nextType !== messageType && messageId) {
-                await prismaBase.message
+                const retyped = await prismaBase.message
                   .update({
                     where: { id: messageId },
                     data: { messageType: nextType },
                   })
-                  .catch(() => {});
+                  .catch(() => null);
+                void noteMessageRowChange(retyped, "upd");
               }
               log.info(
                 {
@@ -222,10 +224,11 @@ export function startOutboundConsumer(
       }
       if (meta?.organizationId && sent?.key?.id) {
         await withSystemContext(meta.organizationId, async () => {
-          await prisma.message.update({
+          const sentRow = await prisma.message.update({
             where: { id: messageId },
             data: { externalId: sent.key!.id!, sendStatus: "sent" },
           });
+          void noteMessageRowChange(sentRow, "upd");
           publishMessageStatus({
             organizationId: meta.organizationId,
             conversationId: meta.conversationId,
@@ -273,6 +276,7 @@ async function markFailed(messageId: string, error: string) {
         where: { id: messageId },
         data: { sendStatus: "failed", sendError: error },
       });
+      void noteMessageChange(msg.organizationId, msg.conversationId, "upd", messageId);
       publishMessageStatus({
         organizationId: msg.organizationId,
         conversationId: msg.conversationId,

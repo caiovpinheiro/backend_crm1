@@ -13,6 +13,7 @@ import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { publishNewMessage } from "@/lib/realtime-events";
+import { noteMessageChange } from "@/lib/cache/message-versions";
 
 export const CONVERSATION_EVENT_ACTIONS = [
   "distribuicao",
@@ -130,6 +131,7 @@ export async function createConversationEvent(args: {
       sendStatus: "sent",
     }),
   });
+  void noteMessageChange(saved.organizationId, saved.conversationId, "new", saved.id, saved.externalId);
 
   const conv = await prisma.conversation
     .findUnique({

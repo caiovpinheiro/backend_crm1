@@ -94,15 +94,19 @@ export type MessageStatusPayload = {
   error?: string | null;
 };
 
-/** Rascunho da IA aprovado: a bolha deixa de ser rascunho. */
+/**
+ * Mensagem alterada fora do status de envio: rascunho da IA aprovado
+ * (`approved`) ou nota interna editada (`edited`, aditivo 15/10). O
+ * cliente busca o delta da conversa.
+ */
 export type MessageUpdatedPayload = {
   organizationId: OrgId;
   conversationId: string;
   messageId: string;
-  status: "approved";
+  status: "approved" | "edited";
 };
 
-/** Rascunho da IA descartado. */
+/** Rascunho da IA descartado ou nota interna excluída. */
 export type MessageDeletedPayload = {
   organizationId: OrgId;
   conversationId: string;

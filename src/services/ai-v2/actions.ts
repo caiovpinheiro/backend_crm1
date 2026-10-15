@@ -32,6 +32,7 @@ import { buildSurveyMessage, recordSurveyResponse } from "./survey";
 import { leadsHandoffOption, simpleHandoff } from "./handoff";
 import type { V2LoadedContext } from "./context";
 import { traceStep } from "./trace";
+import { noteMessageChange } from "@/lib/cache/message-versions";
 
 export type V2ActionResult = {
   action: V2Action;
@@ -653,6 +654,7 @@ async function executeSendWhatsappFlow(action: V2Action, ctx: V2ActionContext): 
         aiAgentUserId: ctx.agentUserId,
       }),
     });
+    void noteMessageChange(saved.organizationId, saved.conversationId, "new", saved.id, saved.externalId);
 
     let externalId: string | null = null;
     try {
@@ -667,9 +669,11 @@ async function executeSendWhatsappFlow(action: V2Action, ctx: V2ActionContext): 
       externalId = res?.messages?.[0]?.id ?? null;
       if (externalId) {
         await prisma.message.update({ where: { id: saved.id }, data: { externalId, sendStatus: "sent" } }).catch(() => {});
+        void noteMessageChange(saved.organizationId, saved.conversationId, "upd", saved.id, externalId);
       }
     } catch (err) {
       await prisma.message.update({ where: { id: saved.id }, data: { sendStatus: "failed" } }).catch(() => {});
+      void noteMessageChange(saved.organizationId, saved.conversationId, "upd", saved.id);
       return { action, ok: false, error: err instanceof Error ? err.message : String(err), flowId };
     }
 
@@ -793,6 +797,7 @@ async function executeSendWhatsappTemplate(action: V2Action, ctx: V2ActionContex
         ...(tplConfigId ? { templateConfigId: tplConfigId } : {}),
       }),
     });
+    void noteMessageChange(saved.organizationId, saved.conversationId, "new", saved.id, saved.externalId);
     // Sem update da conversa neste caminho: grava só a ordem da lista.
     await touchConversationLastMessageAt({
       conversationId: ctx.conversationId,
