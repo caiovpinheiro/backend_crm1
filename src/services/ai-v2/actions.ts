@@ -67,7 +67,6 @@ async function executeHandoff(action: V2Action, ctx: V2ActionContext): Promise<V
       dealId: ctx.dealId,
       destination,
       leads: leadsHandoffOption(ctx.config),
-      moveToStageId: ctx.config.handoff.moveToStageId,
     });
     return { action, ok: true };
   } catch (err) {
