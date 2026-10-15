@@ -57,6 +57,14 @@ vi.mock("@/lib/prisma-helpers", () => ({
 }));
 vi.mock("@/services/deals", () => ({ createDealEvent: vi.fn() }));
 vi.mock("@/lib/sse-bus", () => ({ sseBus: { publish: db.publish } }));
+// Versão da lista (ETag do GET, gate de carga 15/10): registra a ordem
+// em relação ao publish — o bump vem ANTES do evento.
+const order = vi.hoisted(() => [] as string[]);
+vi.mock("@/lib/cache/scheduled-versions", () => ({
+  bumpScheduledMessages: vi.fn(async (org: string, conv: string) => {
+    order.push(`bump ${org} ${conv}`);
+  }),
+}));
 
 import {
   cancelPendingForConversation,
@@ -74,7 +82,11 @@ function published() {
 
 describe("scheduled-messages → scheduled_message_updated", () => {
   beforeEach(() => {
+    order.length = 0;
     db.publish.mockReset();
+    db.publish.mockImplementation((event: string, payload: { conversationId: string; status: string }) => {
+      if (event === "scheduled_message_updated") order.push(`publish ${payload.conversationId} ${payload.status}`);
+    });
     db.findMany.mockReset();
     db.findMany.mockResolvedValue([]);
     db.updateMany.mockReset();
@@ -182,5 +194,45 @@ describe("scheduled-messages → scheduled_message_updated", () => {
         status: "FAILED",
       },
     ]);
+  });
+  it("cada escritor sobe a versão da lista ANTES de publicar (criar, cancelar, enviar, falhar)", async () => {
+    await createScheduledMessage({
+      conversationId: "conv_1",
+      createdById: "user_a",
+      content: "lembrete",
+      scheduledAt: new Date(Date.now() + 60_000),
+    });
+    db.findMany.mockResolvedValue([{ id: "sm_1", organizationId: "org_1" }]);
+    db.updateMany.mockResolvedValue({ count: 1 });
+    await cancelPendingForConversation("conv_1", "client_reply");
+    db.findUnique.mockImplementation(async (args?: { where?: { id?: string } }) => ({
+      id: args?.where?.id ?? "sm",
+      status: "PENDING",
+      organizationId: "org_1",
+      conversationId: "conv_1",
+      createdById: "user_a",
+      content: "oi",
+      fallbackTemplateName: null,
+    }));
+    await cancelScheduledMessage("sm_1", "user_a");
+    await markAsSent("sm_2", { sentMessageId: "msg_1" });
+    await markAsFailed("sm_3", "sessão expirada");
+    expect(order).toEqual([
+      "bump org_1 conv_1",
+      "publish conv_1 PENDING",
+      "bump org_1 conv_1",
+      "publish conv_1 CANCELLED",
+      "bump org_1 conv_1",
+      "publish conv_1 CANCELLED",
+      "bump org_1 conv_1",
+      "publish conv_1 SENT",
+      "bump org_1 conv_1",
+      "publish conv_1 FAILED",
+    ]);
+  });
+
+  it("sem pendentes não sobe a versão", async () => {
+    await cancelPendingForConversation("conv_1", "agent_reply");
+    expect(order).toEqual([]);
   });
 });

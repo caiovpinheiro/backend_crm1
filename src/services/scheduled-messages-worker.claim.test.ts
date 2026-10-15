@@ -38,7 +38,24 @@ const h = vi.hoisted(() => {
 
 vi.mock("@/lib/prisma", () => ({ prisma: {} }));
 vi.mock("@/lib/prisma-base", () => ({
-  prismaBase: { scheduledMessage: { updateMany: h.updateMany } },
+  prismaBase: {
+    scheduledMessage: {
+      updateMany: h.updateMany,
+      findMany: vi.fn(async (args: { where: { status?: string; updatedAt?: { lt: Date } } }) =>
+        [...h.rows.values()]
+          .filter((row) => !args.where.status || row.status === args.where.status)
+          .filter((row) => !args.where.updatedAt?.lt || row.updatedAt < args.where.updatedAt.lt)
+          .map((row) => ({ organizationId: "org_1", conversationId: `conv_${row.id}` })),
+      ),
+    },
+  },
+}));
+// Versão da lista de agendadas (ETag do GET): o item sai/volta da lista.
+const bumps = vi.hoisted(() => [] as string[][]);
+vi.mock("@/lib/cache/scheduled-versions", () => ({
+  bumpScheduledMessages: vi.fn(async (org: string, ...ids: string[]) => {
+    bumps.push([org, ...ids]);
+  }),
 }));
 vi.mock("@/lib/send-whatsapp", () => ({ sendWhatsAppText: vi.fn() }));
 vi.mock("@/lib/meta-whatsapp/client", async () => {
@@ -58,6 +75,7 @@ import {
 } from "@/services/scheduled-messages-worker";
 
 beforeEach(() => {
+  bumps.length = 0;
   h.rows.clear();
   h.updateMany.mockClear();
   delete process.env.SCHEDULED_MESSAGE_SENDING_LEASE_MS;
@@ -78,6 +96,14 @@ describe("claim atômico", () => {
     expect(h.rows.get("sm_1")?.status).toBe("SENDING");
   });
 
+  it("claim com escopo sobe a versão da lista (o item sai dos pendentes); perdedor não", async () => {
+    h.rows.set("sm_2", { id: "sm_2", status: "PENDING", updatedAt: new Date() });
+    const scope = { organizationId: "org_1", conversationId: "conv_9" };
+    expect(await claimScheduledMessage("sm_2", scope)).toBe(true);
+    expect(await claimScheduledMessage("sm_2", scope)).toBe(false);
+    expect(bumps).toEqual([["org_1", "conv_9"]]);
+  });
+
   it("SENDING antigo volta a PENDING; SENDING dentro do lease fica", async () => {
     const lease = scheduledMessageSendingLeaseMs();
     h.rows.set("old", {
@@ -94,6 +120,8 @@ describe("claim atômico", () => {
     expect(n).toBe(1);
     expect(h.rows.get("old")?.status).toBe("PENDING");
     expect(h.rows.get("fresh")?.status).toBe("SENDING");
+    // O item volta à lista: a versão da conversa dele sobe.
+    expect(bumps).toEqual([["org_1", "conv_old"]]);
   });
 });
 
