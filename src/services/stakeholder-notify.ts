@@ -25,8 +25,10 @@
 import { getLogger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { getOrgIdOrNull } from "@/lib/request-context";
 import { sendWhatsAppText } from "@/lib/send-whatsapp";
 import { logEvent } from "@/services/activity-log";
+import { noteMessageChange } from "@/lib/cache/message-versions";
 
 const log = getLogger("stakeholder-notify");
 
@@ -138,6 +140,7 @@ async function deliver(
     }),
     select: { id: true, createdAt: true },
   });
+  void noteMessageChange(getOrgIdOrNull(), ch.conversationId, "new", msg.id);
 
   const result = await sendWhatsAppText({
     conversationId: ch.conversationId,

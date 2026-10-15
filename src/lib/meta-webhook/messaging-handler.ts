@@ -53,6 +53,7 @@ import {
   type MessagingEvent,
   type WebhookEntry,
 } from "@/lib/meta-webhook/messaging-payload";
+import { noteMessageRowChange } from "@/lib/cache/message-versions";
 
 const log = getLogger("meta-messaging-webhook");
 const VERIFY_TOKEN = process.env.META_WEBHOOK_VERIFY_TOKEN?.trim() || "";
@@ -628,6 +629,7 @@ async function processEvent(
     log.info(`duplicata por corrida mid=${externalId ?? ""} — ignorando`);
     return;
   }
+  void noteMessageRowChange(msgCreated, "new");
 
   // TODO(inbox-ig): este ingest ainda não incrementa unread nem seta
   // lastMessageDirection — bug de UX separado; não misturar com firstInboundAt.

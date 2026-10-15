@@ -6,6 +6,7 @@ import { requireConversationAccess } from "@/lib/conversation-access";
 import { prisma } from "@/lib/prisma";
 import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import { getLogger } from "@/lib/logger";
+import { noteMessageRowChange } from "@/lib/cache/message-versions";
 
 const log = getLogger("api/messages/[id]/reactions");
 
@@ -110,10 +111,11 @@ export async function POST(request: Request, ctx: Ctx) {
         metaEmoji = rawEmoji;
       }
 
-      await prisma.message.update({
+      const reacted = await prisma.message.update({
         where: { id: message.id },
         data: { reactions: updated as unknown as object[] },
       });
+      void noteMessageRowChange(reacted, "upd");
 
       // Só envia à Meta quando a mensagem tem wamid E o canal é Cloud
       // API. Reagir em mensagens Baileys / notas / falhas locais só

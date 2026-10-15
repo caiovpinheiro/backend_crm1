@@ -15,6 +15,7 @@ import { getLogger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
 import { withOrg } from "@/lib/prisma-helpers";
 import { publishNewMessage } from "@/lib/realtime-events";
+import { noteMessageRowChange } from "@/lib/cache/message-versions";
 
 const log = getLogger("sip-call-chat");
 
@@ -94,7 +95,7 @@ export async function logSipCallInConversation(
     });
     if (already) return conversationId;
 
-    await prisma.message.create({
+    const sipRow = await prisma.message.create({
       data: withOrg(
         {
           conversationId,
@@ -110,6 +111,7 @@ export async function logSipCallInConversation(
         input.organizationId,
       ),
     });
+    void noteMessageRowChange(sipRow, "new");
   } catch (err) {
     log.warn({ err, callId: input.callId }, "[sip-call-chat] falha ao gravar sip_call no chat");
     return conversationId;

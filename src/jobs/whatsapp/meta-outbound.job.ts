@@ -20,6 +20,7 @@ import { publishOutboundStatus } from "@/lib/outbound-status-signal";
 import { publishMessageStatus } from "@/lib/realtime-events";
 import { maskPhone } from "@/lib/pii-mask";
 import { getLogger } from "@/lib/logger";
+import { noteMessageChange } from "@/lib/cache/message-versions";
 
 const log = getLogger("jobs.whatsapp.meta-outbound");
 
@@ -120,6 +121,7 @@ async function failOutbound(
       data: { sendStatus: "failed", sendError: error },
     })
     .catch(() => {});
+  void noteMessageChange(payload.organizationId, payload.conversationId, "upd", payload.messageId);
   await markConversationError(payload.conversationId, true);
   publishStatus(
     payload.organizationId,
@@ -203,6 +205,7 @@ async function processMetaOutboundTemplate(
         ...(tpl.templateConfigId ? { templateConfigId: tpl.templateConfigId } : {}),
       },
     });
+    void noteMessageChange(payload.organizationId, payload.conversationId, "upd", payload.messageId, externalId);
 
     return afterSuccessfulSend(payload, externalId);
   } catch (err) {

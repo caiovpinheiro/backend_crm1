@@ -3,6 +3,8 @@ import { NextResponse } from "next/server";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { requireConversationAccess } from "@/lib/conversation-access";
 import { prisma } from "@/lib/prisma";
+import { noteMessageChange } from "@/lib/cache/message-versions";
+import { getOrgIdOrNull } from "@/lib/request-context";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 
 type Ctx = { params: Promise<{ id: string }> };
@@ -88,6 +90,7 @@ export async function PUT(req: Request, ctx: Ctx) {
         data: withOrgFromCtx({ conversationId: id, messageId: internalId, expiresAt }),
       });
     }
+    void noteMessageChange(getOrgIdOrNull(), id, "meta");
 
     return NextResponse.json({ ok: true });
   });
@@ -117,6 +120,7 @@ export async function DELETE(req: Request, ctx: Ctx) {
       await prisma.pinnedMessage.deleteMany({
         where: { conversationId: id, messageId: internalId },
       });
+      void noteMessageChange(getOrgIdOrNull(), id, "meta");
     }
 
     return NextResponse.json({ ok: true });

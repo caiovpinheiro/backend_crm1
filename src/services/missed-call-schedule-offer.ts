@@ -9,6 +9,7 @@ import { publishNewMessage } from "@/lib/realtime-events";
 import { buildOutboundTemplateMessageContent } from "@/lib/whatsapp-outbound-template-label";
 import { fireTrigger, buildMessageTriggerData } from "@/services/automation-triggers";
 import { getLogger } from "@/lib/logger";
+import { noteMessageChange } from "@/lib/cache/message-versions";
 
 const log = getLogger("missed-call-schedule-offer");
 
@@ -127,6 +128,7 @@ export async function maybeSendMissedCallScheduleTemplate(params: {
         : {}),
     }),
   });
+  void noteMessageChange(saved.organizationId, saved.conversationId, "new", saved.id, saved.externalId);
 
   await prisma.conversation
     .update({

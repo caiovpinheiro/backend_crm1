@@ -31,6 +31,7 @@ import { logMessageFailed } from "@/services/activity-log";
 import { fireTrigger } from "@/services/automation-triggers";
 import { maskPhone } from "@/lib/pii-mask";
 import { getLogger } from "@/lib/logger";
+import { noteMessageChange } from "@/lib/cache/message-versions";
 
 const log = getLogger("jobs.whatsapp.meta-attach");
 
@@ -90,6 +91,7 @@ async function markFailed(
       },
     })
     .catch(() => {});
+  void noteMessageChange(payload.organizationId, payload.conversationId, "upd", payload.messageId);
 
   await prisma.conversation
     .update({
@@ -395,6 +397,7 @@ export async function processMetaAttach(
       ...(externalId ? { externalId } : {}),
     },
   });
+  void noteMessageChange(payload.organizationId, payload.conversationId, "upd", payload.messageId, externalId);
 
   await prisma.conversation
     .update({
