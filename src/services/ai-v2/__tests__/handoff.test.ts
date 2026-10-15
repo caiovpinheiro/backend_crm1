@@ -16,6 +16,9 @@ const mocks = vi.hoisted(() => ({
   isAgentAvailable: vi.fn(async (_userId: string) => true),
   requeueTurn: vi.fn(async (_turnId: string) => undefined),
   traceStep: vi.fn((_step: string, _detail: string) => undefined),
+  dealFindUnique: vi.fn(async (_args: unknown): Promise<{ stageId: string; contactId: string | null } | null> => null),
+  updateDeal: vi.fn(async (_id: string, _data: unknown) => ({})),
+  notifyStage: vi.fn(async () => undefined),
 }));
 
 vi.mock("@/lib/prisma", () => ({
@@ -23,8 +26,11 @@ vi.mock("@/lib/prisma", () => ({
     conversation: { updateMany: mocks.conversationUpdateMany, update: mocks.conversationUpdate },
     aIAgentConfig: { findUnique: mocks.agentFindUnique },
     distributionRule: { findUnique: mocks.ruleFindUnique, update: mocks.ruleUpdate },
+    deal: { findUnique: mocks.dealFindUnique },
   },
 }));
+vi.mock("@/services/deals", () => ({ updateDeal: (...a: unknown[]) => mocks.updateDeal(...a) }));
+vi.mock("@/services/automation-triggers", () => ({ notifyDealStageChanged: (...a: unknown[]) => mocks.notifyStage(...a) }));
 vi.mock("@/services/distribution", () => ({ executeDistribution: mocks.executeDistribution }));
 vi.mock("@/services/lead-distribution", () => ({ isAgentAvailable: mocks.isAgentAvailable }));
 vi.mock("@/services/ai/turn-manager", () => ({ requeueTurnForAssignee: mocks.requeueTurn }));
@@ -81,6 +87,38 @@ describe("rota por tipo de destino", () => {
       allowOrgWideFallback: false,
     });
     expect(released()).toBe(true);
+  });
+
+  it("etapa ao chamar a equipe: move o negócio antes de distribuir", async () => {
+    mocks.dealFindUnique.mockResolvedValue({ stageId: "etapa-atual", contactId: "ct-1" });
+    await simpleHandoff({
+      conversationId: "conv-1",
+      contactId: "ct-1",
+      dealId: "deal-1",
+      destination: { type: "department", id: "dep-1" },
+      moveToStageId: "etapa-equipe",
+    });
+    expect(mocks.updateDeal).toHaveBeenCalledWith("deal-1", { stageId: "etapa-equipe" });
+    expect(mocks.notifyStage).toHaveBeenCalledWith("deal-1", "etapa-atual", "etapa-equipe", { contactId: "ct-1", depth: 0 });
+    expect(mocks.updateDeal.mock.invocationCallOrder[0]).toBeLessThan(mocks.executeDistribution.mock.invocationCallOrder[0]);
+  });
+
+  it("mesma etapa ou destino agente de IA: não move o negócio", async () => {
+    mocks.dealFindUnique.mockResolvedValue({ stageId: "etapa-equipe", contactId: "ct-1" });
+    await simpleHandoff({
+      conversationId: "conv-1",
+      dealId: "deal-1",
+      destination: { type: "department", id: "dep-1" },
+      moveToStageId: "etapa-equipe",
+    });
+    mocks.agentFindUnique.mockResolvedValue({ userId: "ai-user-2", engine: "simple", active: true });
+    await simpleHandoff({
+      conversationId: "conv-1",
+      dealId: "deal-1",
+      destination: { type: "ai_agent", id: "agent-2" },
+      moveToStageId: "etapa-equipe",
+    });
+    expect(mocks.updateDeal).not.toHaveBeenCalled();
   });
 
   it("pessoa: atribui direto e não passa pela distribuição", async () => {
