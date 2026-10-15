@@ -4553,6 +4553,16 @@ export async function executeStep(
       return { skipRemaining: true };
     }
 
+    case "wait_for_document": {
+      if (!rt.contactId) throw new Error("wait_for_document: contactId ausente");
+      const wfdStepId = (cfg as Record<string, unknown>).__stepId as string | undefined;
+      if (wfdStepId) {
+        await persistPausedContext(rt, wfdStepId, undefined);
+      }
+      log.debug(`Aguardando documento do contato ${rt.contactId}`);
+      return { skipRemaining: true };
+    }
+
     case "closing_protocol": {
       if (!rt.contactId) throw new Error("closing_protocol: contactId ausente");
       const {
@@ -5004,6 +5014,7 @@ const RETRY_PAUSE_STEP_TYPES = new Set([
   "send_whatsapp_list",
   "send_whatsapp_flow",
   "wait_for_reply",
+  "wait_for_document",
 ]);
 
 /**
@@ -5619,6 +5630,7 @@ const STEP_TYPE_LABELS: Record<string, string> = {
   update_lead_score: "Lead score",
   question: "Pergunta ao lead",
   wait_for_reply: "Aguardar resposta",
+  wait_for_document: "Aguardar documento",
   closing_protocol: "Encerramento (aguardar + agente)",
   set_variable: "Definir variável",
   goto: "Ir para",
