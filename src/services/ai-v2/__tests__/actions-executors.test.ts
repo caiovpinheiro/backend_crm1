@@ -21,6 +21,11 @@ const mocks = vi.hoisted(() => ({
   contactUpdate: vi.fn(async (_args: unknown) => ({})),
   contactFindUnique: vi.fn(async (_args: unknown): Promise<unknown> => null),
   messageCreate: vi.fn(async (_args: unknown) => ({ id: "msg-1", content: "x", createdAt: new Date("2026-03-10T15:00:00Z") })),
+  messageUpdate: vi.fn(async (_args: unknown) => ({})),
+  flowScreenFindFirst: vi.fn(async (_args: unknown): Promise<{ title: string } | null> => null),
+  userFindUnique: vi.fn(async (_args: unknown): Promise<{ name: string } | null> => null),
+  getFlow: vi.fn(async (_id: string): Promise<{ id: string; name: string; metaFlowId: string } | null> => null),
+  getTargets: vi.fn(async (_id: string): Promise<{ to: string; recipient: string } | null> => null),
   tplConfigFindFirst: vi.fn(async (_args: unknown): Promise<unknown> => null),
   metaClient: vi.fn((_cfg: unknown): Record<string, unknown> => ({ configured: false })),
   enrichTemplate: vi.fn(async (): Promise<{ components: unknown; flowToken: string | null }> => ({ components: undefined, flowToken: null })),
@@ -37,7 +42,9 @@ vi.mock("@/lib/prisma", () => ({
   prisma: {
     conversation: { update: mocks.conversationUpdate, findUnique: mocks.conversationFindUnique },
     contact: { update: mocks.contactUpdate, findUnique: mocks.contactFindUnique },
-    message: { create: mocks.messageCreate },
+    message: { create: mocks.messageCreate, update: mocks.messageUpdate },
+    whatsappFlowScreen: { findFirst: mocks.flowScreenFindFirst },
+    user: { findUnique: mocks.userFindUnique },
     whatsAppTemplateConfig: { findFirst: mocks.tplConfigFindFirst },
     aIV2KnowledgeGap: { findFirst: mocks.gapFindFirst, update: mocks.gapUpdate, create: mocks.gapCreate },
     aIAgentSurveyResponse: { create: mocks.surveyCreate },
@@ -61,6 +68,8 @@ vi.mock("@/services/tags", () => ({ applyExistingTagToContact: mocks.applyTag })
 vi.mock("@/services/deals", () => ({ createDeal: mocks.createDeal, updateDeal: mocks.updateDeal }));
 vi.mock("@/services/activities", () => ({ createActivity: mocks.createActivity }));
 vi.mock("@/lib/meta-whatsapp/client", () => ({ metaClientFromConfig: mocks.metaClient }));
+vi.mock("@/services/whatsapp-flow-definitions", () => ({ getPublishedFlowForSend: (id: string) => mocks.getFlow(id) }));
+vi.mock("@/lib/contact-whatsapp-target", () => ({ getContactWhatsAppTargets: (id: string) => mocks.getTargets(id) }));
 vi.mock("@/lib/meta-whatsapp/enrich-template-flow", () => ({ enrichTemplateComponentsForFlowSend: mocks.enrichTemplate }));
 vi.mock("../handoff", () => ({ simpleHandoff: vi.fn(async () => undefined), leadsHandoffOption: () => undefined }));
 vi.mock("@/services/automation-triggers", () => ({ notifyDealStageChanged: mocks.notifyStage }));
@@ -348,6 +357,50 @@ describe("template e flow do WhatsApp", () => {
     expect(String((mocks.messageCreate.mock.calls[0][0] as { data: { content: string } }).data.content)).toContain("Olá Ana, tudo bem?");
     expect(mocks.touchLastMessage).toHaveBeenCalledWith(expect.objectContaining({ conversationId: "conv-1" }));
     expect(mocks.publishNewMessage).toHaveBeenCalledWith(expect.objectContaining({ conversationId: "conv-1", direction: "out" }));
+  });
+
+  it("send_whatsapp_flow: o cliente vê o título da tela, no nome do agente, como mensagem do agente", async () => {
+    const sendInteractiveFlow = vi.fn(async () => ({ messages: [{ id: "wamid.flow" }] }));
+    mocks.getFlow.mockResolvedValue({ id: "f-1", name: "Message templates_form_estag_MARKETING_e23ec", metaFlowId: "meta-1" });
+    mocks.conversationFindUnique.mockResolvedValue({
+      organizationId: "org-1",
+      channel: "whatsapp",
+      channelId: "ch-1",
+      contactId: "contact-1",
+      channelRef: { id: "ch-1", config: { token: "x" }, provider: "META_CLOUD_API" },
+    });
+    mocks.metaClient.mockReturnValue({ configured: true, sendInteractiveFlow });
+    mocks.getTargets.mockResolvedValue({ to: "5511999999999", recipient: "5511999999999" });
+    mocks.flowScreenFindFirst.mockResolvedValue({ title: "Finalize seu cadastro" });
+    mocks.userFindUnique.mockResolvedValue({ name: "Atendente - Candidaturas" });
+
+    const r = await run(
+      { type: "send_whatsapp_flow", flowId: "f-1" },
+      ctx({ config: config({ allowedFlowIds: ["f-1"] }) }),
+    );
+
+    expect(r).toMatchObject({ ok: true, flowId: "f-1", externalId: "wamid.flow" });
+    expect(sendInteractiveFlow).toHaveBeenCalledWith(
+      "5511999999999",
+      "Finalize seu cadastro",
+      expect.objectContaining({ flowId: "meta-1", flowCta: "Abrir formulário" }),
+      undefined,
+      undefined,
+      "5511999999999",
+    );
+    expect(mocks.messageCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        conversationId: "conv-1",
+        channelId: "ch-1",
+        direction: "out",
+        messageType: "interactive",
+        authorType: "bot",
+        senderName: "Atendente - Candidaturas",
+        aiAgentUserId: "user-1",
+        content: "Finalize seu cadastro\n[Flow: Abrir formulário]",
+      }),
+    });
+    expect(String((mocks.messageCreate.mock.calls[0][0] as { data: { content: string } }).data.content)).not.toContain("templates_form");
   });
 
   it("send_whatsapp_flow: sem id, em modo sugestão ou flow não liberado para o agente falha antes de tocar na API", async () => {

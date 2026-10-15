@@ -5,6 +5,7 @@
 
 import { toWhatsAppText } from "./reply-format";
 import { touchConversationLastMessageAt } from "@/lib/conversation-last-message";
+import { botOutboundReplyMark } from "@/lib/conversation-reply-marking";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
@@ -579,6 +580,13 @@ async function executeSendMaterialAttachment(action: V2Action, ctx: V2ActionCont
   }
 }
 
+/** Texto do cliente. O nome cadastrado do flow é o id interno da Meta, não uma frase. */
+function customerFlowBody(screenTitle: string | null | undefined): string {
+  const title = (screenTitle ?? "").replace(/\s+/g, " ").trim();
+  if (title && !/template|https?:|\/|_/i.test(title)) return title.slice(0, 1024);
+  return "Preencha o formulário para continuar.";
+}
+
 async function executeSendWhatsappFlow(action: V2Action, ctx: V2ActionContext): Promise<V2ActionResult> {
   const flowId = typeof action.flowId === "string" ? action.flowId.trim() : "";
   if (!flowId) return { action, ok: false, error: "Missing flowId" };
@@ -599,8 +607,9 @@ async function executeSendWhatsappFlow(action: V2Action, ctx: V2ActionContext): 
       select: {
         organizationId: true,
         channel: true,
+        channelId: true,
         contactId: true,
-        channelRef: { select: { config: true, provider: true } },
+        channelRef: { select: { id: true, config: true, provider: true } },
       },
     });
     if (!conv) return { action, ok: false, error: "Conversation not found" };
@@ -616,18 +625,29 @@ async function executeSendWhatsappFlow(action: V2Action, ctx: V2ActionContext): 
     const target = await getContactWhatsAppTargets(ctx.contactId);
     if (!target) return { action, ok: false, error: "Contact without phone" };
 
-    const body = `Preencha o formulário: ${flow.name}`.slice(0, 1024);
+    const screen = await prisma.whatsappFlowScreen.findFirst({
+      where: { flowId: flow.id },
+      orderBy: { sortOrder: "asc" },
+      select: { title: true },
+    });
+    const body = customerFlowBody(screen?.title);
     const flowCta = "Abrir formulário";
     const flowToken = randomUUID();
     const displayContent = `${body}\n[Flow: ${flowCta}]`;
+    const agent = ctx.agentUserId
+      ? await prisma.user.findUnique({ where: { id: ctx.agentUserId }, select: { name: true } })
+      : null;
+    const senderName = agent?.name?.trim() || "Agente IA";
 
     const saved = await prisma.message.create({
       data: withOrgFromCtx({
         conversationId: ctx.conversationId,
+        channelId: conv.channelId ?? conv.channelRef?.id ?? undefined,
         content: displayContent,
         direction: "out",
         messageType: "interactive",
-        senderName: "Agente IA",
+        authorType: "bot",
+        senderName,
         flowToken,
         aiAgentUserId: ctx.agentUserId,
       }),
@@ -652,6 +672,18 @@ async function executeSendWhatsappFlow(action: V2Action, ctx: V2ActionContext): 
       return { action, ok: false, error: err instanceof Error ? err.message : String(err), flowId };
     }
 
+    try {
+      await prisma.conversation.update({
+        where: { id: ctx.conversationId },
+        data: { ...(await botOutboundReplyMark(conv.organizationId)) },
+      });
+    } catch {
+      // A marcação da conversa não desfaz o formulário já enviado.
+    }
+    await touchConversationLastMessageAt({
+      conversationId: ctx.conversationId,
+      message: saved,
+    }).catch(() => null);
     const { publishNewMessage } = await import("@/lib/realtime-events");
     publishNewMessage({
       organizationId: conv.organizationId,
