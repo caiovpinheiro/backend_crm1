@@ -69,6 +69,40 @@ describe("resolveV2AgentForConversation — atribuição automática", () => {
     mocks.attendanceEnabled.mockResolvedValue(true);
   });
 
+  it("conversa atribuída a agente de IA desligado é solta e vai para o agente ativo", async () => {
+    mocks.conversationFindUnique.mockResolvedValue({
+      ...UNASSIGNED,
+      assignedToId: "ai-off",
+      assignedTo: { id: "ai-off", aiAgentConfig: { id: "agent-off", engine: "legacy", active: false } },
+    });
+    const r = await resolveV2AgentForConversation("conv-1");
+    expect(mocks.conversationUpdateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "conv-1", assignedToId: "ai-off" },
+      data: { assignedToId: null },
+    }));
+    expect(r).toMatchObject({ userId: "ai-user-1", agentConfigId: "agent-1", wasAssigned: true });
+  });
+
+  it("agente v2 desligado atribuído também não responde: solta a conversa", async () => {
+    mocks.conversationFindUnique.mockResolvedValue({
+      ...UNASSIGNED,
+      assignedToId: "ai-off",
+      assignedTo: { id: "ai-off", aiAgentConfig: { id: "agent-off", engine: "simple", active: false } },
+    });
+    const r = await resolveV2AgentForConversation("conv-1");
+    expect(r?.agentConfigId).toBe("agent-1");
+  });
+
+  it("agente do motor antigo ativo continua com a conversa (não é do v2)", async () => {
+    mocks.conversationFindUnique.mockResolvedValue({
+      ...UNASSIGNED,
+      assignedToId: "ai-old",
+      assignedTo: { id: "ai-old", aiAgentConfig: { id: "agent-old", engine: "legacy", active: true } },
+    });
+    expect(await resolveV2AgentForConversation("conv-1")).toBeNull();
+    expect(mocks.conversationUpdateMany).not.toHaveBeenCalled();
+  });
+
   it("conversa nova sem responsável vai para o agente v2", async () => {
     const r = await resolveV2AgentForConversation("conv-1");
     expect(r).toMatchObject({ userId: "ai-user-1", agentConfigId: "agent-1", wasAssigned: true });

@@ -32,7 +32,7 @@ type ConversationForResolve = {
   contact?: { phone: string | null } | null;
   assignedTo?: {
     id: string;
-    aiAgentConfig?: { id: string; engine?: string | null } | null;
+    aiAgentConfig?: { id: string; engine?: string | null; active?: boolean | null } | null;
   } | null;
 };
 
@@ -115,7 +115,7 @@ export async function resolveV2AgentForConversation(
       assignedTo: {
         select: {
           id: true,
-          aiAgentConfig: { select: { id: true, engine: true } },
+          aiAgentConfig: { select: { id: true, engine: true, active: true } },
         },
       },
     },
@@ -123,10 +123,24 @@ export async function resolveV2AgentForConversation(
 
   if (!conv) return null;
 
-  if (conv.assignedTo?.aiAgentConfig?.engine === "simple") {
+  const assignedAi = conv.assignedTo?.aiAgentConfig;
+  // Responsável é um agente de IA desligado (herdado do contato/negócio, por
+  // exemplo): ninguém respondia e o cliente ficava sem retorno. A conversa é
+  // solta e segue como sem responsável — agente ativo ou fila da equipe.
+  if (assignedAi && assignedAi.active === false && conv.assignedToId) {
+    const released = await (prismaBase as unknown as {
+      conversation: { updateMany: (args: unknown) => Promise<{ count: number }> };
+    }).conversation.updateMany({
+      where: { id: conversationId, assignedToId: conv.assignedToId },
+      data: { assignedToId: null },
+    });
+    if (released.count === 0) return resolveV2AgentForConversation(conversationId);
+    conv.assignedToId = null;
+    conv.assignedTo = null;
+  } else if (assignedAi?.engine === "simple" && conv.assignedTo) {
     return {
       userId: conv.assignedTo.id,
-      agentConfigId: conv.assignedTo.aiAgentConfig.id,
+      agentConfigId: assignedAi.id,
       wasAssigned: false,
     };
   }
