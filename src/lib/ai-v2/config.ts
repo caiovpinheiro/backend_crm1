@@ -388,6 +388,10 @@ export const v2AgentConfigSchema = z.object({
     humanRequestWithSubject: z.enum(["answer_first", "transfer"]).optional(),
     whileQueued: z.enum(["notify", "answer"]).optional(),
     queuedMessage: optionalText,
+    moveToStageId: z.preprocess(
+      (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
+      z.string().optional(),
+    ),
     leads: z.object({
       enabled: z.boolean().optional(),
       roleIds: z.array(z.string()).optional(),

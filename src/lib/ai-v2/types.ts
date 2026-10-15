@@ -357,6 +357,12 @@ export interface V2HandoffConfig {
   /** Aviso de fila (vazio = texto padrão). */
   queuedMessage?: string;
   /**
+   * Etapa para a qual o negócio vai ao chamar a equipe (atalho, modelo ou
+   * sentimento). Vazio: a transferência não muda a etapa. Não vale quando o
+   * destino é outro agente de IA.
+   */
+  moveToStageId?: string;
+  /**
    * Repasse no modo por leads, só deste agente. Desligado (padrão): o destino
    * departamento segue a distribuição inteligente. Ligado: sorteio pelo peso
    * do modo por leads, restrito ao departamento do destino, aos papéis e às
