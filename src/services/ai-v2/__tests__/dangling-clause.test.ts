@@ -148,6 +148,20 @@ describe("frase sem oração principal depois de um corte", () => {
       .toBe("Entendi a dúvida sobre o documento. A equipe consegue emitir o documento certo para você.");
   });
 
+  it("frase que só nomeia o assunto do aviso cortado sai", () => {
+    expect(withoutTransferClause("Sobre o prazo para concluir o plano, vou te passar para o time de Atendimento.")).toBe("");
+    expect(withoutTransferClause("Quanto ao valor da renovação, vou chamar alguém da equipe.")).toBe("");
+    // Com oração principal depois, fica.
+    expect(standaloneClause("Sobre o prazo, ele vence em 3 dias")).toBe("Sobre o prazo, ele vence em 3 dias");
+    // Frase de assunto com verbo ou dois-pontos já diz algo: fica.
+    expect(withoutTransferClause("Sobre esse assunto eu não consigo ajudar, vou te passar para a equipe.")).toBe("Sobre esse assunto eu não consigo ajudar.");
+    expect(standaloneClause("Sobre o pagamento: o portal está em manutenção até sexta")).toBe("Sobre o pagamento: o portal está em manutenção até sexta");
+    expect(standaloneClause("Sobre o que você precisa de ajuda")).toBe("Sobre o que você precisa de ajuda");
+    // Alternativas no fim de uma frase não são condição pendurada.
+    expect(standaloneClause("Posso te orientar sobre os pedidos, sobre a cobrança ou sobre um item específico"))
+      .toBe("Posso te orientar sobre os pedidos, sobre a cobrança ou sobre um item específico");
+  });
+
   it("condição que pertencia ao aviso de transferência sai junto (vírgula ou travessão)", () => {
     expect(withoutTransferClause("Poxa, Ana, entendo a frustração — se o pedido continua em análise mesmo após a reclamação, vou te passar para o time."))
       .toBe("Poxa, Ana, entendo a frustração.");
