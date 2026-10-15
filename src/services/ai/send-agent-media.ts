@@ -17,6 +17,7 @@ import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import type { AgentFaqMedia } from "@/services/ai/message-models-retrieval";
 import { traceStep } from "@/services/ai-v2/trace";
 import { getLogger } from "@/lib/logger";
+import { noteMessageRowChange } from "@/lib/cache/message-versions";
 
 const log = getLogger("ai.send-agent-media");
 
@@ -132,6 +133,7 @@ export async function sendAgentFollowUpMedia(args: {
         sendStatus: "pending",
       }),
     });
+    void noteMessageRowChange(msgRow, "new");
     // Este envio não atualiza a conversa: grava só a ordem da lista.
     await touchConversationLastMessageAt({
       conversationId: conv.id,
@@ -171,6 +173,7 @@ export async function sendAgentFollowUpMedia(args: {
             data: { sendStatus: "failed", sendError: result.error },
           })
           .catch(() => {});
+        void noteMessageRowChange(msgRow, "upd");
         continue;
       }
       sentCount += 1;
@@ -186,6 +189,7 @@ export async function sendAgentFollowUpMedia(args: {
           data: { sendStatus: "failed", sendError: "Canal Meta não configurado." },
         })
         .catch(() => {});
+      void noteMessageRowChange(msgRow, "upd");
       continue;
     }
 
@@ -228,6 +232,7 @@ export async function sendAgentFollowUpMedia(args: {
           },
         })
         .catch(() => {});
+      void noteMessageRowChange(msgRow, "upd");
       continue;
     }
     sentCount += 1;

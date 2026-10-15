@@ -5,6 +5,7 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { sendWhatsAppText } from "@/lib/send-whatsapp";
 import { publishNewMessage } from "@/lib/realtime-events";
 import { getLogger } from "@/lib/logger";
+import { noteMessageChange } from "@/lib/cache/message-versions";
 
 const log = getLogger("whatsapp-inbound-call-routing");
 
@@ -90,6 +91,7 @@ export async function rejectInboundCallWithoutAgent(params: {
       externalId: extId,
     }),
   });
+  void noteMessageChange(saved.organizationId, saved.conversationId, "new", saved.id, saved.externalId);
 
   const sendResult = await sendWhatsAppText({
     conversationId: params.conversationId,

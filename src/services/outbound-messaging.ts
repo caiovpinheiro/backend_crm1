@@ -41,6 +41,7 @@ import { fireTrigger, buildMessageTriggerData } from "@/services/automation-trig
 import { getConversationLite, reopenResolvedAsNewTicket } from "@/services/conversations";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
 import { getLogger } from "@/lib/logger";
+import { noteMessageChange } from "@/lib/cache/message-versions";
 
 const log = getLogger("outbound-messaging");
 
@@ -198,6 +199,7 @@ export async function createInternalNoteOnConversation(args: {
       senderName,
     }),
   });
+  void noteMessageChange(saved.organizationId, saved.conversationId, "new", saved.id, saved.externalId);
 
   void (async () => {
     const dealId =
@@ -353,6 +355,7 @@ export async function sendTextToConversation(args: {
       ...(localOnly ? { sendStatus: "sent" } : {}),
     }),
   });
+  void noteMessageChange(saved.organizationId, saved.conversationId, "new", saved.id, saved.externalId);
 
   const sendResult = localOnly
     ? { externalId: null as string | null, failed: false, error: undefined as string | undefined }
@@ -575,6 +578,7 @@ export async function sendInteractiveButtonsToConversation(args: {
       senderName,
     }),
   });
+  void noteMessageChange(saved.organizationId, saved.conversationId, "new", saved.id, saved.externalId);
 
   let externalId: string | null = null;
   let sendError: string | undefined;
@@ -592,6 +596,7 @@ export async function sendInteractiveButtonsToConversation(args: {
       await prisma.message
         .update({ where: { id: saved.id }, data: { externalId, sendStatus: "sent" } })
         .catch(() => {});
+      void noteMessageChange(saved.organizationId, saved.conversationId, "upd", saved.id, externalId);
     }
   } catch (e: unknown) {
     sendError = e instanceof Error ? e.message : "Falha ao enviar botões pelo WhatsApp.";
@@ -599,6 +604,7 @@ export async function sendInteractiveButtonsToConversation(args: {
     await prisma.message
       .update({ where: { id: saved.id }, data: { sendStatus: "failed" } })
       .catch(() => {});
+    void noteMessageChange(saved.organizationId, saved.conversationId, "upd", saved.id);
   }
 
   try {
@@ -874,6 +880,7 @@ export async function sendInteractiveListToConversation(args: {
       senderName,
     }),
   });
+  void noteMessageChange(saved.organizationId, saved.conversationId, "new", saved.id, saved.externalId);
 
   let externalId: string | null = null;
   let sendError: string | undefined;
@@ -901,6 +908,7 @@ export async function sendInteractiveListToConversation(args: {
       await prisma.message
         .update({ where: { id: saved.id }, data: { externalId, sendStatus: "sent" } })
         .catch(() => {});
+      void noteMessageChange(saved.organizationId, saved.conversationId, "upd", saved.id, externalId);
     }
   } catch (e: unknown) {
     sendError = e instanceof Error ? e.message : "Falha ao enviar lista pelo WhatsApp.";
@@ -908,6 +916,7 @@ export async function sendInteractiveListToConversation(args: {
     await prisma.message
       .update({ where: { id: saved.id }, data: { sendStatus: "failed" } })
       .catch(() => {});
+    void noteMessageChange(saved.organizationId, saved.conversationId, "upd", saved.id);
   }
 
   try {
@@ -1100,6 +1109,7 @@ export async function sendFlowToConversation(args: {
       flowToken,
     }),
   });
+  void noteMessageChange(saved.organizationId, saved.conversationId, "new", saved.id, saved.externalId);
 
   let externalId: string | null = null;
   let sendError: string | undefined;
@@ -1122,6 +1132,7 @@ export async function sendFlowToConversation(args: {
       await prisma.message
         .update({ where: { id: saved.id }, data: { externalId, sendStatus: "sent" } })
         .catch(() => {});
+      void noteMessageChange(saved.organizationId, saved.conversationId, "upd", saved.id, externalId);
     }
   } catch (e: unknown) {
     sendError = e instanceof Error ? e.message : "Falha ao enviar formulário pelo WhatsApp.";
@@ -1129,6 +1140,7 @@ export async function sendFlowToConversation(args: {
     await prisma.message
       .update({ where: { id: saved.id }, data: { sendStatus: "failed" } })
       .catch(() => {});
+    void noteMessageChange(saved.organizationId, saved.conversationId, "upd", saved.id);
   }
 
   try {
@@ -1399,6 +1411,7 @@ export async function sendTemplateToConversation(
       ...(templateConfigId ? { templateConfigId } : {}),
     }),
   });
+  void noteMessageChange(saved.organizationId, saved.conversationId, "new", saved.id, saved.externalId);
 
   try {
     await prisma.conversation.update({
@@ -1484,6 +1497,7 @@ export async function sendTemplateToConversation(
         data: { sendStatus: "failed", sendError: errMsg },
       })
       .catch(() => {});
+    void noteMessageChange(saved.organizationId, saved.conversationId, "upd", saved.id);
     await prisma.conversation
       .update({ where: { id: conv.id }, data: { hasError: true } })
       .catch(() => {});

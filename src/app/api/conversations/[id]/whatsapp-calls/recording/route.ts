@@ -8,6 +8,7 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { publishNewMessage } from "@/lib/realtime-events";
 import { generateFileName, saveFile } from "@/lib/storage/local";
 import { getLogger } from "@/lib/logger";
+import { noteMessageChange } from "@/lib/cache/message-versions";
 
 const log = getLogger("api/conversations/[id]/whatsapp-calls/recording");
 
@@ -223,6 +224,7 @@ export async function POST(request: Request, context: RouteContext) {
               sendError: null,
             },
           });
+          void noteMessageChange(msg.organizationId, msg.conversationId, "upd", msg.id, msg.externalId);
         } else {
           msg = await prisma.message.create({
             data: withOrgFromCtx({
@@ -237,6 +239,7 @@ export async function POST(request: Request, context: RouteContext) {
               sendStatus: "delivered",
             }),
           });
+          void noteMessageChange(msg.organizationId, msg.conversationId, "new", msg.id, msg.externalId);
         }
       } else {
         msg = await prisma.message.create({
@@ -251,6 +254,7 @@ export async function POST(request: Request, context: RouteContext) {
             sendStatus: "delivered",
           }),
         });
+        void noteMessageChange(msg.organizationId, msg.conversationId, "new", msg.id, msg.externalId);
       }
 
       try {

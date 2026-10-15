@@ -51,6 +51,24 @@ import {
 import { relabelFlowResponseContent } from "@/lib/meta-whatsapp/parse-flow-response";
 import { occurredAtWindow } from "@/lib/activity-events-window";
 import { getLogger } from "@/lib/logger";
+import { recordConditionalResponse } from "@/lib/metrics";
+import {
+  cursorEtagMatches,
+  cursorStillFresh,
+  decodeTimelineCursor,
+  encodeTimelineCursor,
+  isTimelineCursor,
+  noteMessageChange,
+  pageEtagMatches,
+  pageEtagTag,
+  planTimelineDelta,
+  readMessageTimelineState,
+  sortedTimelineIds,
+  timelineCursorFromState,
+  timelineEtag,
+  type MessageTimelineState,
+  type TimelineCursor,
+} from "@/lib/cache/message-versions";
 
 const log = getLogger("api/conversations/[id]/messages");
 
@@ -285,10 +303,15 @@ async function findMessagesSafe(args: {
   orderBy: Prisma.MessageOrderByWithRelationInput | Prisma.MessageOrderByWithRelationInput[];
   take: number;
 }): Promise<MsgRow[]> {
-  const select: Prisma.MessageSelect = { ...MSG_SELECT };
+  const select: Partial<typeof MSG_SELECT> = { ...MSG_SELECT };
   for (let attempt = 0; attempt < 4; attempt++) {
     try {
-      const rows = await prisma.message.findMany({ ...args, select });
+      // `as typeof MSG_SELECT`: o tipo literal evita a comparação profunda
+      // `MessageSelect<DefaultArgs>` × cliente estendido (TS2321).
+      const rows = await prisma.message.findMany({
+        ...args,
+        select: select as typeof MSG_SELECT,
+      });
       return rows.map((r) => ({
         ...r,
         triggeredByName:
@@ -323,6 +346,385 @@ async function findMessagesSafe(args: {
     }
   }
   throw new Error("Falha ao listar mensagens.");
+}
+
+/** Dependências do mapeamento linha → DTO (resolvidas por página/delta). */
+type MessageDtoDeps = {
+  eventActorOf: (
+    id: string,
+    fallbackName: string | null,
+  ) => { senderName: string | null; senderUserId: string | null };
+  presentContent: (raw: string) => string;
+  /** Avatar pelo nome do agente (minúsculo, sem espaços nas pontas). */
+  senderAvatar: (name: string) => string | null;
+  replyToDisplayId: (internalId: string | null | undefined) => string | null;
+  favorited: (internalId: string) => boolean;
+};
+
+/** Linha do ticket atual → bolha (mesmo formato na página e no delta). */
+function toInboxMessageDto(r: MsgRow, d: MessageDtoDeps): InboxMessageDto {
+  const ev = d.eventActorOf(r.id, r.senderName);
+  return {
+    id: r.externalId ?? r.id,
+    content: d.presentContent(r.content),
+    createdAt: r.createdAt.toISOString(),
+    direction: r.direction as InboxMessageDto["direction"],
+    messageType: r.messageType,
+    isPrivate: r.isPrivate || undefined,
+    senderName: ev.senderName,
+    senderUserId: ev.senderUserId,
+    authorType: r.authorType as "human" | "bot" | "system",
+    triggeredByName: r.triggeredByName ?? undefined,
+    senderImageUrl:
+      r.direction === "out" && ev.senderName
+        ? d.senderAvatar(ev.senderName.trim().toLowerCase())
+        : null,
+    mediaUrl: r.mediaUrl,
+    replyToId: d.replyToDisplayId(r.replyToId),
+    replyToPreview: r.replyToPreview,
+    reactions: Array.isArray(r.reactions) ? (r.reactions as ReactionDto[]) : [],
+    sendStatus: r.sendStatus,
+    sendError: r.sendError ?? undefined,
+    status: r.direction === "out" ? mapSendStatus(r.sendStatus) : undefined,
+    channelId: r.channelId ?? null,
+    favoritedByMe: d.favorited(r.id) || undefined,
+    catalogOrder: isWhatsappOrderSnapshot(r.catalogOrder) ? r.catalogOrder : null,
+    referral: referralFromJson(r.referral),
+    sharedContacts: sharedContactsFromJson(r.sharedContacts),
+  };
+}
+
+type PinnedBundle = {
+  pinnedNoteId: string | null;
+  pinnedMessageIds: string[];
+  /** Menor `expiresAt` das fixadas vigentes (ms) — a resposta envelhece aí. */
+  nextExpiryMs: number | null;
+};
+
+/** Fixadas da conversa (as vencidas saem da lista e são apagadas em segundo plano). */
+async function loadPinnedBundle(conv: {
+  id: string;
+  pinnedNoteId: string | null;
+}): Promise<PinnedBundle> {
+  try {
+    const pins = await prisma.pinnedMessage.findMany({
+      where: { conversationId: conv.id },
+      orderBy: { createdAt: "asc" },
+      select: {
+        id: true,
+        expiresAt: true,
+        message: { select: { id: true, externalId: true } },
+      },
+    });
+    const now = new Date();
+    const expiredIds = pins
+      .filter((p) => p.expiresAt && p.expiresAt < now)
+      .map((p) => p.id);
+    if (expiredIds.length > 0) {
+      void prisma.pinnedMessage
+        .deleteMany({ where: { id: { in: expiredIds } } })
+        .catch(() => undefined);
+    }
+    const live = pins.filter((p) => !(p.expiresAt && p.expiresAt < now));
+    const expiries = live
+      .map((p) => p.expiresAt?.getTime())
+      .filter((t): t is number => typeof t === "number");
+    return {
+      pinnedNoteId: conv.pinnedNoteId ?? null,
+      pinnedMessageIds: live.map((p) => p.message.externalId ?? p.message.id),
+      nextExpiryMs: expiries.length > 0 ? Math.min(...expiries) : null,
+    };
+  } catch {
+    return { pinnedNoteId: conv.pinnedNoteId ?? null, pinnedMessageIds: [], nextExpiryMs: null };
+  }
+}
+
+/**
+ * Quando a resposta envelhece sem nenhuma escrita: fim da janela de 24 h
+ * (sessão ativa) ou a fixada que vence primeiro. `0` = não envelhece.
+ */
+function responseNotAfter(
+  session: { active: boolean; expiresAt: Date | null },
+  pinExpiryMs: number | null,
+): number {
+  const candidates: number[] = [];
+  if (session.active && session.expiresAt) candidates.push(session.expiresAt.getTime());
+  if (pinExpiryMs !== null) candidates.push(pinExpiryMs);
+  return candidates.length > 0 ? Math.min(...candidates) : 0;
+}
+
+// ── Cache HTTP: ETag, 304 e delta (gate de carga, 15/10) ────────────
+//
+// Contrato (detalhe em `lib/cache/message-versions.ts`):
+//
+// - Página (`GET …/messages[?limit|before|history|budget]`): `ETag`
+//   `W/"f.<hash>.<expira>"` (versões das conversas da linha do tempo +
+//   famílias da org + usuário + parâmetros) e `cursor` no corpo.
+//   `If-None-Match` igual e no prazo → 304 sem ler mensagem nenhuma (só a
+//   leitura da conversa que decide o acesso — sem acesso continua 404).
+// - Delta (`GET …/messages?after=<cursor>`): `{ delta: true, reset: false,
+//   items, changed, deleted, cursor, pinnedNoteId, pinnedMessageIds,
+//   session, channels }` com o que mudou DESDE o cursor: `items` =
+//   mensagens novas, `changed` = alteradas (status, edição, reação,
+//   favorito), `deleted` = ids excluídos (id da bolha e/ou interno). O
+//   cliente manda sempre o cursor da última página inteira: o delta é
+//   cumulativo e o navegador revalida a mesma URL (`ETag` = cursor atual →
+//   304 sem banco). Sem como garantir o delta (outra conversa entrou na
+//   linha do tempo, permissões mudaram, diário truncado): devolve a página
+//   inteira com `reset: true`.
+
+const MESSAGES_CACHE_CONTROL = "private, no-cache";
+const MESSAGES_VARY = "Origin, Cookie, Authorization";
+/** Linha que o diário anunciou e o banco ainda não mostra: espera este tanto antes de dar como excluída. */
+const DELTA_MISSING_GRACE_MS = 30_000;
+
+function messagesCacheHeaders(etag: string): Record<string, string> {
+  return { ETag: etag, "Cache-Control": MESSAGES_CACHE_CONTROL, Vary: MESSAGES_VARY };
+}
+
+function messagesNotModified(etag: string, routePath: string): NextResponse {
+  recordConditionalResponse(routePath, 304);
+  return new NextResponse(null, { status: 304, headers: messagesCacheHeaders(etag) });
+}
+
+type PreloadedConvChannel = NonNullable<
+  NonNullable<Parameters<typeof getConversationSession>[1]>["channel"]
+>;
+
+type DeltaArgs = {
+  request: Request;
+  routePath: string;
+  conv: {
+    id: string;
+    contactId: string | null;
+    channel: string;
+    channelId: string | null;
+    organizationId: string;
+    pinnedNoteId: string | null;
+  };
+  convChannel: PreloadedConvChannel | null;
+  userId: string;
+  orgFilter: ReturnType<typeof userOrgFilter>;
+  timelineIds: string[];
+  timeline: MessageTimelineState;
+  current: TimelineCursor;
+  base: TimelineCursor;
+};
+
+/**
+ * Responde `?after=<cursor>`. `null` = não dá para garantir o delta: o
+ * chamador devolve a página inteira com `reset: true`.
+ */
+async function respondTimelineDelta(a: DeltaArgs): Promise<NextResponse | null> {
+  const ifNoneMatch = a.request.headers.get("if-none-match");
+  const planned = planTimelineDelta(a.base, a.current, a.timeline);
+  if (planned.kind === "reset") {
+    debugLog(`[messages] delta reset conv=${a.conv.id} motivo=${planned.reason}`);
+    return null;
+  }
+  let plan: Extract<typeof planned, { kind: "delta" }>;
+  if (planned.kind === "unchanged") {
+    if (cursorStillFresh(a.base)) {
+      const tag = encodeTimelineCursor(a.base);
+      if (cursorEtagMatches(ifNoneMatch, a.current)) {
+        return messagesNotModified(timelineEtag(tag), a.routePath);
+      }
+      recordConditionalResponse(a.routePath, 200);
+      return NextResponse.json(
+        { delta: true, reset: false, items: [], changed: [], deleted: [], cursor: tag },
+        { headers: messagesCacheHeaders(timelineEtag(tag)) },
+      );
+    }
+    // Janela de 24 h / fixada venceu: só a sessão e as fixadas mudam.
+    plan = {
+      kind: "delta",
+      created: new Set(),
+      updated: new Set(),
+      deleted: new Set(),
+      meta: true,
+      byEntry: [],
+    };
+  } else {
+    // Nada mudou desde a última resposta deste delta (o navegador guarda o
+    // corpo): 304 sem banco.
+    const same = cursorEtagMatches(ifNoneMatch, a.current);
+    if (same) return messagesNotModified(timelineEtag(encodeTimelineCursor(same)), a.routePath);
+    plan = planned;
+  }
+
+  const wanted = [...new Set([...plan.created, ...plan.updated])];
+  const [rows, pins, session] = await Promise.all([
+    wanted.length > 0
+      ? findMessagesSafe({
+          where: {
+            conversationId: { in: a.timelineIds },
+            OR: [{ id: { in: wanted } }, { externalId: { in: wanted } }],
+          },
+          orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+          take: wanted.length * 2 + 10,
+        })
+      : Promise.resolve([] as MsgRow[]),
+    loadPinnedBundle(a.conv),
+    getConversationSession(a.conv, a.convChannel ? { channel: a.convChannel } : {}),
+  ]);
+
+  // Linha anunciada e ainda não visível (escrita em voo): segura o cursor
+  // antes dela; passado o prazo, conta como excluída.
+  const found = new Set<string>();
+  for (const r of rows) {
+    found.add(r.id);
+    if (r.externalId) found.add(r.externalId);
+  }
+  const versions = [...a.current.versions];
+  const deleted = new Set(plan.deleted);
+  const now = Date.now();
+  for (const id of wanted) {
+    if (found.has(id)) continue;
+    const hits = plan.byEntry.filter((e) => e.entry.ids.includes(id));
+    if (hits.some((e) => now - e.entry.at < DELTA_MISSING_GRACE_MS)) {
+      for (const e of hits) {
+        versions[e.conversationIndex] = Math.min(
+          versions[e.conversationIndex]!,
+          e.entry.version - 1,
+        );
+      }
+    } else {
+      deleted.add(id);
+    }
+  }
+
+  const presented = await presentDeltaRows(rows, {
+    conversationId: a.conv.id,
+    userId: a.userId,
+    orgFilter: a.orgFilter,
+  });
+  const items: InboxMessageDto[] = [];
+  const changed: InboxMessageDto[] = [];
+  rows.forEach((r, i) => {
+    const dto = presented.messages[i]!;
+    const isNew =
+      plan.created.has(r.id) || (r.externalId !== null && plan.created.has(r.externalId));
+    (isNew ? items : changed).push(dto);
+  });
+
+  const notAfter = responseNotAfter(session, pins.nextExpiryMs);
+  const cursor = encodeTimelineCursor({ ...a.current, versions, notAfter });
+  recordConditionalResponse(a.routePath, 200);
+  return NextResponse.json(
+    {
+      delta: true,
+      reset: false,
+      items,
+      changed,
+      deleted: [...deleted],
+      cursor,
+      pinnedNoteId: pins.pinnedNoteId,
+      pinnedMessageIds: pins.pinnedMessageIds,
+      channels: presented.channels,
+      session: {
+        lastInboundAt: session.lastInboundAt?.toISOString() ?? null,
+        active: session.active,
+        expiresAt: session.expiresAt?.toISOString() ?? null,
+      },
+    },
+    { headers: messagesCacheHeaders(timelineEtag(cursor)) },
+  );
+}
+
+/** Enriquecimento das linhas do delta (o mesmo da página, só destas linhas). */
+async function presentDeltaRows(
+  rows: MsgRow[],
+  ctx: { conversationId: string; userId: string; orgFilter: ReturnType<typeof userOrgFilter> },
+): Promise<{ messages: InboxMessageDto[]; channels: Record<string, ConnectionRefDto> }> {
+  if (rows.length === 0) return { messages: [], channels: {} };
+  const contents = rows.map((r) => r.content);
+  const outSenderNames = Array.from(
+    new Set(
+      rows
+        .filter((r) => r.direction === "out" && r.senderName)
+        .map((r) => r.senderName!.trim())
+        .filter(Boolean),
+    ),
+  );
+  const channelIds = [
+    ...new Set(rows.map((r) => r.channelId).filter((v): v is string => Boolean(v))),
+  ];
+  const loadedById = new Map(rows.map((r) => [r.id, r]));
+  const replyDisplay = new Map<string, string>();
+  const missingReply: string[] = [];
+  const replyIds = new Set(rows.map((r) => r.replyToId).filter((v): v is string => Boolean(v)));
+  for (const parentId of replyIds) {
+    const parent = loadedById.get(parentId);
+    if (parent) replyDisplay.set(parent.id, parent.externalId ?? parent.id);
+    else missingReply.push(parentId);
+  }
+  const [favRows, agents, channelRows, templateContentMap, eventActors, replyParents, flowLabels] =
+    await Promise.all([
+      prisma.favoriteMessage
+        .findMany({
+          where: { userId: ctx.userId, messageId: { in: rows.map((r) => r.id) } },
+          select: { messageId: true },
+        })
+        .catch(() => [] as { messageId: string }[]),
+      outSenderNames.length > 0
+        ? prisma.user.findMany({
+            where: {
+              OR: outSenderNames.map((name) => ({
+                name: { equals: name, mode: "insensitive" as const },
+              })),
+              ...ctx.orgFilter,
+            },
+            select: { name: true, avatarUrl: true },
+          })
+        : Promise.resolve([] as { name: string; avatarUrl: string | null }[]),
+      channelIds.length > 0
+        ? prisma.channel.findMany({
+            where: { id: { in: channelIds }, ...ctx.orgFilter },
+            select: { id: true, name: true, type: true, phoneNumber: true },
+          })
+        : Promise.resolve(
+            [] as { id: string; name: string; type: string; phoneNumber: string | null }[],
+          ),
+      expandLegacyTemplateContents(contents),
+      enrichEventMessageActors([{ conversationId: ctx.conversationId, rows, contents }]).catch(
+        () => new Map<string, { senderName: string; senderUserId: string | null }>(),
+      ),
+      missingReply.length > 0
+        ? prisma.message.findMany({
+            where: { id: { in: missingReply }, ...ctx.orgFilter },
+            select: { id: true, externalId: true },
+          })
+        : Promise.resolve([] as { id: string; externalId: string | null }[]),
+      loadFlowFieldLabels(contents),
+    ]);
+  for (const p of replyParents) replyDisplay.set(p.id, p.externalId ?? p.id);
+  const favorited = new Set(favRows.map((f) => f.messageId));
+  const avatars = new Map(agents.map((u) => [u.name.toLowerCase(), u.avatarUrl ?? null]));
+  const deps: MessageDtoDeps = {
+    eventActorOf: (id, fallbackName) => {
+      const hit = eventActors.get(id);
+      return {
+        senderName: hit?.senderName ?? fallbackName,
+        senderUserId: hit?.senderUserId ?? null,
+      };
+    },
+    presentContent: (raw) =>
+      relabelFlowResponseContent(templateContentMap.get(raw) ?? raw, flowLabels),
+    senderAvatar: (name) => avatars.get(name) ?? null,
+    replyToDisplayId: (internalId) =>
+      internalId ? (replyDisplay.get(internalId) ?? internalId) : null,
+    favorited: (id) => favorited.has(id),
+  };
+  const channels: Record<string, ConnectionRefDto> = {};
+  for (const ch of channelRows) {
+    channels[ch.id] = {
+      id: ch.id,
+      name: ch.name,
+      type: ch.type,
+      phoneNumber: ch.phoneNumber ?? null,
+    };
+  }
+  return { messages: rows.map((r) => toInboxMessageDto(r, deps)), channels };
 }
 
 // ── GET ──────────────────────────────────────
@@ -422,6 +824,59 @@ export async function GET(request: Request, context: RouteContext) {
         ? { conversationId: { in: [conv.id, ...siblingActiveConversationIds] } }
         : { conversationId: conv.id };
 
+    // ── Cache HTTP: versões no Redis ANTES de qualquer leitura de mensagem
+    // (versão velha + dado novo só custa um 200 a mais; o contrário daria
+    // 304 para dado velho). Uma ida ao Redis; sem Redis, segue sem ETag.
+    const userId = (authResult.user as { id: string }).id;
+    const orgId = conv.organizationId;
+    const routePath = url.pathname;
+    const timelineIds = sortedTimelineIds([conv.id, ...siblingActiveConversationIds]);
+    const wantsDelta = isTimelineCursor(after);
+    const legacyAfter = wantsDelta ? null : after;
+    const baseCursor = wantsDelta ? decodeTimelineCursor(after) : null;
+    const timeline = await readMessageTimelineState(
+      orgId,
+      timelineIds,
+      baseCursor && baseCursor.versions.length === timelineIds.length
+        ? baseCursor.versions
+        : undefined,
+    );
+    const stateCursor = timeline
+      ? timelineCursorFromState(orgId, userId, timeline, 0)
+      : null;
+    const pageVariant = [
+      limit,
+      before ?? "",
+      legacyAfter ?? "",
+      includeHistory ? "1" : "0",
+      url.searchParams.get("budget") ?? "",
+    ].join("|");
+    const ifNoneMatch = request.headers.get("if-none-match");
+    if (wantsDelta && timeline && stateCursor && baseCursor) {
+      const delta = await respondTimelineDelta({
+        request,
+        routePath,
+        conv,
+        convChannel:
+          conv.channelRef &&
+          conv.channelRef.id === conv.channelId &&
+          conv.channelRef.organizationId === conv.organizationId
+            ? conv.channelRef
+            : null,
+        userId,
+        orgFilter: userOrgFilter({ user: authResult.user }),
+        timelineIds,
+        timeline,
+        current: stateCursor,
+        base: baseCursor,
+      });
+      if (delta) return delta;
+    }
+    if (!wantsDelta && stateCursor && ifNoneMatch) {
+      const matched = pageEtagMatches(ifNoneMatch, pageEtagTag(orgId, stateCursor, pageVariant));
+      if (matched) return messagesNotModified(timelineEtag(matched), routePath);
+    }
+
     // Mesmo recorte do `previousTickets` (encerrados ANTERIORES a este, do
     // mesmo canal): `hasOlderTickets` só promete o que `?history=1` entrega.
     // Sem o `createdAt`, um ticket encerrado mais novo fazia o chat pedir um
@@ -475,36 +930,7 @@ export async function GET(request: Request, context: RouteContext) {
     // Cold path: 1ª página + probe barato (só pra saber se o prefetch/
     // scroll-up deve pedir history). history=1 sem `before` = 1 ticket.
     const [pinnedBundle, convSession, rowsDesc, olderTicket, prevConvs] = await Promise.all([
-      (async (): Promise<{ pinnedNoteId: string | null; pinnedMessageIds: string[] }> => {
-        try {
-          const pins = await prisma.pinnedMessage.findMany({
-            where: { conversationId: conv.id },
-            orderBy: { createdAt: "asc" },
-            select: {
-              id: true,
-              expiresAt: true,
-              message: { select: { id: true, externalId: true } },
-            },
-          });
-          const now = new Date();
-          const expiredIds = pins
-            .filter((p) => p.expiresAt && p.expiresAt < now)
-            .map((p) => p.id);
-          if (expiredIds.length > 0) {
-            void prisma.pinnedMessage
-              .deleteMany({ where: { id: { in: expiredIds } } })
-              .catch(() => undefined);
-          }
-          return {
-            pinnedNoteId: conv.pinnedNoteId ?? null,
-            pinnedMessageIds: pins
-              .filter((p) => !(p.expiresAt && p.expiresAt < now))
-              .map((p) => p.message.externalId ?? p.message.id),
-          };
-        } catch {
-          return { pinnedNoteId: conv.pinnedNoteId ?? null, pinnedMessageIds: [] };
-        }
-      })(),
+      loadPinnedBundle(conv),
       getConversationSession(conv, convChannel ? { channel: convChannel } : {}),
       includeHistory
         ? Promise.resolve([] as MsgRow[])
@@ -513,8 +939,8 @@ export async function GET(request: Request, context: RouteContext) {
               ...activeMessageConversationFilter,
               ...(before
                 ? { createdAt: { lt: new Date(before) } }
-                : after
-                  ? { createdAt: { gt: new Date(after) } }
+                : legacyAfter
+                  ? { createdAt: { gt: new Date(legacyAfter) } }
                   : {}),
             },
             // id desempata mensagens no mesmo segundo (timestamp do WhatsApp).
@@ -778,37 +1204,15 @@ export async function GET(request: Request, context: RouteContext) {
     const presentContent = (raw: string) =>
       relabelFlowResponseContent(openedContent(raw), flowLabelSources);
 
-    const messages: InboxMessageDto[] = rows.map((r) => {
-      const ev = eventActorOf(r.id, r.senderName);
-      return {
-      id: r.externalId ?? r.id,
-      content: presentContent(r.content),
-      createdAt: r.createdAt.toISOString(),
-      direction: r.direction as InboxMessageDto["direction"],
-      messageType: r.messageType,
-      isPrivate: r.isPrivate || undefined,
-      senderName: ev.senderName,
-      senderUserId: ev.senderUserId,
-      authorType: r.authorType as "human" | "bot" | "system",
-      triggeredByName: r.triggeredByName ?? undefined,
-      senderImageUrl:
-        r.direction === "out" && ev.senderName
-          ? senderAvatarMap.get(ev.senderName.trim().toLowerCase()) ?? null
-          : null,
-      mediaUrl: r.mediaUrl,
-      replyToId: replyToDisplayId(r.replyToId),
-      replyToPreview: r.replyToPreview,
-      reactions: Array.isArray(r.reactions) ? (r.reactions as ReactionDto[]) : [],
-      sendStatus: r.sendStatus,
-      sendError: r.sendError ?? undefined,
-      status: r.direction === "out" ? mapSendStatus(r.sendStatus) : undefined,
-      channelId: r.channelId ?? null,
-      favoritedByMe: favoritedIds.has(r.id) || undefined,
-      catalogOrder: isWhatsappOrderSnapshot(r.catalogOrder) ? r.catalogOrder : null,
-      referral: referralFromJson(r.referral),
-      sharedContacts: sharedContactsFromJson(r.sharedContacts),
-    };
-    });
+    const messages: InboxMessageDto[] = rows.map((r) =>
+      toInboxMessageDto(r, {
+        eventActorOf,
+        presentContent,
+        senderAvatar: (name) => senderAvatarMap.get(name) ?? null,
+        replyToDisplayId,
+        favorited: (internalId) => favoritedIds.has(internalId),
+      }),
+    );
 
     const channelsMap: Record<string, ConnectionRefDto> = {};
     for (const ch of channelRows) {
@@ -904,7 +1308,7 @@ export async function GET(request: Request, context: RouteContext) {
       finalMessages = [...historical, ...messages];
     }
 
-    return NextResponse.json({
+    const body = {
       messages: finalMessages,
       hasMore,
       hasOlderTickets,
@@ -919,7 +1323,19 @@ export async function GET(request: Request, context: RouteContext) {
         active: sessionActive,
         expiresAt: sessionExpiresAt,
       },
-    });
+    };
+    if (!stateCursor) return NextResponse.json(body);
+    const notAfter = responseNotAfter(convSession, pinnedBundle.nextExpiryMs);
+    const cursor = encodeTimelineCursor({ ...stateCursor, notAfter });
+    recordConditionalResponse(routePath, 200);
+    return NextResponse.json(
+      { ...body, cursor, ...(wantsDelta ? { reset: true } : {}) },
+      {
+        headers: messagesCacheHeaders(
+          timelineEtag(pageEtagTag(orgId, { ...stateCursor, notAfter }, pageVariant)),
+        ),
+      },
+    );
     });
   } catch (e: unknown) {
     log.error({ err: e }, "GET falhou");
@@ -1118,6 +1534,7 @@ export async function POST(request: Request, context: RouteContext) {
           replyToPreview,
         }),
       });
+      void noteMessageChange(saved.organizationId, saved.conversationId, "new", saved.id, saved.externalId);
 
       // Activity Log: nota inserida pelo composer do Inbox. Antes deste
       // bloco o `return` abaixo curto-circuitava o `logEvent` que vem
@@ -1198,6 +1615,7 @@ export async function POST(request: Request, context: RouteContext) {
           replyToPreview,
         }),
       });
+      void noteMessageChange(savedMsg.organizationId, savedMsg.conversationId, "new", savedMsg.id, savedMsg.externalId);
 
       const sendRes = await sendMessengerOrInstagramText({
         conversationId: conv.id,
@@ -1340,6 +1758,7 @@ export async function POST(request: Request, context: RouteContext) {
         ...(localOnly ? { sendStatus: "sent" } : !useBaileys ? { sendStatus: "pending" } : {}),
       }),
     });
+    void noteMessageChange(saved.organizationId, saved.conversationId, "new", saved.id, saved.externalId);
 
     if (!useBaileys && !localOnly) {
       if (!conv.contactId) {
@@ -1421,6 +1840,7 @@ export async function POST(request: Request, context: RouteContext) {
             data: { sendStatus: "failed", sendError: errMsg },
           })
           .catch(() => {});
+        void noteMessageChange(saved.organizationId, saved.conversationId, "upd", saved.id);
         await prisma.conversation
           .update({ where: { id: conv.id }, data: { hasError: true } })
           .catch(() => {});

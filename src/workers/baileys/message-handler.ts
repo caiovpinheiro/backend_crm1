@@ -42,6 +42,7 @@ import {
   appendWhatsAppGroupMessage,
   findWhatsAppGroupByJid,
 } from "@/services/whatsapp-groups";
+import { noteMessageRowChange } from "@/lib/cache/message-versions";
 
 const log = getLogger("baileys-msg");
 
@@ -742,6 +743,8 @@ export async function handleBaileysMessage(
     );
 
     if (!msgCreated) return;
+    // Fora da transação (já commitada): a versão sobe com a linha visível.
+    void noteMessageRowChange(msgCreated, "new");
 
     // "digitando…" do contato: mensagem nova numa conversa aberta assina
     // (ou renova) a presença deste JID. Só memória + 1 nó no socket; a

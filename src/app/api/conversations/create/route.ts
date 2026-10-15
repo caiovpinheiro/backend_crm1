@@ -21,6 +21,7 @@ import { fireTrigger } from "@/services/automation-triggers";
 import { getLogger } from "@/lib/logger";
 import { publishConversationTimelineUpdated } from "@/lib/realtime-events";
 import { getOrgIdOrNull } from "@/lib/request-context";
+import { noteMessageChange } from "@/lib/cache/message-versions";
 
 const log = getLogger("conversations.create");
 
@@ -342,6 +343,7 @@ export async function POST(request: Request) {
             senderName,
           }),
         });
+        void noteMessageChange(msgRow.organizationId, msgRow.conversationId, "new", msgRow.id, msgRow.externalId);
 
         firstMessageAt = msgRow.createdAt;
         const baileysTo = existing?.waJid ?? contact.phone!;
@@ -382,6 +384,7 @@ export async function POST(request: Request) {
             senderName,
           }),
         });
+        void noteMessageChange(sentRow.organizationId, sentRow.conversationId, "new", sentRow.id, sentRow.externalId);
         firstMessageAt = sentRow.createdAt;
       }
       await touchConversationLastMessageAt({

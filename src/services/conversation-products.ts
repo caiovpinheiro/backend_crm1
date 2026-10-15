@@ -35,6 +35,7 @@ import { cancelPendingForConversation } from "@/services/scheduled-messages";
 
 import type { NextResponse } from "next/server";
 import { getLogger } from "@/lib/logger";
+import { noteMessageChange } from "@/lib/cache/message-versions";
 
 const log = getLogger("conversation-products");
 
@@ -358,6 +359,7 @@ export async function sendProductsToConversation(args: {
       sendStatus: "pending",
     }),
   });
+  void noteMessageChange(saved.organizationId, saved.conversationId, "new", saved.id, saved.externalId);
 
   let externalId: string | null = null;
   try {
@@ -392,6 +394,7 @@ export async function sendProductsToConversation(args: {
         data: { externalId, sendStatus: "sent" },
       })
       .catch(() => {});
+    void noteMessageChange(saved.organizationId, saved.conversationId, "upd", saved.id, externalId);
   } catch (err) {
     const reason = formatMetaSendError(err);
     log.warn(
@@ -399,6 +402,7 @@ export async function sendProductsToConversation(args: {
       "[conversation-products] envio catálogo falhou — fallback legacy",
     );
     await prisma.message.delete({ where: { id: saved.id } }).catch(() => {});
+    void noteMessageChange(saved.organizationId, saved.conversationId, "del", saved.id);
     return {
       ok: true,
       used: "legacy",

@@ -21,6 +21,7 @@ import { getLogger } from "@/lib/logger";
 import { prismaBase } from "@/lib/prisma-base";
 import { stopBackgroundTimers } from "@/lib/background-timers";
 import { installGracefulShutdown } from "@/workers/graceful-shutdown";
+import { noteMessageChange } from "@/lib/cache/message-versions";
 
 const log = getLogger("worker.campaign");
 
@@ -50,6 +51,7 @@ async function markInboxJobFailed(opts: {
     })
     .catch(() => null);
   if (!updated || updated.count === 0) return;
+  void noteMessageChange(opts.organizationId, opts.conversationId, "upd", opts.messageId);
   await prisma.conversation
     .update({
       where: { id: opts.conversationId },

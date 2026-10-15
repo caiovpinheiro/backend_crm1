@@ -8,6 +8,7 @@ import { messagingClientFromConfig } from "@/lib/meta-messaging/client";
 import { formatMetaSendError } from "@/lib/meta-whatsapp/client";
 import { prisma } from "@/lib/prisma";
 import { logMessageFailed } from "@/services/activity-log";
+import { noteMessageRowChange } from "@/lib/cache/message-versions";
 
 type Platform = "messenger" | "instagram";
 
@@ -32,12 +33,13 @@ type SendResult = {
 };
 
 async function markFailed(opts: SendOpts, error: string): Promise<SendResult> {
-  await prisma.message
+  const failedRow = await prisma.message
     .update({
       where: { id: opts.messageId },
       data: { sendStatus: "failed", sendError: error },
     })
-    .catch(() => {});
+    .catch(() => null);
+  void noteMessageRowChange(failedRow, "upd");
   void (async () => {
     const contact = await prisma.contact
       .findUnique({
@@ -90,10 +92,11 @@ export async function sendMessengerOrInstagramText(opts: SendOpts): Promise<Send
     const result = await client.sendText(recipientId, opts.content);
     const externalId = result.message_id ?? null;
     if (externalId) {
-      await prisma.message.update({
+      const sentRow = await prisma.message.update({
         where: { id: opts.messageId },
         data: { externalId, sendStatus: "sent" },
       });
+      void noteMessageRowChange(sentRow, "upd");
     }
     return { externalId, failed: false, error: null };
   } catch (err) {

@@ -10,6 +10,7 @@ import {
 } from "@/lib/queue";
 import { prisma } from "@/lib/prisma";
 import { logMessageFailed } from "@/services/activity-log";
+import { noteMessageRowChange } from "@/lib/cache/message-versions";
 
 type ChannelInfo = {
   id: string;
@@ -48,12 +49,13 @@ async function markFailed(
   error: string,
   source: "api" | "baileys",
 ): Promise<SendTextResult> {
-  await prisma.message
+  const failedRow = await prisma.message
     .update({
       where: { id: opts.messageId },
       data: { sendStatus: "failed", sendError: error },
     })
-    .catch(() => {});
+    .catch(() => null);
+  void noteMessageRowChange(failedRow, "upd");
   void (async () => {
     const contact = await prisma.contact
       .findUnique({
@@ -125,10 +127,11 @@ async function sendViaMeta(opts: SendTextOpts): Promise<SendTextResult> {
     if (externalId) {
       // Grava wamid + sent juntos: o webhook de status (sent/delivered/read)
       // procura por externalId. Sem isso o ACK não encontra a mensagem.
-      await prisma.message.update({
+      const sentRow = await prisma.message.update({
         where: { id: opts.messageId },
         data: { externalId, sendStatus: "sent" },
       });
+      void noteMessageRowChange(sentRow, "upd");
     }
     return { externalId, failed: false, error: null };
   } catch (err) {
