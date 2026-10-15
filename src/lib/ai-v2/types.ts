@@ -356,6 +356,8 @@ export interface V2HandoffConfig {
   whileQueued?: "notify" | "answer";
   /** Aviso de fila (vazio = texto padrão). */
   queuedMessage?: string;
+  /** Etapa do negócio para a qual o card vai antes da distribuição. */
+  moveToStageId?: string;
   /**
    * Repasse no modo por leads, só deste agente. Desligado (padrão): o destino
    * departamento segue a distribuição inteligente. Ligado: sorteio pelo peso

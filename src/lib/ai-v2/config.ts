@@ -393,6 +393,8 @@ export const v2AgentConfigSchema = z.object({
       roleIds: z.array(z.string()).optional(),
       userIds: z.array(z.string()).optional(),
     }).optional(),
+    /** Antes de distribuir, move o negócio para esta etapa. Vazio = não move. */
+    moveToStageId: z.string().optional(),
   }).optional().default({
     defaultDestination: { type: "department" } as V2Destination,
     message: "Vou transferir para um atendente.",
