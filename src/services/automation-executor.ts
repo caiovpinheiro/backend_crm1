@@ -9,6 +9,7 @@ import {
 } from "@prisma/client";
 
 import { conversationHasRealAttendance } from "@/lib/ai-agents/tabulation-classify-policy";
+import { rewriteStorageUrlsForWebhook } from "@/lib/public-media-url";
 import { normalizeConditionConfig } from "@/lib/automation-condition";
 import {
   runWithAutomationOrigin,
@@ -1182,7 +1183,7 @@ const WEBHOOK_TOKEN_RE = /\{\{\s*([\w.]+)\s*\}\}/g;
 function interpolateWebhookString(template: string, root: Record<string, unknown>): string {
   return template.replace(WEBHOOK_TOKEN_RE, (_m, path: string) => {
     const val = resolveDottedPath(root, path);
-    return jsonEscapeFragment(webhookValueToString(val));
+    return jsonEscapeFragment(rewriteStorageUrlsForWebhook(webhookValueToString(val)));
   });
 }
 
@@ -4697,7 +4698,12 @@ export async function executeStep(
       if (!rt.contactId) throw new Error("wait_for_document: contactId ausente");
       const wfdStepId = (cfg as Record<string, unknown>).__stepId as string | undefined;
       if (wfdStepId) {
-        await persistPausedContext(rt, wfdStepId, undefined);
+        const configured = readNumber(cfg, "timeoutMs");
+        // Sem cronômetro o contexto ficava RUNNING até o TTL de segurança
+        // (24h) e não seguia a saída "Tempo esgotado".
+        const wfdTimeoutMs =
+          configured && configured > 0 ? configured : 86_400_000;
+        await persistPausedContext(rt, wfdStepId, wfdTimeoutMs);
       }
       log.debug(`Aguardando documento do contato ${rt.contactId}`);
       return { skipRemaining: true };

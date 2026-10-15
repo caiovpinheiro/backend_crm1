@@ -1,6 +1,7 @@
 import type { Prisma } from "@prisma/client";
 
 import { probeInboundMedia } from "@/lib/ai-agents/media-placeholder";
+import { toPublicMediaUrl } from "@/lib/public-media-url";
 import { messageHasMedia } from "@/lib/ai-agents/tabulation-classify-policy";
 import { getLogger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
@@ -1208,10 +1209,13 @@ export async function processIncomingMessage(
         messageType,
         mediaUrl: file.mediaUrl,
       });
-      const mediaUrl = isDocument ? (file.mediaUrl ?? "").trim() : "";
+      const storedMedia = isDocument ? (file.mediaUrl ?? "").trim() : "";
+      // Foto e PDF gravam o mesmo tipo de valor: a URL do arquivo.
+      // Com token, o n8n baixa no webhook sem sessão do CRM.
+      const mediaUrl = storedMedia ? (toPublicMediaUrl(storedMedia) ?? storedMedia) : "";
       const varName = replyVariableName(config);
-      // {{lastResponse}} é o arquivo (URL no storage da org). O nome
-      // configurado continua com a legenda ou o nome do arquivo.
+      // {{lastResponse}} é só o link. O nome configurado continua com a
+      // legenda ou o nome do arquivo.
       const replyValue = isDocument ? mediaUrl || messageContent : messageContent;
       variables = {
         ...variables,
@@ -1968,6 +1972,41 @@ export async function processTimeout(contextId: string) {
       timeoutGoto,
       variables,
       "wait_for_reply timeout",
+      { id: step.id, type: step.type },
+    );
+    return;
+  }
+
+  if (step.type === "wait_for_document") {
+    const timeoutGoto = readStepRef(config, "timeoutGotoStepId");
+    if (!timeoutGoto) {
+      log.warn(
+        `wait_for_document timeout sem timeoutGotoStepId — auto=${ctx.automation.name} step=${step.id} → fechando contexto`,
+      );
+      await advanceContext(ctx.id, null, variables);
+      return;
+    }
+    const waitAbort = await abortTimeoutIfAttendanceStarted(
+      ctx.contactId,
+      ctx.updatedAt,
+      ctx.automation.steps.find((s) => s.id === timeoutGoto),
+      typeof variables.conversationId === "string" ? variables.conversationId : null,
+    );
+    if (waitAbort) {
+      log.warn(
+        `wait_for_document timeout abortado (${waitAbort}) — auto=${ctx.automation.name} contato=${ctx.contactId} — não segue finish`,
+      );
+      await advanceContext(ctx.id, null, variables);
+      return;
+    }
+    log.info(
+      `wait_for_document timeout — auto=${ctx.automation.name} contato=${ctx.contactId} → step=${timeoutGoto}`,
+    );
+    await dispatchToNextStep(
+      ctxForDispatch,
+      timeoutGoto,
+      variables,
+      "wait_for_document timeout",
       { id: step.id, type: step.type },
     );
     return;

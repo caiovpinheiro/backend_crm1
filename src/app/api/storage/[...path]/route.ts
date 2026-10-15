@@ -26,7 +26,9 @@ import {
   statStoredFile,
 } from "@/lib/storage/local";
 import { persistLegacyBytesToActiveDriver } from "@/lib/storage/migrate-from-legacy";
+import { publicMediaTokenMatches } from "@/lib/public-media-url";
 import { authorizeStorageObject } from "@/lib/storage-object-access";
+import { validateToken } from "@/services/api-tokens";
 import { tryUpstreamFallback } from "@/lib/storage/upstream-fallback";
 import { getLogger } from "@/lib/logger";
 
@@ -68,25 +70,42 @@ async function withStorageCors(request: Request, res: Response): Promise<Respons
   }
 }
 
+function authorizationBearer(request: Request): string {
+  const header = request.headers.get("authorization") ?? "";
+  const match = /^Bearer\s+(\S+)/i.exec(header.trim());
+  return match?.[1]?.trim() ?? "";
+}
+
 /** Worker sem cookie: mesmo segredo dos crons. Não aceita `?secret=` (vaza em log). */
 function hasCronSecret(request: Request): boolean {
   const expected = process.env.CRON_SECRET?.trim();
   if (!expected) return false;
-  const provided = (request.headers.get("authorization") ?? "")
-    .replace(/^Bearer\s+/i, "")
-    .trim();
+  const provided = authorizationBearer(request);
   return provided.length > 0 && provided === expected;
+}
+
+/**
+ * Token de API do CRM (`eduit_…`) no header `Authorization: Bearer`.
+ * Só abre mídia recebida da própria org — o n8n baixa a foto/PDF do campo
+ * com a mesma credencial que já usa na API. Não vale para keeps, anexo
+ * nem exportação.
+ */
+async function inboundMediaApiTokenOk(
+  request: Request,
+  parsed: { orgId: string; bucket: string },
+): Promise<boolean> {
+  if (parsed.bucket !== "inbound-media") return false;
+  const raw = authorizationBearer(request);
+  if (!raw.startsWith("eduit_")) return false;
+  const token = await validateToken(raw);
+  if (!token) return false;
+  if (token.user.isSuperAdmin) return true;
+  return token.organizationId === parsed.orgId;
 }
 
 export async function GET(request: Request, context: RouteContext) {
   const cronOk = hasCronSecret(request);
   const session = cronOk ? null : await auth();
-  if (!cronOk && !session?.user) {
-    return withStorageCors(
-      request,
-      NextResponse.json({ message: "Não autorizado." }, { status: 401 }),
-    );
-  }
 
   const { path: segments } = await context.params;
   const joined = (segments ?? []).join("/");
@@ -98,14 +117,32 @@ export async function GET(request: Request, context: RouteContext) {
     );
   }
 
-  if (cronOk) {
+  // n8n baixa a foto/PDF do campo sem cookie: `?t=` ou
+  // `Authorization: Bearer` (token do arquivo, ou token de API `eduit_`).
+  const queryToken = new URL(request.url).searchParams.get("t")?.trim() ?? "";
+  const bearer = authorizationBearer(request);
+  const publicOk = Boolean(
+    (queryToken && publicMediaTokenMatches(queryToken, parsed)) ||
+      (bearer && publicMediaTokenMatches(bearer, parsed)),
+  );
+  const apiTokenOk =
+    !publicOk && !cronOk && (await inboundMediaApiTokenOk(request, parsed));
+
+  if (!cronOk && !publicOk && !apiTokenOk && !session?.user) {
+    return withStorageCors(
+      request,
+      NextResponse.json({ message: "Não autorizado." }, { status: 401 }),
+    );
+  }
+
+  if (!publicOk && !apiTokenOk && cronOk) {
     if (!isStorageReuseBucket(parsed.bucket)) {
       return withStorageCors(
         request,
         NextResponse.json({ message: "Arquivo não encontrado." }, { status: 404 }),
       );
     }
-  } else {
+  } else if (!publicOk && !apiTokenOk) {
     // Multi-tenancy enforcement: só super-admin atravessa orgs.
     const sUser = session!.user as {
       id: string;

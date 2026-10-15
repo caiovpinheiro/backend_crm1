@@ -239,6 +239,17 @@ describe("cookie com token revogado (marcado pelo callback jwt)", () => {
     expect((await middleware(request("/api/admin/organizations"))).status).toBe(401);
   });
 
+  it("link da mídia recebida passa sem sessão; o storage sem token continua 401", async () => {
+    getToken.mockResolvedValue(null);
+    const open = await middleware(
+      request("/api/storage/org1/inbound-media/in_1_ab.pdf?t=abc"),
+    );
+    expect(open.status).not.toBe(401);
+    expect(await (await middleware(request("/api/storage/org1/inbound-media/in_1_ab.pdf"))).json()).toMatchObject({
+      code: "AUTH_REQUIRED",
+    });
+  });
+
   it("rotas públicas continuam abertas e sem cookie segue AUTH_REQUIRED", async () => {
     getToken.mockResolvedValue({ revoked: true, revokedReason: "session_revoked" });
     expect((await middleware(request("/api/health"))).status).not.toBe(401);
