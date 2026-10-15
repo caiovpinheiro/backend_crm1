@@ -850,6 +850,16 @@ export async function createAutomation(
  */
 async function countConnectedChannels(type: "WHATSAPP" | "EMAIL"): Promise<number> {
   const organizationId = getOrgIdOrThrow();
+  if (type === "EMAIL") {
+    // As contas IMAP/SMTP (`EmailAccount`) são os canais reais do
+    // `send_email` — é o que o picker do passo lista. `Channel.type=EMAIL`
+    // legado continua contando por compat.
+    const [legacy, accounts] = await Promise.all([
+      prisma.channel.count({ where: { organizationId, type, status: "CONNECTED" } }),
+      prisma.emailAccount.count({ where: { organizationId } }),
+    ]);
+    return legacy + accounts;
+  }
   return prisma.channel.count({
     where: {
       organizationId,

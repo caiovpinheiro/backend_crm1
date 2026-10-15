@@ -202,6 +202,25 @@ export function readStepAllowedChannelIds(cfg: unknown): string[] | null {
 }
 
 /**
+ * Contas de e-mail (`EmailAccount.id`) candidatas do passo `send_email`,
+ * na ordem em que o operador marcou no picker. O editor grava a conta no
+ * MESMO contrato dos canais WhatsApp (`channelScope`/`channelIds`/
+ * `channelId`); `accountId` é aceito como alias explícito. Ids de mockup
+ * (`mock-email-*`, só existem no editor sem conta conectada) são
+ * descartados. Vazio = qualquer conta da org (o motor prefere SHARED).
+ */
+export function readSendEmailAccountIds(cfg: unknown): string[] {
+  const c = asRecord(cfg);
+  const allowed = readStepAllowedChannelIds(cfg) ?? [];
+  const legacy = typeof c.channelId === "string" ? c.channelId.trim() : "";
+  const explicit = typeof c.accountId === "string" ? c.accountId.trim() : "";
+  const ordered = [...allowed, legacy, explicit].filter(
+    (id) => id !== "" && !id.startsWith("mock-"),
+  );
+  return [...new Set(ordered)];
+}
+
+/**
  * Departamentos do passo `execute_distribution`. Campo preenchido manda
  * exatamente o que o operador escolheu. Campo VAZIO significa "usar o
  * departamento da conversa" (`Conversation.departmentId`); só quando a
@@ -721,7 +740,8 @@ export function isStepIncomplete(
     case "send_whatsapp_flow":
       return !str(c.flowDefinitionId);
     case "send_email":
-      return !str(c.to) || !str(c.subject) || !str(c.body);
+      // `to` vazio = e-mail do contato (resolvido no motor).
+      return !str(c.subject) || !str(c.body);
     case "webhook":
       return !str(c.url);
     case "create_conversation_note":

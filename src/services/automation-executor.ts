@@ -19,6 +19,7 @@ import {
   roundRobinOptionsSignature,
 } from "@/lib/automation-round-robin";
 import {
+  readSendEmailAccountIds,
   readStepAllowedChannelIds,
   resolveStepDistributionScope,
   triggerTypeLabel,
@@ -82,6 +83,7 @@ import { executeDistribution } from "@/services/distribution";
 import { executeLeadsDistribution } from "@/services/distribution/leads/engine";
 import { ASSIGN_OWNER_VIA, getOrgDistributionMode } from "@/services/distribution/mode";
 import { logEvent, userIdForFk } from "@/services/activity-log";
+import { sendEmail } from "@/services/emails";
 import { createInternalNoteOnConversation } from "@/services/outbound-messaging";
 import { tabulationLogMeta } from "@/services/tabulations";
 import {
@@ -117,6 +119,8 @@ const META_SEND_FAILURE_STEP_TYPES = new Set([
   "send_whatsapp_list",
   "send_whatsapp_flow",
   "question",
+  // SMTP: conta ausente, destinatário inválido ou recusa do servidor.
+  "send_email",
 ]);
 
 /**
@@ -1022,6 +1026,81 @@ export function resolveOutboundChannelId(
     return allowed[0] ?? null;
   }
   return cfgChannelId || bound || null;
+}
+
+const EMAIL_ADDRESS_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const HTML_TAG_RE = /<\/?[a-z][^>]*>/i;
+
+/**
+ * Corpo do `send_email` é um textarea de texto puro. Pra que a quebra de
+ * linha sobreviva em clientes que só renderizam a parte HTML, geramos a
+ * versão HTML escapada com `pre-wrap`. Operador que já escreveu HTML
+ * (tem tag) manda como está.
+ */
+function plainTextToEmailHtml(text: string): string {
+  if (!text.trim()) return "";
+  if (HTML_TAG_RE.test(text)) return text;
+  const escaped = text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+  return `<div style="white-space:pre-wrap">${escaped}</div>`;
+}
+
+/**
+ * Tenant do run — ALS (rotas HTTP / worker com contexto), depois os
+ * snapshots já carregados no runtime, por fim a própria automação.
+ */
+async function resolveRuntimeOrgId(rt: RuntimeContext): Promise<string | null> {
+  const fromCtx = getOrgIdOrNull();
+  if (fromCtx) return fromCtx;
+  if (rt.contact?.organizationId) return rt.contact.organizationId;
+  if (rt.deal?.organizationId) return rt.deal.organizationId;
+  const automation = await prisma.automation.findUnique({
+    where: { id: rt.automationId },
+    select: { organizationId: true },
+  });
+  return automation?.organizationId ?? null;
+}
+
+/**
+ * Conta SMTP que o `send_email` usa. O picker "Canais" do passo grava
+ * `EmailAccount.id` (ver `readSendEmailAccountIds`); na ordem marcada,
+ * a primeira que ainda existe na org vence. Sem seleção ("Selecionar
+ * tudo"), a conta compartilhada mais antiga da org; sem compartilhada,
+ * qualquer uma. Nunca cruza tenant.
+ */
+async function resolveSendEmailAccount(
+  cfg: Record<string, unknown>,
+  rt: RuntimeContext,
+): Promise<{ id: string; email: string } | null> {
+  const organizationId = await resolveRuntimeOrgId(rt);
+  if (!organizationId) return null;
+  const select = { id: true, email: true } as const;
+  const candidates = readSendEmailAccountIds(cfg);
+  if (candidates.length > 0) {
+    const rows = await prisma.emailAccount.findMany({
+      where: { organizationId, id: { in: candidates } },
+      select,
+    });
+    for (const id of candidates) {
+      const hit = rows.find((r) => r.id === id);
+      if (hit) return hit;
+    }
+    return null;
+  }
+  const shared = await prisma.emailAccount.findFirst({
+    where: { organizationId, visibility: "SHARED" },
+    orderBy: { createdAt: "asc" },
+    select,
+  });
+  if (shared) return shared;
+  return prisma.emailAccount.findFirst({
+    where: { organizationId },
+    orderBy: { createdAt: "asc" },
+    select,
+  });
 }
 
 const ACTIVITY_TYPES: ActivityType[] = ["CALL", "EMAIL", "MEETING", "TASK", "NOTE", "WHATSAPP", "OTHER"];
@@ -2134,10 +2213,62 @@ export async function executeStep(
 
   switch (stepType) {
     case "send_email": {
-      const to = readString(cfg, "to") ?? rt.contact?.email ?? "";
-      const subject = readString(cfg, "subject") ?? "(sem assunto)";
-      log.warn(`send_email: envio de e-mail não implementado (to=${to}, assunto="${subject}") — step ignorado`);
-      return {};
+      const vars = (cfg as Record<string, unknown>)["__variables"] as
+        | Record<string, unknown>
+        | undefined;
+      const toRaw = readString(cfg, "to")?.trim() || "";
+      const toResolved = toRaw
+        ? await interpolateMessageVariables(toRaw, rt, vars)
+        : (rt.contact?.email ?? "");
+      const recipients = toResolved
+        .split(/[,;]/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const subjectRaw = readString(cfg, "subject")?.trim() || "";
+      const bodyRaw = readString(cfg, "body") ?? "";
+      const subject = subjectRaw
+        ? await interpolateMessageVariables(subjectRaw, rt, vars)
+        : "(sem assunto)";
+      const body = bodyRaw ? await interpolateMessageVariables(bodyRaw, rt, vars) : "";
+
+      if (recipients.length === 0) {
+        throw new MetaSendFailureError(
+          `send_email: sem destino — contato ${rt.contactId ?? "—"} não tem e-mail e o passo não define "Para"`,
+        );
+      }
+      const invalid = recipients.find((r) => !EMAIL_ADDRESS_RE.test(r));
+      if (invalid) {
+        throw new MetaSendFailureError(`send_email: destinatário inválido "${invalid}"`);
+      }
+
+      const account = await resolveSendEmailAccount(cfg, rt);
+      if (!account) {
+        throw new MetaSendFailureError(
+          readSendEmailAccountIds(cfg).length > 0
+            ? "send_email: a conta de e-mail marcada neste passo não existe mais — escolha outra em Canais."
+            : "send_email: nenhuma conta de e-mail conectada nesta organização (conecte uma em E-mail).",
+        );
+      }
+
+      const to = recipients.join(", ");
+      log.debug(
+        `Enviando e-mail: contato=${rt.contactId ?? "—"} de=${account.email} para=${to} assunto="${subject.slice(0, 60)}"`,
+      );
+      try {
+        await sendEmail({
+          accountId: account.id,
+          to,
+          subject,
+          bodyText: body,
+          bodyHtml: plainTextToEmailHtml(body) || undefined,
+        });
+      } catch (err) {
+        throw new MetaSendFailureError(
+          `send_email: ${err instanceof Error ? err.message : String(err)}`,
+          err,
+        );
+      }
+      return { note: `enviado para ${to} via ${account.email}` };
     }
 
     case "move_stage":
