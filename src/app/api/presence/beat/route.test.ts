@@ -139,10 +139,12 @@ beforeEach(() => {
   delete process.env.SESSION_IDLE_HOURS;
   delete process.env.SESSION_IDLE_TIMEOUT_HOURS;
   delete process.env.PRESENCE_PING_USER_MAX_PER_MIN;
+  delete process.env.PRESENCE_BEAT_NOOP_WINDOW_MS;
 });
 
 afterEach(() => {
   vi.useRealTimers();
+  delete process.env.PRESENCE_BEAT_NOOP_WINDOW_MS;
 });
 
 describe("POST /api/presence/beat — contrato", () => {
@@ -210,6 +212,10 @@ describe("POST /api/presence/beat — contrato", () => {
 });
 
 describe("POST /api/presence/beat — 1 escrita por usuário a cada 30 s", () => {
+  // Sem o no-op de 45 s (204): aqui se mede só o limite de 30 s.
+  beforeEach(() => {
+    process.env.PRESENCE_BEAT_NOOP_WINDOW_MS = "0";
+  });
   it("3 abas de 2 navegadores do mesmo usuário em 60 s → 1 escrita", async () => {
     // Navegador A: aba líder a1 (batida) + a2 (batida extra, ex.: foco).
     // Navegador B: aba líder b1. Cada líder bate a cada 60 s.
@@ -369,6 +375,10 @@ describe("POST /api/presence/beat — inatividade (mesma regra do ping)", () => 
 });
 
 describe("compatibilidade: ping e heartbeat antigos dividem o mesmo limite", () => {
+  // Sem o no-op de 45 s (204): aqui se mede só o limite de 30 s.
+  beforeEach(() => {
+    process.env.PRESENCE_BEAT_NOOP_WINDOW_MS = "0";
+  });
   it("beat → ping e heartbeat em < 30 s respondem 200 deduplicado; depois de 30 s o heartbeat grava", async () => {
     await beatJson({ entities: deals("d1") });
     vi.setSystemTime(T0 + 5_000);
@@ -420,10 +430,17 @@ describe("simulação da org: 20 usuários × 2 abas por 10 min", () => {
 
     const written = new Map<string, number[]>();
     let total = 0;
+    let noop = 0;
     for (const e of events) {
       vi.setSystemTime(T0 + e.at);
       h.user = { id: e.user, organizationId: "org1" };
-      const json = await beatJson({ tabId: e.tab, entities: deals(`deal-${e.user}`) });
+      const res = await beat({ tabId: e.tab, entities: deals(`deal-${e.user}`) });
+      if (res.status === 204) {
+        noop++;
+        continue;
+      }
+      expect(res.status).toBe(200);
+      const json = (await res.json()) as BeatJson;
       if (json.deduped) continue;
       total++;
       written.set(e.user, [...(written.get(e.user) ?? []), e.at]);
@@ -432,6 +449,8 @@ describe("simulação da org: 20 usuários × 2 abas por 10 min", () => {
     const perMin = total / 10;
     expect(events.length).toBeGreaterThanOrEqual(380); // ~10 batidas por aba
     expect(perMin).toBeLessThanOrEqual(30);
+    // A 2ª aba repete a lista da 1ª: a maioria vira 204 sem escrita.
+    expect(noop).toBeGreaterThan(0);
     // Hoje (ping + heartbeat sem limite único) eram ~59/min nessa org.
     for (const [, times] of written) {
       for (let i = 1; i < times.length; i++) {
@@ -462,6 +481,7 @@ describe("simulação da org: 20 usuários × 2 abas por 10 min", () => {
       vi.setSystemTime(T0 + e.at);
       h.user = { id: e.user, organizationId: "org1" };
       const res = e.kind === "hb" ? await heartbeat(`deal-${e.user}`) : await ping(`tab-${e.user}`);
+      if (res.status === 204) continue; // no-op: repetiu a última gravada há < 45 s
       expect(res.status).toBe(200);
       const json = await res.json();
       if (json.deduped) continue;
@@ -482,5 +502,196 @@ describe("simulação da org: 20 usuários × 2 abas por 10 min", () => {
         expect(times[i]! - times[i - 1]!).toBeLessThan(150_000);
       }
     }
+  });
+});
+
+describe("no-op 204: mesma lista da última batida gravada há < 45 s (gate de carga, item 3)", () => {
+  async function noopValue(route: string): Promise<number> {
+    return metricValue(route, "noop_204");
+  }
+
+  it("mesma lista em < 45 s → 204 sem corpo, sem escrita e só o EVAL do limite; métrica noop_204", async () => {
+    await beatJson({ clientId: "navA", entities: deals("d1", "d2") });
+    const n0 = await noopValue("beat");
+    h.redis.calls.length = 0;
+    h.systemPresence.length = 0;
+
+    vi.setSystemTime(T0 + 20_000);
+    // Outro navegador do mesmo usuário, mesma lista em outra ordem.
+    const res = await beat({ clientId: "navB", entities: [...deals("d2"), ...deals("d1"), ...deals("d1")] });
+    expect(res.status).toBe(204);
+    expect(await res.text()).toBe("");
+    expect(h.redis.calls.map((c) => c.split(" ")[0])).toEqual(["EVAL"]);
+    expect(writes()).toBe(0);
+    expect(h.systemPresence).toEqual([]);
+    expect((await noopValue("beat")) - n0).toBe(1);
+    const text = await registry.metrics();
+    expect(text).toContain('crm_presence_beats_total{route="beat",result="noop_204"');
+  });
+
+  it("lista vazia repetida também é no-op", async () => {
+    await beatJson({ entities: [] });
+    vi.setSystemTime(T0 + 44_000);
+    expect((await beat({ entities: [] })).status).toBe(204);
+  });
+
+  it("lista DIFERENTE segue a regra atual: < 30 s → 200 deduplicado; 30–45 s → grava", async () => {
+    await beatJson({ entities: deals("d1") });
+    vi.setSystemTime(T0 + 10_000);
+    const dedup = await beatJson({ entities: deals("d1", "d2") });
+    expect(dedup.deduped).toBe(true);
+    vi.setSystemTime(T0 + 35_000);
+    const ok = await beatJson({ entities: deals("d1", "d2") });
+    expect(ok.deduped).toBeUndefined();
+    expect(viewerIds(ok.viewers["deal:d2"])).toEqual(["u1"]);
+    expect(writes()).toBe(2);
+    // A assinatura agora é a lista nova: repetir ela é no-op.
+    vi.setSystemTime(T0 + 40_000);
+    expect((await beat({ entities: deals("d2", "d1") })).status).toBe(204);
+  });
+
+  it("aos 45 s da última ESCRITA a mesma lista grava de novo (a cadência de 60 s nunca vira no-op)", async () => {
+    await beatJson({ entities: deals("d1") });
+    vi.setSystemTime(T0 + 44_999);
+    expect((await beat({ entities: deals("d1") })).status).toBe(204);
+    vi.setSystemTime(T0 + 45_000);
+    const json = await beatJson({ entities: deals("d1") });
+    expect(json.deduped).toBeUndefined();
+    expect(json.viewers["deal:d1"]?.[0]?.lastSeen).toBe(T0 + 45_000);
+    expect(writes()).toBe(2);
+    // Navegador sozinho a cada 60 s: todas gravam.
+    for (let i = 1; i <= 5; i++) {
+      vi.setSystemTime(T0 + 45_000 + i * 60_000);
+      expect((await beatJson({ entities: deals("d1") })).deduped).toBeUndefined();
+    }
+    expect(writes()).toBe(7);
+  });
+
+  it("a janela conta da escrita, não da última chamada: duplicatas a cada 10 s não seguram a escrita", async () => {
+    const writtenAt: number[] = [];
+    for (let at = 0; at <= 5 * 60_000; at += 10_000) {
+      vi.setSystemTime(T0 + at);
+      const res = await beat({ entities: deals("d1") });
+      if (res.status === 200 && !((await res.json()) as BeatJson).deduped) writtenAt.push(at);
+    }
+    // Grava a cada 50 s (primeira chamada depois dos 45 s): "CRM aberto"
+    // (300 s) e viewers (150 s) sempre frescos.
+    for (let i = 1; i < writtenAt.length; i++) {
+      expect(writtenAt[i]! - writtenAt[i - 1]!).toBe(50_000);
+    }
+    expect(writtenAt.length).toBe(7);
+  });
+
+  it("inatividade vem antes do no-op: lastInteractionAt vencido → 401", async () => {
+    await beatJson({ entities: deals("d1") });
+    vi.setSystemTime(T0 + 10_000);
+    const res = await beat({ lastInteractionAt: T0 - 13 * HOUR, entities: deals("d1") });
+    expect(res.status).toBe(401);
+  });
+
+  it("ping antigo: qualquer batida gravada há < 45 s → 204; heartbeat antigo: 204 se a entidade estava na lista", async () => {
+    await beatJson({ entities: deals("d1", "d2") });
+    const p0 = await noopValue("ping");
+    const hb0 = await noopValue("heartbeat");
+
+    vi.setSystemTime(T0 + 5_000);
+    const p = await ping("t-antiga");
+    expect(p.status).toBe(204);
+    expect(await p.text()).toBe("");
+    vi.setSystemTime(T0 + 10_000);
+    expect((await heartbeat("d2")).status).toBe(204);
+    // d9 não estava na lista: regra atual (limite de 30 s → deduplicado, lê o Redis).
+    const hb = await heartbeat("d9");
+    expect(hb.status).toBe(200);
+    expect((await hb.json()).deduped).toBe(true);
+    expect(writes()).toBe(1);
+    expect(h.systemPresence).toEqual(["u1"]);
+    expect((await noopValue("ping")) - p0).toBe(1);
+    expect((await noopValue("heartbeat")) - hb0).toBe(1);
+
+    // Depois de 45 s o ping grava.
+    vi.setSystemTime(T0 + 45_000);
+    const later = await ping("t-antiga2");
+    expect(later.status).toBe(200);
+    expect((await later.json()).deduped).toBeUndefined();
+    expect(h.systemPresence).toEqual(["u1", "u1"]);
+  });
+
+  it("ping gravado → outro ping em < 45 s é 204; a batida nova com entidades (lista diferente) segue a regra atual", async () => {
+    expect((await ping("t1")).status).toBe(200);
+    vi.setSystemTime(T0 + 20_000);
+    expect((await ping("t2")).status).toBe(204);
+    vi.setSystemTime(T0 + 31_000);
+    const json = await beatJson({ entities: deals("d1") });
+    expect(json.deduped).toBeUndefined();
+    expect(viewerIds(json.viewers["deal:d1"])).toEqual(["u1"]);
+  });
+
+  it("PRESENCE_BEAT_NOOP_WINDOW_MS=0 desliga; valor maior que 0,75 × intervalo é limitado", async () => {
+    process.env.PRESENCE_BEAT_NOOP_WINDOW_MS = "0";
+    await beatJson({ entities: deals("d1") });
+    vi.setSystemTime(T0 + 10_000);
+    expect((await beatJson({ entities: deals("d1") })).deduped).toBe(true);
+
+    const { presenceBeatNoopWindowMs } = await import("@/lib/presence-beat-config");
+    expect(presenceBeatNoopWindowMs({})).toBe(45_000);
+    expect(presenceBeatNoopWindowMs({ PRESENCE_BEAT_NOOP_WINDOW_MS: "0" })).toBe(0);
+    expect(presenceBeatNoopWindowMs({ PRESENCE_BEAT_NOOP_WINDOW_MS: "20000" })).toBe(20_000);
+    expect(presenceBeatNoopWindowMs({ PRESENCE_BEAT_NOOP_WINDOW_MS: "120000" })).toBe(45_000);
+    expect(
+      presenceBeatNoopWindowMs({ PRESENCE_BEAT_INTERVAL_MS: "120000", PRESENCE_BEAT_NOOP_WINDOW_MS: "80000" }),
+    ).toBe(80_000);
+  });
+
+  it("Redis caído → aceita (fail-open): não descarta nem vira no-op", async () => {
+    h.redis.down = true;
+    expect((await beat({ entities: deals("d1") })).status).toBe(200);
+    vi.setSystemTime(T0 + 10_000);
+    // Fail-open: Redis fora não descarta nem vira no-op.
+    const again = await beat({ entities: deals("d1") });
+    expect(again.status).toBe(200);
+  });
+
+  it("simulação: 20 usuários × 2 navegadores (60 s, mesma lista) por 10 min → ~40 chamadas/min, ≤ 20 escritas/min, metade 204", async () => {
+    const rand = rng(11);
+    const events: Array<{ at: number; user: string; nav: string }> = [];
+    for (let u = 0; u < 20; u++) {
+      for (const nav of ["navA", "navB"]) {
+        let at = Math.floor(rand() * 60_000);
+        while (at < 10 * 60_000) {
+          events.push({ at, user: `u${u}`, nav });
+          at += 60_000;
+        }
+      }
+    }
+    events.sort((a, b) => a.at - b.at);
+    const tally = { written: 0, deduped: 0, noop: 0 };
+    const lastWrite = new Map<string, number>();
+    let maxGap = 0;
+    for (const e of events) {
+      vi.setSystemTime(T0 + e.at);
+      h.user = { id: e.user, organizationId: "org1" };
+      const res = await beat({ clientId: e.nav, entities: deals(`deal-${e.user}`) });
+      if (res.status === 204) {
+        tally.noop++;
+        continue;
+      }
+      const json = (await res.json()) as BeatJson;
+      if (json.deduped) {
+        tally.deduped++;
+        continue;
+      }
+      tally.written++;
+      const prev = lastWrite.get(e.user);
+      if (prev !== undefined) maxGap = Math.max(maxGap, e.at - prev);
+      lastWrite.set(e.user, e.at);
+    }
+    const calls = events.length / 10;
+    expect(calls).toBeGreaterThanOrEqual(38);
+    expect(tally.written / 10).toBeLessThanOrEqual(21);
+    // Sem o no-op, todas as não gravadas seriam 200 deduplicadas com leitura
+    // dos viewers no Redis; agora a maior parte é 204 sem leitura.
+    expect(tally.noop).toBeGreaterThan(tally.deduped);
+    expect(maxGap).toBeLessThan(150_000);
   });
 });
