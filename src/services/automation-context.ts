@@ -1207,12 +1207,17 @@ export async function processIncomingMessage(
         messageType,
         mediaUrl: file.mediaUrl,
       });
+      const mediaUrl = isDocument ? (file.mediaUrl ?? "").trim() : "";
       const varName = replyVariableName(config);
+      // {{lastResponse}} é o arquivo (URL no storage da org). O nome
+      // configurado continua com a legenda ou o nome do arquivo.
+      const replyValue = isDocument ? mediaUrl || messageContent : messageContent;
       variables = {
         ...variables,
-        [varName]: messageContent,
+        [varName]: varName === "lastResponse" ? replyValue : messageContent,
+        lastResponse: replyValue,
         documentMessageType: messageType,
-        documentMediaUrl: isDocument ? (file.mediaUrl ?? "") : "",
+        documentMediaUrl: mediaUrl,
         documentReceived: isDocument ? "sim" : "nao",
       };
       const gotoKey = isDocument ? "documentGotoStepId" : "textGotoStepId";
