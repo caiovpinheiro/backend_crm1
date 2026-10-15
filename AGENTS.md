@@ -141,6 +141,7 @@ Medição por conversa: `node dist/workers/audit-attendance.js --org <slug>`.
 
 ## Decisões técnicas
 
+- 2026-10-15 — Grok 4.7 — **Imagem do aguardar documento no campo do negócio**: no ramo de documento, `lastResponse` é a URL do arquivo no storage (`documentMediaUrl` igual). Texto segue na variável configurada (`lastDocument`). `{{lastResponse}}` no `update_field` grava essa URL no custom field do deal. O aguardar resposta não muda.
 - 2026-10-15 — Grok 4.7 — **Aguardar documento**: passo `wait_for_document`. Pausa o fluxo e separa mídia de texto. Foto, PDF, Word, imagem, áudio, vídeo ou outra mídia segue `documentGotoStepId`. Texto segue `textGotoStepId`. Grava `documentMediaUrl`, `documentMessageType` e o texto ou nome do arquivo em `saveToVariable` (padrão `lastDocument`). Sem saída de cronômetro. O aguardar resposta não muda.
 - 2026-10-14 — Grok 4.7 — **Filtro de fase do log lê `meta.from.id` / `meta.to.id`**: o STAGE_CHANGED grava `{ from, to }` com o id dentro do objeto. `fromStageId`/`toStageId` na raiz do meta não existem, e filtrar por eles devolvia lista vazia. Com origem ou destino escolhidos, o id da etapa recorta o funil. Sem fase, o funil casa `pipelineId` em `from`, `to` ou na coluna.
 - 2026-10-14 — Grok 4.7 — **Logs filtram pelo responsável**: `GET /api/activity-feed` aceita `actorUserId` (um id ou csv) e `actorUserIds`. Vários ids devolvem a união dos eventos em que essa pessoa é o ator (`activity_events.actorUserId`), a mesma coluna Responsável da lista. Sem id, a lista segue inteira.
