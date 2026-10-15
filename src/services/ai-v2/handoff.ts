@@ -186,8 +186,9 @@ async function routeHandoff(args: HandoffArgs): Promise<void> {
 
 /**
  * Destino departamento com a opção deste agente: modo por leads, só pessoas
- * daquele departamento (papel e lista da config), online e no expediente.
- * Sem ninguém, a fila é a do modo por leads. Não chama a distribuição inteligente.
+ * daquele departamento (papel e lista da config), pelo peso. Sem ninguém com
+ * peso, o card fica sem responsável. Não entra em fila e não chama a
+ * distribuição inteligente.
  */
 async function routeLeadsDepartment(args: HandoffArgs, departmentId: string | null): Promise<void> {
   if (!departmentId) {
@@ -221,7 +222,7 @@ async function routeLeadsDepartment(args: HandoffArgs, departmentId: string | nu
   }
   traceStep(
     "transferência",
-    `Por leads: ninguém disponível no departamento agora (${result.reason}). O card espera na fila do modo por leads, sem a fila inteligente.`,
+    `Por leads: ninguém com peso no recorte (${result.reason}). O card fica sem responsável. Não entra em fila.`,
   );
 }
 
