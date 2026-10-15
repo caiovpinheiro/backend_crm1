@@ -8,7 +8,7 @@ import {
   consumePresencePingUserSlot,
   presenceTabId,
 } from "@/lib/presence-ping-limit";
-import { claimPresenceBeat } from "@/lib/presence-beat";
+import { claimPresenceBeat, entityListSignature } from "@/lib/presence-beat";
 import { recordHeartbeatThrottled } from "@/services/system-presence";
 import { getLogger } from "@/lib/logger";
 import { recordPresenceBeat } from "@/lib/metrics";
@@ -47,7 +47,10 @@ async function readLastInteractionAt(request: Request, now: number): Promise<num
  * MESMO limite da batida nova (`claimPresenceBeat`, 1 a cada
  * `PRESENCE_BEAT_MIN_INTERVAL_MS` = 30 s por usuário somando beat + ping +
  * heartbeat). Perdeu → 200 `{ ok: true, systemOnline: true, deduped: true,
- * sessionIdleMs }` sem gravar nada.
+ * sessionIdleMs }` sem gravar nada. Antes do limite, no-op: com QUALQUER
+ * batida do usuário gravada há menos de `PRESENCE_BEAT_NOOP_WINDOW_MS`
+ * (45 s; a presença do sistema está fresca) → 204 sem corpo e sem escrita
+ * (`crm_presence_beats_total{route="ping",result="noop_204"}`).
  *
  * IMPORTANTE — separação vs Distribuição:
  *   Antes este ping mexia em `AgentStatus` (promovia AWAY→ONLINE e alimentava
@@ -109,7 +112,16 @@ export async function POST(request: Request) {
       return NextResponse.json({ ok: true, systemOnline: true, sessionIdleMs });
     }
 
-    const beat = await claimPresenceBeat({ userId });
+    // Ping não tem entidades: a assinatura gravada é a lista vazia.
+    const beat = await claimPresenceBeat({
+      userId,
+      noop: { mode: "any" },
+      writeSignature: entityListSignature([]),
+    });
+    if (!beat.accepted && beat.noop) {
+      recordPresenceBeat("ping", "noop_204");
+      return new NextResponse(null, { status: 204 });
+    }
     if (!beat.accepted) {
       recordPresenceBeat("ping", "deduped");
       return NextResponse.json({ ok: true, systemOnline: true, deduped: true, sessionIdleMs });

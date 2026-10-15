@@ -245,7 +245,7 @@ function buildMetrics(registry: Registry): AppMetrics {
   // `ping` e `heartbeat` antigas, que dividem o mesmo limite).
   const presenceBeats = new Counter({
     name: "crm_presence_beats_total",
-    help: "Batidas de presença por rota (beat|ping|heartbeat) e resultado (written|deduped).",
+    help: "Batidas de presença por rota (beat|ping|heartbeat) e resultado (written|deduped|noop_204).",
     labelNames: ["route", "result"] as const,
     registers: [registry],
   });
@@ -517,7 +517,8 @@ export function recordConditionalResponse(path: string, status: number): void {
 }
 
 export type PresenceBeatRoute = "beat" | "ping" | "heartbeat";
-export type PresenceBeatResult = "written" | "deduped";
+/** `noop_204`: repetiu a última batida gravada há < 45 s — 204 sem escrita. */
+export type PresenceBeatResult = "written" | "deduped" | "noop_204";
 
 /**
  * Conta uma batida de presença: `crm_presence_beats_total{route, result}`.

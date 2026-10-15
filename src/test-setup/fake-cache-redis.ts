@@ -175,10 +175,23 @@ export function fakeIoredisModule(state: FakeRedisState) {
       }
       return ttl;
     },
-    // Limite da batida de presença: SET NX PX; ganhou → [1, lista anterior
-    // ou ""]; perdeu → [0, PTTL em texto].
-    "presence-beat-gate": ([gateKey, listKey], [windowMs]) => {
+    // Limite da batida de presença: no-op (mesma assinatura gravada) → [2];
+    // SET NX PX; ganhou → grava a assinatura e [1, lista anterior ou ""];
+    // perdeu → [0, PTTL em texto].
+    "presence-beat-gate": ([gateKey, noopKey, listKey], [windowMs, mode, target, write, noopMs]) => {
+      if (mode) {
+        const cur = ops.get(noopKey!);
+        if (
+          cur !== null &&
+          (mode === "any" ||
+            (mode === "same" && cur === target) ||
+            (mode === "contains" && cur.includes(target!)))
+        ) {
+          return [2, ""];
+        }
+      }
       if (ops.set(gateKey!, "1", "NX", "PX", Number(windowMs)) === "OK") {
+        if (write && Number(noopMs) > 0) ops.set(noopKey!, write, "PX", Number(noopMs));
         return [1, listKey ? (ops.get(listKey) ?? "") : ""];
       }
       return [0, String(ops.pttl(gateKey!))];
