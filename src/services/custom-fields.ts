@@ -533,12 +533,34 @@ export function withoutBlankOverwrites(
   });
 }
 
+/** Código do erro conhecido do Prisma (`P2002`…), ou `null`. */
+export function prismaErrorCode(err: unknown): string | null {
+  if (!err || typeof err !== "object") return null;
+  const code = (err as { code?: unknown }).code;
+  return typeof code === "string" && /^P\d{4}$/.test(code) ? code : null;
+}
+
+/**
+ * Upsert dos valores de campo do negócio.
+ *
+ * Corrida (500 em `PUT /api/deals/:id/custom-fields`): a extensão de org
+ * (`lib/prisma.ts`) junta `organizationId` ao `where` do upsert, o que tira
+ * o upsert NATIVO do Prisma (`INSERT … ON CONFLICT`). Sem ele o Prisma lê e
+ * depois insere: dois salvamentos simultâneos do mesmo campo ainda sem valor
+ * (Enter + blur no editor, duas abas, automação gravando o campo do negócio
+ * recém-criado) inserem os dois e o segundo leva P2002 no
+ * `@@unique([dealId, customFieldId])`. Agora o P2002 repete a transação uma
+ * vez — a linha já existe, o upsert vira UPDATE (último valor vence, como
+ * dois salvamentos em sequência).
+ */
 export async function upsertDealCustomFieldValues(
   dealId: string,
   values: { fieldId: string; value: string }[],
   options?: { allowBlank?: boolean },
 ) {
   if (values.length === 0) return [];
+  // Campo repetido no payload: o último vence.
+  values = [...new Map(values.map((v) => [v.fieldId, v])).values()];
   const existing = await prisma.dealCustomFieldValue.findMany({
     where: { dealId, customFieldId: { in: values.map((v) => v.fieldId) } },
     select: { customFieldId: true, value: true },
@@ -549,24 +571,32 @@ export async function upsertDealCustomFieldValues(
     options,
   );
   if (writable.length === 0) return [];
-  const ops = writable.map((v) =>
-    prisma.dealCustomFieldValue.upsert({
-      where: {
-        dealId_customFieldId: {
-          dealId,
-          customFieldId: v.fieldId,
-        },
-      },
-      update: { value: v.value },
-      create: withOrgFromCtx({
-        dealId,
-        customFieldId: v.fieldId,
-        value: v.value,
-      }),
-    })
-  );
+  const run = () =>
+    prisma.$transaction(
+      writable.map((v) =>
+        prisma.dealCustomFieldValue.upsert({
+          where: {
+            dealId_customFieldId: {
+              dealId,
+              customFieldId: v.fieldId,
+            },
+          },
+          update: { value: v.value },
+          create: withOrgFromCtx({
+            dealId,
+            customFieldId: v.fieldId,
+            value: v.value,
+          }),
+        }),
+      ),
+    );
 
-  return prisma.$transaction(ops);
+  try {
+    return await run();
+  } catch (err) {
+    if (prismaErrorCode(err) !== "P2002") throw err;
+    return run();
+  }
 }
 
 /**
