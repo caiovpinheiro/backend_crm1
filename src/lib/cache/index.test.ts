@@ -139,9 +139,12 @@ describe("boardDataKey", () => {
     const a = await boardDataKey("org1", "pipe1", variant);
     const b = await boardDataKey("org1", "pipe1", variant);
     expect(a).toBe(b);
-    // `v<versão da org>.<versão do pipeline>` entre o pipeline e o hash.
-    expect(a).toMatch(/^board:org1:pipe1:v[0-9a-z]+\.[0-9a-z]+:[a-f0-9]{20}$/);
-    expect(a.length).toBeLessThan(80);
+    // `v<card org>.<card pipeline>.<atividade org>.<atividade pipeline>`
+    // entre o pipeline e o hash.
+    expect(a).toMatch(
+      /^board:org1:pipe1:v[0-9a-z]+\.[0-9a-z]+\.[0-9a-z]+\.[0-9a-z]+:[a-f0-9]{20}$/,
+    );
+    expect(a.length).toBeLessThan(100);
     expect(a.includes(variant)).toBe(false);
   });
 });

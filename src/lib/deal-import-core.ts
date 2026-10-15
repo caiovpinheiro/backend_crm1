@@ -698,7 +698,8 @@ export async function processDealRow(
         ...(externalPatch !== undefined ? { externalId: externalPatch } : {}),
       };
       if (Object.keys(updatePayload).length > 0) {
-        await updateDeal(resolved.target.id, updatePayload);
+        // Lote: sem `deal_moved` por linha (o ETag do board já muda pelo bump).
+        await updateDeal(resolved.target.id, updatePayload, { publishCard: false });
         outcome = "updated";
       } else {
         outcome = "skipped";
