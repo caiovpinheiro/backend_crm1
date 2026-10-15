@@ -199,7 +199,7 @@ export async function startDistributionWorker() {
   return { drainWorker, executeWorker };
 }
 
-/** Fila por leads com recorte da IA: recalcula online + expediente. */
+/** Termina linhas antigas de distribution_leads_pending. O modo por leads não cria fila nova. */
 async function drainAiLeadsScopes(): Promise<void> {
   let rows: Array<{ organizationId: string }>;
   try {

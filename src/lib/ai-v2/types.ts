@@ -366,8 +366,9 @@ export interface V2HandoffConfig {
    * Repasse no modo por leads, só deste agente. Desligado (padrão): o destino
    * departamento segue a distribuição inteligente. Ligado: sorteio pelo peso
    * do modo por leads, restrito ao departamento do destino, aos papéis e às
-   * pessoas escolhidas, e só quem está online dentro do expediente. Sem
-   * ninguém, espera na fila do modo por leads — não entra na fila inteligente.
+   * pessoas escolhidas. Horário e presença não entram. Sem ninguém com peso,
+   * o card fica sem responsável — não entra em fila. A fila de espera é só
+   * da distribuição inteligente.
    */
   leads?: {
     enabled?: boolean;

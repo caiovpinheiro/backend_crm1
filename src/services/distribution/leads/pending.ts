@@ -1,63 +1,17 @@
 /**
- * Fila da Distribuição por Leads.
+ * Linhas antigas de `distribution_leads_pending`.
  *
- * Sem consultor elegível (ACTIVE com peso > 0), o lead fica aqui — fora do
- * smart, porque a conversa está com routeMode="leads". A drenagem roda
- * quando um participante passa a poder receber (upsert com peso > 0, ou
- * o kill switch do modo é ligado).
+ * O modo por leads não enfileira mais: sem peso, o card fica sem
+ * responsável. A drenagem só termina o que já estava PENDING — atribui se
+ * houver peso > 0 e marca RESOLVED. Fila de espera nova é só da
+ * distribuição inteligente.
  */
 
-import { Prisma } from "@prisma/client";
-
-import type { ScopedTx } from "@/lib/prisma";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
-import { eligibleUserIdsForScope, readLeadsScope, type LeadsRoutingScope } from "@/services/ai-v2/leads-handoff";
+import { eligibleUserIdsForScope, readLeadsScope } from "@/services/ai-v2/leads-handoff";
 
 const DRAIN_BATCH = 100;
-
-export async function enqueueLeadsPending(
-  tx: ScopedTx,
-  args: {
-    organizationId: string;
-    targetKey: string;
-    contactId: string | null;
-    dealId: string | null;
-    conversationId: string | null;
-    triggerSource: string;
-    scope?: LeadsRoutingScope | null;
-  },
-): Promise<"created" | "updated"> {
-  const existing = await tx.distributionLeadsPending.findFirst({
-    where: {
-      organizationId: args.organizationId,
-      targetKey: args.targetKey,
-      status: "PENDING",
-    },
-    select: { id: true },
-  });
-  const scopeData = args.scope ? { scope: args.scope as Prisma.InputJsonValue } : {};
-  if (existing) {
-    await tx.distributionLeadsPending.update({
-      where: { id: existing.id },
-      data: { attempts: { increment: 1 }, lastAttemptAt: new Date(), ...scopeData },
-    });
-    return "updated";
-  }
-  await tx.distributionLeadsPending.create({
-    data: {
-      organizationId: args.organizationId,
-      targetKey: args.targetKey,
-      contactId: args.contactId,
-      dealId: args.dealId,
-      conversationId: args.conversationId,
-      triggerSource: args.triggerSource,
-      status: "PENDING",
-      ...scopeData,
-    },
-  });
-  return "created";
-}
 
 async function humanOwnerId(row: {
   conversationId: string | null;
@@ -91,15 +45,15 @@ async function humanOwnerId(row: {
 }
 
 /**
- * Atribui os leads que estavam sem consultor, do mais antigo para o mais
- * novo. Para no primeiro que ainda não tem elegível (o rodízio continua
- * vazio). Quem já ganhou dono humano sai da fila sem ser redistribuído.
+ * Atribui as linhas que já estavam PENDING, da mais antiga para a mais
+ * nova. Quem já ganhou dono humano sai sem ser redistribuído. Sem peso, a
+ * linha continua PENDING até alguém ter peso — o motor novo não cria outra.
  */
 export async function drainLeadsPending(): Promise<number> {
   const orgId = getOrgIdOrThrow();
   const { executeLeadsDistribution } = await import("./engine");
   let assigned = 0;
-  // Card da IA esperando o expediente não pode travar o restante da fila.
+  // Um recorte sem peso não trava o restante das linhas antigas.
   const waitingOnScope: string[] = [];
 
   for (let i = 0; i < DRAIN_BATCH; i++) {
@@ -148,8 +102,7 @@ export async function drainLeadsPending(): Promise<number> {
         where: { id: next.id },
         data: { attempts: { increment: 1 }, lastAttemptAt: new Date() },
       });
-      // Recorte da IA sem ninguém online agora: segue para o próximo lead.
-      // O rodízio da org pode ter gente; este card espera o expediente dele.
+      // Recorte sem peso agora: segue para a próxima linha antiga.
       if (scope) {
         waitingOnScope.push(next.id);
         continue;

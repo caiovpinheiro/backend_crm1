@@ -2517,8 +2517,8 @@ export async function executeStep(
 
       // ── Modo "leads" (escolha EXPLÍCITA no bloco; ausência = smart) ──
       // Rodízio próprio: participantes com status administrativo + peso 0–5.
-      // Sem olhar presença/expediente/departamento. Sem elegível, o lead
-      // espera em distribution_leads_pending.
+      // Sem olhar presença/expediente/departamento. Sem elegível, o card
+      // fica sem responsável. Não entra em fila (fila é só do modo smart).
       // Idempotência: outcome gravado em DistributionLeadsExecution por
       // (contexto, step, occurrence) — retry antes do avanço durável do
       // fluxo reencontra o resultado; a occurrence avança após a execução.
@@ -2589,13 +2589,12 @@ export async function executeStep(
           // ASSIGNED (ou corrida rara DONO_PRESERVADO) → saída SIM.
           return {};
         }
-        // NO_ELIGIBLE_PARTICIPANT → saída NÃO. O motor já enfileirou o
-        // lead (distribution_leads_pending) para atribuir quando algum
-        // consultor ACTIVE tiver peso > 0. Sem fallback para o smart.
+        // NO_ELIGIBLE_PARTICIPANT → saída NÃO. Sem fila de espera e sem
+        // fallback para o smart.
         const elseStepId = readString(cfg, "elseStepId");
         const note =
           leadsResult.reason === "NO_ELIGIBLE_PARTICIPANT"
-            ? "Sem consultor no rodízio — lead na fila de espera"
+            ? "Sem consultor no rodízio"
             : undefined;
         if (elseStepId) {
           return { skipRemaining: true, gotoStepId: elseStepId, note };

@@ -5,7 +5,7 @@
  * INACTIVE fora, mudança de peso), proporção ~3:1 entre participantes,
  * idempotência por DistributionLeadsExecution (retry não consome slot nem
  * duplica histórico), redistribuição com dono humano vigente e
- * NO_ELIGIBLE_PARTICIPANT (entra na fila; routeMode permanece).
+ * NO_ELIGIBLE_PARTICIPANT (não entra em fila; routeMode permanece).
  */
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -419,17 +419,12 @@ describe("executeLeadsDistribution — sorteio por peso", () => {
     expect(r.success).toBe(false);
     expect(r.reason).toBe("NO_ELIGIBLE_PARTICIPANT");
     expect(assignments).toHaveLength(0);
-    // routeMode marcado (fora do smart) e o lead fica na fila do modo leads.
+    // routeMode marcado (fora do smart). Sem fila de espera.
     expect(conversations.get("c1")?.routeMode).toBe("leads");
-    expect(pendingRows).toHaveLength(1);
-    expect(pendingRows[0]).toMatchObject({
-      status: "PENDING",
-      conversationId: "c1",
-      targetKey: "contact:ct1",
-    });
+    expect(pendingRows).toHaveLength(0);
   });
 
-  it("fila espera e atribui quando o consultor fica com peso maior que zero", async () => {
+  it("sem peso não cria fila; linha antiga ainda é atribuída quando o peso sobe", async () => {
     addParticipant("Julia", 0);
     addConversation("c1", "ct1", null);
 
@@ -440,7 +435,19 @@ describe("executeLeadsDistribution — sorteio por peso", () => {
     });
     expect(waiting.reason).toBe("NO_ELIGIBLE_PARTICIPANT");
     expect(conversations.get("c1")?.assignedToId).toBeNull();
+    expect(pendingRows).toHaveLength(0);
 
+    pendingRows.push({
+      id: "pend_legacy",
+      targetKey: "contact:ct1",
+      status: "PENDING",
+      attempts: 1,
+      conversationId: "c1",
+      contactId: "ct1",
+      dealId: null,
+      resolvedUserId: null,
+      createdAt: Date.now(),
+    });
     participants.find((p) => p.userId === "Julia")!.weight = 1;
     const { drainLeadsPending } = await import("../leads/pending");
     const assigned = await drainLeadsPending();

@@ -19,7 +19,8 @@
  * Se o deal/conversa passa no bloco, redistribui — inclusive quando já tem
  * dono humano. `DONO_PRESERVADO` fica só para corrida (CAS perdeu). Sem
  * elegível: NO_ELIGIBLE_PARTICIPANT — o alvo fica marcado (routeMode="leads")
- * e entra em `distribution_leads_pending` até alguém ACTIVE ter peso > 0.
+ * e sem responsável. Não entra em fila. A fila de espera é só da
+ * distribuição inteligente.
  */
 
 import { Prisma } from "@prisma/client";
@@ -39,7 +40,6 @@ import {
   claimDealAssignmentTx,
 } from "../claim";
 import { isLeadsDistributionEnabled } from "./enabled";
-import { enqueueLeadsPending } from "./pending";
 import { getLogger } from "@/lib/logger";
 
 const log = getLogger("distribution.leads.engine");
@@ -77,7 +77,10 @@ export interface ExecuteLeadsDistributionInput {
    * departamento. Vazia = ninguém neste momento.
    */
   onlyUserIds?: string[];
-  /** Gravado na fila quando ninguém está disponível, para a drenagem repetir o recorte. */
+  /**
+   * Aceito por compatibilidade com quem ainda manda o recorte. O modo por
+   * leads não grava fila: sem peso, o card fica sem responsável.
+   */
   pendingScope?: { departmentId: string; roleIds: string[]; userIds: string[] } | null;
 }
 
@@ -411,7 +414,7 @@ export async function executeLeadsDistribution(
         pipelineId: string | null;
         fromOwnerId: string | null;
       }
-    | { kind: "NO_ELIGIBLE_PARTICIPANT"; pending: "created" | "updated" }
+    | { kind: "NO_ELIGIBLE_PARTICIPANT" }
     | { kind: "DONO_PRESERVADO"; ownerId: string | null; ownerName: string | null };
 
   try {
@@ -423,15 +426,6 @@ export async function executeLeadsDistribution(
 
       const slot = await selectNextSlotTx(tx, orgId, input.onlyUserIds);
       if (!slot) {
-        const pending = await enqueueLeadsPending(tx, {
-          organizationId: orgId,
-          targetKey: target.targetKey,
-          contactId: target.contactId,
-          dealId: target.dealId,
-          conversationId: target.conversationId,
-          triggerSource: input.triggerSource,
-          scope: input.pendingScope ?? null,
-        });
         const result: LeadsDistributionResult = {
           success: false,
           reason: "NO_ELIGIBLE_PARTICIPANT",
@@ -439,7 +433,7 @@ export async function executeLeadsDistribution(
           selectedUserName: null,
         };
         await recordExecution(orgId, execId, result, null, tx);
-        return { kind: "NO_ELIGIBLE_PARTICIPANT", pending };
+        return { kind: "NO_ELIGIBLE_PARTICIPANT" };
       }
 
       // Claim do alvo: o modo leads sempre redistribui (inclusive dono
@@ -586,30 +580,29 @@ export async function executeLeadsDistribution(
   }
 
   if (txOutcome.kind === "NO_ELIGIBLE_PARTICIPANT") {
-    // routeMode permanece: o alvo fica fora do smart. A fila
-    // (distribution_leads_pending) redistribui quando alguém ficar elegível.
-    if (txOutcome.pending === "created") {
-      logEvent({
-        type: "LEAD_DISTRIBUTION_FAILED",
-        entityType: target.dealId
-          ? "DEAL"
-          : target.conversationId
-            ? "CONVERSATION"
-            : "CONTACT",
-        entityId: target.dealId ?? target.conversationId ?? target.contactId!,
-        dealId: target.dealId,
-        contactId: target.contactId,
-        conversationId: target.conversationId,
-        field: "owner",
-        meta: {
-          reason: "NO_ELIGIBLE_PARTICIPANT",
-          mode: "leads",
-          triggerSource: input.triggerSource,
-          queued: true,
-        },
-        actor: { type: "AUTOMATION", label: "Distribuição por Leads" },
-      }).catch((e) => log.error({ err: e }, "[leads] logEvent fila falhou"));
-    }
+    // routeMode permanece: o alvo fica fora do smart. Sem fila — quem não
+    // tem peso simplesmente não recebe. A fila de espera é só do modo
+    // inteligente.
+    logEvent({
+      type: "LEAD_DISTRIBUTION_FAILED",
+      entityType: target.dealId
+        ? "DEAL"
+        : target.conversationId
+          ? "CONVERSATION"
+          : "CONTACT",
+      entityId: target.dealId ?? target.conversationId ?? target.contactId!,
+      dealId: target.dealId,
+      contactId: target.contactId,
+      conversationId: target.conversationId,
+      field: "owner",
+      meta: {
+        reason: "NO_ELIGIBLE_PARTICIPANT",
+        mode: "leads",
+        triggerSource: input.triggerSource,
+        queued: false,
+      },
+      actor: { type: "AUTOMATION", label: "Distribuição por Leads" },
+    }).catch((e) => log.error({ err: e }, "[leads] logEvent sem elegível falhou"));
     return {
       success: false,
       reason: "NO_ELIGIBLE_PARTICIPANT",
