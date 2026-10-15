@@ -2,30 +2,31 @@ import { NextResponse } from "next/server";
 
 import { withApiAuthContext } from "@/lib/api-auth";
 import type { AppUserRole } from "@/lib/auth-types";
-import { invalidateBoardData } from "@/lib/cache/keys";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { notifyTagAdded } from "@/services/automation-triggers";
-import { createDealEvent, getDealById } from "@/services/deals";
+import { createDealEvent, getDealById, syncBoardsAfterDealChanges } from "@/services/deals";
 
 /**
- * Invalida o cache-aside do board do funil do deal.
- * Sem isso, o refetch do React Query (onSettled das mutações de tag)
- * devolve o board stale (TTL 30s) e o card reverte o update otimista.
- * Await obrigatório antes do 200 — senão o GET /board do front ainda
- * lê a variante cacheada.
+ * Troca a versão de card do board do funil do deal (cache-aside + ETag) e
+ * publica o card com as tags novas (`deal_moved` na mesma etapa) para os
+ * outros clientes. Sem isso, o refetch do React Query (onSettled das
+ * mutações de tag) devolve o board stale e o card reverte o update
+ * otimista. Await obrigatório antes do 200 — senão o GET /board do front
+ * ainda lê a variante cacheada.
  */
 async function invalidateDealBoardCache(deal: {
+  id: string;
   stage?: { pipeline?: { id?: string } | null } | null;
 }): Promise<void> {
   try {
-    const pipelineId = deal.stage?.pipeline?.id;
-    if (!pipelineId) return;
-    const orgId = getOrgIdOrThrow();
-    await invalidateBoardData(orgId, pipelineId);
+    await syncBoardsAfterDealChanges({
+      changes: [{ dealId: deal.id }],
+      extraPipelineIds: [deal.stage?.pipeline?.id],
+    });
   } catch {
-    /* fora de contexto de org — TTL curto cobre */
+    /* best-effort — o bump da escrita (extension do prisma) cobre */
   }
 }
 

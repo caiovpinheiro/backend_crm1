@@ -127,14 +127,15 @@ vi.mock("@/lib/authz/resource-policy", async () => {
     ),
   };
 });
-vi.mock("@/lib/visibility", () => ({
-  getVisibilityFilter: vi.fn(async () => ({
+vi.mock("@/lib/visibility", () => {
+  const visibility = vi.fn(async () => ({
     dealWhere: h.authz.ownOnly ? { ownerId: "u0" } : {},
     conversationWhere: {},
     canSeeAll: !h.authz.ownOnly,
     includeUnassigned: true,
-  })),
-}));
+  }));
+  return { getVisibilityFilter: visibility, getDealVisibilityFilter: visibility };
+});
 vi.mock("@/services/pipelines", () => ({
   resolvePipelineByPublicRef: vi.fn(async (ref: string) => ({ id: ref, name: "Funil" })),
   getPipelineMeta: vi.fn(async (id: string) => ({ id, name: "Funil" })),

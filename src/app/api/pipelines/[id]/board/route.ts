@@ -5,9 +5,21 @@ import { withOrgContext } from "@/lib/auth-helpers";
 import { canViewStage, loadAuthzContext } from "@/lib/authz";
 import { funnelDealWhere, andDealWhere } from "@/lib/authz/funnel-visibility";
 import { requirePipelineScope } from "@/lib/authz/resource-policy";
+import {
+  boardEtagFreshness,
+  boardEtagMatches,
+  boardNotModified,
+  computeBoardEtag,
+  withBoardEtag,
+} from "@/lib/cache/board-etag";
+import { getOrgIdOrNull } from "@/lib/request-context";
 import { ServerTiming } from "@/lib/server-timing";
-import { getVisibilityFilter } from "@/lib/visibility";
-import { boardStageScope } from "@/services/board-cache-variant";
+import { getDealVisibilityFilter } from "@/lib/visibility";
+import {
+  boardStageScope,
+  canonicalBoardFilters,
+  canonicalBoardVariant,
+} from "@/services/board-cache-variant";
 import {
   getBoardJson,
   isValidDealStatus,
@@ -113,11 +125,16 @@ type BoardRequest = {
  * resposta já serializada, com `Server-Timing` por fase.
  *
  * Toda checagem continua aqui: escopo do funil (`requirePipelineScope`),
- * visibilidade do usuário (`getVisibilityFilter` + funil/etapas do papel
+ * visibilidade do usuário (`getDealVisibilityFilter` + funil/etapas do papel
  * no `where`) e filtro de etapas visíveis (`canViewStage`) — este agora
  * roda antes de guardar no cache, e o recorte de etapas entra na chave.
+ *
+ * ETag (`lib/cache/board-etag.ts`): calculado DEPOIS dessas checagens, com o
+ * pedido canônico + perfil de visibilidade + versões do board. `If-None-Match`
+ * igual (GET ou POST) → 304 sem corpo e sem tocar no banco.
  */
 async function loadBoard(
+  request: Request,
   session: AppSession,
   rawRef: string,
   readRequest: () => Promise<BoardRequest>,
@@ -140,7 +157,7 @@ async function loadBoard(
   const [meta, scopeDenied, visibility] = await Promise.all([
     resolved ? Promise.resolve(resolved) : getPipelineMeta(pipelineId),
     requirePipelineScope(session.user, "view", pipelineId),
-    req.view === "stages" ? Promise.resolve(null) : getVisibilityFilter(user),
+    req.view === "stages" ? Promise.resolve(null) : getDealVisibilityFilter(user),
   ]);
   timing.add("pre", performance.now() - pre0);
 
@@ -149,22 +166,62 @@ async function loadBoard(
   }
   if (scopeDenied) return scopeDenied;
 
+  // Org do contexto (super-admin pode estar sem org na sessão).
+  const orgId = getOrgIdOrNull() ?? session.user.organizationId ?? "_";
+  const stageScope = boardStageScope(authz);
+
   if (req.view === "stages") {
+    // Só etapas: muda com escrita de etapa (versão de card do funil).
+    const etag = await timing.time("etag", () =>
+      computeBoardEtag({
+        orgId,
+        pipelineId,
+        kind: "stages",
+        variant: JSON.stringify({ sv: stageScope }),
+        freshness: { activity: false, volatile: false },
+      }),
+    );
+    if (boardEtagMatches(request, etag)) return boardNotModified(request, etag, timing);
     const stages = (await getBoardStagesOnly(pipelineId)).filter((s) =>
       canViewStage(authz, s.id),
     );
-    return NextResponse.json(stages);
+    return withBoardEtag(request, NextResponse.json(stages), etag);
+  }
+
+  const dealWhere = andDealWhere(visibility!.dealWhere, funnelDealWhere(authz));
+  const etag = await timing.time("etag", () =>
+    computeBoardEtag({
+      orgId,
+      pipelineId,
+      kind: "board",
+      variant: canonicalBoardVariant({
+        pipelineId,
+        visibilityWhere: dealWhere,
+        statusFilter: req.status,
+        advancedFilters: req.filters,
+        limitOptions: req.limit,
+        stageScope,
+      }),
+      freshness: boardEtagFreshness({
+        sortField: req.limit.sortField,
+        filters: canonicalBoardFilters(req.filters, pipelineId),
+      }),
+    }),
+  );
+  if (boardEtagMatches(request, etag)) {
+    log.debug({ method, pipelineId, timing: timing.toJSON() }, "[board] 304");
+    return boardNotModified(request, etag, timing);
   }
 
   const { json, source } = await getBoardJson(
     pipelineId,
-    andDealWhere(visibility!.dealWhere, funnelDealWhere(authz)),
+    dealWhere,
     req.status,
     req.filters,
     req.limit,
     {
       stageVisible: (stageId) => canViewStage(authz, stageId),
-      stageScope: boardStageScope(authz),
+      stageScope,
       timing,
     },
   );
@@ -180,13 +237,17 @@ async function loadBoard(
   if (timing.totalMs() >= SLOW_BOARD_LOG_MS) log.info(fields, "[board] lento");
   else log.debug(fields, "[board] tempos");
 
-  return new NextResponse(json, {
-    status: 200,
-    headers: {
-      "Content-Type": "application/json",
-      "Server-Timing": timing.header(),
-    },
-  });
+  return withBoardEtag(
+    request,
+    new NextResponse(json, {
+      status: 200,
+      headers: {
+        "Content-Type": "application/json",
+        "Server-Timing": timing.header(),
+      },
+    }),
+    etag,
+  );
 }
 
 function errorResponse(e: unknown, label: string): NextResponse {
@@ -217,6 +278,7 @@ export async function GET(request: Request, context: RouteContext) {
       }
       const url = new URL(request.url);
       return await loadBoard(
+        request,
         session,
         rawRef,
         async () => ({
@@ -258,6 +320,7 @@ export async function POST(request: Request, context: RouteContext) {
         return NextResponse.json({ message: "ID inválido." }, { status: 400 });
       }
       return await loadBoard(
+        request,
         session,
         rawRef,
         async () => {

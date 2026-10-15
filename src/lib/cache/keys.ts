@@ -496,9 +496,21 @@ export async function invalidateStageMetrics(
 // query por `variant` (visibilidade + status + filtros + paginação/sort).
 // Hash da variant: a JSON crua estourava a chave Redis (GET lento).
 //
-// Duas versões na chave: a da org (`cache:v:board:<org>`, invalida todos
-// os pipelines) e a do pipeline (`cache:v:board:<org>:<pipeline>`). As
-// variantes da versão anterior ficam no Redis até o TTL do board (45 s).
+// Dois pares de versões na chave (gate C, 15/10):
+//
+// - CARD (`cache:v:board:<org>` e `cache:v:board:<org>:<pipeline>`): sobe
+//   SÓ quando muda algo que aparece no card ou decide em que coluna/página
+//   ele está — negócio criado, movido, editado, excluído/arquivado, dono,
+//   tags, produtos, tarefas, contato, etapas. Entra também no ETag do board
+//   (`board-etag.ts`): sem bump, o cliente recebe 304.
+// - ATIVIDADE (`cache:v:board_act:<org>[:<pipeline>]`): sobe por MENSAGEM,
+//   coalescida em 1 por minuto por funil
+//   (`scheduleBoardInvalidationForMessages`). Só refresca a prévia e a
+//   ordem por última interação do valor em cache; no ETag só entra quando a
+//   ordenação é `lastInteraction` ou o filtro depende de conversa.
+//
+// As variantes da versão anterior ficam no Redis até o TTL do board (45 s).
+// Escritores e onde chamam o bump: ver a tabela em `board-etag.ts`.
 
 function boardOrgVersion(orgId: string): string {
   return cacheVersionName("board", orgId);
@@ -508,20 +520,48 @@ function boardPipelineVersion(orgId: string, pipelineId: string): string {
   return cacheVersionName("board", orgId, pipelineId);
 }
 
+function boardActivityOrgVersion(orgId: string): string {
+  return cacheVersionName("board_act", orgId);
+}
+
+function boardActivityPipelineVersion(orgId: string, pipelineId: string): string {
+  return cacheVersionName("board_act", orgId, pipelineId);
+}
+
+/**
+ * Versões do board de um funil, como texto (vão na chave do valor e no
+ * ETag). `activity: false` = só as do card.
+ */
+export async function boardVersionTag(
+  orgId: string,
+  pipelineId: string,
+  opts: { activity: boolean },
+): Promise<string> {
+  const names = [boardOrgVersion(orgId), boardPipelineVersion(orgId, pipelineId)];
+  if (opts.activity) {
+    names.push(
+      boardActivityOrgVersion(orgId),
+      boardActivityPipelineVersion(orgId, pipelineId),
+    );
+  }
+  return (await getCacheVersions(...names)).join(".");
+}
+
 export async function boardDataKey(
   orgId: string,
   pipelineId: string,
   variant: string,
 ): Promise<string> {
   const fp = createHash("sha1").update(variant).digest("hex").slice(0, 20);
-  const [orgVersion, pipelineVersion] = await getCacheVersions(
-    boardOrgVersion(orgId),
-    boardPipelineVersion(orgId, pipelineId),
-  );
-  return `board:${orgId}:${pipelineId}:v${orgVersion}.${pipelineVersion}:${fp}`;
+  const versions = await boardVersionTag(orgId, pipelineId, { activity: true });
+  return `board:${orgId}:${pipelineId}:v${versions}:${fp}`;
 }
 
-/** Invalida TODAS as variantes do board de um pipeline (todos os filtros). */
+/**
+ * Invalida TODAS as variantes do board de um pipeline (todos os filtros) e
+ * troca o ETag dele. Só para mudança de CARD (ver o cabeçalho da seção);
+ * mensagem usa `scheduleBoardInvalidationForMessages`.
+ */
 export async function invalidateBoardData(
   orgId: string,
   pipelineId: string,
@@ -530,12 +570,8 @@ export async function invalidateBoardData(
 }
 
 /**
- * Invalida o board de TODOS os pipelines da org.
- *
- * Uma mensagem nova muda `lastMessage`/`unreadCount` dos cards, mas quem a
- * cria (webhook, envio manual, automação, IA) conhece a conversa — não o
- * pipeline do negócio. Trocar a versão da org evita um lookup extra no
- * hot path.
+ * Invalida o board de TODOS os pipelines da org (mudança de card sem funil
+ * conhecido: nome/foto de usuário, tag renomeada, contato editado, lote).
  */
 export async function invalidateOrgBoards(orgId: string): Promise<void> {
   try {
@@ -589,17 +625,36 @@ export function scheduleBoardInvalidation(
 /**
  * Janela da purga do board disparada por MENSAGEM (`new_message`).
  *
- * O cliente não precisa mais do board recalculado para o card: aplica
+ * O cliente não precisa do board recalculado para o card: aplica
  * prévia/não lidas/ordem in-place pelo próprio evento, e negócio novo entra
- * pelo `deal_moved`. A purga por mensagem só mantém a ORDEM do board em
- * cache (última interação) — 1 por minuto por funil basta, e só quando
- * houve mensagem (leading + trailing, como `scheduleBoardInvalidation`).
+ * pelo `deal_moved`. A purga por mensagem só mantém a prévia e a ORDEM do
+ * board em cache (última interação) — 1 por minuto por funil basta, e só
+ * quando houve mensagem (leading + trailing, como `scheduleBoardInvalidation`).
  * O TTL do valor (45 s) continua limitando o quanto a ordem pode ficar velha.
+ *
+ * Troca a versão de ATIVIDADE, não a do card: o ETag do board ordenado por
+ * posição/criação continua o mesmo (304) — ver `board-etag.ts`.
  *
  * Janela própria (`board-msg:`): escrita de negócio (criar, mover, editar)
  * segue purgando na hora por `invalidateBoardData`, sem esperar esta janela.
  */
 export const BOARD_MESSAGE_INVALIDATION_WINDOW_MS = 60_000;
+
+/** Troca a versão de atividade (mensagens) do funil ou, sem funil, da org. */
+export async function invalidateBoardActivity(
+  orgId: string,
+  pipelineId?: string | null,
+): Promise<void> {
+  try {
+    await bumpCacheVersion(
+      pipelineId
+        ? boardActivityPipelineVersion(orgId, pipelineId)
+        : boardActivityOrgVersion(orgId),
+    );
+  } catch {
+    /* cache é best-effort — o TTL cobre a falha */
+  }
+}
 
 /** Purga do board por mensagem: no máximo 1 a cada 60 s por funil (ou org). */
 export function scheduleBoardInvalidationForMessages(
@@ -611,10 +666,7 @@ export function scheduleBoardInvalidationForMessages(
   scheduleCoalescedPurge(
     `board-msg:${windowKey}`,
     BOARD_MESSAGE_INVALIDATION_WINDOW_MS,
-    () =>
-      pipelineId
-        ? invalidateBoardData(orgId, pipelineId)
-        : invalidateOrgBoards(orgId),
+    () => invalidateBoardActivity(orgId, pipelineId),
   );
 }
 
