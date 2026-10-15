@@ -101,7 +101,10 @@ export function isPlaceholderContactName(name: unknown): boolean {
     .trim();
   // Só número, telefone ou símbolo ("-", "."): não é nome.
   if (!/[a-z]/.test(t)) return String(name ?? "").trim() !== "";
-  return PLACEHOLDER_NAMES.has(t) || /^(?:negocio|lead|contato|cliente)\s*\d+$/.test(t);
+  if (PLACEHOLDER_NAMES.has(t) || /^(?:negocio|lead|contato|cliente)\s*\d+$/.test(t)) return true;
+  // Marca de cadastro ("Duplicado 2", "Cópia de…", "Mesclado", "Não usar"):
+  // o agente chamava a pessoa de "Duplicado 2".
+  return /^(?:duplicad[oa]s?|copia|mesclad[oa]|excluir|apagar|nao usar|lixo|spam|inativ[oa]|teste)(?:\s|$)/.test(t);
 }
 
 const squashName = (s: string) => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]/g, "");
