@@ -22,8 +22,18 @@ vi.mock("@/lib/auth-helpers", () => ({
 }));
 
 vi.mock("@/lib/conversation-access", () => ({
+  CONVERSATION_ACCESS_SELECT: { id: true, organizationId: true },
   requireConversationAccess: h.access,
+  // GET lê acesso + org da conversa numa leitura só.
+  requireConversationAccessAndLoad: async (session: unknown, id: string) => {
+    const access = h.access as unknown as (...args: unknown[]) => Promise<NextResponse | null>;
+    const denied = await access(session, id);
+    return denied
+      ? { response: denied }
+      : { conversation: { id, organizationId: "org_1" } };
+  },
 }));
+vi.mock("@/lib/prisma", () => ({ prisma: {} }));
 
 vi.mock("@/services/scheduled-messages", () => ({
   listPendingByConversation: h.list,

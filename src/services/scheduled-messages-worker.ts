@@ -27,6 +27,7 @@ import {
   touchChatLastMessageAt,
   touchConversationLastMessageAt,
 } from "@/lib/conversation-last-message";
+import { bumpScheduledMessages } from "@/lib/cache/scheduled-versions";
 import { metaGraphFetchWorstCaseMs } from "@/lib/meta-whatsapp/client";
 import { TEMPLATE_DEFINITION_LISTING_PAGE_CAP } from "@/lib/meta-whatsapp/enrich-template-flow";
 import { prisma } from "@/lib/prisma";
@@ -96,12 +97,22 @@ export function scheduledMessageSendingLeaseMs(): number {
   return floor;
 }
 
-/** PENDING → SENDING. Só uma instância recebe count === 1. */
-export async function claimScheduledMessage(id: string): Promise<boolean> {
+/**
+ * PENDING → SENDING. Só uma instância recebe count === 1. O item sai da
+ * lista de pendentes: com `scope`, a versão da lista sobe (ETag do
+ * `GET /api/scheduled-messages`).
+ */
+export async function claimScheduledMessage(
+  id: string,
+  scope?: { organizationId: string | null | undefined; conversationId: string },
+): Promise<boolean> {
   const result = await prismaBase.scheduledMessage.updateMany({
     where: { id, status: ScheduledMessageStatus.PENDING },
     data: { status: ScheduledMessageStatus.SENDING },
   });
+  if (result.count === 1 && scope) {
+    await bumpScheduledMessages(scope.organizationId, scope.conversationId);
+  }
   return result.count === 1;
 }
 
@@ -112,13 +123,26 @@ export async function claimScheduledMessage(id: string): Promise<boolean> {
  */
 export async function reclaimStaleSendingScheduledMessages(now = new Date()): Promise<number> {
   const cutoff = new Date(now.getTime() - scheduledMessageSendingLeaseMs());
+  const stale = {
+    status: ScheduledMessageStatus.SENDING,
+    updatedAt: { lt: cutoff },
+  };
+  // Raro (worker caiu no meio do envio): lê as conversas para subir a
+  // versão da lista — o item volta a aparecer como pendente.
+  const affected = await prismaBase.scheduledMessage.findMany({
+    where: stale,
+    select: { organizationId: true, conversationId: true },
+  });
+  if (affected.length === 0) return 0;
   const result = await prismaBase.scheduledMessage.updateMany({
-    where: {
-      status: ScheduledMessageStatus.SENDING,
-      updatedAt: { lt: cutoff },
-    },
+    where: stale,
     data: { status: ScheduledMessageStatus.PENDING },
   });
+  if (result.count > 0) {
+    await Promise.all(
+      affected.map((r) => bumpScheduledMessages(r.organizationId, r.conversationId)),
+    );
+  }
   return result.count;
 }
 
@@ -167,7 +191,10 @@ export async function tickOnce() {
   let failed = 0;
 
   for (const item of due) {
-    const claimed = await claimScheduledMessage(item.id);
+    const claimed = await claimScheduledMessage(item.id, {
+      organizationId: item.organizationId,
+      conversationId: item.conversationId,
+    });
     if (!claimed) continue;
 
     const orgId = item.conversation?.organizationId;

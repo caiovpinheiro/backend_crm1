@@ -8,6 +8,7 @@ import {
   bumpResponseFamilies,
   RESPONSE_FAMILIES,
 } from "@/lib/cache/response-families";
+import { bumpScheduledMessages } from "@/lib/cache/scheduled-versions";
 import { requireAdmin, userOrgFilter } from "@/lib/auth-helpers";
 import { clearLoginLockout } from "@/lib/auth/lockout";
 import {
@@ -329,10 +330,20 @@ export async function DELETE(_request: Request, context: RouteContext) {
         where: { createdById: target.id },
         data: { createdById: reassignToId },
       });
+      // O autor aparece no item da lista de agendadas: as conversas
+      // afetadas sobem a versão (ETag do `GET /api/scheduled-messages`).
+      const scheduledConvs = await prisma.scheduledMessage.findMany({
+        where: { createdById: target.id },
+        select: { organizationId: true, conversationId: true },
+        distinct: ["conversationId"],
+      });
       await prisma.scheduledMessage.updateMany({
         where: { createdById: target.id },
         data: { createdById: reassignToId },
       });
+      await Promise.all(
+        scheduledConvs.map((c) => bumpScheduledMessages(c.organizationId, c.conversationId)),
+      );
       // Tabela legada do catálogo (sem model Prisma ativo) — RESTRICT NOT NULL.
       try {
         await prisma.$executeRaw`
