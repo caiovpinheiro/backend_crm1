@@ -1,5 +1,6 @@
 import nodemailer from "nodemailer";
 import type SMTPTransport from "nodemailer/lib/smtp-transport";
+import * as socks from "socks";
 import type { EmailEncryption } from "@prisma/client";
 
 import { getLogger } from "@/lib/logger";
@@ -30,22 +31,27 @@ const CONNECT_TIMEOUT_MS = 15_000;
 // ─── Proxy de saída (SMTP_PROXY_URL) ─────────────────────────
 // A DigitalOcean bloqueia 25/465/587 de saída na borda de rede (drop, não
 // recusa: cada tentativa direta estoura o CONNECT_TIMEOUT_MS). Com
-// SMTP_PROXY_URL=http://user:pass@host:porta o Nodemailer abre a conexão
-// "direta" da conta via HTTP CONNECT (cliente nativo do nodemailer, sem
-// dependência nova) num servidor onde essas portas saem. O proxy só
-// repassa TCP: TLS (servername do destino) e AUTH continuam fim-a-fim
-// entre o CRM e o SMTP do cliente — SPF/DKIM intactos, qualquer provedor,
-// sem config por org. Vale só para as contas conectadas: o transacional
-// (Mailjet) já sai por HTTPS e o IMAP (993) não é bloqueado. O relay por
-// org abaixo continua como fallback secundário. SOCKS exigiria o pacote
-// `socks` — não suportado; só http:// e https://.
+// SMTP_PROXY_URL=socks5://user:pass@host:porta (ou http://) o Nodemailer
+// abre a conexão "direta" da conta através de um proxy num servidor onde
+// essas portas saem. O proxy só repassa TCP: TLS (servername do destino)
+// e AUTH continuam fim-a-fim entre o CRM e o SMTP do cliente — SPF/DKIM
+// intactos, qualquer provedor, sem config por org. Vale só para as contas
+// conectadas: o transacional (Mailjet) já sai por HTTPS e o IMAP (993)
+// não é bloqueado. O relay por org abaixo continua como fallback
+// secundário.
+// Esquemas: socks5:// / socks4:// via pacote `socks` (o nodemailer exige
+// `transport.set("proxy_socks_module", socks)`); http:// / https:// via
+// HTTP CONNECT nativo do nodemailer.
+
+const SOCKS_PROTOCOLS = new Set(["socks:", "socks4:", "socks4a:", "socks5:"]);
+const HTTP_PROTOCOLS = new Set(["http:", "https:"]);
 
 /** Nome montado em runtime — o bundler não consegue inlinear `undefined`. */
 function proxyKey(): string {
   return ["SMTP", "PROXY", "URL"].join("_");
 }
 
-type SmtpProxy = { url: string; label: string };
+type SmtpProxy = { url: string; label: string; socks: boolean };
 
 /** `label` sem credenciais, para log. `null` = env ausente ou inválida. */
 export function parseSmtpProxyUrl(raw: string | undefined): SmtpProxy | null {
@@ -56,10 +62,11 @@ export function parseSmtpProxyUrl(raw: string | undefined): SmtpProxy | null {
   } catch {
     return null;
   }
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+  const isSocks = SOCKS_PROTOCOLS.has(parsed.protocol);
+  if (!isSocks && !HTTP_PROTOCOLS.has(parsed.protocol)) return null;
   if (!parsed.hostname) return null;
-  const port = parsed.port || (parsed.protocol === "https:" ? "443" : "80");
-  return { url: raw, label: `${parsed.protocol}//${parsed.hostname}:${port}` };
+  const port = parsed.port || (isSocks ? "1080" : parsed.protocol === "https:" ? "443" : "80");
+  return { url: raw, label: `${parsed.protocol}//${parsed.hostname}:${port}`, socks: isSocks };
 }
 
 let proxyAnnounced: string | null = null;
@@ -73,13 +80,13 @@ function getSmtpProxy(): SmtpProxy | null {
     // Nunca logar `raw`: carrega credenciais.
     if (proxyRejected !== raw) {
       proxyRejected = raw;
-      log.error("SMTP_PROXY_URL inválida (use http://[user:pass@]host:porta) — ignorando, SMTP sai direto");
+      log.error("SMTP_PROXY_URL inválida (use socks5://[user:pass@]host:porta ou http://…) — ignorando, SMTP sai direto");
     }
     return null;
   }
   if (proxyAnnounced !== proxy.label) {
     proxyAnnounced = proxy.label;
-    log.info({ proxy: proxy.label }, "SMTP das contas conectadas sai via proxy HTTP CONNECT");
+    log.info({ proxy: proxy.label }, `SMTP das contas conectadas sai via proxy ${proxy.socks ? "SOCKS" : "HTTP CONNECT"}`);
   }
   return proxy;
 }
@@ -109,8 +116,10 @@ function isConnectionFailure(err: unknown): boolean {
     raw.includes("eai_again") ||
     raw.includes("epipe") ||
     // Proxy HTTP CONNECT respondeu 4xx/5xx (ConnectPort fechado, auth do
-    // proxy errada): o destino nem foi alcançado — mesma classe de rede.
-    raw.includes("response from proxy")
+    // proxy errada) ou o SOCKS recusou/falhou (SocksClientError): o destino
+    // nem foi alcançado — mesma classe de rede.
+    raw.includes("response from proxy") ||
+    raw.includes("socks")
   );
 }
 
@@ -192,7 +201,7 @@ function createTransport(input: SmtpConnectInput) {
     auth: { user: input.email, pass: input.password },
     // PLAIN = senha com ! @ # em base64. LOGIN quoted falha em alguns Dovecot/UOL.
     ...(uol ? { authMethod: "PLAIN" } : {}),
-    // HTTP CONNECT até host:porta da conta; TLS e AUTH seguem fim-a-fim.
+    // Proxy até host:porta da conta; TLS e AUTH seguem fim-a-fim.
     ...(proxy ? { proxy: proxy.url } : {}),
     connectionTimeout: CONNECT_TIMEOUT_MS,
     greetingTimeout: CONNECT_TIMEOUT_MS,
@@ -202,7 +211,11 @@ function createTransport(input: SmtpConnectInput) {
       minVersion: "TLSv1.2",
     },
   };
-  return nodemailer.createTransport(options);
+  const transport = nodemailer.createTransport(options);
+  // socks*:// — o nodemailer só traz o cliente HTTP CONNECT embutido; para
+  // SOCKS ele pede o módulo `socks` registrado no transport.
+  if (proxy?.socks) transport.set("proxy_socks_module", socks);
+  return transport;
 }
 
 function looksLikeAppPasswordRequired(lower: string): boolean {
@@ -221,12 +234,12 @@ export function mapSmtpError(err: unknown, host = ""): EmailFieldError {
   const meta = mailerMeta(err);
   const lower = `${raw} ${meta.responseText ?? ""} ${meta.serverResponseCode ?? ""}`.toLowerCase();
   const kind = mailboxProviderKind(host);
-  if (lower.includes("response from proxy")) {
+  if (lower.includes("response from proxy") || lower.includes("socks")) {
     return {
       ok: false,
       field: "smtp_host",
       message:
-        "O proxy de saída SMTP (SMTP_PROXY_URL) recusou a conexão ao servidor. Confira ConnectPort 465/587 e as credenciais do proxy.",
+        "O proxy de saída SMTP (SMTP_PROXY_URL) falhou ao conectar no servidor. Confira usuário/senha do proxy e se ele libera a porta de destino.",
     };
   }
   if (lower.includes("timeout")) {
