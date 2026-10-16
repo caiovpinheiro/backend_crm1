@@ -1,3 +1,15 @@
+### 2026-10-16 — Proxy HTTP CONNECT para o SMTP das contas conectadas (`SMTP_PROXY_URL`)
+
+**Decisão.** Env global `SMTP_PROXY_URL=http://user:pass@host:porta`. `createTransport` (caminho direto de `src/services/email-smtp.ts`) passa `proxy` ao Nodemailer, que abre a conexão até `smtpHost:smtpPort` da conta por HTTP CONNECT (cliente nativo `lib/smtp-connection/http-proxy-client.js`, sem dependência nova). TLS (`servername` do destino) e `AUTH` da conta seguem fim-a-fim; o proxy só repassa TCP. `testSmtpConnection`, `sendSmtpMail` e os três chamadores (caixa, regras/OOO, automação `send_email`) herdam sem mudança. Só `http://`/`https://`; URL inválida é ignorada com `log.error` (sem ecoar a URL — carrega credenciais) e o SMTP sai direto. `Invalid response from proxy` conta como falha de conexão (cai no relay por org, se houver) e tem mensagem própria em `mapSmtpError`. Relay por org continua como fallback secundário. Relay, transacional (Mailjet via HTTPS 443) e IMAP (993) **não** passam pelo proxy.
+
+**Contexto.** A DO dropa 465/587 na borda: cada envio esperava o `CONNECT_TIMEOUT_MS` (15 s) antes de cair no relay, e conectar conta sem relay era impossível (IMAP passa, SMTP não — `connectEmailAccount` exige os dois). O relay em túnel socat fixo (2525 → SMTP real) não repassa a auth da conta (`createRelayTransport` só autentica com o `username` do relay) e serve um único destino por túnel. PoC local em 2026-10-16: o Nodemailer 7.0.13 do repo alcançou `smtp.gmail.com:465` (TLS implícito), `smtp.gmail.com:587` e `smtp.office365.com:587` (STARTTLS) por um proxy CONNECT com `Proxy-Authorization`.
+
+**Alternativas descartadas.** Desbloqueio na DO (não libera). Smarthost real (Mailjet/Brevo na 2525) — exige o domínio de cada cliente verificado lá. Gateway HTTP próprio no servidor liberado — senha das caixas trafegaria para outro serviço. WireGuard + policy routing de 465/587 no host EasyPanel — zero código, mas frágil. SOCKS5 — pacote `socks` novo sem ganho sobre CONNECT. Só corrigir o túnel (auth da conta quando o relay não tem `username`) — continuaria 1 destino por túnel.
+
+**Impacto.** `src/services/email-smtp.ts`, `.env.example`, `AGENTS.md`. Deploy: só a env (lida em runtime via `runtimeEnv`, nome montado com `join`) + `tinyproxy` com `ConnectPort 465/587`, `BasicAuth`, firewall para o IP do droplet (Reserved IP). Infra ainda não validada — teste de dentro do droplet: `openssl s_client -proxy HOST:PORTA -proxy_user U -proxy_pass P -connect smtp.cliente:465 -servername smtp.cliente` deve mostrar `220 ... ESMTP`.
+
+---
+
 ### 2026-09-05 — Origem/UTM em filtro, automação, import e export
 
 **Decisão.** Estender o que já existia para `Contact.source` (filtro Origem, condição `contact.source`) com: (1) filtro pipeline `utmSources` (`Contact.adUtmSource`); (2) campos UTM no catálogo de condições + triggers nativos; (3) import de contatos com colunas UTM e import de negócios com `contact_source`/`origem`; (4) export de contatos/negócios com colunas UTM. `createContact` passa a persistir tracking quando informado.
