@@ -6,7 +6,7 @@
 
 **Alternativas descartadas.** Desbloqueio na DO (não libera). Smarthost real (Mailjet/Brevo na 2525) — exige o domínio de cada cliente verificado lá. Gateway HTTP próprio no servidor liberado — senha das caixas trafegaria para outro serviço. WireGuard + policy routing de 465/587 no host EasyPanel — zero código, mas frágil. SOCKS5 — pacote `socks` novo sem ganho sobre CONNECT. Só corrigir o túnel (auth da conta quando o relay não tem `username`) — continuaria 1 destino por túnel.
 
-**Impacto.** `src/services/email-smtp.ts`, `.env.example`, `AGENTS.md`. Deploy: só a env (lida em runtime via `runtimeEnv`, nome montado com `join`) + `tinyproxy` com `ConnectPort 465/587`, `BasicAuth`, firewall para o IP do droplet (Reserved IP). Infra ainda não validada — teste de dentro do droplet: `openssl s_client -proxy HOST:PORTA -proxy_user U -proxy_pass P -connect smtp.cliente:465 -servername smtp.cliente` deve mostrar `220 ... ESMTP`.
+**Impacto.** `src/services/email-smtp.ts`, `.env.example`, `AGENTS.md`. Deploy: só a env (lida em runtime via `runtimeEnv`, nome montado com `join`) + `tinyproxy` com `ConnectPort 465/587`, `BasicAuth`, firewall para o IPv4 público do droplet (é o IP de saída; Reserved IP é só entrada). Infra ainda não validada — teste de dentro do droplet: `openssl s_client -proxy HOST:PORTA -proxy_user U -proxy_pass P -connect smtp.cliente:465 -servername smtp.cliente` deve mostrar `220 ... ESMTP`.
 
 ---
 
