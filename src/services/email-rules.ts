@@ -1,6 +1,6 @@
 import type { Email, EmailAccount, EmailRule } from "@prisma/client";
 
-import { decryptAccountPassword } from "@/services/email-accounts";
+import { decryptAccountPassword, resolveAccountFromName } from "@/services/email-accounts";
 import {
   ensureEmailOutlookColumns,
   isMissingEmailOutlookColumn,
@@ -219,6 +219,7 @@ async function recordOutgoing(
   mail: { to: string; subject: string; bodyText: string; inReplyTo?: string | null },
 ) {
   const password = decryptAccountPassword(account);
+  const fromName = await resolveAccountFromName(account);
   const sent = await sendSmtpMail(
     {
       email: account.email,
@@ -226,6 +227,7 @@ async function recordOutgoing(
       smtpHost: account.smtpHost,
       smtpPort: account.smtpPort,
       smtpEncryption: account.smtpEncryption,
+      fromName,
     },
     {
       to: mail.to,

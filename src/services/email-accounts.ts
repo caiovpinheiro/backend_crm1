@@ -392,6 +392,28 @@ export function decryptAccountPassword(account: EmailAccount): string {
   return decryptSecret(account.passwordEncrypted);
 }
 
+/**
+ * Nome de exibição para o `From` dos envios pela conta: o nome do dono
+ * (`ownerUserId`). Conta compartilhada sem dono → sem nome (só o endereço).
+ * Nunca falha o envio por causa do nome: qualquer erro vira `undefined`.
+ */
+export async function resolveAccountFromName(
+  account: Pick<EmailAccount, "ownerUserId">,
+): Promise<string | undefined> {
+  if (!account.ownerUserId) return undefined;
+  try {
+    const owner = await prisma.user.findFirst({
+      where: { id: account.ownerUserId },
+      select: { name: true },
+    });
+    const name = owner?.name?.trim();
+    return name ? name : undefined;
+  } catch (err) {
+    log.warn({ err, ownerUserId: account.ownerUserId }, "não resolveu o nome do dono da conta de e-mail");
+    return undefined;
+  }
+}
+
 export async function disconnectEmailAccount(id: string): Promise<boolean> {
   const orgId = getOrgIdOrThrow();
   const result = await prisma.emailAccount.deleteMany({
