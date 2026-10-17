@@ -18,9 +18,10 @@ name: Mirror base image
 # Dockerfiles aceitam `--build-arg BASE_IMAGE=node:22-bookworm-slim`.
 #
 # Quando rodar:
-#   - manualmente (Actions -> Mirror base image -> Run workflow) na primeira
-#     vez e sempre que trocar `BASE_TAG` abaixo (depois ajuste o ARG
-#     `BASE_IMAGE` nos Dockerfiles);
+#   - sozinho em todo push que altere ESTE arquivo (é o que registra o
+#     workflow no GitHub e publica o espelho antes do merge da troca do FROM;
+#     trocar `BASE_TAG` aqui e depois o ARG `BASE_IMAGE` nos Dockerfiles);
+#   - manualmente (Actions -> Mirror base image -> Run workflow);
 #   - no schedule semanal, para pegar os rebuilds de segurança da imagem
 #     oficial — a tag `22-bookworm-slim` é flutuante upstream.
 #
@@ -29,6 +30,9 @@ name: Mirror base image
 # continua batendo depois da troca do FROM.
 
 on:
+  push:
+    paths:
+      - .github/workflows/mirror-base-image.yml
   workflow_dispatch:
   schedule:
     - cron: "17 6 * * 1" # segunda-feira, 06:17 UTC
