@@ -3,7 +3,11 @@ import type { EmailFolder } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { withOrg } from "@/lib/prisma-helpers";
 import { getRequestContext, runWithContext } from "@/lib/request-context";
-import { decryptAccountPassword, type SerializedEmailAccount } from "@/services/email-accounts";
+import {
+  decryptAccountPassword,
+  resolveAccountFromName,
+  type SerializedEmailAccount,
+} from "@/services/email-accounts";
 import { ensureEmailOutlookColumns } from "@/services/email-schema-ensure";
 import { sendSmtpMail } from "@/services/email-smtp";
 import { applyRulesToEmail, normalizeSenderAddress, setSenderSpamRule } from "@/services/email-rules";
@@ -306,6 +310,7 @@ export async function sendEmail(params: {
   const account = await prisma.emailAccount.findFirst({ where: { id: params.accountId } });
   if (!account) throw new Error("Conta de e-mail não encontrada.");
   const password = decryptAccountPassword(account);
+  const fromName = await resolveAccountFromName(account);
   const sent = await sendSmtpMail(
     {
       email: account.email,
@@ -313,6 +318,7 @@ export async function sendEmail(params: {
       smtpHost: account.smtpHost,
       smtpPort: account.smtpPort,
       smtpEncryption: account.smtpEncryption,
+      fromName,
     },
     {
       to: params.to,

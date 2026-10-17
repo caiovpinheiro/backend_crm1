@@ -14,6 +14,7 @@ import {
   type EmailFieldError,
   type EmailOk,
 } from "@/services/email-imap";
+import { buildSmtpMailPayload, type SmtpMailInput } from "@/services/email-smtp-payload";
 import { getSmtpRelayConfig, type SmtpRelayConfig } from "@/services/smtp-relay";
 
 const log = getLogger("email-smtp");
@@ -24,6 +25,8 @@ export type SmtpConnectInput = {
   smtpHost: string;
   smtpPort: number;
   smtpEncryption: EmailEncryption;
+  /** Nome de exibição do `From` (dono da conta). Só usado no envio. */
+  fromName?: string | null;
 };
 
 const CONNECT_TIMEOUT_MS = 15_000;
@@ -312,41 +315,12 @@ export async function testSmtpConnection(input: SmtpConnectInput): Promise<Email
   }
 }
 
-function isBlankHtml(html?: string): boolean {
-  if (!html?.trim()) return true;
-  return html.replace(/<style[\s\S]*?<\/style>/gi, "").replace(/<[^>]+>/g, " ").replace(/&nbsp;/gi, " ").replace(/\s+/g, " ").trim() === "";
-}
-
-function textFromHtml(html?: string): string {
-  if (!html) return "";
-  return html.replace(/<style[\s\S]*?<\/style>/gi, "").replace(/<br\s*\/?>/gi, "\n").replace(/<\/p>/gi, "\n").replace(/<[^>]+>/g, " ").replace(/&nbsp;/gi, " ").replace(/\s+\n/g, "\n").replace(/[ \t]+/g, " ").trim();
-}
-
 export async function sendSmtpMail(
   input: SmtpConnectInput,
-  mail: {
-    to: string;
-    subject: string;
-    text?: string;
-    html?: string;
-    inReplyTo?: string;
-  },
+  mail: SmtpMailInput,
 ): Promise<{ ok: true; messageId: string } | EmailFieldError> {
-  const text = mail.text?.trim() || textFromHtml(mail.html) || undefined;
-  const html = isBlankHtml(mail.html) ? undefined : mail.html;
-  const payload = {
-    from: input.email,
-    to: mail.to,
-    subject: mail.subject,
-    text: text ?? " ",
-    html,
-    ...(mail.inReplyTo
-      ? {
-          inReplyTo: mail.inReplyTo.includes("<") ? mail.inReplyTo : `<${mail.inReplyTo}>`,
-          references: mail.inReplyTo.includes("<") ? mail.inReplyTo : `<${mail.inReplyTo}>`,
-        }
-      : {}),
-  };
+  // From com nome, Content-Language e <html lang> — ver email-smtp-payload.ts.
+  const payload = buildSmtpMailPayload({ email: input.email, fromName: input.fromName }, mail);
   const transport = createTransport(input);
   try {
     const info = await transport.sendMail(payload);
