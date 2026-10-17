@@ -133,6 +133,8 @@ const SCOPED_MODELS = new Set<Prisma.ModelName>([
   "WhatsAppGroup",
   "WhatsAppGroupMember",
   "WhatsAppGroupMessage",
+  // Sessão do visitante do widget de webchat (docs/decisoes/webchat-widget.md).
+  "WebchatSession",
   "QuickReply",
   "MessageTemplate",
   "WhatsAppTemplateConfig",

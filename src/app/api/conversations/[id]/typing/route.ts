@@ -4,6 +4,7 @@ import { withOrgContext } from "@/lib/auth-helpers";
 import { dispatchMetaTyping, resolveTypingTarget } from "@/lib/conversation-typing";
 import { publishTypingEvent } from "@/lib/realtime-events";
 import { getLogger } from "@/lib/logger";
+import { markWebchatAgentTyping } from "@/lib/webchat/agent-typing";
 
 const log = getLogger("api/conversations/[id]/typing");
 
@@ -40,6 +41,10 @@ export async function POST(_request: Request, context: RouteContext) {
         userId: session.user.id,
         userName: session.user.name ?? null,
       });
+
+      if (target.webchat) {
+        void markWebchatAgentTyping(target.organizationId, target.conversationId);
+      }
 
       if (!target.metaTyping) return NextResponse.json({ ok: false });
       // Sem await: a Graph não segura a resposta (nunca lança).

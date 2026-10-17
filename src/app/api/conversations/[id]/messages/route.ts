@@ -181,6 +181,12 @@ export type InboxMessageDto = {
    * (o frontend trata como "herda a conexão anterior", sem marcador).
    */
   channelId?: string | null;
+  /**
+   * Canal da conversa desta mensagem (`whatsapp`, `instagram`, `webchat`…).
+   * Só nas conversas webchat: o histórico (`history=1`) junta os tickets do
+   * contato em todos os canais e o chat mostra o selo de cada bloco.
+   */
+  channel?: string | null;
   /** Mensagem favoritada pelo agente LOGADO (marcador pessoal — não é
    *  compartilhado entre agentes). Alimenta a estrela preenchida no
    *  menu contextual e no bubble. */
@@ -888,15 +894,21 @@ export async function GET(request: Request, context: RouteContext) {
     // mesmo canal): `hasOlderTickets` só promete o que `?history=1` entrega.
     // Sem o `createdAt`, um ticket encerrado mais novo fazia o chat pedir um
     // histórico que nunca vinha.
+    // Webchat: o histórico é do contato em TODOS os canais (encerrados de
+    // qualquer canal + ativos dos outros canais — os ativos do próprio
+    // webchat já estão na página principal). docs/decisoes/webchat-widget.md §3.2.
+    const unifiedHistory = conv.channel === "webchat";
+    const historyTicketWhere: Prisma.ConversationWhereInput = unifiedHistory
+      ? { OR: [{ status: "RESOLVED" }, { channel: { not: conv.channel } }] }
+      : { status: "RESOLVED", ...(conv.channel ? { channel: conv.channel } : {}) };
     const olderTicketsProbe =
       !includeHistory && !before && conv.contactId
         ? prisma.conversation.findFirst({
             where: {
               contactId: conv.contactId,
               id: { not: conv.id },
-              status: "RESOLVED",
               createdAt: { lt: conv.createdAt },
-              ...(conv.channel ? { channel: conv.channel } : {}),
+              ...historyTicketWhere,
             },
             select: { id: true },
           })
@@ -910,17 +922,22 @@ export async function GET(request: Request, context: RouteContext) {
         ? prisma.conversation.findMany({
             where: {
               contactId: conv.contactId,
-              channel: conv.channel,
               id: { not: conv.id },
-              status: "RESOLVED",
               createdAt: { lt: conv.createdAt },
+              ...historyTicketWhere,
             },
             orderBy: { createdAt: "desc" },
-            select: { id: true, number: true, closedAt: true, createdAt: true },
+            select: { id: true, number: true, closedAt: true, createdAt: true, channel: true },
             take: 40,
           })
         : Promise.resolve(
-            [] as { id: string; number: number; closedAt: Date | null; createdAt: Date }[],
+            [] as {
+              id: string;
+              number: number;
+              closedAt: Date | null;
+              createdAt: Date;
+              channel: string | null;
+            }[],
           );
 
     // O Channel da conversa veio no `channelRef`: a sessão de 24h não
@@ -980,6 +997,7 @@ export async function GET(request: Request, context: RouteContext) {
       number: number;
       closedAt: Date | null;
       createdAt: Date | null;
+      channel: string | null;
       rows: (typeof rows)[number][];
     };
     let historyTickets: HistoryTicket[] = [];
@@ -1008,6 +1026,7 @@ export async function GET(request: Request, context: RouteContext) {
           number: pc.number,
           closedAt: pc.closedAt,
           createdAt: pc.createdAt,
+          channel: pc.channel ?? null,
           rows: pRows,
         });
         remaining -= pRows.length;
@@ -1220,6 +1239,9 @@ export async function GET(request: Request, context: RouteContext) {
         favorited: (internalId) => favoritedIds.has(internalId),
       }),
     );
+    if (unifiedHistory) {
+      for (const m of messages) m.channel = conv.channel;
+    }
 
     const channelsMap: Record<string, ConnectionRefDto> = {};
     for (const ch of channelRows) {
@@ -1237,7 +1259,7 @@ export async function GET(request: Request, context: RouteContext) {
     // + mensagens do ticket atual.
     let finalMessages: InboxMessageDto[] = messages;
     if (historyTickets.length > 0) {
-      const mapRows = (rr: typeof rows): InboxMessageDto[] =>
+      const mapRows = (rr: typeof rows, channel: string | null): InboxMessageDto[] =>
         rr.map((r) => ({
           id: r.externalId ?? r.id,
           content: presentContent(r.content),
@@ -1260,6 +1282,7 @@ export async function GET(request: Request, context: RouteContext) {
           catalogOrder: isWhatsappOrderSnapshot(r.catalogOrder) ? r.catalogOrder : null,
           referral: referralFromJson(r.referral),
           sharedContacts: sharedContactsFromJson(r.sharedContacts),
+          ...(unifiedHistory ? { channel } : {}),
         }));
 
       const createdByConv = new Map<string, (typeof lifeEvents)[number]>();
@@ -1288,12 +1311,14 @@ export async function GET(request: Request, context: RouteContext) {
             openedByUserId: opened.userId,
             closedByName: closed.name,
             closedByUserId: closed.userId,
+            ...(unifiedHistory ? { channel: ticket.channel } : {}),
           }),
           createdAt: ticket.createdAt?.toISOString() ?? ticket.closedAt?.toISOString() ?? new Date(0).toISOString(),
           direction: "system",
           messageType: "ticket-separator",
+          ...(unifiedHistory ? { channel: ticket.channel } : {}),
         });
-        historical.push(...mapRows(ticket.rows));
+        historical.push(...mapRows(ticket.rows, ticket.channel));
       }
       const opened = resolveLifecycleEventActor(createdByConv.get(conv.id));
 
@@ -1307,10 +1332,12 @@ export async function GET(request: Request, context: RouteContext) {
           openedAt: conv.createdAt?.toISOString?.() ?? null,
           openedByName: opened.name,
           openedByUserId: opened.userId,
+          ...(unifiedHistory ? { channel: conv.channel } : {}),
         }),
         createdAt: conv.createdAt?.toISOString?.() ?? new Date().toISOString(),
         direction: "system",
         messageType: "ticket-separator",
+        ...(unifiedHistory ? { channel: conv.channel } : {}),
       });
       finalMessages = [...historical, ...messages];
     }
@@ -1603,6 +1630,111 @@ export async function POST(request: Request, context: RouteContext) {
           senderName,
         } satisfies InboxMessageDto,
       }, { status: 201 });
+    }
+
+    // ── Webchat (widget no site da org) ──
+    // Sem API externa: a entrega é o próprio banco — o widget busca em
+    // `GET /api/public/webchat/messages` (sent → delivered) e reporta a
+    // leitura em `/read`. Sempre pelo canal da conversa (override de canal
+    // do composer não se aplica). docs/decisoes/webchat-widget.md §3.6.
+    if (conv.channel === "webchat") {
+      const webchatChannelId = conv.channelId;
+      const savedMsg = await prisma.message.create({
+        data: withOrgFromCtx({
+          conversationId: conv.id,
+          channelId: webchatChannelId ?? undefined,
+          content,
+          direction: "out",
+          messageType: "text",
+          senderName,
+          sendStatus: "sent",
+          replyToId: replyParentInternalId,
+          replyToPreview,
+        }),
+      });
+      void noteMessageChange(savedMsg.organizationId, savedMsg.conversationId, "new", savedMsg.id, savedMsg.externalId);
+
+      try {
+        await prisma.conversation.update({
+          where: { id: conv.id },
+          data: {
+            lastMessageDirection: "out",
+            hasAgentReply: true,
+            hasHumanReply: true,
+            hasError: false,
+          },
+        });
+        await touchChatLastMessageAt({ conversationId: conv.id, message: savedMsg });
+      } catch { /* colunas opcionais */ }
+
+      scheduleCapacityReleasedAfterHumanSend(
+        conv.assignedToId ?? authResult.user.id,
+      );
+
+      void stopAutomationsAfterHumanReply(conv.contactId).then(() =>
+        fireTrigger("message_sent", {
+          contactId: conv.contactId,
+          data: buildMessageTriggerData({
+            channel: "webchat",
+            channelId: webchatChannelId,
+            conversationId: conv.id,
+            content,
+          }),
+        }).catch((err) => log.warn({ err }, "[automation trigger] message_sent")),
+      );
+
+      void logEvent({
+        type: "MESSAGE_SENT",
+        entityType: "MESSAGE",
+        entityId: savedMsg.id,
+        entityLabel: senderName ?? "Mensagem enviada",
+        conversationId: conv.id,
+        contactId: conv.contactId,
+        meta: {
+          preview: content.slice(0, 200),
+          channel: "Webchat",
+          via: "webchat",
+        },
+      });
+
+      try {
+        publishNewMessage({
+          organizationId: conv.organizationId,
+          conversationId: conv.id,
+          contactId: conv.contactId,
+          direction: "out",
+          content,
+          senderName,
+          timestamp: savedMsg.createdAt,
+        });
+      } catch { /* best-effort */ }
+
+      cancelPendingForConversation(conv.id, "agent_reply", authResult.user.id).catch(
+        (err) =>
+          log.warn({ err }, "[scheduled-messages] falha ao cancelar apos envio manual"),
+      );
+
+      return NextResponse.json(
+        {
+          message: {
+            id: savedMsg.id,
+            content,
+            createdAt: savedMsg.createdAt.toISOString(),
+            direction: "out",
+            messageType: "text",
+            senderName,
+            replyToId: replyParentInternalId,
+            replyToPreview,
+            sendStatus: "sent",
+            status: "SENT",
+            channelId: webchatChannelId ?? null,
+            channel: "webchat",
+          } satisfies InboxMessageDto,
+          conversationId: conv.id,
+          ...(reopenedConversationId ? { reopenedConversationId } : {}),
+        },
+        { status: 201 },
+      );
     }
 
     // ── Send via Facebook Messenger / Instagram Direct ──

@@ -482,15 +482,23 @@ class SseBus {
   }
 }
 
-export const sseBus = new SseBus();
+/**
+ * Singleton em `globalThis`: rotas e instrumentation viram bundles diferentes
+ * (mesmo motivo de `api-shutdown.ts`). Sem isso, no modo sem Redis cada rota
+ * tinha o SEU bus — o `publish` de `POST /api/conversations/:id/messages` ou
+ * de `/api/public/webchat/*` nunca chegava aos listeners de
+ * `GET /api/sse/messages` (inbox sem tempo real em dev/réplica única), e os
+ * sweepers eram agendados uma vez por bundle.
+ */
+const g = globalThis as unknown as { __crmSseBus?: SseBus; __crmSseBusBootstrapped?: boolean };
+
+export const sseBus: SseBus = g.__crmSseBus ?? (g.__crmSseBus = new SseBus());
 
 // Lazily start background services on first module load.
 // This runs server-side only (sse-bus is never imported by client components).
-let _bootstrapped = false;
-
 function bootstrapBackgroundServices() {
-  if (_bootstrapped) return;
-  _bootstrapped = true;
+  if (g.__crmSseBusBootstrapped) return;
+  g.__crmSseBusBootstrapped = true;
 
   // Sweepers rodam em UM processo só. Em produção (workers externos):
   //   - APP_MODE=api NÃO sobe nenhum (senão duplica wait_for_reply / sessão).

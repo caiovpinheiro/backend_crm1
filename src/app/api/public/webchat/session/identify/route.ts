@@ -1,0 +1,60 @@
+import { NextResponse } from "next/server";
+
+import { getLogger } from "@/lib/logger";
+import { inWebchatOrg, readJsonObject, webchatRateLimit } from "@/lib/webchat/http";
+import {
+  WebchatIdentifyError,
+  identifyWebchatVisitor,
+  parseWebchatIdentity,
+} from "@/lib/webchat/identify";
+import {
+  authenticateWebchatVisitor,
+  reissueWebchatToken,
+  webchatError,
+} from "@/lib/webchat/session";
+
+const log = getLogger("api/public/webchat/identify");
+
+/**
+ * POST /api/public/webchat/session/identify  (Bearer do visitante)
+ *
+ * Body `{ name?, email?, phone? }` (ao menos um). Cruza e-mail/telefone com
+ * contato existente da org e funde (§3.2).
+ * 200 → `{ contactId, merged, matchedBy, token, expiresAt }` — o token é
+ * reemitido (o contato pode ter mudado).
+ */
+export async function POST(request: Request) {
+  const auth = await authenticateWebchatVisitor(request);
+  if (!auth.ok) return auth.response;
+  const { channel, session } = auth.visitor;
+
+  const rl = await webchatRateLimit("POST /api/public/webchat/session/identify", [
+    { profile: "webchat.message", scope: "visitor", id: session.id },
+  ]);
+  if (!rl.ok) return rl.response;
+
+  const parsed = await readJsonObject(request);
+  if (!parsed.ok) return parsed.response;
+
+  try {
+    const identity = parseWebchatIdentity(parsed.body);
+    return await inWebchatOrg(channel.organizationId, async () => {
+      const res = await identifyWebchatVisitor({
+        organizationId: channel.organizationId,
+        session,
+        identity,
+      });
+      const { token, expiresAt } = await reissueWebchatToken(session, res.contactId);
+      return NextResponse.json(
+        { ...res, token, expiresAt: expiresAt.toISOString() },
+        { headers: rl.headers },
+      );
+    });
+  } catch (err) {
+    if (err instanceof WebchatIdentifyError) {
+      return webchatError(400, "INVALID_BODY", err.message, rl.headers);
+    }
+    log.error({ err, visitorId: session.id }, "identify do webchat falhou");
+    return NextResponse.json({ message: "Erro ao identificar o visitante." }, { status: 500 });
+  }
+}

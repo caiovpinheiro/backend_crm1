@@ -52,6 +52,8 @@ export type TypingTarget = {
   channelId: string | null;
   /** Canal Meta configurado e com recibo de leitura ligado. */
   metaTyping: boolean;
+  /** Conversa do widget de webchat (o visitante vê "digitando…" por polling). */
+  webchat?: boolean;
 };
 
 type TypingSession = Parameters<typeof requireConversationAccessAndLoad>[0] & {
@@ -108,6 +110,7 @@ export async function resolveTypingTarget(
       where,
       select: {
         ...CONVERSATION_ACCESS_SELECT,
+        channel: true,
         channelRef: { select: { config: true } },
       },
     }),
@@ -122,6 +125,7 @@ export async function resolveTypingTarget(
     metaTyping: metaTypingEnabled(
       conv.channelRef?.config as Record<string, unknown> | null | undefined,
     ),
+    webchat: (conv as { channel?: string | null }).channel === "webchat",
   };
   if (orgId && conv.organizationId === orgId) {
     await cache.set(key, target, TYPING_ACCESS_TTL_SEC);

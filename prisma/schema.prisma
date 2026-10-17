@@ -193,6 +193,7 @@ model Organization {
   keepImports              KeepImport[]
   keepCategories           KeepCategory[]
   whatsAppGroups           WhatsAppGroup[]
+  webchatSessions          WebchatSession[]
   whatsAppGroupMembers     WhatsAppGroupMember[]
   whatsAppGroupMessages    WhatsAppGroupMessage[]
 
@@ -1218,6 +1219,10 @@ model Contact {
   messengerPsid          String?        @map("messenger_psid")
   /// IGSID (Instagram-Scoped ID) da Instagram Messaging API — análogo ao PSID.
   instagramIgsid         String?        @map("instagram_igsid")
+  /// Visitante do widget de webchat (= `WebchatSession.id`). Análogo ao
+  /// PSID/IGSID: um visitante = um contato. Ao se identificar e casar com um
+  /// contato existente, o id passa para o sobrevivente do merge.
+  webchatVisitorId       String?        @map("webchat_visitor_id")
 
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
@@ -1243,6 +1248,7 @@ model Contact {
   productStakeholders    ProductStakeholder[]
   emails                 Email[]
   calls                  Call[]
+  webchatSessions        WebchatSession[]
 
   /// Última mensagem de CHAT do contato em qualquer conversa (mesmo recorte de
   /// `conversations.lastMessageAt` — `isListChatMessage`) e a direção dela
@@ -1263,6 +1269,7 @@ model Contact {
   @@unique([organizationId, whatsappBsuid])
   @@unique([organizationId, messengerPsid])
   @@unique([organizationId, instagramIgsid])
+  @@unique([organizationId, webchatVisitorId])
   // Índices removidos (write tax no webhook, prefixo de composto / unique):
   //   2026-09-06: (org,whatsappJid), (org,leadScore), (org,companyId),
   //     (org,updatedAt), (org,assignedToId) — 0 scans/12d em prod
@@ -3656,6 +3663,10 @@ model Channel {
   /// ao roteamento padrão em vez de quebrar.
   defaultPipelineId String?
   defaultPipeline   Pipeline?       @relation(fields: [defaultPipelineId], references: [id], onDelete: SetNull)
+  /// Chave pública do canal WEBCHAT ("wc_" + 24 chars) — vai no snippet do
+  /// site. Coluna própria (e não no `config`) porque toda chamada pública
+  /// `/api/public/webchat/*` resolve o canal por ela. Null nos outros tipos.
+  publicKey         String?         @unique
   createdAt         DateTime        @default(now())
   updatedAt         DateTime        @updatedAt
 
@@ -3666,6 +3677,7 @@ model Channel {
   metaWebhookEvents MetaWebhookEvent[]
   productMetaLinks  ProductMetaLink[]
   whatsAppGroups    WhatsAppGroup[]
+  webchatSessions   WebchatSession[]
 
   @@unique([organizationId, number])
   @@index([organizationId])
@@ -3692,6 +3704,9 @@ enum ChannelProvider {
   META_CLOUD_API
   BAILEYS_MD
   META_INSTAGRAM_LOGIN
+  /// Widget de chat no site da org (docs/decisoes/webchat-widget.md). Sem
+  /// handshake externo: nasce CONNECTED.
+  WEBCHAT
 }
 
 enum ChannelStatus {
@@ -6994,4 +7009,33 @@ model OrgNumberCounter {
 
   @@id([organizationId, model])
   @@map("org_number_counters")
+}
+
+/// Sessão do visitante do widget de webchat (docs/decisoes/webchat-widget.md
+/// §3.2). `id` = visitorId (vai no JWT e em `Contact.webchatVisitorId`).
+/// Tenant-scoped. Nunca guarda IP cru (só `ipHash`) nem o token (só o sha256).
+model WebchatSession {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  channelId      String
+  channel        Channel      @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  /// Null até o visitante escrever ou se identificar: abrir a página não
+  /// cria contato. Merge/identify troca para o contato sobrevivente.
+  contactId      String?
+  contact        Contact?     @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  tokenHash      String       @unique
+  expiresAt      DateTime
+  lastSeenAt     DateTime
+  firstUrl       String?
+  lastUrl        String?
+  referrer       String?
+  utm            Json?
+  userAgent      String?
+  ipHash         String?
+  createdAt      DateTime     @default(now())
+
+  @@index([organizationId, channelId, lastSeenAt])
+  @@index([contactId])
+  @@map("webchat_sessions")
 }

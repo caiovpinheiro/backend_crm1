@@ -284,7 +284,7 @@ export async function notifyInboundMessage(params: {
   contactId: string;
   contactName: string;
   preview: string;
-  channel?: "WhatsApp" | "Email" | "Instagram" | "Meta";
+  channel?: "WhatsApp" | "Email" | "Instagram" | "Meta" | "Webchat";
 }): Promise<void> {
   if (!ensureConfigured()) {
     const { isFcmConfigured } = await import("@/lib/fcm");

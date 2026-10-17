@@ -21,6 +21,8 @@ const SENSITIVE_FIELDS: Record<ChannelProvider, ReadonlyArray<string>> = {
   META_CLOUD_API: ["accessToken", "appSecret", "verifyToken"],
   BAILEYS_MD: [],
   META_INSTAGRAM_LOGIN: ["accessToken", "appSecret", "verifyToken"],
+  // Webchat: config sem segredo (docs/decisoes/webchat-widget.md §3.1).
+  WEBCHAT: [],
 };
 
 /** Recupera os campos sensiveis configurados para um provider. */

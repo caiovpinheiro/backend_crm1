@@ -4,8 +4,14 @@ import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { requireChannelScope } from "@/lib/authz/resource-policy";
 import { enqueueBaileysControl } from "@/lib/queue";
-import { deleteChannel, getChannelById, updateChannel } from "@/services/channels";
+import {
+  deleteChannel,
+  getChannelById,
+  updateChannel,
+  withWebchatDefaults,
+} from "@/services/channels";
 import { getLogger } from "@/lib/logger";
+import { WebchatConfigError } from "@/lib/webchat/config";
 
 const log = getLogger("api/channels/[id]");
 
@@ -21,6 +27,7 @@ const CHANNEL_TYPES = new Set<string>([
 
 const CHANNEL_PROVIDERS = new Set<string>([
   "META_CLOUD_API",
+  "WEBCHAT",
 ]);
 
 function isChannelType(v: unknown): v is ChannelType {
@@ -98,6 +105,18 @@ export async function PUT(request: Request, context: RouteContext) {
       }
       patch.provider = b.provider;
     }
+    // Webchat não troca de tipo/provedor (nem vira webchat por PUT): a
+    // `publicKey` só nasce no POST.
+    const isWebchat = existing.provider === "WEBCHAT";
+    if (
+      (patch.type !== undefined && (patch.type === "WEBCHAT") !== isWebchat) ||
+      (patch.provider !== undefined && (patch.provider === "WEBCHAT") !== isWebchat)
+    ) {
+      return NextResponse.json(
+        { message: "Tipo/provedor de canal Webchat não pode ser alterado." },
+        { status: 400 },
+      );
+    }
     if (b.config !== undefined) {
       if (b.config !== null && typeof b.config !== "object") {
         return NextResponse.json({ message: "config deve ser um objeto." }, { status: 400 });
@@ -134,13 +153,19 @@ export async function PUT(request: Request, context: RouteContext) {
     }
 
     const channel = await updateChannel(id, patch);
-    return NextResponse.json({ channel });
+    return NextResponse.json({ channel: await withWebchatDefaults(channel) });
   } catch (e: unknown) {
+    if (e instanceof WebchatConfigError) {
+      return NextResponse.json({ message: e.message }, { status: 400 });
+    }
     log.error({ err: e }, "PUT falhou");
     const msg = e instanceof Error ? e.message : "Erro ao atualizar canal.";
     return NextResponse.json({ message: msg }, { status: 500 });
   }
 }
+
+/** Alias do PUT (o PUT já é parcial): painel do Webchat pode usar PATCH. */
+export const PATCH = PUT;
 
 export async function DELETE(_request: Request, context: RouteContext) {
   try {
