@@ -1,0 +1,108 @@
+name: Mirror base image
+
+# Espelha a imagem base dos Dockerfiles (`node:22-bookworm-slim`) no GHCR
+# deste repositório: ghcr.io/<owner>/<repo>/node:22-bookworm-slim.
+#
+# Por quê: em 17/10/2026 três builds da main falharam com
+# "toomanyrequests: Data limit exceeded" ao resolver
+# `public.ecr.aws/docker/library/node`. A cota anônima do ECR Public é por
+# IP e os runners hospedados do GitHub a compartilham — não há nada a fazer
+# no nosso lado além de parar de depender dela no caminho crítico do deploy.
+# O build-and-deploy.yml já faz `docker login ghcr.io` com o GITHUB_TOKEN
+# antes do build, então o `FROM` dos Dockerfiles aponta para o espelho e o
+# ECR Public / Docker Hub só são tocados aqui, uma vez por semana.
+#
+# Sem secrets novos: o GITHUB_TOKEN com `packages: write` cria/atualiza o
+# pacote, que fica vinculado a este repositório (Actions do repo têm acesso
+# automaticamente). Para `docker build` local sem login no GHCR, os
+# Dockerfiles aceitam `--build-arg BASE_IMAGE=node:22-bookworm-slim`.
+#
+# Quando rodar:
+#   - sozinho em todo push que altere ESTE arquivo (é o que registra o
+#     workflow no GitHub e publica o espelho antes do merge da troca do FROM;
+#     trocar `BASE_TAG` aqui e depois o ARG `BASE_IMAGE` nos Dockerfiles);
+#   - manualmente (Actions -> Mirror base image -> Run workflow);
+#   - no schedule semanal, para pegar os rebuilds de segurança da imagem
+#     oficial — a tag `22-bookworm-slim` é flutuante upstream.
+#
+# `docker buildx imagetools create` copia o índice multi-arch inteiro
+# preservando os digests das camadas, então o cache `type=gha` do build
+# continua batendo depois da troca do FROM.
+
+on:
+  push:
+    paths:
+      - .github/workflows/mirror-base-image.yml
+  workflow_dispatch:
+  schedule:
+    - cron: "17 6 * * 1" # segunda-feira, 06:17 UTC
+
+concurrency:
+  group: mirror-base-image
+  cancel-in-progress: false
+
+env:
+  BASE_TAG: 22-bookworm-slim
+  # Origens em ordem de preferência; a próxima só é tentada se a anterior
+  # falhar (cota, rede). Ambas servem a mesma imagem oficial do Node.
+  SOURCES: public.ecr.aws/docker/library/node docker.io/library/node
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve target
+        id: target
+        run: |
+          # GHCR exige namespace em minúsculas.
+          REPO=$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')
+          echo "image=ghcr.io/$REPO/node:$BASE_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Copy image to GHCR
+        env:
+          TARGET: ${{ steps.target.outputs.image }}
+        run: |
+          ok=0
+          for src in $SOURCES; do
+            ref="$src:$BASE_TAG"
+            for attempt in 1 2; do
+              echo "::group::imagetools create $TARGET <- $ref (tentativa $attempt)"
+              if docker buildx imagetools create --tag "$TARGET" "$ref"; then
+                ok=1
+              fi
+              echo "::endgroup::"
+              [ "$ok" = 1 ] && break
+              sleep 20
+            done
+            [ "$ok" = 1 ] && break
+            echo "::warning::Não foi possível copiar de $ref — tentando a próxima origem."
+          done
+          if [ "$ok" != 1 ]; then
+            echo "::error::Nenhuma origem respondeu; espelho NÃO atualizado (a tag anterior continua servindo)."
+            exit 1
+          fi
+          echo "Espelho publicado:"
+          docker buildx imagetools inspect "$TARGET"
+
+      # Mesmo caminho do build-and-deploy.yml (buildx + credencial do
+      # GITHUB_TOKEN): se isto passa, o `FROM` dos Dockerfiles resolve.
+      - name: Smoke build from the mirror
+        env:
+          TARGET: ${{ steps.target.outputs.image }}
+        run: |
+          dir=$(mktemp -d)
+          printf 'FROM %s\nRUN node --version && npm --version\n' "$TARGET" > "$dir/Dockerfile"
+          docker buildx build --pull --platform linux/amd64 --output type=cacheonly "$dir"
