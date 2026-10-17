@@ -1,6 +1,14 @@
 # syntax=docker/dockerfile:1
 
-FROM public.ecr.aws/docker/library/node:22-bookworm-slim AS builder
+# Imagem base vem do espelho no GHCR deste repositório (alimentado por
+# .github/workflows/mirror-base-image.yml), não do ECR Public: a cota anônima
+# do public.ecr.aws é por IP e os runners do GitHub a compartilham — em
+# 17/10/2026 três builds da main caíram com "toomanyrequests: Data limit
+# exceeded". O build-and-deploy.yml já faz login no GHCR antes do build.
+# Build local sem login no GHCR: --build-arg BASE_IMAGE=node:22-bookworm-slim
+ARG BASE_IMAGE=ghcr.io/caiovpinheiro/backend_crm1/node:22-bookworm-slim
+
+FROM ${BASE_IMAGE} AS builder
 WORKDIR /app
 RUN apt-get update -y && apt-get install -y --no-install-recommends openssl ca-certificates && rm -rf /var/lib/apt/lists/*
 
@@ -36,7 +44,7 @@ RUN --mount=type=cache,target=/app/.next/cache \
 # Ver scripts/build-workers.mjs para os entry points compilados.
 RUN npm run build:workers
 
-FROM public.ecr.aws/docker/library/node:22-bookworm-slim AS runner
+FROM ${BASE_IMAGE} AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
