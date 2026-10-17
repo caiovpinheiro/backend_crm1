@@ -2,12 +2,13 @@ import type { ChannelProvider, ChannelType } from "@prisma/client";
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
-import { createChannel, getChannels } from "@/services/channels";
+import { createChannel, getChannels, withWebchatDefaults } from "@/services/channels";
 import { channelsSpec } from "@/services/startup-cache";
 import { respondWithCachedJson } from "@/lib/cache/response-cache";
 import { getLogger } from "@/lib/logger";
 import { ServerTiming } from "@/lib/server-timing";
 import { timedJson } from "@/lib/server-timing-response";
+import { WebchatConfigError } from "@/lib/webchat/config";
 
 const log = getLogger("api/channels");
 
@@ -22,6 +23,7 @@ const CHANNEL_TYPES = new Set<string>([
 const CHANNEL_PROVIDERS = new Set<string>([
   "META_CLOUD_API",
   "BAILEYS_MD",
+  "WEBCHAT",
 ]);
 
 function isChannelType(v: unknown): v is ChannelType {
@@ -74,7 +76,10 @@ export async function POST(request: Request) {
       if (!isChannelType(b.type)) {
         return NextResponse.json({ message: "Tipo de canal inválido." }, { status: 400 });
       }
-      if (!isChannelProvider(b.provider)) {
+      // Webchat não tem provedor externo: type=WEBCHAT é sempre provider=WEBCHAT
+      // (o dialog antigo mandava META_CLOUD_API). WEBCHAT só vale com esse tipo.
+      const provider = b.type === "WEBCHAT" ? "WEBCHAT" : b.provider;
+      if (!isChannelProvider(provider) || (provider === "WEBCHAT" && b.type !== "WEBCHAT")) {
         return NextResponse.json({ message: "Provedor inválido." }, { status: 400 });
       }
 
@@ -90,13 +95,16 @@ export async function POST(request: Request) {
       const channel = await createChannel({
         name,
         type: b.type,
-        provider: b.provider,
+        provider,
         config,
         phoneNumber,
       });
 
-      return NextResponse.json({ channel }, { status: 201 });
+      return NextResponse.json({ channel: await withWebchatDefaults(channel) }, { status: 201 });
     } catch (e: unknown) {
+      if (e instanceof WebchatConfigError) {
+        return NextResponse.json({ message: e.message }, { status: 400 });
+      }
       log.error({ err: e }, "POST falhou");
       const msg = e instanceof Error ? e.message : "Erro ao criar canal.";
       return NextResponse.json({ message: msg }, { status: 500 });

@@ -189,6 +189,13 @@ export async function mergeContacts(
         data: { contactId: keepId },
       });
 
+      // Visitante do webchat: a sessão do widget acompanha o contato (a FK
+      // em cascata apagaria a sessão e o visitante perderia a conversa).
+      await tx.webchatSession.updateMany({
+        where: { contactId: removeId },
+        data: { contactId: keepId },
+      });
+
       // Finalmente, descarta o duplicado. Cascades já não vão derrubar
       // mais nada útil porque já reapontamos tudo.
       await tx.contact.delete({ where: { id: removeId } });
