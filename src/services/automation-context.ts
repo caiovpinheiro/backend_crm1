@@ -282,8 +282,11 @@ export function rememberClickedOption(
   const clicked =
     messageContent.trim() || (option?.title || option?.text || "").trim();
   if (!clicked) return variables;
-  const next = { ...variables, lastResponse: clicked };
-  if (next[""] === messageContent || next[""] === clicked) delete next[""];
+  const next: Record<string, unknown> = { ...variables, lastResponse: clicked };
+  const blankKey = "";
+  if (next[blankKey] === messageContent || next[blankKey] === clicked) {
+    delete next[blankKey];
+  }
   return next;
 }
 
