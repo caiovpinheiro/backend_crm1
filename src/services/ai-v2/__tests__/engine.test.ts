@@ -2311,6 +2311,19 @@ describe("processV2Turn — correções do motor", () => {
     expect(logged.reply).toContain("Me conta");
   });
 
+  it("resposta e saída barradas por repetição: não fica em silêncio, sai pela saída do assunto", async () => {
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: baseConfig(), active: true });
+    mocks.callLLM.mockResolvedValue(llmOut({
+      reply: "Para consultar os pedidos em aberto, acesse o painel, toque em Pedidos e filtre por situação para ver o que ainda falta concluir na sua conta.",
+    }));
+    mocks.sendText.mockResolvedValue({ sent: false, reason: "near_duplicate" });
+    const result = await run("Quero consultar os pedidos que faltam na minha conta");
+    expect(result.handoff).toBe(true);
+    expect(mocks.simpleHandoff).toHaveBeenCalled();
+    mocks.sendText.mockReset();
+    mocks.sendText.mockResolvedValue({ sent: true });
+  });
+
   it("explicação barrada por repetição: o envio ignora o fecho e a saída pergunta o que ficou confuso", async () => {
     const endingPhrase = "Posso te ajudar em mais alguma coisa?";
     const config = baseConfig({ replyEnding: { info: { enabled: true, phrases: [endingPhrase] } } } as Partial<V2AgentConfig>);

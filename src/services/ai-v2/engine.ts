@@ -2780,6 +2780,22 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       } else {
         const alt = await sendReply(fallback);
         if (alt.sent) sentReply = fallback;
+        else if (!anyHandoff && !anyClose) {
+          // A saída também foi barrada (o cliente repete o mesmo pedido e o
+          // agente só teria o mesmo a dizer): o cliente ficava sem nada e a
+          // conversa parada, porque o encerramento por inatividade espera a
+          // última mensagem ser do agente. Sai pela saída do assunto.
+          const stalledAction = config.limits.stalledExchangesAction;
+          traceStep("resposta", `Resposta e saída barradas por repetição → ${stalledAction === "close" ? "encerra" : "transfere pela saída do assunto, com o contexto"}`);
+          if (stalledAction === "close") {
+            anyClose = true;
+            llmOutput.concluded = true;
+          } else {
+            anyHandoff = true;
+            llmOutput.handoff = true;
+            noteV2Fact("handoffCause", "limit", { keepFirst: true });
+          }
+        }
       }
     }
     // Não enviada fica fora do log do turno: antes o log dizia que o agente
