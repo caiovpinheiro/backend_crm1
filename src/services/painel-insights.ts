@@ -53,6 +53,9 @@ export async function getPainelInsights(input: {
   const pipe = input.pipelineIds;
   const wantInbound = input.inboundOwners || input.stageIds.length > 0;
 
+  // Sai da lista do consultor se, depois do inbound, houve saída pública do
+  // consultor (human), da campanha (`Campanha:`) ou da automação (bot sem
+  // agente de IA). Agente de IA continua de fora: tem `aiAgentUserId`.
   const inboundRows = wantInbound && pipe.length
     ? await db().$queryRaw<
         { stageId: string; ownerId: string; ownerName: string; cnt: bigint }[]
@@ -83,8 +86,15 @@ export async function getPainelInsights(input: {
                   AND reply."organizationId" = ${orgId}
                   AND reply.direction = 'out'
                   AND reply."isPrivate" = false
-                  AND reply."authorType" = 'human'::"MessageAuthorType"
                   AND reply."createdAt" > m."createdAt"
+                  AND (
+                    reply."authorType" = 'human'::"MessageAuthorType"
+                    OR (
+                      reply."authorType" = 'bot'::"MessageAuthorType"
+                      AND reply."aiAgentUserId" IS NULL
+                      AND NULLIF(btrim(reply."senderName"), '') IS NOT NULL
+                    )
+                  )
               )
           )
         GROUP BY 1, 2, 3
