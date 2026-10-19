@@ -367,6 +367,90 @@ export async function connectEmailAccount(
   );
 }
 
+/**
+ * Edita servidores, senha, visibilidade e opções de uma conta já conectada.
+ * Campo ausente mantém o valor atual; `password` vazia mantém a senha. O
+ * endereço não muda (outro endereço = outra conta). Validação e normalização
+ * são as mesmas do connect (`parseConnectInput` sobre o merge) e a conexão
+ * IMAP → SMTP é testada antes de gravar — nada é salvo se o teste falhar.
+ */
+export async function updateEmailAccountConnection(
+  account: EmailAccount,
+  body: Record<string, unknown>,
+  actorUserId: string,
+): Promise<{ ok: true; account: SerializedEmailAccount } | EmailFieldError> {
+  const newPassword = typeof body.password === "string" ? body.password : "";
+  const merged: Record<string, unknown> = {
+    email: account.email,
+    password: newPassword || decryptAccountPassword(account),
+    imapHost: readRaw(body, "imapHost", "imap_host") ?? account.imapHost,
+    imapPort: readRaw(body, "imapPort", "imap_port") ?? account.imapPort,
+    imapEncryption: readRaw(body, "imapEncryption", "imap_encryption") ?? account.imapEncryption,
+    smtpHost: readRaw(body, "smtpHost", "smtp_host") ?? account.smtpHost,
+    smtpPort: readRaw(body, "smtpPort", "smtp_port") ?? account.smtpPort,
+    smtpEncryption: readRaw(body, "smtpEncryption", "smtp_encryption") ?? account.smtpEncryption,
+    visibility: readRaw(body, "visibility") ?? account.visibility,
+    groupInThreads: readRaw(body, "groupInThreads", "group_in_threads") ?? account.groupInThreads,
+    createContactsForReplies:
+      readRaw(body, "createContactsForReplies", "create_contacts_for_replies") ?? account.createContactsForReplies,
+  };
+  const parsed = parseConnectInput(merged);
+  if (isEmailFieldError(parsed)) return parsed;
+
+  const tested = await testEmailAccountConnection(parsed);
+  if (!tested.ok) {
+    log.warn(
+      { accountId: account.id, field: tested.field, email: maskEmail(account.email), message: tested.message },
+      "falha ao testar conexão ao editar conta de e-mail",
+    );
+    return tested;
+  }
+
+  // Mesmo motivo do connect: os callbacks de imapflow/nodemailer derrubam o
+  // ALS — recoloca o tenant antes de gravar.
+  const current = getRequestContext();
+  return runWithContext(
+    {
+      organizationId: account.organizationId,
+      userId: current?.userId ?? actorUserId,
+      isSuperAdmin: current?.isSuperAdmin ?? false,
+      actor: current?.actor ?? { type: "HUMAN", label: actorUserId },
+    },
+    async () => {
+      const updated = await prisma.emailAccount.update({
+        where: { id: account.id },
+        data: {
+          ...(newPassword ? { passwordEncrypted: encryptSecret(newPassword) } : {}),
+          imapHost: parsed.imapHost,
+          imapPort: parsed.imapPort,
+          imapEncryption: parsed.imapEncryption,
+          smtpHost: parsed.smtpHost,
+          smtpPort: parsed.smtpPort,
+          smtpEncryption: parsed.smtpEncryption,
+          visibility: parsed.visibility,
+          groupInThreads: parsed.groupInThreads,
+          createContactsForReplies: parsed.createContactsForReplies,
+          ownerUserId: parsed.visibility === "PERSONAL" ? (account.ownerUserId ?? actorUserId) : null,
+        },
+      });
+
+      log.info(
+        { accountId: updated.id, email: maskEmail(updated.email), passwordChanged: Boolean(newPassword) },
+        "conta de e-mail editada",
+      );
+
+      return {
+        ok: true,
+        account: {
+          ...serializeBase(updated),
+          unreadCount: 0,
+          folderUnread: { inbox: 0, sent: 0, spam: 0, trash: 0 },
+        },
+      };
+    },
+  );
+}
+
 export async function listAccessibleAccountIds(opts: {
   userId: string;
   canViewShared: boolean;
