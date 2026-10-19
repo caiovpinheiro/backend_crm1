@@ -10,6 +10,7 @@ import {
 } from "@/services/email-accounts";
 import { ensureEmailOutlookColumns } from "@/services/email-schema-ensure";
 import { sendSmtpMail } from "@/services/email-smtp";
+import type { SmtpMailAttachment } from "@/services/email-smtp-payload";
 import { applyRulesToEmail, normalizeSenderAddress, setSenderSpamRule } from "@/services/email-rules";
 
 const EMAIL_LIST_SELECT = {
@@ -305,6 +306,8 @@ export async function sendEmail(params: {
   bodyText?: string;
   bodyHtml?: string;
   inReplyTo?: string;
+  /** Anexos em memória; vão só no envio — a cópia em SENT não os guarda. */
+  attachments?: SmtpMailAttachment[];
 }) {
   await ensureEmailOutlookColumns();
   const account = await prisma.emailAccount.findFirst({ where: { id: params.accountId } });
@@ -326,6 +329,7 @@ export async function sendEmail(params: {
       text: params.bodyText,
       html: params.bodyHtml,
       inReplyTo: params.inReplyTo,
+      attachments: params.attachments,
     },
   );
   if (!sent.ok) throw new Error(sent.message);
