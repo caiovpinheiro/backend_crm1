@@ -12,12 +12,20 @@
 
 export const EMAIL_CONTENT_LANGUAGE = "pt-BR";
 
+/** Anexo já em memória (o Nodemailer aceita `content: Buffer` direto). */
+export type SmtpMailAttachment = {
+  filename: string;
+  content: Buffer;
+  contentType?: string;
+};
+
 export type SmtpMailInput = {
   to: string;
   subject: string;
   text?: string;
   html?: string;
   inReplyTo?: string;
+  attachments?: SmtpMailAttachment[];
 };
 
 export type SmtpMailPayload = {
@@ -29,6 +37,7 @@ export type SmtpMailPayload = {
   headers: Record<string, string>;
   inReplyTo?: string;
   references?: string;
+  attachments?: SmtpMailAttachment[];
 };
 
 export function isBlankHtml(html?: string): boolean {
@@ -97,5 +106,6 @@ export function buildSmtpMailPayload(
     ...(html ? { html } : {}),
     headers: { "Content-Language": EMAIL_CONTENT_LANGUAGE },
     ...(replyRef ? { inReplyTo: replyRef, references: replyRef } : {}),
+    ...(mail.attachments?.length ? { attachments: mail.attachments } : {}),
   };
 }
