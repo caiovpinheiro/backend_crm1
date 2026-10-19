@@ -62,6 +62,21 @@ describe("passada de inatividade", () => {
     mocks.send.mockResolvedValue({ sent: true });
   });
 
+  it("ticket novo com a pergunta pós-encerramento sem resposta: fecha no prazo, sem mensagem", async () => {
+    const config = { name: "Agente", tone: "Objetivo", autonomyMode: "auto", inactivity: { enabled: true, closeAfter: 30, closeMessage: "Vou encerrar por aqui." } };
+    mocks.queryRaw.mockResolvedValue([row({ simple_config: config, post_close_asked: true, last_out_at: minutesAgo(40), last_inbound_at: minutesAgo(41) })]);
+    expect(await processIdleV2(NOW)).toEqual({ nudged: 0, closed: 1 });
+    expect(mocks.send).not.toHaveBeenCalled();
+    expect(mocks.closeState).toHaveBeenCalledTimes(1);
+    expect(mocks.logTurn).toHaveBeenCalledWith(expect.objectContaining({ prompt: "inactivity", closed: true }));
+
+    // Antes do prazo: nada.
+    vi.clearAllMocks();
+    mocks.queryRaw.mockResolvedValue([row({ simple_config: config, post_close_asked: true, last_out_at: minutesAgo(10), last_inbound_at: minutesAgo(11) })]);
+    expect(await processIdleV2(NOW)).toEqual({ nudged: 0, closed: 0 });
+    expect(mocks.closeState).not.toHaveBeenCalled();
+  });
+
   it("sem conversas paradas: não carrega nada e não registra", async () => {
     mocks.queryRaw.mockResolvedValue([]);
     expect(await processIdleV2(NOW)).toEqual({ nudged: 0, closed: 0 });
@@ -206,11 +221,12 @@ describe("passada de inatividade", () => {
     expect(mocks.queryRaw.mock.calls[0][1]).toBe(NOW);
     const sql = String(mocks.queryRaw.mock.calls[0][0]);
     // Só conversas abertas cuja última mensagem enviada é do próprio agente,
-    // com inatividade ligada, fora da fila de pessoas e não encerradas.
+    // com inatividade ligada, fora da fila de pessoas e não encerradas — menos
+    // o ticket novo que espera a resposta da pergunta pós-encerramento.
     expect(sql).toContain(`c."status" = 'OPEN'`);
     expect(sql).toContain(`last_out."aiAgentUserId" = c."assignedToId"`);
     expect(sql).toContain(`'inactivity'->>'enabled') = 'true'`);
-    expect(sql).toContain(`s."owner" <> 'pessoa' AND s."stage" <> 'closed'`);
+    expect(sql).toContain(`s."owner" <> 'pessoa' AND (s."stage" <> 'closed' OR s."counters"->>'postCloseAsked' = 'true')`);
   });
 });
 

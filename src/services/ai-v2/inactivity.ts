@@ -184,6 +184,8 @@ type IdleRow = {
   last_inbound_at: Date | null;
   idle_follow_up?: { anchorAt?: string; sent?: number; lastAt?: string; kind?: V2IdleKind } | null;
   has_state?: boolean;
+  /** Ticket novo depois de um encerramento: o agente perguntou se é algo novo e espera. */
+  post_close_asked?: boolean;
 };
 
 const db = prismaBase as unknown as {
@@ -212,7 +214,8 @@ async function listIdleV2(now: Date): Promise<IdleRow[]> {
             last_out."content" AS last_out_content, last_out."createdAt" AS last_out_at,
             c."lastInboundAt" AS last_inbound_at,
             s."counters"->'idleFollowUp' AS idle_follow_up,
-            (s."id" IS NOT NULL) AS has_state
+            (s."id" IS NOT NULL) AS has_state,
+            (s."stage" = 'closed' AND s."counters"->>'postCloseAsked' = 'true') AS post_close_asked
        FROM "conversations" c
        JOIN "users" u ON u."id" = c."assignedToId" AND u."type" = 'AI'
        JOIN "ai_agent_configs" a ON a."userId" = u."id" AND a."active" = true AND a."engine" = 'simple'
@@ -232,7 +235,9 @@ async function listIdleV2(now: Date): Promise<IdleRow[]> {
         -- última foi de uma pessoa ou de um fluxo, não encerra.
         AND last_out."aiAgentUserId" = c."assignedToId"
         AND (a."simpleConfig"->'inactivity'->>'enabled') = 'true'
-        AND (s."id" IS NULL OR (s."owner" <> 'pessoa' AND s."stage" <> 'closed'))
+        -- Encerrado fica de fora, menos o ticket novo em que o agente perguntou
+        -- "é algo novo?" e o cliente não respondeu: ele ficava aberto para sempre.
+        AND (s."id" IS NULL OR (s."owner" <> 'pessoa' AND (s."stage" <> 'closed' OR s."counters"->>'postCloseAsked' = 'true')))
         AND (c."lastInboundAt" IS NULL OR c."lastInboundAt" <= last_out."createdAt")
         AND last_out."createdAt" < $1::timestamptz - make_interval(mins => LEAST(
               COALESCE(NULLIF((a."simpleConfig"->'inactivity'->'followUps'->0->>'after')::int, 0), 1000000),
@@ -330,6 +335,45 @@ export async function processIdleV2(now: Date = new Date()): Promise<{ nudged: n
       continue;
     }
     const inactivity = config.inactivity;
+    // Pergunta pós-encerramento sem resposta: o atendimento anterior já foi
+    // encerrado (com despedida); no prazo de encerramento, só fecha o ticket
+    // novo — sem lembrete, sem mensagem, sem mexer no negócio.
+    if (row.post_close_asked) {
+      const closeAfter = inactivity?.closeAfter ?? 0;
+      if (!closeAfter || now.getTime() - new Date(row.last_out_at).getTime() < closeAfter * MINUTE) continue;
+      try {
+        await withSystemContext(row.organization_id, () =>
+          runWithV2Trace(async () => {
+            traceStep("inatividade", `Pergunta pós-encerramento sem resposta há ${closeAfter} min → fecha o ticket sem mensagem`);
+            await closeState(
+              row.organization_id, row.conversation_id, row.agent_config_id, row.deal_id ?? undefined, config, undefined,
+              "inactivity", row.contact_id, {}, getV2ThemeById(config, row.theme_id ?? undefined),
+            );
+            closed++;
+            await logV2Turn({
+              organizationId: row.organization_id,
+              conversationId: row.conversation_id,
+              agentId: row.agent_config_id,
+              inboundText: "",
+              crmContext: { contact: null, deals: [], selectedDeal: null, fields: { contact: [], deal: [] } },
+              prompt: "inactivity",
+              executedActions: [],
+              discardedActions: [],
+              handoff: false,
+              closed: true,
+              latencyMs: 0,
+              inputTokens: 0,
+              outputTokens: 0,
+              owner: "agente",
+              stage: "closed",
+            });
+          }),
+        );
+      } catch (err) {
+        log.warn({ conv: row.conversation_id, err: err instanceof Error ? err.message : err }, "[ai-v2 inatividade] falhou");
+      }
+      continue;
+    }
     const vars = buildVariableMap(config.variables, null, null, { id: row.contact_id, name: row.contact_name ?? "" });
     const progress = idleProgress(row, config);
     const decision = decideV2Idle({
