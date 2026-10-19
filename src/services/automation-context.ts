@@ -269,6 +269,24 @@ export type InteractiveOption = {
   flowCta?: string;
 };
 
+/**
+ * Clique de botão ou lista. O passo costuma ir com `saveToVariable: ""`,
+ * e o texto caía na chave vazia — `{{lastResponse}}` no atualizar campo
+ * gravava branco. O texto livre desse passo não muda.
+ */
+export function rememberClickedOption(
+  variables: Record<string, unknown>,
+  messageContent: string,
+  option?: InteractiveOption,
+): Record<string, unknown> {
+  const clicked =
+    messageContent.trim() || (option?.title || option?.text || "").trim();
+  if (!clicked) return variables;
+  const next = { ...variables, lastResponse: clicked };
+  if (next[""] === messageContent || next[""] === clicked) delete next[""];
+  return next;
+}
+
 export const AWAITING_FLOW_VAR = "__awaitingFlow";
 
 export type AwaitingFlowState = {
@@ -1337,6 +1355,7 @@ export async function processIncomingMessage(
         } else if (decision.action === "goto_button") {
           delete variables[AWAITING_FLOW_VAR];
           const matchedBtn = decision.button;
+          variables = rememberClickedOption(variables, messageContent, matchedBtn);
           gotoFromButton(matchedBtn, matchedBtn.title || matchedBtn.text || matchedBtn.id || "");
         } else if (decision.action === "stay") {
           const stayForMedia = decision.reason === "non_text";
@@ -1361,6 +1380,7 @@ export async function processIncomingMessage(
           const staleGoto = staleBtn ? readStepRef(staleBtn, "gotoStepId") : null;
           if (staleGoto) {
             nextStepId = staleGoto;
+            variables = rememberClickedOption(variables, messageContent, staleBtn ?? undefined);
             const btnLabel = staleBtn?.title || staleBtn?.text || staleBtn?.id;
             log.info(
               `botão stale "${btnLabel}" matched — auto=${ctx.automation.name} step=${currentStep.id} → step=${nextStepId} (clique em menu anterior)`,
