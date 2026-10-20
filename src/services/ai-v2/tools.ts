@@ -80,7 +80,6 @@ export async function searchV2Products(args: {
 
   const candidates = await prisma.product.findMany({
     where,
-    take: 500,
     orderBy: { name: "asc" },
     include: {
       customValues: {

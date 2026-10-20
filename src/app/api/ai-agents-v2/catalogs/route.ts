@@ -86,7 +86,6 @@ export async function GET() {
         where: { organizationId, isActive: true },
         select: { id: true, name: true },
         orderBy: { name: "asc" },
-        take: 500,
       }),
       p.whatsAppTemplateConfig.findMany({
         where: { organizationId },
