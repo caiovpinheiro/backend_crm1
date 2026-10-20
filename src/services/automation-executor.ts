@@ -1334,11 +1334,25 @@ async function resolveConversationAssigneeId(
  * Responsável do lead para os tokens `{{assignee.*}}` / `{{responsavel.*}}`.
  * Prioridade: consultor da conversa (quem está atendendo) → dono do negócio.
  * Sem responsável, os tokens resolvem para string vazia como qualquer outro.
+ *
+ * O snapshot do runtime é do começo do job. Distribuição e atribuir
+ * responsável gravam o dono no banco e não atualizam essa cópia; um delay
+ * curto segue no mesmo processo. Por isso a conversa deste ticket e, no
+ * fallback, o dono do negócio são relidos aqui.
  */
 async function resolveLeadAssigneeVars(
   rt: RuntimeContext,
 ): Promise<Record<string, unknown>> {
-  let userId = rt.conversation?.assignedToId ?? null;
+  let userId: string | null = null;
+
+  const conversationId = rt.conversation?.id;
+  if (conversationId) {
+    const conv = await prisma.conversation.findUnique({
+      where: { id: conversationId },
+      select: { assignedToId: true },
+    });
+    userId = conv?.assignedToId ?? null;
+  }
 
   // Gatilhos de deal/contato não carregam snapshot de conversa — busca a
   // conversa aberta mais recente do contato antes de cair no dono do deal.
@@ -1353,6 +1367,13 @@ async function resolveLeadAssigneeVars(
       select: { assignedToId: true },
     });
     userId = conv?.assignedToId ?? null;
+  }
+  if (!userId && rt.dealId) {
+    const deal = await prisma.deal.findUnique({
+      where: { id: rt.dealId },
+      select: { ownerId: true },
+    });
+    userId = deal?.ownerId ?? null;
   }
   if (!userId) userId = rt.deal?.ownerId ?? null;
   if (!userId) return {};
