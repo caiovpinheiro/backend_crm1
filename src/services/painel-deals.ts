@@ -135,6 +135,10 @@ export type PainelFunnelStage = {
   inflow: PainelFunnelInflow[];
   /** Para onde foram as saídas; soma de `count` = `exited`. */
   outflow: PainelFunnelOutflow[];
+  /**
+   * Negócios distintos que saíram DESTA etapa para uma etapa Perdido no período
+   * (STAGE_CHANGED from = etapa, to = etapa com `isLost`). Sempre ≤ `exited`.
+   */
   lost: number;
   /** Entradas desde o início do dia (fuso do Painel). */
   todayDelta: number;
@@ -702,12 +706,14 @@ export async function getPainelFunnel(f: PainelDealFilters): Promise<PainelFunne
         toStageId: string;
         toStageName: string | null;
         toPipelineId: string | null;
+        wentLost: boolean;
       }[]
     >(Prisma.sql`
       SELECT DISTINCT ON (x."dealId", x."fromStageId")
         x."dealId", x."fromStageId", x."toStageId",
         COALESCE(ts.name, x."toStageName") AS "toStageName",
-        COALESCE(ts."pipelineId", x."toPipelineId") AS "toPipelineId"
+        COALESCE(ts."pipelineId", x."toPipelineId") AS "toPipelineId",
+        bool_or(COALESCE(ts."isLost", false)) OVER (PARTITION BY x."dealId", x."fromStageId") AS "wentLost"
       FROM (
         SELECT e."dealId" AS "dealId",
                (e.meta->'from'->>'id') AS "fromStageId",
@@ -836,10 +842,13 @@ export async function getPainelFunnel(f: PainelDealFilters): Promise<PainelFunne
   }
 
   // Saídas: 1ª saída por (negócio, etapa) — soma de `outflow` = `exited`.
+  // Perdas da etapa: negócios que saíram DESTA etapa para uma etapa Perdido no
+  // período (qualquer saída do negócio daqui, não só a 1ª).
   for (const row of exits) {
     const bucket = byStage.get(row.fromStageId);
     if (!bucket) continue;
     bucket.exited += 1;
+    if (row.wentLost) bucket.lost += 1;
     const out = bucket.outflow.get(row.toStageId);
     if (out) out.count += 1;
     else {
@@ -934,17 +943,6 @@ export async function getPainelFunnel(f: PainelDealFilters): Promise<PainelFunne
       }
       passThrough = round2((reached / bucket.count) * 100);
     }
-    let lost = 0;
-    if (lostStageIds.size && bucket.count > 0) {
-      for (const dealId of bucket.dealIds) {
-        const enteredA = bucket.firstAt.get(dealId);
-        if (!enteredA) continue;
-        const events = laterByDeal.get(dealId) ?? [];
-        if (events.some((e) => lostStageIds.has(e.stageId) && e.enteredAt >= enteredA)) {
-          lost += 1;
-        }
-      }
-    }
     const byUser: PainelFunnelUserRow[] = [...stock.byUser.entries()]
       .map(([id, u]) => ({
         id,
@@ -965,7 +963,7 @@ export async function getPainelFunnel(f: PainelDealFilters): Promise<PainelFunne
       exited: bucket.exited,
       inflow: [...bucket.inflow.values()],
       outflow: [...bucket.outflow.values()],
-      lost,
+      lost: bucket.lost,
       todayDelta: bucket.todayDelta,
       byUser,
     };
