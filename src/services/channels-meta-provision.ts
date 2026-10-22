@@ -119,6 +119,16 @@ export async function provisionMetaCloudChannel(
     }
   }
 
+  // Número já desta org: não assina o WABA, não registra o telefone e não
+  // grava de novo. Só a reconexão explícita deste mesmo canal segue.
+  const samePhone = await findMetaCloudChannelByPhoneNumberId(phoneNumberId);
+  if (samePhone && samePhone.id !== input.channelId) {
+    throw new MetaProvisionError(
+      "Este número de WhatsApp já está conectado. O canal existente não foi alterado.",
+      409,
+    );
+  }
+
   // 1. Assina o app do CRM ao WABA do cliente. Sem isso, a Meta não
   // envia eventos desse número para o nosso Callback URL.
   let webhookSubscribed = false;
@@ -208,26 +218,12 @@ export async function provisionMetaCloudChannel(
     config.appId = input.appId.trim();
   }
 
-  // Mesmo número nesta org atualiza o canal que já existe. Não abre outro.
-  const samePhone = await findMetaCloudChannelByPhoneNumberId(phoneNumberId);
-  if (
-    input.channelId &&
-    samePhone &&
-    samePhone.id !== input.channelId
-  ) {
-    throw new MetaProvisionError(
-      "Este número de WhatsApp já está conectado em outro canal.",
-      409,
-    );
-  }
-
   let channel: Channel;
   let created = false;
-  const targetId = input.channelId ?? samePhone?.id;
-  if (targetId) {
+  if (input.channelId) {
     // Se o cliente pre-criou o canal (fluxo do botao "Webhook") ha um
     // webhookId em config -- preservamos ao mesclar com o config novo.
-    channel = await updateChannel(targetId, {
+    channel = await updateChannel(input.channelId, {
       name: input.name?.trim() || undefined,
       config,
       phoneNumber: displayPhone,
