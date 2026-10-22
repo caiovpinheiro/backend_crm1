@@ -5,14 +5,12 @@ vi.mock("@/lib/cache/redis-client", () => ({
 }));
 
 describe("meta connect nonce em memória (só fora de produção)", () => {
-  const prev = process.env.NODE_ENV;
-
   beforeEach(() => {
-    process.env.NODE_ENV = "test";
+    vi.stubEnv("NODE_ENV", "test");
   });
 
   afterEach(() => {
-    process.env.NODE_ENV = prev;
+    vi.unstubAllEnvs();
   });
 
   it("completed devolve o mesmo canal e não volta para pending", async () => {
@@ -56,7 +54,7 @@ describe("meta connect nonce em memória (só fora de produção)", () => {
   });
 
   it("produção sem Redis recusa memória", async () => {
-    process.env.NODE_ENV = "production";
+    vi.stubEnv("NODE_ENV", "production");
     const { savePendingMetaConnect } = await import("./meta-connect-store");
     await expect(
       savePendingMetaConnect(
