@@ -282,6 +282,25 @@ export async function getChannelById(
 }
 
 /**
+ * Canal Cloud API desta org com o mesmo `phoneNumberId`.
+ * O prisma já restringe `organizationId`. Não cria linha nova.
+ */
+export async function findMetaCloudChannelByPhoneNumberId(
+  phoneNumberId: string,
+): Promise<Channel | null> {
+  const id = phoneNumberId.trim();
+  if (!id) return null;
+  return prisma.channel.findFirst({
+    where: {
+      type: "WHATSAPP",
+      provider: "META_CLOUD_API",
+      config: { path: ["phoneNumberId"], equals: id },
+    },
+    orderBy: { updatedAt: "desc" },
+  });
+}
+
+/**
  * Webchat: sem handshake externo — nasce CONNECTED, com `publicKey` nova e
  * config default (+ o que o painel mandou, validado). Colisão da chave
  * (improvável: 62^24) repete com outra.

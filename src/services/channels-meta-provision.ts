@@ -17,7 +17,12 @@
  */
 import type { Channel } from "@prisma/client";
 
-import { createChannel, getChannelById, updateChannel } from "@/services/channels";
+import {
+  createChannel,
+  findMetaCloudChannelByPhoneNumberId,
+  getChannelById,
+  updateChannel,
+} from "@/services/channels";
 import { getLogger } from "@/lib/logger";
 
 const log = getLogger("channels-meta-provision");
@@ -203,12 +208,26 @@ export async function provisionMetaCloudChannel(
     config.appId = input.appId.trim();
   }
 
+  // Mesmo número nesta org atualiza o canal que já existe. Não abre outro.
+  const samePhone = await findMetaCloudChannelByPhoneNumberId(phoneNumberId);
+  if (
+    input.channelId &&
+    samePhone &&
+    samePhone.id !== input.channelId
+  ) {
+    throw new MetaProvisionError(
+      "Este número de WhatsApp já está conectado em outro canal.",
+      409,
+    );
+  }
+
   let channel: Channel;
   let created = false;
-  if (input.channelId) {
+  const targetId = input.channelId ?? samePhone?.id;
+  if (targetId) {
     // Se o cliente pre-criou o canal (fluxo do botao "Webhook") ha um
     // webhookId em config -- preservamos ao mesclar com o config novo.
-    channel = await updateChannel(input.channelId, {
+    channel = await updateChannel(targetId, {
       name: input.name?.trim() || undefined,
       config,
       phoneNumber: displayPhone,

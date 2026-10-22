@@ -6,16 +6,19 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { createChannel, updateChannel, getChannelById } = vi.hoisted(() => ({
-  createChannel: vi.fn(),
-  updateChannel: vi.fn(),
-  getChannelById: vi.fn(),
-}));
+const { createChannel, updateChannel, getChannelById, findMetaCloudChannelByPhoneNumberId } =
+  vi.hoisted(() => ({
+    createChannel: vi.fn(),
+    updateChannel: vi.fn(),
+    getChannelById: vi.fn(),
+    findMetaCloudChannelByPhoneNumberId: vi.fn(),
+  }));
 
 vi.mock("@/services/channels", () => ({
   createChannel,
   updateChannel,
   getChannelById,
+  findMetaCloudChannelByPhoneNumberId,
 }));
 
 type FetchResp = { ok: boolean; json: () => Promise<unknown> };
@@ -45,6 +48,8 @@ describe("provisionMetaCloudChannel", () => {
     createChannel.mockReset();
     updateChannel.mockReset();
     getChannelById.mockReset();
+    findMetaCloudChannelByPhoneNumberId.mockReset();
+    findMetaCloudChannelByPhoneNumberId.mockResolvedValue(null);
     createChannel.mockResolvedValue({ id: "ch-1", provider: "META_CLOUD_API" });
     updateChannel.mockResolvedValue({
       id: "ch-1",
@@ -141,6 +146,57 @@ describe("provisionMetaCloudChannel", () => {
     expect(result.created).toBe(true);
     expect(result.webhookSubscribed).toBe(true);
     expect(result.phoneRegistered).toBe(false);
+  });
+
+  it("reaproveita o canal do mesmo phoneNumberId em vez de criar outro", async () => {
+    vi.stubGlobal(
+      "fetch",
+      routeFetch({
+        "/subscribed_apps": ok(),
+        "/register": ok(),
+        "?fields=display_phone_number": ok({ display_phone_number: "+55" }),
+      }),
+    );
+    findMetaCloudChannelByPhoneNumberId.mockResolvedValue({ id: "ch-existing" });
+    updateChannel.mockResolvedValue({ id: "ch-existing", status: "CONNECTED" });
+
+    const { provisionMetaCloudChannel } = await import(
+      "@/services/channels-meta-provision"
+    );
+    const result = await provisionMetaCloudChannel({
+      accessToken: "tok",
+      phoneNumberId: "pn-1",
+      wabaId: "waba-1",
+      embeddedSignup: true,
+    });
+
+    expect(result.created).toBe(false);
+    expect(createChannel).not.toHaveBeenCalled();
+    expect(updateChannel).toHaveBeenCalledWith(
+      "ch-existing",
+      expect.objectContaining({ status: "CONNECTED" }),
+    );
+  });
+
+  it("recusa gravar o mesmo número em outro canal", async () => {
+    vi.stubGlobal("fetch", routeFetch({ "/subscribed_apps": ok(), "/register": ok() }));
+    findMetaCloudChannelByPhoneNumberId.mockResolvedValue({ id: "ch-other" });
+    getChannelById.mockResolvedValue({ id: "ch-pre" });
+
+    const { provisionMetaCloudChannel, MetaProvisionError } = await import(
+      "@/services/channels-meta-provision"
+    );
+    await expect(
+      provisionMetaCloudChannel({
+        accessToken: "tok",
+        phoneNumberId: "pn-1",
+        wabaId: "waba-1",
+        channelId: "ch-pre",
+      }),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(createChannel).not.toHaveBeenCalled();
+    expect(updateChannel).not.toHaveBeenCalled();
+    expect(MetaProvisionError).toBeTruthy();
   });
 
   it("rejeita quando faltam credenciais obrigatorias", async () => {

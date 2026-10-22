@@ -360,6 +360,9 @@ export async function signupOrganizationWithAdmin(input: {
       "Slug inválido: use letras minúsculas, números e hífens (2-40 caracteres).",
     );
   }
+  if (slug === "connect") {
+    throw new Error("Este endereço é reservado.");
+  }
   if (adminName.length < 2) throw new Error("Informe um nome válido.");
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(adminEmail)) {
     throw new Error("Email inválido.");
