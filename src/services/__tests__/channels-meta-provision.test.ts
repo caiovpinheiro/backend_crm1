@@ -148,7 +148,28 @@ describe("provisionMetaCloudChannel", () => {
     expect(result.phoneRegistered).toBe(false);
   });
 
-  it("reaproveita o canal do mesmo phoneNumberId em vez de criar outro", async () => {
+  it("não altera o canal quando o número já está conectado", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    findMetaCloudChannelByPhoneNumberId.mockResolvedValue({ id: "ch-existing" });
+
+    const { provisionMetaCloudChannel, MetaProvisionError } = await import(
+      "@/services/channels-meta-provision"
+    );
+    await expect(
+      provisionMetaCloudChannel({
+        accessToken: "tok",
+        phoneNumberId: "pn-1",
+        wabaId: "waba-1",
+        embeddedSignup: true,
+      }),
+    ).rejects.toBeInstanceOf(MetaProvisionError);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(createChannel).not.toHaveBeenCalled();
+    expect(updateChannel).not.toHaveBeenCalled();
+  });
+
+  it("reconecta só o canal pedido quando o número é dele", async () => {
     vi.stubGlobal(
       "fetch",
       routeFetch({
@@ -158,6 +179,7 @@ describe("provisionMetaCloudChannel", () => {
       }),
     );
     findMetaCloudChannelByPhoneNumberId.mockResolvedValue({ id: "ch-existing" });
+    getChannelById.mockResolvedValue({ id: "ch-existing" });
     updateChannel.mockResolvedValue({ id: "ch-existing", status: "CONNECTED" });
 
     const { provisionMetaCloudChannel } = await import(
@@ -167,6 +189,7 @@ describe("provisionMetaCloudChannel", () => {
       accessToken: "tok",
       phoneNumberId: "pn-1",
       wabaId: "waba-1",
+      channelId: "ch-existing",
       embeddedSignup: true,
     });
 
@@ -178,8 +201,9 @@ describe("provisionMetaCloudChannel", () => {
     );
   });
 
-  it("recusa gravar o mesmo número em outro canal", async () => {
-    vi.stubGlobal("fetch", routeFetch({ "/subscribed_apps": ok(), "/register": ok() }));
+  it("recusa gravar o mesmo número em outro canal sem chamar a Meta", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
     findMetaCloudChannelByPhoneNumberId.mockResolvedValue({ id: "ch-other" });
     getChannelById.mockResolvedValue({ id: "ch-pre" });
 
@@ -194,6 +218,7 @@ describe("provisionMetaCloudChannel", () => {
         channelId: "ch-pre",
       }),
     ).rejects.toMatchObject({ status: 409 });
+    expect(fetchMock).not.toHaveBeenCalled();
     expect(createChannel).not.toHaveBeenCalled();
     expect(updateChannel).not.toHaveBeenCalled();
     expect(MetaProvisionError).toBeTruthy();
