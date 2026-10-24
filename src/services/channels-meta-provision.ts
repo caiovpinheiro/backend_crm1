@@ -17,7 +17,12 @@
  */
 import type { Channel } from "@prisma/client";
 
-import { createChannel, getChannelById, updateChannel } from "@/services/channels";
+import {
+  createChannel,
+  findMetaCloudChannelByPhoneNumberId,
+  getChannelById,
+  updateChannel,
+} from "@/services/channels";
 import { getLogger } from "@/lib/logger";
 
 const log = getLogger("channels-meta-provision");
@@ -112,6 +117,16 @@ export async function provisionMetaCloudChannel(
     if (!existing) {
       throw new MetaProvisionError("Canal não encontrado.", 404);
     }
+  }
+
+  // Número já desta org: não assina o WABA, não registra o telefone e não
+  // grava de novo. Só a reconexão explícita deste mesmo canal segue.
+  const samePhone = await findMetaCloudChannelByPhoneNumberId(phoneNumberId);
+  if (samePhone && samePhone.id !== input.channelId) {
+    throw new MetaProvisionError(
+      "Este número de WhatsApp já está conectado. O canal existente não foi alterado.",
+      409,
+    );
   }
 
   // 1. Assina o app do CRM ao WABA do cliente. Sem isso, a Meta não

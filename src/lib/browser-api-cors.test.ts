@@ -173,6 +173,27 @@ describe("política por caminho", () => {
     },
   );
 
+  it("https://connect.bwipo.com entra só nas rotas do signup central, sem wildcard", async () => {
+    expect(
+      await resolve("https://connect.bwipo.com", "/api/meta/connect/complete"),
+    ).toBe("https://connect.bwipo.com");
+    expect(
+      await resolve("https://connect.bwipo.com", "/api/meta/connect/preview"),
+    ).toBe("https://connect.bwipo.com");
+    expect(await resolve("https://connect.bwipo.com", "/api/config/public")).toBe(
+      "https://connect.bwipo.com",
+    );
+    expect(await resolve("https://connect.bwipo.com", "/api/me")).toBeNull();
+    expect(await resolve("https://connect.bwipo.com", "/api/meta/connect/start")).toBeNull();
+    expect(
+      await resolve("https://evil.connect.bwipo.com", "/api/meta/connect/complete"),
+    ).toBeNull();
+    expect(
+      await resolve("https://connect.bwipo.com.evil.com", "/api/meta/connect/complete"),
+    ).toBeNull();
+    expect(lookup).not.toHaveBeenCalled();
+  });
+
   it("prefixo parecido não herda a política", () => {
     expect(corsPathPolicy("/api/healthz")).toBe("tenant");
     expect(corsPathPolicy("/api/authz")).toBe("tenant");

@@ -279,6 +279,25 @@ export async function getChannelById(
   return channel ? attachOrgSlug(channel) : null;
 }
 
+/**
+ * Canal Cloud API desta org com o mesmo `phoneNumberId`.
+ * O prisma já restringe `organizationId`. Não cria linha nova.
+ */
+export async function findMetaCloudChannelByPhoneNumberId(
+  phoneNumberId: string,
+): Promise<Channel | null> {
+  const id = phoneNumberId.trim();
+  if (!id) return null;
+  return prisma.channel.findFirst({
+    where: {
+      type: "WHATSAPP",
+      provider: "META_CLOUD_API",
+      config: { path: ["phoneNumberId"], equals: id },
+    },
+    orderBy: { updatedAt: "desc" },
+  });
+}
+
 export async function createChannel(data: CreateChannelData): Promise<Channel> {
   // PR-1.2: encripta campos sensiveis (accessToken, appSecret, verifyToken)
   // antes de gravar. encryptChannelConfig e idempotente — se ja vier encriptado

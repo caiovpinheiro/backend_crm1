@@ -38,6 +38,19 @@ const DEFAULT_ALLOW_HEADERS =
 /** Mesmo formato de slug do signup (`services/onboarding.ts`). */
 const TENANT_SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
 
+/**
+ * Host do Embedded Signup central. Não é tenant.
+ * CORS só nesta origem exata, e só nas rotas que a página chama.
+ * Sem wildcard.
+ */
+export const META_CONNECT_BROWSER_ORIGIN = "https://connect.bwipo.com";
+
+const META_CONNECT_CORS_PATHS = new Set([
+  "/api/meta/connect/complete",
+  "/api/meta/connect/preview",
+  "/api/config/public",
+]);
+
 /** Responde "esta org existe, está ativa e tem admin verificado?". */
 export type TenantOriginLookup = (slug: string) => Promise<boolean>;
 
@@ -172,6 +185,8 @@ export function classifyBrowserApiOrigin(
 
   const slug = hostname.slice(0, -(base.length + 1));
   if (!TENANT_SLUG_RE.test(slug)) return null;
+  // connect.bwipo.com é infra, não organização.
+  if (slug === "connect") return null;
   return { kind: "tenant", origin, slug };
 }
 
@@ -186,6 +201,13 @@ export async function resolveBrowserApiCorsOrigin(
   if (!origin) return null;
   const policy = corsPathPolicy(pathname);
   if (policy === "none") return null;
+
+  if (
+    origin === META_CONNECT_BROWSER_ORIGIN &&
+    META_CONNECT_CORS_PATHS.has(pathname)
+  ) {
+    return META_CONNECT_BROWSER_ORIGIN;
+  }
 
   const classified = classifyBrowserApiOrigin(origin);
   if (!classified) return null;
