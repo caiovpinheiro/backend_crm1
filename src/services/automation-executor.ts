@@ -1721,6 +1721,24 @@ async function resolveAutomationDealIds(rt: RuntimeContext): Promise<string[]> {
 }
 
 /**
+ * Negócio fechado mais recente do contato, só quando não há nenhum aberto.
+ * `update_field` grava nele. `move_stage` não usa: cair no Perdido/Ganho
+ * reabriria o card.
+ */
+async function latestClosedDealId(contactId: string): Promise<string | null> {
+  const openCount = await prisma.deal.count({
+    where: { contactId, status: "OPEN" },
+  });
+  if (openCount > 0) return null;
+  const closed = await prisma.deal.findFirst({
+    where: { contactId, status: { in: ["LOST", "WON"] } },
+    orderBy: { updatedAt: "desc" },
+    select: { id: true },
+  });
+  return closed?.id ?? null;
+}
+
+/**
  * Carrega tags do contato e do deal em arrays paralelos (ids + nomes).
  *
  * Usado por `resolveRuntimeContext` (primeira execução) e por
@@ -2964,6 +2982,13 @@ export async function executeStep(
         const dealIds = await resolveAutomationDealIds(rt);
         const cfgDealId = readString(cfg, "dealId");
         if (dealIds.length === 0 && cfgDealId) dealIds.push(cfgDealId);
+        // Continuação depois do botão só recarrega negócio OPEN. O card em
+        // Perdido/Ganho existe; sem este fallback o passo aborta com
+        // "dealId ausente" e o campo não grava.
+        if (dealIds.length === 0 && rt.contactId) {
+          const closedId = await latestClosedDealId(rt.contactId);
+          if (closedId) dealIds.push(closedId);
+        }
         if (dealIds.length === 0) throw new Error("update_field: dealId ausente");
         for (const targetDealId of dealIds) {
         const data: Prisma.DealUncheckedUpdateInput = {};
