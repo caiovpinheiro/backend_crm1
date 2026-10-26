@@ -323,45 +323,29 @@ export type InteractiveMenuDecision =
 
 export type InteractiveOnNonText = "stay" | "else";
 
-const IMAGE_MESSAGE_TYPES = new Set(["image", "photo"]);
-const NON_IMAGE_MEDIA_TYPES = new Set([
-  "audio",
-  "ptt",
-  "voice",
-  "voice_note",
-  "video",
-  "sticker",
-  "document",
-  "file",
-  "unsupported",
-]);
-const IMAGE_FILE_RE = /\.(?:jpe?g|png|gif|webp|heic|heif|bmp|tiff?)(?:$|[?#\s])/i;
+const DOCUMENT_MEDIA_KINDS = new Set(["image", "video", "document", "sticker"]);
+const AUDIO_FILE_RE = /\.(?:mp3|ogg|opus|m4a|wav|aac|amr|oga|weba)(?:$|[?#\s])/i;
 
-function looksLikeImageFile(input: {
-  messageContent: string;
-  mediaUrl?: string | null;
-}): boolean {
-  return IMAGE_FILE_RE.test(`${input.messageContent ?? ""}\n${input.mediaUrl ?? ""}`);
-}
-
-/**
- * Saída "Documento recebido" do aguardar documento: só imagem.
- * Foto do WhatsApp, ou arquivo cuja extensão é de imagem. Áudio, vídeo,
- * PDF, Word e figurinha não entram.
- */
-export function inboundIsImage(input: {
+/** Áudio ou recado de voz. O aguardar documento não segue com isso. */
+export function inboundIsAudio(input: {
   messageContent: string;
   messageType?: string | null;
   mediaUrl?: string | null;
 }): boolean {
   const type = (input.messageType ?? "").trim().toLowerCase();
-  if (IMAGE_MESSAGE_TYPES.has(type) || type.startsWith("image/")) return true;
   if (
     type === "audio" ||
     type === "ptt" ||
     type === "voice" ||
     type === "voice_note" ||
-    type.startsWith("audio/") ||
+    type.startsWith("audio/")
+  ) {
+    return true;
+  }
+  if (
+    type === "image" ||
+    type === "photo" ||
+    type.startsWith("image/") ||
     type === "video" ||
     type.startsWith("video/") ||
     type === "sticker"
@@ -372,38 +356,38 @@ export function inboundIsImage(input: {
     content: input.messageContent,
     messageType: type || null,
   });
-  if (probe.kind === "image") return true;
-  if (probe.kind === "audio" || probe.kind === "video" || probe.kind === "sticker") return false;
-  return looksLikeImageFile(input);
+  if (probe.kind === "audio") return true;
+  if (probe.kind === "image" || probe.kind === "video" || probe.kind === "sticker") return false;
+  return AUDIO_FILE_RE.test(`${input.messageContent ?? ""}\n${input.mediaUrl ?? ""}`);
 }
 
-/** Mídia que não é imagem: o aguardar documento continua parado. */
-export function inboundIsNonImageMedia(input: {
+/**
+ * Arquivo do contato na saída "Documento recebido": foto, PDF, Word,
+ * vídeo, figurinha ou outra mídia. Áudio não conta. Texto, clique de
+ * botão, localização e contato compartilhado também não.
+ */
+export function inboundIsDocument(input: {
   messageContent: string;
   messageType?: string | null;
   mediaUrl?: string | null;
 }): boolean {
-  if (inboundIsImage(input)) return false;
+  if (inboundIsAudio(input)) return false;
   const type = (input.messageType ?? "").trim().toLowerCase();
+  if (type === "text" || type === "interactive" || type === "button") return false;
+  if (type === "unsupported") return true;
   if (
-    type === "text" ||
-    type === "interactive" ||
-    type === "button" ||
-    type === "location" ||
-    type === "contact" ||
-    type === "contacts"
+    (input.mediaUrl ?? "").trim() &&
+    type !== "location" &&
+    type !== "contact" &&
+    type !== "contacts"
   ) {
-    return false;
-  }
-  if (NON_IMAGE_MEDIA_TYPES.has(type) || type.startsWith("audio/") || type.startsWith("video/")) {
     return true;
   }
-  if ((input.mediaUrl ?? "").trim()) return true;
   const probe = probeInboundMedia({
     content: input.messageContent,
     messageType: type || null,
   });
-  return probe.kind === "audio" || probe.kind === "video" || probe.kind === "document" || probe.kind === "sticker";
+  return Boolean(probe.kind && DOCUMENT_MEDIA_KINDS.has(probe.kind));
 }
 
 /** Imagem, áudio, documento, sticker, álbum Meta `unsupported` — não é clique do menu. */
@@ -1283,9 +1267,9 @@ export async function processIncomingMessage(
         messageType,
         mediaUrl: file.mediaUrl,
       };
-      if (inboundIsNonImageMedia(inboundMedia)) {
+      if (inboundIsAudio(inboundMedia)) {
         log.info(
-          `wait_for_document ignorou mídia que não é imagem — auto=${ctx.automation.name} contato=${contactId} type=${messageType || "-"} — permanece no passo`,
+          `wait_for_document ignorou áudio — auto=${ctx.automation.name} contato=${contactId} type=${messageType || "-"} — permanece no passo`,
         );
         return {
           handled: true,
@@ -1294,9 +1278,9 @@ export async function processIncomingMessage(
           contextId: ctx.id,
         };
       }
-      const isDocument = inboundIsImage(inboundMedia);
+      const isDocument = inboundIsDocument(inboundMedia);
       const storedMedia = isDocument ? (file.mediaUrl ?? "").trim() : "";
-      // A imagem grava a URL do arquivo. Com token, o n8n baixa no webhook
+      // Foto e PDF gravam a URL do arquivo. Com token, o n8n baixa no webhook
       // sem sessão do CRM.
       const mediaUrl = storedMedia ? (toPublicMediaUrl(storedMedia) ?? storedMedia) : "";
       const varName = replyVariableName(config);
