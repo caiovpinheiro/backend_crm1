@@ -323,34 +323,87 @@ export type InteractiveMenuDecision =
 
 export type InteractiveOnNonText = "stay" | "else";
 
-const DOCUMENT_MEDIA_KINDS = new Set(["image", "video", "audio", "document", "sticker"]);
+const IMAGE_MESSAGE_TYPES = new Set(["image", "photo"]);
+const NON_IMAGE_MEDIA_TYPES = new Set([
+  "audio",
+  "ptt",
+  "voice",
+  "voice_note",
+  "video",
+  "sticker",
+  "document",
+  "file",
+  "unsupported",
+]);
+const IMAGE_FILE_RE = /\.(?:jpe?g|png|gif|webp|heic|heif|bmp|tiff?)(?:$|[?#\s])/i;
+
+function looksLikeImageFile(input: {
+  messageContent: string;
+  mediaUrl?: string | null;
+}): boolean {
+  return IMAGE_FILE_RE.test(`${input.messageContent ?? ""}\n${input.mediaUrl ?? ""}`);
+}
 
 /**
- * Arquivo enviado pelo contato: foto, PDF, Word, imagem, áudio, vídeo,
- * figurinha ou qualquer outra mídia. Texto, clique de botão, localização
- * e contato compartilhado não contam.
+ * Saída "Documento recebido" do aguardar documento: só imagem.
+ * Foto do WhatsApp, ou arquivo cuja extensão é de imagem. Áudio, vídeo,
+ * PDF, Word e figurinha não entram.
  */
-export function inboundIsDocument(input: {
+export function inboundIsImage(input: {
   messageContent: string;
   messageType?: string | null;
   mediaUrl?: string | null;
 }): boolean {
   const type = (input.messageType ?? "").trim().toLowerCase();
-  if (type === "text" || type === "interactive" || type === "button") return false;
-  if (type === "unsupported") return true;
+  if (IMAGE_MESSAGE_TYPES.has(type) || type.startsWith("image/")) return true;
   if (
-    (input.mediaUrl ?? "").trim() &&
-    type !== "location" &&
-    type !== "contact" &&
-    type !== "contacts"
+    type === "audio" ||
+    type === "ptt" ||
+    type === "voice" ||
+    type === "voice_note" ||
+    type.startsWith("audio/") ||
+    type === "video" ||
+    type.startsWith("video/") ||
+    type === "sticker"
   ) {
-    return true;
+    return false;
   }
   const probe = probeInboundMedia({
     content: input.messageContent,
     messageType: type || null,
   });
-  return Boolean(probe.kind && DOCUMENT_MEDIA_KINDS.has(probe.kind));
+  if (probe.kind === "image") return true;
+  if (probe.kind === "audio" || probe.kind === "video" || probe.kind === "sticker") return false;
+  return looksLikeImageFile(input);
+}
+
+/** Mídia que não é imagem: o aguardar documento continua parado. */
+export function inboundIsNonImageMedia(input: {
+  messageContent: string;
+  messageType?: string | null;
+  mediaUrl?: string | null;
+}): boolean {
+  if (inboundIsImage(input)) return false;
+  const type = (input.messageType ?? "").trim().toLowerCase();
+  if (
+    type === "text" ||
+    type === "interactive" ||
+    type === "button" ||
+    type === "location" ||
+    type === "contact" ||
+    type === "contacts"
+  ) {
+    return false;
+  }
+  if (NON_IMAGE_MEDIA_TYPES.has(type) || type.startsWith("audio/") || type.startsWith("video/")) {
+    return true;
+  }
+  if ((input.mediaUrl ?? "").trim()) return true;
+  const probe = probeInboundMedia({
+    content: input.messageContent,
+    messageType: type || null,
+  });
+  return probe.kind === "audio" || probe.kind === "video" || probe.kind === "document" || probe.kind === "sticker";
 }
 
 /** Imagem, áudio, documento, sticker, álbum Meta `unsupported` — não é clique do menu. */
@@ -1225,14 +1278,26 @@ export async function processIncomingMessage(
     } else if (currentStep.type === "wait_for_document") {
       const file = await latestInboundFile(inboundConversationId);
       const messageType = (opts?.messageType ?? file.messageType ?? "").trim();
-      const isDocument = inboundIsDocument({
+      const inboundMedia = {
         messageContent,
         messageType,
         mediaUrl: file.mediaUrl,
-      });
+      };
+      if (inboundIsNonImageMedia(inboundMedia)) {
+        log.info(
+          `wait_for_document ignorou mídia que não é imagem — auto=${ctx.automation.name} contato=${contactId} type=${messageType || "-"} — permanece no passo`,
+        );
+        return {
+          handled: true,
+          replied: true,
+          automationId: ctx.automationId,
+          contextId: ctx.id,
+        };
+      }
+      const isDocument = inboundIsImage(inboundMedia);
       const storedMedia = isDocument ? (file.mediaUrl ?? "").trim() : "";
-      // Foto e PDF gravam o mesmo tipo de valor: a URL do arquivo.
-      // Com token, o n8n baixa no webhook sem sessão do CRM.
+      // A imagem grava a URL do arquivo. Com token, o n8n baixa no webhook
+      // sem sessão do CRM.
       const mediaUrl = storedMedia ? (toPublicMediaUrl(storedMedia) ?? storedMedia) : "";
       const varName = replyVariableName(config);
       // {{lastResponse}} é só o link. O nome configurado continua com a
