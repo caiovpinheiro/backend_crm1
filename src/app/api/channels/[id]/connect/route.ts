@@ -61,13 +61,16 @@ export async function POST(_request: Request, context: RouteContext) {
       }
 
       const meta = new MetaWhatsAppClient(accessToken, phoneNumberId, businessAccountId);
-      await meta.getBusinessProfile();
+      // `whatsapp_business_profile` responde 133010 ("account is not registered")
+      // mesmo com o número CONNECTED. O probe é o próprio phone number.
+      const health = await meta.getPhoneNumberHealth();
+      const display = health.display_phone_number?.trim();
 
       const updated = await updateChannel(id, {
         status: "CONNECTED",
         lastConnectedAt: new Date(),
         qrCode: null,
-        phoneNumber: channel.phoneNumber ?? phoneNumberId,
+        phoneNumber: display || channel.phoneNumber || phoneNumberId,
       });
 
       return NextResponse.json({
