@@ -28,6 +28,8 @@ import {
   waitForReplyHijacksAiTurn,
   aiOwnsInboundOverFlow,
   decideFlowStepInbound,
+  flowTemplateRowHasFlowButton,
+  sessionFlowWindowOpen,
   isInFlightPlainSend,
 } from "@/services/automation-context";
 
@@ -874,13 +876,23 @@ describe("decideFlowStepInbound — node Formulário WhatsApp", () => {
     gotoStepId: "depois",
   };
 
-  it("texto livre permanece no passo", () => {
+  it("texto livre sem aresta permanece no passo", () => {
     expect(
       decideFlowStepInbound({
         flowReply: false,
         awaitingFlow: awaiting,
       }),
     ).toBe("stay");
+  });
+
+  it("mensagem comum segue Outra resposta quando a aresta existe", () => {
+    expect(
+      decideFlowStepInbound({
+        flowReply: false,
+        awaitingFlow: awaiting,
+        elseConfigured: true,
+      }),
+    ).toBe("else");
   });
 
   it("nfm_reply com o mesmo token completa", () => {
@@ -893,24 +905,94 @@ describe("decideFlowStepInbound — node Formulário WhatsApp", () => {
     ).toBe("complete");
   });
 
-  it("nfm_reply sem token da Meta ainda completa", () => {
-    expect(
-      decideFlowStepInbound({
-        flowReply: true,
-        flowToken: null,
-        awaitingFlow: awaiting,
-      }),
-    ).toBe("complete");
-  });
-
-  it("nfm_reply com token diferente permanece", () => {
+  it("nfm_reply com token diferente não conclui", () => {
     expect(
       decideFlowStepInbound({
         flowReply: true,
         flowToken: "tok-outro",
         awaitingFlow: awaiting,
+        elseConfigured: true,
       }),
     ).toBe("stay");
+  });
+
+  it("sem token e sem correlação não avança", () => {
+    expect(
+      decideFlowStepInbound({
+        flowReply: true,
+        flowToken: null,
+        awaitingFlow: awaiting,
+        soleAwaitingOnConversation: false,
+      }),
+    ).toBe("stay");
+  });
+
+  it("sem token, única espera da conversa, completa", () => {
+    expect(
+      decideFlowStepInbound({
+        flowReply: true,
+        flowToken: null,
+        awaitingFlow: awaiting,
+        soleAwaitingOnConversation: true,
+        inboundConversationId: "conv-1",
+      }),
+    ).toBe("complete");
+  });
+
+  it("sem token, nome de outro formulário, permanece", () => {
+    expect(
+      decideFlowStepInbound({
+        flowReply: true,
+        flowToken: null,
+        awaitingFlow: { ...awaiting, flowName: "Formulario_Redacao", metaFlowId: "111" },
+        inboundFlowName: "Outro_Form",
+        soleAwaitingOnConversation: true,
+      }),
+    ).toBe("stay");
+  });
+
+  it("sem token, mesmo id de Flow, completa", () => {
+    expect(
+      decideFlowStepInbound({
+        flowReply: true,
+        flowToken: null,
+        awaitingFlow: { ...awaiting, metaFlowId: "111" },
+        inboundMetaFlowId: "111",
+        soleAwaitingOnConversation: false,
+      }),
+    ).toBe("complete");
+  });
+
+  it("token certo em outra conversa não conclui", () => {
+    expect(
+      decideFlowStepInbound({
+        flowReply: true,
+        flowToken: "tok-form",
+        awaitingFlow: { ...awaiting, conversationId: "conv-a" },
+        inboundConversationId: "conv-b",
+      }),
+    ).toBe("stay");
+  });
+});
+
+describe("send_whatsapp_flow — template e janela de 24h", () => {
+  const DAY = 24 * 60 * 60 * 1000;
+
+  it("template com botão FLOW ou flowId pode ser enviado", () => {
+    expect(flowTemplateRowHasFlowButton({ buttonTypes: ["QUICK_REPLY", "FLOW"] })).toBe(true);
+    expect(flowTemplateRowHasFlowButton({ flowId: "1132732492544346", buttonTypes: [] })).toBe(true);
+  });
+
+  it("template sem botão Flow e cadastro ausente não entram", () => {
+    expect(flowTemplateRowHasFlowButton({ buttonTypes: ["QUICK_REPLY"], flowId: "" })).toBe(false);
+    expect(flowTemplateRowHasFlowButton(null)).toBe(false);
+  });
+
+  it("Flow de sessão só abre dentro da janela", () => {
+    const now = Date.now();
+    expect(sessionFlowWindowOpen(new Date(now - DAY + 60_000), now)).toBe(true);
+    expect(sessionFlowWindowOpen(new Date(now - DAY - 1), now)).toBe(false);
+    expect(sessionFlowWindowOpen(null, now)).toBe(false);
   });
 });
 

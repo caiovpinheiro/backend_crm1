@@ -41,11 +41,11 @@ import {
   templateVariablesFromSendComponents,
 } from "@/lib/meta-whatsapp/build-template-components";
 import { enrichTemplateComponentsForFlowSend } from "@/lib/meta-whatsapp/enrich-template-flow";
+import { isMetaFlowEnrichError } from "@/lib/meta-whatsapp/meta-flow-enrich-error";
 import {
   buildOutboundTemplateMessageContent,
   buttonLabelsFromConfig,
 } from "@/lib/whatsapp-outbound-template-label";
-import { isMetaFlowEnrichError } from "@/lib/meta-whatsapp/meta-flow-enrich-error";
 import {
   injectTemplateHeaderMediaComponent,
   TemplateHeaderMediaError,
@@ -99,7 +99,9 @@ import {
   pausedStepTimeoutMs,
   shouldPersistDelay,
   AWAITING_FLOW_VAR,
+  flowTemplateRowHasFlowButton,
   readStepRef,
+  sessionFlowWindowOpen,
 } from "@/services/automation-context";
 import { getPublishedFlowForSend } from "@/services/whatsapp-flow-definitions";
 import {
@@ -4198,10 +4200,13 @@ export async function executeStep(
         throw new MetaSendFailureError("send_whatsapp_flow: sem destino");
       }
 
-      const flowDefId = readString(cfg, "flowDefinitionId")?.trim();
-      if (!flowDefId) throw new Error("send_whatsapp_flow: formulário obrigatório");
-      const flow = await getPublishedFlowForSend(flowDefId);
-      if (!flow) {
+      const templateName = readString(cfg, "templateName")?.trim() || "";
+      const flowDefId = readString(cfg, "flowDefinitionId")?.trim() || "";
+      if (!templateName && !flowDefId) {
+        throw new Error("send_whatsapp_flow: formulário ou template com botão Flow obrigatório");
+      }
+      const flow = flowDefId && !templateName ? await getPublishedFlowForSend(flowDefId) : null;
+      if (!templateName && !flow) {
         throw new MetaSendFailureError(
           "send_whatsapp_flow: formulário não encontrado ou ainda não publicado na Meta",
         );
@@ -4210,21 +4215,6 @@ export async function executeStep(
       const flowVars = (cfg as Record<string, unknown>)["__variables"] as
         | Record<string, unknown>
         | undefined;
-      const bodyRaw = readString(cfg, "body")?.trim() || `Preencha o formulário: ${flow.name}`;
-      const body = await interpolateMessageVariables(bodyRaw, rt, flowVars);
-      const ctaRaw = readString(cfg, "flowCta")?.trim() || "Abrir formulário";
-      const flowCta = await interpolateMessageVariables(ctaRaw, rt, flowVars);
-
-      const headerRaw = readString(cfg, "header");
-      const footerRaw = readString(cfg, "footer");
-      const header = headerRaw
-        ? await interpolateMessageVariables(headerRaw, rt, flowVars)
-        : headerRaw;
-      const footer = footerRaw
-        ? await interpolateMessageVariables(footerRaw, rt, flowVars)
-        : footerRaw;
-
-      const displayContent = `${body}\n[Flow: ${flowCta}]`;
       const flowChannelId = resolveOutboundChannelId(cfg, rt);
       let conversationId: string | undefined;
       if (rt.contactId) {
@@ -4248,38 +4238,142 @@ export async function executeStep(
         );
       }
 
-      const flowToken = randomUUID();
+      let flowToken = randomUUID();
       let externalId: string | null = null;
-      try {
-        const sendResult = await flowMetaClient.sendInteractiveFlow(
-          to,
-          body,
-          {
-            flowId: flow.metaFlowId,
-            flowCta,
-            flowToken,
-            flowAction: "navigate",
+      let displayContent = "";
+      let outboundType: "interactive" | "template" = "interactive";
+      let awaitingMetaFlowId = flow?.metaFlowId ?? "";
+      let awaitingFlowName = flow?.name ?? "";
+
+      if (templateName) {
+        const langCode = readString(cfg, "languageCode")?.trim() || "pt_BR";
+        const tplRow = await prisma.whatsAppTemplateConfig.findFirst({
+          where: { metaTemplateName: templateName },
+          select: {
+            id: true,
+            metaTemplateId: true,
+            bodyPreview: true,
+            category: true,
+            flowId: true,
+            buttonTypes: true,
+            label: true,
           },
-          header,
-          footer,
-          recipient,
-        );
-        externalId = sendResult.messages?.[0]?.id ?? null;
-      } catch (sendErr) {
-        const classified = classifyMetaSendFailure(sendErr) ?? toMetaSendFailure(sendErr);
-        log.error(
-          `Envio WhatsApp Flow falhou (contato=${rt.contactId ?? "—"}): ${classified.message}`,
-        );
-        await persistFailedAutomationOutbound({
-          conversationId,
-          content: displayContent,
-          messageType: "interactive",
-          senderName: rt.automationName ?? "Automação",
-          triggeredByName: rt.triggeredByName,
-          error: classified,
-          channelId: flowChannelId,
         });
-        throw classified;
+        awaitingMetaFlowId = tplRow?.flowId?.trim() || "";
+        awaitingFlowName = tplRow?.label?.trim() || templateName;
+        displayContent = buildOutboundTemplateMessageContent(
+          templateName,
+          "generic",
+          tplRow?.category ?? null,
+          tplRow?.bodyPreview?.trim() || null,
+          { bodyText: tplRow?.bodyPreview?.trim() || null, buttons: [] },
+        );
+        outboundType = "template";
+        try {
+          if (tplRow && !flowTemplateRowHasFlowButton(tplRow)) {
+            throw new MetaSendFailureError(
+              `send_whatsapp_flow: o template "${templateName}" não tem botão Flow.`,
+            );
+          }
+          const enrichTpl = await enrichTemplateComponentsForFlowSend(flowMetaClient, {
+            templateName,
+            languageCode: langCode,
+            components: [],
+            flowToken,
+            templateGraphId: tplRow?.metaTemplateId?.trim() || null,
+          });
+          const enrichedToken = enrichTpl.flowToken?.trim();
+          if (!enrichedToken) {
+            throw new MetaSendFailureError(
+              `send_whatsapp_flow: o template "${templateName}" não tem botão Flow aprovado neste canal.`,
+            );
+          }
+          flowToken = enrichedToken;
+          const tplResult = await flowMetaClient.sendTemplate(
+            to,
+            templateName,
+            langCode,
+            enrichTpl.components,
+            recipient,
+          );
+          externalId = tplResult?.messages?.[0]?.id ?? null;
+        } catch (sendErr) {
+          const classified = isMetaFlowEnrichError(sendErr)
+            ? new MetaSendFailureError(
+                `send_whatsapp_flow: o template "${templateName}" não tem botão Flow aprovado neste canal.`,
+                sendErr,
+              )
+            : (classifyMetaSendFailure(sendErr) ?? toMetaSendFailure(sendErr));
+          log.error(
+            `Envio de template Flow falhou (contato=${rt.contactId ?? "—"}): ${classified.message}`,
+          );
+          await persistFailedAutomationOutbound({
+            conversationId,
+            content: displayContent || templateName,
+            messageType: "template",
+            senderName: rt.automationName ?? "Automação",
+            triggeredByName: rt.triggeredByName,
+            error: classified,
+            channelId: flowChannelId,
+          });
+          throw classified;
+        }
+      } else if (flow) {
+        const bodyRaw = readString(cfg, "body")?.trim() || `Preencha o formulário: ${flow.name}`;
+        const body = await interpolateMessageVariables(bodyRaw, rt, flowVars);
+        const ctaRaw = readString(cfg, "flowCta")?.trim() || "Abrir formulário";
+        const flowCta = await interpolateMessageVariables(ctaRaw, rt, flowVars);
+        const headerRaw = readString(cfg, "header");
+        const footerRaw = readString(cfg, "footer");
+        const header = headerRaw
+          ? await interpolateMessageVariables(headerRaw, rt, flowVars)
+          : headerRaw;
+        const footer = footerRaw
+          ? await interpolateMessageVariables(footerRaw, rt, flowVars)
+          : footerRaw;
+        displayContent = `${body}\n[Flow: ${flowCta}]`;
+        try {
+          if (conversationId) {
+            const conv = await prisma.conversation.findUnique({
+              where: { id: conversationId },
+              select: { lastInboundAt: true },
+            });
+            if (!sessionFlowWindowOpen(conv?.lastInboundAt)) {
+              throw new MetaSendFailureError(
+                "Fora da janela de 24h. Use um template aprovado com botão Flow.",
+              );
+            }
+          }
+          const sendResult = await flowMetaClient.sendInteractiveFlow(
+            to,
+            body,
+            {
+              flowId: flow.metaFlowId,
+              flowCta,
+              flowToken,
+              flowAction: "navigate",
+            },
+            header,
+            footer,
+            recipient,
+          );
+          externalId = sendResult.messages?.[0]?.id ?? null;
+        } catch (sendErr) {
+          const classified = classifyMetaSendFailure(sendErr) ?? toMetaSendFailure(sendErr);
+          log.error(
+            `Envio WhatsApp Flow falhou (contato=${rt.contactId ?? "—"}): ${classified.message}`,
+          );
+          await persistFailedAutomationOutbound({
+            conversationId,
+            content: displayContent,
+            messageType: "interactive",
+            senderName: rt.automationName ?? "Automação",
+            triggeredByName: rt.triggeredByName,
+            error: classified,
+            channelId: flowChannelId,
+          });
+          throw classified;
+        }
       }
 
       if (conversationId) {
@@ -4288,7 +4382,7 @@ export async function executeStep(
             conversationId,
             content: displayContent,
             direction: "out",
-            messageType: "interactive",
+            messageType: outboundType,
             senderName: rt.automationName ?? "Automação",
             authorType: "bot",
             ...(rt.triggeredByName ? { triggeredByName: rt.triggeredByName } : {}),
@@ -4325,6 +4419,10 @@ export async function executeStep(
             buttonId: "flow",
             flowToken,
             ...(nextId ? { gotoStepId: nextId } : {}),
+            ...(awaitingMetaFlowId ? { metaFlowId: awaitingMetaFlowId } : {}),
+            ...(awaitingFlowName ? { flowName: awaitingFlowName } : {}),
+            ...(conversationId ? { conversationId } : {}),
+            ...(flowChannelId ? { channelId: flowChannelId } : {}),
           },
         });
       }
