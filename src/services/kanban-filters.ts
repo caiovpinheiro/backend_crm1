@@ -1282,15 +1282,14 @@ export async function buildDealWhereFromFilters(
     conditions.push({ status: { in: filters.statuses } });
   }
 
-  // Responsável
-  if (filters.withoutOwner) {
-    conditions.push({ ownerId: null });
-  } else if (filters.ownerIds && filters.ownerIds.length > 0) {
-    const realIds = filters.ownerIds.filter((id): id is string => !!id);
-    const hasNull = filters.ownerIds.some((id) => id === null);
-    if (hasNull && realIds.length > 0) {
+  // Responsável. "Sem responsável" junto de consultores é a união dos dois.
+  {
+    const realIds = (filters.ownerIds ?? []).filter((id): id is string => !!id);
+    const hasNull = (filters.ownerIds ?? []).some((id) => id === null);
+    const wantUnassigned = filters.withoutOwner === true || hasNull;
+    if (wantUnassigned && realIds.length > 0) {
       conditions.push({ OR: [{ ownerId: null }, { ownerId: { in: realIds } }] });
-    } else if (hasNull) {
+    } else if (wantUnassigned) {
       conditions.push({ ownerId: null });
     } else if (realIds.length > 0) {
       conditions.push({ ownerId: { in: realIds } });
