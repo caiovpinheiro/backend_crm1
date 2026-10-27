@@ -141,6 +141,7 @@ Medição por conversa: `node dist/workers/audit-attendance.js --org <slug>`.
 
 ## Decisões técnicas
 
+- 2026-10-27 — Grok 4.7 — **Mover estágio também pega o negócio Perdido**: sem card OPEN, `move_stage` usa `latestClosedDealId`. Destino que não é Ganho nem Perdido reabre o card. `continueFromStep` carrega esse negócio na retomada (botão/espera), senão a condição vê o campo vazio e a distribuição não recebe `dealId`.
 - 2026-10-27 — Grok 4.7 — **Formulário FLOW tem quatro saídas**: `send_whatsapp_flow` envia um Flow publicado (janela de 24h) ou um template aprovado com botão Flow. Conclusão só com o token daquele envio, ou sem token quando o id/nome casa ou é a única espera da conversa. Outro Flow não conclui. Mensagem comum segue `elseGotoStepId` se a aresta existir; sem aresta, permanece. Timeout e resposta disputam `claimFlowWait` — só uma saída anda.
 - 2026-10-26 — Grok 4.7 — **Aguardar documento aceita tudo menos áudio**: foto, PDF, Word, vídeo e figurinha seguem Documento recebido. Áudio e recado de voz (`audio`/`ptt`/extensão de áudio) não avançam — o passo continua esperando. Texto segue a saída de mensagem.
 - 2026-10-26 — Grok 4.7 — **Aguardar documento só segue com imagem**: a saída Documento recebido aceita foto (`messageType` image/photo) ou arquivo com extensão de imagem. Áudio, vídeo, PDF, Word e figurinha não avançam o fluxo — o passo continua esperando. Texto segue a saída de mensagem.

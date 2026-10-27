@@ -1724,8 +1724,8 @@ async function resolveAutomationDealIds(rt: RuntimeContext): Promise<string[]> {
 
 /**
  * Negócio fechado mais recente do contato, só quando não há nenhum aberto.
- * `update_field` grava nele. `move_stage` não usa: cair no Perdido/Ganho
- * reabriria o card.
+ * `update_field` grava nele. `move_stage` também move esse card: se o
+ * destino não for Ganho nem Perdido, o status volta para aberto.
  */
 async function latestClosedDealId(contactId: string): Promise<string | null> {
   const openCount = await prisma.deal.count({
@@ -2321,6 +2321,13 @@ export async function executeStep(
       if (dealIds.length === 0) {
         const cfgDealId = readString(cfg, "dealId");
         if (cfgDealId) dealIds.push(cfgDealId);
+      }
+      // Sem negócio aberto (ex.: card em Perdido). O passo tem estágio de
+      // destino: move o fechado mais recente. Destino que não é Ganho nem
+      // Perdido reabre o card no statusPatch abaixo.
+      if (dealIds.length === 0 && rt.contactId) {
+        const closedId = await latestClosedDealId(rt.contactId);
+        if (closedId) dealIds.push(closedId);
       }
       if (dealIds.length === 0) {
         // Opt-in: sem negócio aberto, seguir o fluxo em vez de abortar.
@@ -5956,16 +5963,38 @@ export async function continueFromStep(
     ? `${contact.name ?? "Contato"}${contact.phone ? ` (${contact.phone})` : ""}`
     : contactId;
 
-  const dealRaw = await prisma.deal.findFirst({
+  const dealInclude = {
+    stage: { select: { name: true, pipelineId: true, pipeline: { select: { name: true } } } },
+  } as const;
+  let dealRaw = await prisma.deal.findFirst({
     where: { contactId, status: "OPEN" },
     orderBy: { updatedAt: "desc" },
-    include: {
-      stage: { select: { name: true, pipelineId: true, pipeline: { select: { name: true } } } },
-    },
+    include: dealInclude,
   });
-  const deal: DealWithNames | null = dealRaw
+  if (!dealRaw) {
+    // Retomada depois de botão/espera. O gatilho "Perdido" dispara com o
+    // card fechado; sem este fallback a condição vê os campos vazios, o
+    // mover ignora e a distribuição não recebe o dealId.
+    const pinnedId =
+      typeof variables.dealId === "string" ? variables.dealId.trim() : "";
+    if (pinnedId) {
+      dealRaw = await prisma.deal.findFirst({
+        where: { id: pinnedId, contactId },
+        include: dealInclude,
+      });
+    }
+  }
+  if (!dealRaw) {
+    dealRaw = await prisma.deal.findFirst({
+      where: { contactId },
+      orderBy: { updatedAt: "desc" },
+      include: dealInclude,
+    });
+  }
+  const loadedDeal = dealRaw;
+  const deal: DealWithNames | null = loadedDeal
     ? (() => {
-        const { stage, ...dealOnly } = dealRaw;
+        const { stage, ...dealOnly } = loadedDeal;
         return {
           ...(dealOnly as Deal & { contactId: string | null }),
           stageName: stage?.name ?? "",
