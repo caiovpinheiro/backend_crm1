@@ -12,6 +12,7 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { prismaBase } from "@/lib/prisma-base";
 import { publishAutomationState } from "@/lib/realtime-events";
 import { withSystemContext } from "@/lib/webhook-context";
+import { WHATSAPP_SESSION_WINDOW_MS } from "@/services/whatsapp-session-expiry";
 
 const log = getLogger("automation-context");
 
@@ -297,18 +298,41 @@ export type AwaitingFlowState = {
   buttonId: string;
   flowToken: string;
   gotoStepId?: string;
+  /** Id do Flow na Meta (sessão ou botão do template). */
+  metaFlowId?: string;
+  /** Nome do formulário ou do template enviado. */
+  flowName?: string;
+  conversationId?: string;
+  channelId?: string;
 };
+
+function optStr(v: unknown): string {
+  return typeof v === "string" ? v.trim() : "";
+}
 
 export function readAwaitingFlow(variables: Record<string, unknown>): AwaitingFlowState | null {
   const raw = variables[AWAITING_FLOW_VAR];
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const o = raw as Record<string, unknown>;
-  const stepId = typeof o.stepId === "string" ? o.stepId.trim() : "";
-  const buttonId = typeof o.buttonId === "string" ? o.buttonId.trim() : "";
-  const flowToken = typeof o.flowToken === "string" ? o.flowToken.trim() : "";
+  const stepId = optStr(o.stepId);
+  const buttonId = optStr(o.buttonId);
+  const flowToken = optStr(o.flowToken);
   if (!stepId || !buttonId || !flowToken) return null;
-  const gotoStepId = typeof o.gotoStepId === "string" ? o.gotoStepId.trim() : "";
-  return { stepId, buttonId, flowToken, ...(gotoStepId ? { gotoStepId } : {}) };
+  const gotoStepId = optStr(o.gotoStepId);
+  const metaFlowId = optStr(o.metaFlowId);
+  const flowName = optStr(o.flowName);
+  const conversationId = optStr(o.conversationId);
+  const channelId = optStr(o.channelId);
+  return {
+    stepId,
+    buttonId,
+    flowToken,
+    ...(gotoStepId ? { gotoStepId } : {}),
+    ...(metaFlowId ? { metaFlowId } : {}),
+    ...(flowName ? { flowName } : {}),
+    ...(conversationId ? { conversationId } : {}),
+    ...(channelId ? { channelId } : {}),
+  };
 }
 
 export function interactiveButtonId(b: InteractiveOption, idx: number): string {
@@ -470,22 +494,99 @@ export function decideInteractiveMenuInbound(input: {
   return { action: "no_match" };
 }
 
-export type FlowStepInboundDecision = "complete" | "stay";
+export type FlowStepInboundDecision = "complete" | "else" | "stay";
+
+const GENERIC_FLOW_LABELS = new Set(["flow", "sent", "nfm_reply", "flow_reply"]);
 
 /**
- * Node `send_whatsapp_flow`: só avança com nfm_reply (token casa ou Meta omitiu).
- * Texto livre permanece no passo para o lead ainda poder enviar o formulário.
+ * A Meta às vezes manda o id ou o nome do Flow e às vezes só "flow".
+ * `true`/`false` é evidência. `undefined` é omissão — não decide sozinho.
+ */
+export function flowMetaMatchesAwaiting(
+  awaiting: AwaitingFlowState | null,
+  inboundMetaFlowId?: string | null,
+  inboundFlowName?: string | null,
+): boolean | undefined {
+  if (!awaiting) return undefined;
+  const id = (inboundMetaFlowId ?? "").trim();
+  const name = (inboundFlowName ?? "").trim();
+  if (id && awaiting.metaFlowId) return id === awaiting.metaFlowId;
+  if (!name || GENERIC_FLOW_LABELS.has(name.toLowerCase())) return undefined;
+  if (awaiting.metaFlowId && name === awaiting.metaFlowId) return true;
+  if (awaiting.flowName && name.toLowerCase() === awaiting.flowName.toLowerCase()) return true;
+  if (awaiting.metaFlowId || awaiting.flowName) return false;
+  return undefined;
+}
+
+/**
+ * Node `send_whatsapp_flow`.
+ * Conclusão só com o token deste envio, ou sem token quando a correlação
+ * é única (mesmo Flow, ou a única espera desta conversa). Outro Flow fica
+ * no passo. Mensagem comum segue "Outra resposta" só se a aresta existe;
+ * sem aresta, permanece (automação antiga).
  */
 export function decideFlowStepInbound(input: {
   flowReply?: boolean;
   flowToken?: string | null;
   awaitingFlow?: AwaitingFlowState | null;
+  elseConfigured?: boolean;
+  inboundMetaFlowId?: string | null;
+  inboundFlowName?: string | null;
+  inboundConversationId?: string | null;
+  inboundChannelId?: string | null;
+  /** Não há outra espera de Flow na mesma conversa. */
+  soleAwaitingOnConversation?: boolean;
 }): FlowStepInboundDecision {
-  if (!input.flowReply) return "stay";
-  const awaiting = input.awaitingFlow;
-  const inboundToken = (input.flowToken ?? "").trim();
-  if (awaiting && inboundToken && inboundToken !== awaiting.flowToken) return "stay";
-  return "complete";
+  const awaiting = input.awaitingFlow ?? null;
+  const inboundConv = (input.inboundConversationId ?? "").trim();
+  const inboundChannel = (input.inboundChannelId ?? "").trim();
+  if (
+    awaiting?.conversationId &&
+    inboundConv &&
+    awaiting.conversationId !== inboundConv
+  ) {
+    return "stay";
+  }
+  if (awaiting?.channelId && inboundChannel && awaiting.channelId !== inboundChannel) {
+    return "stay";
+  }
+
+  if (input.flowReply) {
+    const inboundToken = (input.flowToken ?? "").trim();
+    if (!awaiting) return "stay";
+    if (inboundToken) {
+      return inboundToken === awaiting.flowToken ? "complete" : "stay";
+    }
+    const meta = flowMetaMatchesAwaiting(
+      awaiting,
+      input.inboundMetaFlowId,
+      input.inboundFlowName,
+    );
+    if (meta === true) return "complete";
+    if (meta === false) return "stay";
+    if (input.soleAwaitingOnConversation) return "complete";
+    return "stay";
+  }
+
+  if (input.elseConfigured) return "else";
+  return "stay";
+}
+
+/** Template aprovado só entra neste node se o cadastro local tem botão Flow. */
+export function flowTemplateRowHasFlowButton(
+  row: { flowId?: string | null; buttonTypes?: readonly string[] | null } | null | undefined,
+): boolean {
+  if (!row) return false;
+  return Boolean(row.flowId?.trim() || row.buttonTypes?.includes("FLOW"));
+}
+
+/** Flow de sessão só pode sair dentro da janela de 24h do último inbound. */
+export function sessionFlowWindowOpen(
+  lastInboundAt: Date | null | undefined,
+  now = Date.now(),
+): boolean {
+  const inboundAt = lastInboundAt?.getTime() ?? 0;
+  return inboundAt > 0 && now - inboundAt < WHATSAPP_SESSION_WINDOW_MS;
 }
 
 /** Clique de botão/lista ou nfm_reply deve retomar menu pausado mesmo com humano atendendo. */
@@ -835,6 +936,23 @@ export async function createContext(
   return row;
 }
 
+/**
+ * Uma resolução da espera do Flow (resposta, outra mensagem ou timeout).
+ * O segundo evento encontra `timeoutAt` nulo e não avança de novo.
+ */
+export async function claimFlowWait(contextId: string, stepId: string): Promise<boolean> {
+  const result = await prisma.automationContext.updateMany({
+    where: {
+      id: contextId,
+      status: "RUNNING",
+      currentStepId: stepId,
+      timeoutAt: { not: null },
+    },
+    data: { timeoutAt: null },
+  });
+  return result.count === 1;
+}
+
 export async function advanceContext(
   contextId: string,
   nextStepId: string | null,
@@ -1029,6 +1147,8 @@ export async function processIncomingMessage(
     flowReply?: boolean;
     flowToken?: string | null;
     flowPayload?: Record<string, unknown> | null;
+    flowMetaName?: string | null;
+    flowMetaId?: string | null;
     messageType?: string | null;
   },
 ): Promise<SalesbotProcessResult> {
@@ -1095,6 +1215,9 @@ export async function processIncomingMessage(
   );
 
   let sawInFlightPlainSend = false;
+  // nfm_reply que não é o Flow desta espera: tenta outro contexto de Flow
+  // antes de tratar como mensagem comum.
+  let deferredUnmatchedFlowReply = false;
   for (const ctx of activeContexts) {
     if (!ctx.currentStepId) {
       // Ponteiro morto: cliente falou e o robô não estava esperando nada.
@@ -1124,6 +1247,9 @@ export async function processIncomingMessage(
     }
 
     const currentStep = ctx.automation.steps.find((s) => s.id === ctx.currentStepId);
+    if (deferredUnmatchedFlowReply && currentStep?.type !== "send_whatsapp_flow") {
+      continue;
+    }
     if (!currentStep) {
       log.warn(
         `ctx ${ctx.id} (auto=${ctx.automation.name}) currentStepId=${ctx.currentStepId} não existe na automação — marcando como COMPLETED`,
@@ -1303,31 +1429,78 @@ export async function processIncomingMessage(
     } else if (currentStep.type === "send_whatsapp_flow") {
       const varName = String(config.saveToVariable ?? "lastResponse");
       const awaiting = readAwaitingFlow(variables);
+      const inboundConv = (opts?.conversationId ?? "").trim();
+      const otherFlowWait = activeContexts.some((other) => {
+        if (other.id === ctx.id) return false;
+        const otherStep = other.automation.steps.find((s) => s.id === other.currentStepId);
+        if (otherStep?.type !== "send_whatsapp_flow") return false;
+        const ov =
+          other.variables && typeof other.variables === "object"
+            ? (other.variables as Record<string, unknown>)
+            : {};
+        const oc = readAwaitingFlow(ov)?.conversationId?.trim() ?? "";
+        if (inboundConv && oc && oc !== inboundConv) return false;
+        return true;
+      });
+      const payloadFlowId =
+        opts?.flowPayload && typeof opts.flowPayload.flow_id === "string"
+          ? opts.flowPayload.flow_id
+          : null;
       const flowDecision = decideFlowStepInbound({
         flowReply: Boolean(opts?.flowReply),
         flowToken: opts?.flowToken,
         awaitingFlow: awaiting,
+        elseConfigured: Boolean(readStepRef(config, "elseGotoStepId")),
+        inboundMetaFlowId: (opts?.flowMetaId ?? payloadFlowId ?? "").trim() || null,
+        inboundFlowName: opts?.flowMetaName,
+        inboundConversationId: opts?.conversationId,
+        inboundChannelId: opts?.channelId,
+        soleAwaitingOnConversation: !otherFlowWait,
       });
       if (flowDecision === "stay") {
         log.info(
-          `send_whatsapp_flow aguardando nfm_reply — auto=${ctx.automation.name} step=${currentStep.id}`,
+          `send_whatsapp_flow permanece no passo — auto=${ctx.automation.name} step=${currentStep.id} flowReply=${Boolean(opts?.flowReply)}`,
+        );
+        if (opts?.flowReply) {
+          deferredUnmatchedFlowReply = true;
+          continue;
+        }
+        return { handled: true, replied: true, automationId: ctx.automationId, contextId: ctx.id };
+      }
+      const claimed = await claimFlowWait(ctx.id, currentStep.id);
+      if (!claimed) {
+        log.info(
+          `send_whatsapp_flow já resolvido (webhook duplicado ou timeout) — auto=${ctx.automation.name} ctx=${ctx.id}`,
         );
         return { handled: true, replied: true, automationId: ctx.automationId, contextId: ctx.id };
       }
       delete variables[AWAITING_FLOW_VAR];
-      if (opts?.flowPayload && Object.keys(opts.flowPayload).length > 0) {
-        variables = { ...variables, [varName]: opts.flowPayload };
+      if (flowDecision === "else") {
+        variables = { ...variables, [varName]: messageContent, lastResponse: messageContent };
+        nextStepId = readStepRef(config, "elseGotoStepId");
+        log.info(
+          `send_whatsapp_flow outra resposta — auto=${ctx.automation.name} → step=${nextStepId ?? "(fim)"}`,
+        );
       } else {
-        variables = { ...variables, [varName]: messageContent };
+        if (opts?.flowPayload && Object.keys(opts.flowPayload).length > 0) {
+          variables = {
+            ...variables,
+            [varName]: opts.flowPayload,
+            flowResponse: opts.flowPayload,
+          };
+          if (varName !== "lastResponse") variables.lastResponse = messageContent;
+        } else {
+          variables = { ...variables, [varName]: messageContent, lastResponse: messageContent };
+        }
+        const storedGoto = (awaiting?.gotoStepId ?? "").trim();
+        nextStepId =
+          storedGoto ||
+          readStepRef(config, "nextStepId") ||
+          linearFallbackStepId(ctx.automation.steps, ctx.currentStepId);
+        log.info(
+          `Formulário WhatsApp concluído — auto=${ctx.automation.name} → step=${nextStepId ?? "(fim)"}`,
+        );
       }
-      const storedGoto = (awaiting?.gotoStepId ?? "").trim();
-      nextStepId =
-        storedGoto ||
-        readStepRef(config, "nextStepId") ||
-        linearFallbackStepId(ctx.automation.steps, ctx.currentStepId);
-      log.info(
-        `Formulário WhatsApp concluído — auto=${ctx.automation.name} → step=${nextStepId ?? "(fim)"}`,
-      );
     } else {
       const varName = String(config.saveToVariable ?? "lastResponse");
       variables = { ...variables, [varName]: messageContent };
@@ -1599,6 +1772,10 @@ export async function processIncomingMessage(
     }
 
     return { handled: true, replied: true, automationId: ctx.automationId, contextId: ctx.id };
+  }
+
+  if (deferredUnmatchedFlowReply) {
+    return { handled: true, replied: true };
   }
 
   log.debug(`nenhum contexto interativo encontrado pra contato=${contactId}`);
@@ -1903,6 +2080,15 @@ export async function processTimeout(contextId: string) {
     (ctx.variables as Record<string, unknown>) ?? {},
     ctx.currentStepId,
   )) {
+    if (step?.type === "send_whatsapp_flow") {
+      const claimed = await claimFlowWait(ctx.id, step.id);
+      if (!claimed) {
+        log.info(
+          `send_whatsapp_flow TTL ignorado (espera já resolvida) — ctx=${ctx.id}`,
+        );
+        return;
+      }
+    }
     log.info(
       `TTL de contexto pausado expirou — auto=${ctx.automation.name} step=${ctx.currentStepId} (${step?.type ?? "?"}) → encerrando contexto`,
     );
@@ -2081,6 +2267,50 @@ export async function processTimeout(contextId: string) {
       "wait_for_document timeout",
       { id: step.id, type: step.type },
     );
+    return;
+  }
+
+  if (step.type === "send_whatsapp_flow") {
+    const claimed = await claimFlowWait(ctx.id, step.id);
+    if (!claimed) {
+      log.info(
+        `send_whatsapp_flow timeout ignorado (resposta já resolveu a espera) — ctx=${ctx.id}`,
+      );
+      return;
+    }
+    const flowVars = { ...variables };
+    delete flowVars[AWAITING_FLOW_VAR];
+    const timeoutGoto = readStepRef(config, "timeoutGotoStepId");
+    const flowAction = String(config.timeoutAction ?? "continue");
+    if (timeoutGoto && flowAction !== "stop") {
+      log.info(
+        `send_whatsapp_flow timeout — auto=${ctx.automation.name} → step=${timeoutGoto}`,
+      );
+      await dispatchToNextStep(
+        ctxForDispatch,
+        timeoutGoto,
+        flowVars,
+        "send_whatsapp_flow timeout",
+        { id: step.id, type: step.type },
+      );
+      return;
+    }
+    if (flowAction === "continue") {
+      const linear = linearFallbackStepId(ctx.automation.steps, ctx.currentStepId);
+      log.info(
+        `send_whatsapp_flow timeout sem aresta — auto=${ctx.automation.name} → step=${linear ?? "(fim)"}`,
+      );
+      await dispatchToNextStep(
+        ctxForDispatch,
+        linear,
+        flowVars,
+        "send_whatsapp_flow timeout (sem aresta)",
+        { id: step.id, type: step.type },
+      );
+      return;
+    }
+    log.info(`send_whatsapp_flow timeout (action=stop) — auto=${ctx.automation.name}`);
+    await advanceContext(ctx.id, null, flowVars);
     return;
   }
 

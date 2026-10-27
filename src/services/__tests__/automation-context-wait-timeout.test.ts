@@ -26,6 +26,7 @@ const h = vi.hoisted(() => {
       findUnique: vi.fn(),
       create: vi.fn(),
       update: vi.fn(),
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
     step: { findUnique: vi.fn() },
     message: {
@@ -773,5 +774,163 @@ describe("helpers puros", () => {
     expect(isInFlightPlainSend({ stepType: "send_whatsapp_message", timeoutAt: null })).toBe(true);
     expect(isInFlightPlainSend({ stepType: "send_whatsapp_message", timeoutAt: NOW })).toBe(false);
     expect(isInFlightPlainSend({ stepType: "wait_for_reply", timeoutAt: null })).toBe(false);
+  });
+});
+
+describe("send_whatsapp_flow — uma saída por espera", () => {
+  const FLOW_STEPS: Step[] = [
+    {
+      id: "step-flow",
+      type: "send_whatsapp_flow",
+      position: 0,
+      config: {
+        nextStepId: "step-done",
+        elseGotoStepId: "step-else",
+        timeoutGotoStepId: "step-timeout",
+        timeoutAction: "goto",
+        saveToVariable: "formulario",
+      },
+    },
+    { id: "step-done", type: "move_stage", position: 1, config: {} },
+    { id: "step-else", type: "send_whatsapp_message", position: 2, config: {} },
+    { id: "step-timeout", type: "send_whatsapp_message", position: 3, config: {} },
+  ];
+
+  function flowCtx(over: Record<string, unknown> = {}) {
+    return ctxRow(
+      {
+        currentStepId: "step-flow",
+        variables: {
+          conversationId: "conv-1",
+          __awaitingFlow: {
+            stepId: "step-flow",
+            buttonId: "flow",
+            flowToken: "tok-form",
+            gotoStepId: "step-done",
+            metaFlowId: "111",
+            flowName: "Formulario_Redacao",
+            conversationId: "conv-1",
+          },
+        },
+        ...over,
+      },
+      FLOW_STEPS,
+    );
+  }
+
+  it("mensagem comum segue só Outra resposta", async () => {
+    h.ctx.findMany.mockResolvedValueOnce([flowCtx()]);
+    const out = await withOrg(ORG, () => processIncomingMessage("contact-1", "quero saber o preço"));
+    expect(out.handled).toBe(true);
+    expect(h.ctx.updateMany).toHaveBeenCalled();
+    expect(h.continueFromStep).toHaveBeenCalledWith(
+      "auto-1",
+      "contact-1",
+      "step-else",
+      expect.objectContaining({ lastResponse: "quero saber o preço" }),
+    );
+  });
+
+  it("token certo conclui o Flow", async () => {
+    h.ctx.findMany.mockResolvedValueOnce([flowCtx()]);
+    await withOrg(ORG, () =>
+      processIncomingMessage("contact-1", "Resposta do formulário", {
+        flowReply: true,
+        flowToken: "tok-form",
+        flowPayload: { nome: "Ana" },
+        conversationId: "conv-1",
+      }),
+    );
+    expect(h.continueFromStep).toHaveBeenCalledWith(
+      "auto-1",
+      "contact-1",
+      "step-done",
+      expect.objectContaining({ formulario: { nome: "Ana" }, flowResponse: { nome: "Ana" } }),
+    );
+  });
+
+  it("token de outro formulário não conclui este e conclui o Flow que espera esse token", async () => {
+    const other = flowCtx({
+      id: "ctx-2",
+      automationId: "auto-2",
+      variables: {
+        __awaitingFlow: {
+          stepId: "step-flow",
+          buttonId: "flow",
+          flowToken: "tok-outro",
+          gotoStepId: "step-done",
+          metaFlowId: "222",
+          flowName: "Outro",
+          conversationId: "conv-1",
+        },
+      },
+    });
+    h.ctx.findMany.mockResolvedValueOnce([flowCtx(), other]);
+    const out = await withOrg(ORG, () =>
+      processIncomingMessage("contact-1", "Resposta do formulário", {
+        flowReply: true,
+        flowToken: "tok-outro",
+        conversationId: "conv-1",
+      }),
+    );
+    expect(out.handled).toBe(true);
+    expect(h.continueFromStep).toHaveBeenCalledTimes(1);
+    expect(h.continueFromStep).toHaveBeenCalledWith(
+      "auto-2",
+      "contact-1",
+      "step-done",
+      expect.anything(),
+    );
+  });
+
+  it("token de outro formulário não avança", async () => {
+    h.ctx.findMany.mockResolvedValueOnce([flowCtx()]);
+    const out = await withOrg(ORG, () =>
+      processIncomingMessage("contact-1", "Resposta do formulário", {
+        flowReply: true,
+        flowToken: "tok-outro",
+        conversationId: "conv-1",
+      }),
+    );
+    expect(out.handled).toBe(true);
+    expect(h.ctx.updateMany).not.toHaveBeenCalled();
+    expect(h.continueFromStep).not.toHaveBeenCalled();
+  });
+
+  it("webhook duplicado não avança de novo", async () => {
+    h.ctx.updateMany.mockResolvedValueOnce({ count: 0 });
+    h.ctx.findMany.mockResolvedValueOnce([flowCtx()]);
+    const out = await withOrg(ORG, () =>
+      processIncomingMessage("contact-1", "Resposta do formulário", {
+        flowReply: true,
+        flowToken: "tok-form",
+        conversationId: "conv-1",
+      }),
+    );
+    expect(out.handled).toBe(true);
+    expect(h.continueFromStep).not.toHaveBeenCalled();
+  });
+
+  it("timeout segue só a saída de prazo e a resposta simultânea não entra", async () => {
+    h.ctx.findUnique.mockResolvedValueOnce(flowCtx());
+    await withOrg(ORG, () => processTimeout("ctx-1"));
+    expect(h.continueFromStep).toHaveBeenCalledWith(
+      "auto-1",
+      "contact-1",
+      "step-timeout",
+      expect.anything(),
+    );
+
+    h.ctx.updateMany.mockResolvedValueOnce({ count: 0 });
+    h.ctx.findMany.mockResolvedValueOnce([flowCtx()]);
+    const late = await withOrg(ORG, () =>
+      processIncomingMessage("contact-1", "Resposta do formulário", {
+        flowReply: true,
+        flowToken: "tok-form",
+        conversationId: "conv-1",
+      }),
+    );
+    expect(late.handled).toBe(true);
+    expect(h.continueFromStep).toHaveBeenCalledTimes(1);
   });
 });

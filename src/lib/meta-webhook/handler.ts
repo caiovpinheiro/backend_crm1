@@ -3644,6 +3644,11 @@ export async function processMetaWebhookPayload(
                 flowReply: isFlowReply,
                 flowToken: parsed.flowToken,
                 flowPayload: parsed.flowPayload,
+                flowMetaName: parsed.flowMetaName,
+                flowMetaId:
+                  parsed.flowPayload && typeof parsed.flowPayload.flow_id === "string"
+                    ? parsed.flowPayload.flow_id
+                    : null,
                 messageType: inboundMsgType,
               });
               salesbotReplied = Boolean(salesbotResult?.replied);
