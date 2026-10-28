@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { prisma } from "@/lib/prisma";
 import { requireAuth, requirePermission, runInSessionContext } from "@/lib/auth-helpers";
+import { ensureWhatsappFlowHiddenAtColumn } from "@/lib/meta-whatsapp/ensure-hidden-at";
 import { V2_MODELS } from "@/lib/ai-v2/models";
 import { getLogger } from "@/lib/logger";
 
@@ -17,6 +18,7 @@ export async function GET() {
   const p = prisma as any;
 
   try {
+    await ensureWhatsappFlowHiddenAtColumn();
     const [
       departments,
       distributionRules,
@@ -58,7 +60,7 @@ export async function GET() {
       // Mesma consulta das mensagens prontas, no contexto da request.
       // Um import() solto perdia a org e o erro virava lista vazia.
       p.whatsappFlowDefinition.findMany({
-        where: { organizationId, status: "PUBLISHED" },
+        where: { organizationId, status: "PUBLISHED", hiddenAt: null },
         select: { id: true, name: true, metaFlowId: true },
         orderBy: { name: "asc" },
       }),
