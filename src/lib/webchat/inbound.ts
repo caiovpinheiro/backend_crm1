@@ -3,8 +3,9 @@
  *
  * Cópia disciplinada de `processEvent` (src/lib/meta-webhook/messaging-handler.ts)
  * com platform "webchat": mesma ordem de contato → gatilho → deal → ticket →
- * mensagem → SSE/push/gatilho/IA, para o inbox, a distribuição e as
- * automações enxergarem o webchat sem código novo.
+ * mensagem → SSE/push/gatilho, para o inbox, a distribuição e as
+ * automações enxergarem o webchat sem código novo. Sem turno de IA (ver o
+ * fim de `processWebchatInbound`).
  *
  * Roda dentro de `withSystemContext(organizationId)` (rota pública): o
  * `prisma` scoped injeta a org do canal.
@@ -23,9 +24,9 @@ import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { publishNewMessage } from "@/lib/realtime-events";
 import { notifyInboundMessage } from "@/lib/web-push";
+import { notePossibleDuplicatesInConversation } from "@/lib/webchat/duplicate-notice";
 import { contactTrackingFromSession, type WebchatSessionRow } from "@/lib/webchat/session";
 import { inheritContactAssigneeForNewTicket } from "@/services/ai/attendance-gate";
-import { onInboundMessageForAi } from "@/services/ai/turn-manager";
 import { ensureOpenDealForContact } from "@/services/auto-deals";
 import {
   buildMessageTriggerData,
@@ -87,17 +88,20 @@ const MESSAGE_SELECT = {
 // ── Contato do visitante ────────────────────────────────────────────
 
 /**
- * Contato da sessão; sem contato ainda (visitante anônimo que só abriu o
- * chat), cria por `webchatVisitorId` e grava na sessão. Corrida (duas
- * primeiras mensagens juntas) cai no unique (org, webchatVisitorId).
+ * Contato do PRÓPRIO visitante: o que nasceu nesta sessão do webchat
+ * (`webchatVisitorId === session.id`). Sem ele ainda (visitante anônimo que
+ * só abriu o chat), cria por `webchatVisitorId` e grava na sessão. Corrida
+ * (duas primeiras mensagens juntas) cai no unique (org, webchatVisitorId).
+ * Sessão apontando para um contato que não nasceu nela (ligação do identify
+ * antigo) não é reaproveitada: o visitante volta para o contato dele.
  */
 export async function ensureVisitorContact(
   session: WebchatSessionRow,
   fields: { name?: string | null; email?: string | null; phone?: string | null } = {},
 ): Promise<{ id: string; name: string; isNew: boolean }> {
   if (session.contactId) {
-    const existing = await prisma.contact.findUnique({
-      where: { id: session.contactId },
+    const existing = await prisma.contact.findFirst({
+      where: { id: session.contactId, webchatVisitorId: session.id },
       select: { id: true, name: true },
     });
     if (existing) return { ...existing, isNew: false };
@@ -278,6 +282,22 @@ export async function processWebchatInbound(args: {
     content,
     messageType: "text",
   });
+  if (conversation.created) {
+    // Visitante que se identificou antes de escrever: o aviso de possível
+    // duplicado entra no ticket que acabou de nascer.
+    void prisma.contact
+      .findUnique({ where: { id: contact.id }, select: { id: true, email: true, phone: true } })
+      .then((row) =>
+        row
+          ? notePossibleDuplicatesInConversation({
+              organizationId,
+              conversationId: conversation.id,
+              contact: row,
+            })
+          : undefined,
+      )
+      .catch((err) => log.warn({ err }, "aviso de possível duplicado falhou"));
+  }
 
   const msgCreated = await createMessageDedup(() =>
     prisma.message.create({
@@ -355,17 +375,12 @@ export async function processWebchatInbound(args: {
     log.error({ err }, "Falha ao disparar gatilho message_received");
   }
 
-  // IA: o turno é avaliado como nos outros canais; responder pelo webchat
-  // ainda não existe (fora de escopo — §6).
-  if (content.trim()) {
-    void onInboundMessageForAi({
-      conversationId: conversation.id,
-      contactId: contact.id,
-      messageId: msgCreated.id,
-      userMessage: content,
-      channel: "messaging",
-    });
-  }
+  // IA: sem turno no webchat. O agente de IA só sabe responder pela Meta
+  // (WhatsApp) e, numa conversa webchat, o envio caía no cliente Meta global
+  // e mandava WhatsApp para o telefone que o visitante digitou. Responder
+  // pelo widget fica para quando existir entrega de IA pelo webchat (§6);
+  // até lá o ticket segue para atendimento humano. `sendAgentMessage` e
+  // `sendAgentMedia` também recusam conversa webchat (defesa em camadas).
 
   const { organizationId: _org, ...message } = msgCreated;
   return { duplicate: false, message, conversationId: conversation.id, contactId: contact.id };

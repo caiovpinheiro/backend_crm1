@@ -6,6 +6,11 @@ import { prisma } from "@/lib/prisma";
 import { publishMessageUpdated } from "@/lib/realtime-events";
 import { getLogger } from "@/lib/logger";
 import { noteMessageChange } from "@/lib/cache/message-versions";
+import {
+  isWebchatConversation,
+  WEBCHAT_UNSUPPORTED_SEND_MESSAGE,
+  WEBCHAT_UNSUPPORTED_STATUS,
+} from "@/lib/webchat/outbound-guard";
 
 const log = getLogger("api/ai-agents/drafts/[messageId]/approve");
 
@@ -49,7 +54,8 @@ export async function POST(
               contactId: true,
               organizationId: true,
               // Trazer canal pra resolver cliente Meta correto (per-tenant).
-              channelRef: { select: { id: true, config: true } },
+              channel: true,
+              channelRef: { select: { id: true, config: true, provider: true } },
             },
           },
         },
@@ -58,6 +64,13 @@ export async function POST(
         return NextResponse.json(
           { message: "Rascunho não encontrado." },
           { status: 404 },
+        );
+      }
+      // Aprovar envia pela Meta: rascunho em conversa webchat não sai.
+      if (isWebchatConversation(draft.conversation)) {
+        return NextResponse.json(
+          { message: WEBCHAT_UNSUPPORTED_SEND_MESSAGE, code: "WEBCHAT_UNSUPPORTED" },
+          { status: WEBCHAT_UNSUPPORTED_STATUS },
         );
       }
 

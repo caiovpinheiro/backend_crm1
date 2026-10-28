@@ -1,7 +1,20 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const mocks = vi.hoisted(() => {
+  const logger = {
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+    child: () => logger,
+  };
+  return { logger };
+});
+vi.mock("@/lib/logger", () => ({ getLogger: () => mocks.logger }));
 
 import {
   WEBCHAT_TOKEN_TTL_SEC,
+  checkWebchatSecretConfig,
   hashWebchatToken,
   signWebchatToken,
   verifyWebchatToken,
@@ -41,5 +54,29 @@ describe("webchat token", () => {
     expect(await verifyWebchatToken(token)).toEqual({ ok: false, reason: "invalid" });
     expect(await verifyWebchatToken(null)).toEqual({ ok: false, reason: "missing" });
     expect(await verifyWebchatToken("abc.def.ghi")).toEqual({ ok: false, reason: "invalid" });
+  });
+
+  it("WEBCHAT_JWT_SECRET curto: loga erro (uma vez) e usa o derivado do AUTH_SECRET", async () => {
+    mocks.logger.error.mockClear();
+    const { token: derived } = await signWebchatToken(CLAIMS);
+    process.env.WEBCHAT_JWT_SECRET = "curto-demais";
+    expect(checkWebchatSecretConfig()).toMatchObject({ ok: false });
+    const { token } = await signWebchatToken(CLAIMS);
+    await signWebchatToken(CLAIMS);
+    expect(mocks.logger.error).toHaveBeenCalledTimes(1);
+    expect(String(mocks.logger.error.mock.calls[0]![1])).toContain("WEBCHAT_JWT_SECRET");
+    // segue valendo com o segredo derivado (mesmo do token sem o explícito)
+    expect(await verifyWebchatToken(token)).toMatchObject({ ok: true });
+    delete process.env.WEBCHAT_JWT_SECRET;
+    expect(await verifyWebchatToken(derived)).toMatchObject({ ok: true });
+    expect(await verifyWebchatToken(token)).toMatchObject({ ok: true });
+  });
+
+  it("WEBCHAT_JWT_SECRET ausente ou com 32+ chars: sem erro", () => {
+    mocks.logger.error.mockClear();
+    expect(checkWebchatSecretConfig()).toEqual({ ok: true });
+    process.env.WEBCHAT_JWT_SECRET = "x".repeat(32);
+    expect(checkWebchatSecretConfig()).toEqual({ ok: true });
+    expect(mocks.logger.error).not.toHaveBeenCalled();
   });
 });
