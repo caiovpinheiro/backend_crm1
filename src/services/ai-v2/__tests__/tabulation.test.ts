@@ -109,6 +109,22 @@ describe("tabulação", () => {
     expect(mocks.apply).toHaveBeenCalledTimes(1);
   });
 
+  it("padrão ao transferir: própria, nenhuma ou a geral", async () => {
+    mocks.generate.mockResolvedValue({ text: '{"id":null}' });
+    await run({ enabled: true, when: "always", strategy: "ai", fallbackId: "leaf-a", transferFallbackId: "leaf-b" }, "transfer");
+    expect(mocks.apply).toHaveBeenCalledWith(expect.objectContaining({ tabulationId: "leaf-b" }));
+
+    mocks.apply.mockClear();
+    expect(await run({ enabled: true, when: "always", strategy: "ai", fallbackId: "leaf-a", transferFallbackId: "none" }, "transfer")).toBeNull();
+    expect(mocks.apply).not.toHaveBeenCalled();
+
+    // Encerrar e config sem a padrão de transferência: vale a geral.
+    await run({ enabled: true, when: "always", strategy: "ai", fallbackId: "leaf-a", transferFallbackId: "leaf-b" }, "close");
+    expect(mocks.apply).toHaveBeenLastCalledWith(expect.objectContaining({ tabulationId: "leaf-a" }));
+    await run({ enabled: true, when: "always", strategy: "ai", fallbackId: "leaf-a" }, "transfer");
+    expect(mocks.apply).toHaveBeenLastCalledWith(expect.objectContaining({ tabulationId: "leaf-a" }));
+  });
+
   it("modo fixo não chama o modelo", async () => {
     await run({ enabled: true, fallbackId: "leaf-a" });
     expect(mocks.generate).not.toHaveBeenCalled();

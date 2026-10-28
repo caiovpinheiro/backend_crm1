@@ -12,7 +12,7 @@
 import { NOTICE_DEFAULT_HOURS, noticeInstant, noticeWindow } from "./notices";
 import { prisma } from "@/lib/prisma";
 import { getOrgSettingBool } from "@/lib/org-settings";
-import { normalizeV2Config } from "@/lib/ai-v2/config";
+import { normalizeV2Config, TRANSFER_FALLBACK_NONE } from "@/lib/ai-v2/config";
 import type { V2AgentConfig, V2Destination, V2Theme } from "@/lib/ai-v2/types";
 import { automationTalksToClient } from "@/lib/automation-workflow";
 import { sameWordStem } from "./themes";
@@ -785,6 +785,9 @@ function validateTabulation(c: V2AgentConfig, data: ConfigValidationData, add: (
   if (!tab?.enabled) return;
   if (tab.fallbackId && !tabs.has(tab.fallbackId)) {
     add({ code: "tabulacao_inexistente", severity: "bloqueia", path: "tabulation.fallbackId", message: "A tabulação padrão aponta para uma folha que não existe mais ou está inativa.", evidence: tab.fallbackId });
+  }
+  if (tab.transferFallbackId && tab.transferFallbackId !== TRANSFER_FALLBACK_NONE && !tabs.has(tab.transferFallbackId)) {
+    add({ code: "tabulacao_inexistente", severity: "bloqueia", path: "tabulation.transferFallbackId", message: "A tabulação padrão ao transferir aponta para uma folha que não existe mais ou está inativa.", evidence: tab.transferFallbackId });
   }
   for (const [themeId, tabId] of Object.entries(tab.byTheme ?? {})) {
     if (tabId && !tabs.has(tabId)) {

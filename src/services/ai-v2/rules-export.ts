@@ -7,7 +7,7 @@
  */
 
 import type { V2AgentConfig, V2Destination, V2FieldConfig, V2PostCloseCaseBehavior, V2ReplyEnding, V2Rule, V2Theme } from "@/lib/ai-v2/types";
-import { HUMAN_REQUEST_PHRASES, isHumanRequestRule } from "@/lib/ai-v2/config";
+import { HUMAN_REQUEST_PHRASES, isHumanRequestRule, TRANSFER_FALLBACK_NONE } from "@/lib/ai-v2/config";
 import { V2_MODELS } from "@/lib/ai-v2/models";
 import { FACT_IN_SENTENCE } from "./ground-reply";
 import { extractUrls, isUrlAllowed } from "./output-guard";
@@ -488,7 +488,8 @@ export function detectConfigGaps(config: V2AgentConfig, names: V2ExportNames, ct
   if (tabu?.enabled) {
     const anyLeaf = !!tabu.fallbackId || tabu.strategy === "ai" || c.themes.some((t) => themeTabulationId(c, t));
     if (!anyLeaf) add("média", "Começo e fim", `Tabulação ligada sem tabulação escolhida${(tabu.when ?? "on_close") === "on_close" ? " (ao encerrar vale a do departamento, se houver)" : ": ao transferir fica sem tabulação"}.`, "Escolha a tabulação padrão ou use “o agente avalia”.");
-    const ids = [tabu.fallbackId, ...(tabu.allowedIds ?? []), ...Object.values(tabu.byTheme ?? {})].filter((x): x is string => !!x);
+    const transferId = tabu.transferFallbackId === TRANSFER_FALLBACK_NONE ? undefined : tabu.transferFallbackId;
+    const ids = [tabu.fallbackId, transferId, ...(tabu.allowedIds ?? []), ...Object.values(tabu.byTheme ?? {})].filter((x): x is string => !!x);
     for (const id of [...new Set(ids)]) if (!names.tabulations[id]) add("média", "Começo e fim", `Tabulação ${id} não existe mais ou está inativa.`, "Escolha de novo.");
     if (tabu.strategy === "ai" && (tabu.allowedIds ?? []).length > 0 && (tabu.allowedIds ?? []).every((id) => !names.tabulations[id])) add("alta", "Começo e fim", "“O agente avalia” só com tabulações que não existem mais.", "Escolha as tabulações de novo.");
   }
@@ -765,7 +766,7 @@ export function buildAgentRulesMarkdown(args: {
     ...(c.closure?.nextAutomationStepId ? [`- Ao encerrar, segue a automação no passo ${c.closure.nextAutomationStepId}`] : []),
     `- Volta o negócio para a etapa de origem ao encerrar: ${yesNo(c.closure?.returnToOriginStage)}`,
     `- Inatividade: ${c.inactivity?.enabled ? `aviso em ${c.inactivity.nudgeAfter ?? "—"} min (${qd(c.inactivity.nudgeMessage, "Ainda está por aí?")}), encerra em ${c.inactivity.closeAfter ?? "—"} min (${q(c.inactivity.closeMessage)})${c.inactivity.lostDeal?.enabled ? `, depois move para perdido (${c.inactivity.lostDeal.stageId ?? "—"}) motivo ${c.inactivity.lostDeal.reasonId ?? "—"}` : ""}` : "desligada"}`,
-    `- Tabulação: ${c.tabulation?.enabled ? `${c.tabulation.strategy === "ai" ? "o agente avalia" : "fixa"} · ${TAB_WHEN[c.tabulation.when ?? "on_close"] ?? c.tabulation.when} · padrão: ${c.tabulation.fallbackId ? names.tabulations[c.tabulation.fallbackId] ?? c.tabulation.fallbackId : "—"}${c.tabulation.strategy === "ai" ? ` · pode escolher: ${list((c.tabulation.allowedIds ?? []).map((id) => names.tabulations[id] ?? id))}` : ""}${c.tabulation.instructions ? ` · instruções: ${q(c.tabulation.instructions)}` : ""}` : "desligada"}`,
+    `- Tabulação: ${c.tabulation?.enabled ? `${c.tabulation.strategy === "ai" ? "o agente avalia" : "fixa"} · ${TAB_WHEN[c.tabulation.when ?? "on_close"] ?? c.tabulation.when} · padrão: ${c.tabulation.fallbackId ? names.tabulations[c.tabulation.fallbackId] ?? c.tabulation.fallbackId : "—"}${c.tabulation.transferFallbackId ? ` · padrão ao transferir: ${c.tabulation.transferFallbackId === TRANSFER_FALLBACK_NONE ? "nenhuma" : names.tabulations[c.tabulation.transferFallbackId] ?? c.tabulation.transferFallbackId}` : ""}${c.tabulation.strategy === "ai" ? ` · pode escolher: ${list((c.tabulation.allowedIds ?? []).map((id) => names.tabulations[id] ?? id))}` : ""}${c.tabulation.instructions ? ` · instruções: ${q(c.tabulation.instructions)}` : ""}` : "desligada"}`,
     ...(c.survey?.enabled ? [`- Pesquisa de satisfação: ${q(c.survey.question)}`] : []),
   );
   if (c.flow === "onboarding") {
