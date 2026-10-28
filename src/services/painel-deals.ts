@@ -184,6 +184,13 @@ export type PainelCustomFieldCard = {
   byUser: { id: string; name: string; count: number; sum: number | null }[];
 };
 
+/** Card "Motivo de perda": negócios perdidos no período, por motivo. */
+export type PainelLossReasonsCard = {
+  total: number;
+  totalValue: number;
+  items: { reason: string; count: number; value: number }[];
+};
+
 export type PainelEvolution = {
   available: boolean;
   reason?: "building" | "beyond_retention";
@@ -1283,6 +1290,7 @@ export type PainelDealsResult = {
   sources: PainelBlock<PainelSourceRow[]>;
   exceptions: PainelBlock<PainelDealException[]>;
   customFields?: PainelBlock<PainelCustomFieldCard[]>;
+  lossReasons?: PainelBlock<PainelLossReasonsCard>;
 };
 
 function parseNumericField(raw: string): number | null {
@@ -1361,6 +1369,45 @@ export async function getPainelCustomFieldCards(
   });
 }
 
+export const LOSS_REASON_NONE = "Sem motivo";
+
+/**
+ * Negócios com status LOST e `closedAt` no período, com os mesmos filtros
+ * estruturais dos outros blocos (funil, etapas, tags, responsáveis, origem).
+ * Motivo em branco vira "Sem motivo"; texto igual com espaços extras soma junto.
+ */
+export async function getPainelLossReasons(
+  f: PainelDealFilters,
+): Promise<PainelLossReasonsCard> {
+  const structural = await structuralWhere(f);
+  const rows = await db().deal.groupBy({
+    by: ["lostReason"],
+    where: and(structural, {
+      status: "LOST" as DealStatus,
+      closedAt: { gte: f.range.from, lte: f.range.to },
+    }),
+    _count: { _all: true },
+    _sum: { value: true },
+  });
+
+  const buckets = new Map<string, { reason: string; count: number; value: number }>();
+  for (const row of rows) {
+    const reason = row.lostReason?.trim() || LOSS_REASON_NONE;
+    const b = buckets.get(reason) ?? { reason, count: 0, value: 0 };
+    b.count += row._count._all;
+    b.value += toNumber(row._sum.value);
+    buckets.set(reason, b);
+  }
+  const items = [...buckets.values()]
+    .map((b) => ({ ...b, value: round2(b.value) }))
+    .sort((a, b) => b.count - a.count || a.reason.localeCompare(b.reason, "pt-BR"));
+  return {
+    total: items.reduce((s, i) => s + i.count, 0),
+    totalValue: round2(items.reduce((s, i) => s + i.value, 0)),
+    items,
+  };
+}
+
 async function wrap<T>(fn: () => Promise<T>): Promise<PainelBlock<T>> {
   try {
     return { ok: true, data: await fn() };
@@ -1393,21 +1440,27 @@ const DEAL_SECTIONS = [
   "sources",
   "exceptions",
   "customFields",
+  "lossReasons",
 ] as const;
 export type PainelDealSection = (typeof DEAL_SECTIONS)[number];
 
+/** Sem `section`: tudo menos `lossReasons`, que só roda quando o card pede. */
+const DEFAULT_DEAL_SECTIONS: PainelDealSection[] = DEAL_SECTIONS.filter(
+  (s) => s !== "lossReasons",
+);
+
 export function parseDealSections(raw: string | null): PainelDealSection[] {
-  if (!raw) return [...DEAL_SECTIONS];
+  if (!raw) return [...DEFAULT_DEAL_SECTIONS];
   const asked = raw.split(",").map((s) => s.trim()) as PainelDealSection[];
   const next = asked.filter((s): s is PainelDealSection =>
     (DEAL_SECTIONS as readonly string[]).includes(s),
   );
-  return next.length ? next : [...DEAL_SECTIONS];
+  return next.length ? next : [...DEFAULT_DEAL_SECTIONS];
 }
 
 export async function getPainelDeals(
   f: PainelDealFilters,
-  sections: PainelDealSection[] = [...DEAL_SECTIONS],
+  sections: PainelDealSection[] = [...DEFAULT_DEAL_SECTIONS],
   timing?: ServerTiming,
 ): Promise<PainelDealsResult> {
   const want = new Set(sections);
@@ -1415,7 +1468,7 @@ export async function getPainelDeals(
   // paralelo: as fases se sobrepõem e a soma passa do `total`. Sem cache.
   const run = <T,>(block: PainelDealSection, fn: () => Promise<T>) =>
     wrap(() => (timing ? timing.time(`q-${block}`, fn) : fn()));
-  const [kpis, funnel, evolution, agents, sources, exceptions, customFields] =
+  const [kpis, funnel, evolution, agents, sources, exceptions, customFields, lossReasons] =
     await Promise.all([
       want.has("kpis")
         ? run("kpis", () => getPainelDealsKpis(f))
@@ -1442,6 +1495,18 @@ export async function getPainelDeals(
               ? { ok: false, error: "omitido" }
               : { ok: true, data: [] }) as PainelBlock<PainelCustomFieldCard[]>,
           ),
+      want.has("lossReasons")
+        ? run("lossReasons", () => getPainelLossReasons(f))
+        : Promise.resolve(undefined),
     ]);
-  return { kpis, funnel, evolution, agents, sources, exceptions, customFields };
+  return {
+    kpis,
+    funnel,
+    evolution,
+    agents,
+    sources,
+    exceptions,
+    customFields,
+    ...(lossReasons ? { lossReasons } : {}),
+  };
 }
