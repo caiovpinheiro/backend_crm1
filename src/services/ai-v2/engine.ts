@@ -3047,7 +3047,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       counters.aiTransferCount += 1;
       rememberChainAgent(counters, resolved!.agentConfigId);
     }
-    const tabulation = await applyV2Tabulation({ config, theme: getV2ThemeById(config, themeId), moment: "transfer", organizationId: orgId, conversationId: input.conversationId, contactId, agentId: resolved!.agentConfigId });
+    const tabulation = await applyV2Tabulation({ config, theme: getV2ThemeById(config, themeId), moment: "transfer", organizationId: orgId, conversationId: input.conversationId, contactId, agentId: resolved!.agentConfigId, destinationType: destination.type });
     await summarizeBeforeHandoff(destination, tabulation);
     await simpleHandoff({
       conversationId: input.conversationId,
@@ -3276,7 +3276,7 @@ async function handoffAndReply(
     rememberChainAgent(counters, resolved.agentConfigId);
   }
   traceStep("transferência", `Transferido para ${fallbackDestination.type}${fallbackDestination.id ? ` (${fallbackDestination.id})` : ""}`);
-  const tabulation = await applyV2Tabulation({ config, theme: getV2ThemeById(config, themeId), moment: "transfer", organizationId: orgId, conversationId: input.conversationId, contactId, agentId: resolved!.agentConfigId });
+  const tabulation = await applyV2Tabulation({ config, theme: getV2ThemeById(config, themeId), moment: "transfer", organizationId: orgId, conversationId: input.conversationId, contactId, agentId: resolved!.agentConfigId, destinationType: fallbackDestination.type });
   await writeV2Summary({ organizationId: orgId, conversationId: input.conversationId, contactId, agentId: resolved.agentConfigId, config, moment: "transfer", reason: fallbackDestination.type, tabulation });
   await simpleHandoff({
     conversationId: input.conversationId,

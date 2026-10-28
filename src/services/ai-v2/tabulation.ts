@@ -165,8 +165,16 @@ export async function applyV2Tabulation(args: {
   contactId?: string | null;
   /** Agente (chave do modelo no modo "ai"). */
   agentId?: string;
+  /** Tipo do destino da transferência (do handoff). */
+  destinationType?: string;
 }): Promise<string | null> {
   if (!tabulationAppliesAt(args.config, args.moment)) return null;
+  // Passar para outro agente não encerra o atendimento: tabular aqui travaria
+  // a folha (o CRM não sobrescreve) antes de quem recebe saber o desfecho.
+  if (args.moment === "transfer" && args.destinationType === "ai_agent") {
+    traceStep("tabulação", "Transferência para outro agente → sem tabulação aqui; quem recebe tabula");
+    return null;
+  }
   try {
     let tabulationId: string | null = null;
     // De onde veio a folha (relatório de ações e passos).
