@@ -1,5 +1,6 @@
 import { randomBytes } from "crypto";
 
+import { ensureWhatsappFlowHiddenAtColumn } from "@/lib/meta-whatsapp/ensure-hidden-at";
 import { prisma } from "@/lib/prisma";
 import {
   buildWaFlowJsonString,
@@ -82,6 +83,7 @@ export type FlowDefinitionUpsertInput = {
 };
 
 export async function listFlowDefinitions() {
+  await ensureWhatsappFlowHiddenAtColumn();
   return prisma.whatsappFlowDefinition.findMany({
     orderBy: { updatedAt: "desc" },
     select: {
@@ -92,15 +94,24 @@ export async function listFlowDefinitions() {
       metaFlowId: true,
       flowCategory: true,
       publishedAt: true,
+      hiddenAt: true,
       updatedAt: true,
     },
   });
 }
 
-/** Flows publicados com `metaFlowId` — catálogo para agente (/) e node de automação. */
-export async function listPublishedFlowDefinitions() {
+/**
+ * Flows publicados com `metaFlowId` — catálogo do node, do `/` e do agente.
+ * `hiddenAt` preenchido sai da lista. `includeHidden` só para resolver um
+ * flow que a configuração já escolheu (o envio não depende desta lista).
+ */
+export async function listPublishedFlowDefinitions(opts?: { includeHidden?: boolean }) {
+  await ensureWhatsappFlowHiddenAtColumn();
   const rows = await prisma.whatsappFlowDefinition.findMany({
-    where: { status: "PUBLISHED" },
+    where: {
+      status: "PUBLISHED",
+      ...(opts?.includeHidden ? {} : { hiddenAt: null }),
+    },
     orderBy: { name: "asc" },
     select: {
       id: true,
@@ -111,6 +122,20 @@ export async function listPublishedFlowDefinitions() {
     },
   });
   return rows.filter((r) => Boolean(r.metaFlowId?.trim()));
+}
+
+/** Oculta ou reexibe no seletor. Não apaga na Meta nem no CRM. */
+export async function setFlowDefinitionHidden(id: string, hidden: boolean): Promise<void> {
+  await ensureWhatsappFlowHiddenAtColumn();
+  const existing = await prisma.whatsappFlowDefinition.findFirst({
+    where: { id },
+    select: { id: true },
+  });
+  if (!existing) throw new Error("Flow não encontrado.");
+  await prisma.whatsappFlowDefinition.update({
+    where: { id: existing.id },
+    data: { hiddenAt: hidden ? new Date() : null },
+  });
 }
 
 /** Resolve um flow publicado pronto para envio de sessão (`interactive.type=flow`). */

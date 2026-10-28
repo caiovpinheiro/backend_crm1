@@ -15,6 +15,7 @@ const log = getLogger("meta-whatsapp.ensure-hidden-at");
  * processo.
  */
 let hiddenAtColumnEnsured = false;
+let flowHiddenAtColumnEnsured = false;
 
 export function isMissingHiddenAtColumn(error: unknown): boolean {
   if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2022") {
@@ -40,6 +41,27 @@ export async function ensureWhatsappTemplateHiddenAtColumn(): Promise<boolean> {
     log.warn(
       { err: e instanceof Error ? e.message : e },
       "[whatsapp-template-config] falha ao aplicar hidden_at (DDL)",
+    );
+    return false;
+  }
+}
+
+/** Mesma auto-cura para `whatsapp_flow_definitions.hidden_at`. */
+export async function ensureWhatsappFlowHiddenAtColumn(): Promise<boolean> {
+  if (flowHiddenAtColumnEnsured) return true;
+  try {
+    await prismaBase.$executeRawUnsafe(
+      `ALTER TABLE "whatsapp_flow_definitions" ADD COLUMN IF NOT EXISTS "hidden_at" TIMESTAMP(3)`,
+    );
+    await prismaBase.$executeRawUnsafe(
+      `CREATE INDEX IF NOT EXISTS "whatsapp_flow_definitions_organizationId_hidden_at_idx" ON "whatsapp_flow_definitions" ("organizationId", "hidden_at")`,
+    );
+    flowHiddenAtColumnEnsured = true;
+    return true;
+  } catch (e) {
+    log.warn(
+      { err: e instanceof Error ? e.message : e },
+      "[whatsapp-flow-definition] falha ao aplicar hidden_at (DDL)",
     );
     return false;
   }

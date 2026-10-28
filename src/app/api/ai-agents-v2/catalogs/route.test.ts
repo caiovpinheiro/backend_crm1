@@ -23,6 +23,10 @@ vi.mock("@/lib/auth-helpers", () => ({
   requirePermission: vi.fn().mockResolvedValue(null),
 }));
 
+vi.mock("@/lib/meta-whatsapp/ensure-hidden-at", () => ({
+  ensureWhatsappFlowHiddenAtColumn: vi.fn().mockResolvedValue(true),
+}));
+
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     department: { findMany: mocks.departmentFindMany },
@@ -98,7 +102,7 @@ describe("GET /api/ai-agents-v2/catalogs", () => {
     expect(body.messageFlows).toEqual([{ id: "f1", name: "Cadastro" }]);
     expect(mocks.whatsappFlowDefinitionFindMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { organizationId: "org-1", status: "PUBLISHED" },
+        where: { organizationId: "org-1", status: "PUBLISHED", hiddenAt: null },
       }),
     );
   });

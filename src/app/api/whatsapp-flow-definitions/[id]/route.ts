@@ -7,6 +7,7 @@ import {
   deleteFlowDefinitionDraft,
   getFlowDefinitionById,
   replaceFlowDefinitionDraft,
+  setFlowDefinitionHidden,
   updatePublishedFlowMappings,
   type FlowDefinitionUpsertInput,
 } from "@/services/whatsapp-flow-definitions";
@@ -60,6 +61,31 @@ export async function PUT(request: Request, context: RouteContext) {
       }
       const row = await getFlowDefinitionById(cuid);
       return NextResponse.json(row);
+    } catch (e) {
+      return NextResponse.json(
+        { message: e instanceof Error ? e.message : "Erro." },
+        { status: 400 },
+      );
+    }
+  });
+}
+
+/** PATCH { hidden: boolean } — tira ou devolve o flow na seleção. A lista da aba Flows não muda. */
+export async function PATCH(request: Request, context: RouteContext) {
+  return withOrgContext(async (session) => {
+    const denied = requireAdminOrManager(session);
+    if (denied) return denied;
+    const { id } = await context.params;
+    if (!id) return NextResponse.json({ message: "ID inválido." }, { status: 400 });
+    const body = (await request.json().catch(() => null)) as { hidden?: unknown } | null;
+    if (!body || typeof body.hidden !== "boolean") {
+      return NextResponse.json({ message: "Campo hidden (boolean) obrigatório." }, { status: 400 });
+    }
+    const existing = await getFlowDefinitionById(id);
+    if (!existing) return NextResponse.json({ message: "Não encontrado." }, { status: 404 });
+    try {
+      await setFlowDefinitionHidden(existing.id, body.hidden);
+      return NextResponse.json({ id: existing.id, hidden: body.hidden });
     } catch (e) {
       return NextResponse.json(
         { message: e instanceof Error ? e.message : "Erro." },

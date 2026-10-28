@@ -1297,7 +1297,7 @@ async function describeAllowedFlows(ids: string[]): Promise<Array<{ id: string; 
   const wanted = [...new Set(ids.map((id) => id.trim()).filter(Boolean))].slice(0, 50);
   if (wanted.length === 0) return [];
   const { listPublishedFlowDefinitions } = await import("@/services/whatsapp-flow-definitions");
-  const rows = await listPublishedFlowDefinitions();
+  const rows = await listPublishedFlowDefinitions({ includeHidden: true });
   const allow = new Set(wanted);
   return rows.filter((r) => allow.has(r.id)).map((r) => ({ id: r.id, name: r.name }));
 }

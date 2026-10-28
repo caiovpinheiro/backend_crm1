@@ -4119,6 +4119,10 @@ model WhatsappFlowDefinition {
   /// json_version devolvido pela Meta após publicar (se disponível).
   metaJsonVersion  String?              @map("meta_json_version")
   publishedAt      DateTime?            @map("published_at")
+  /// Quando preenchido, o flow some dos seletores (node de automação, `/` e
+  /// catálogo do agente). Continua na aba Flows. Um passo ou envio que já
+  /// aponta para ele segue funcionando — a Meta não é alterada.
+  hiddenAt         DateTime?            @map("hidden_at")
   screens          WhatsappFlowScreen[]
 
   createdAt DateTime @default(now())
@@ -4127,6 +4131,7 @@ model WhatsappFlowDefinition {
   @@unique([organizationId, number])
   @@index([organizationId])
   @@index([organizationId, status])
+  @@index([organizationId, hiddenAt])
   @@map("whatsapp_flow_definitions")
 }
 
