@@ -22,7 +22,13 @@ const m = vi.hoisted(() => ({
   findActive: vi.fn(),
   createNote: vi.fn(async () => "note-1"),
   findOrCreateConv: vi.fn(),
-  writeLiveContext: vi.fn(async (_a: unknown) => ({})),
+  writeLiveContext: vi.fn(async (_a: unknown) => ({
+    state: { etapa: "2" } as Record<string, string | number | boolean>,
+    updatedAt: new Date("2026-10-28T12:00:00Z"),
+    changed: true,
+    ignored: [],
+  })),
+  publishContext: vi.fn(),
   recordRef: vi.fn(async () => ({ id: "ref-1", created: true })),
   publishConversationUpdated: vi.fn(),
 }));
@@ -42,6 +48,7 @@ vi.mock("@/lib/webchat/conversation-notes", () => ({
   findActiveWebchatConversation: m.findActive,
   createWebchatSiteNote: m.createNote,
 }));
+vi.mock("@/lib/webchat/tracking/realtime", () => ({ publishWebchatContextChange: m.publishContext }));
 vi.mock("@/lib/webchat/inbound", () => ({ findOrCreateWebchatConversation: m.findOrCreateConv }));
 vi.mock("@/lib/webchat/live-context", async (orig) => ({
   ...(await orig<typeof import("@/lib/webchat/live-context")>()),
@@ -132,6 +139,13 @@ describe("entrada S2S — efeito", () => {
     expect(ctx.patch.set).toEqual({ etapa: "2" });
     expect(ctx.patch.ignored).toEqual(["invalida$"]);
     expect(ctx.maxKeys).toBe(30);
+    expect(m.publishContext).toHaveBeenCalledWith({
+      organizationId: "org-1",
+      channelId: "ch-1",
+      contactId: "ct-1",
+      state: { etapa: "2" },
+      updatedAt: new Date("2026-10-28T12:00:00Z"),
+    });
     expect(m.addTag).not.toHaveBeenCalled();
   });
 
@@ -255,6 +269,12 @@ describe("entrada S2S — efeito", () => {
     expect(res.noteId).toBeNull();
     expect(m.createNote).not.toHaveBeenCalled();
     expect(m.writeLiveContext).toHaveBeenCalledTimes(1);
+  });
+
+  it("contexto sem mudança não publica no SSE", async () => {
+    m.writeLiveContext.mockResolvedValueOnce({ state: {}, updatedAt: new Date(), changed: false, ignored: [] });
+    await processWebchatS2SIngress(channel(), request({ fields: { etapa: 3 } }));
+    expect(m.publishContext).not.toHaveBeenCalled();
   });
 
   it("url da conversa: tenant da org", async () => {

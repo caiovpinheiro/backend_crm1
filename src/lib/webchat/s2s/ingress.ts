@@ -23,6 +23,7 @@ import { recordWebchatConversationRef } from "@/lib/webchat/conversation-ref";
 import { createWebchatSiteNote, findActiveWebchatConversation } from "@/lib/webchat/conversation-notes";
 import { findOrCreateWebchatConversation } from "@/lib/webchat/inbound";
 import { sanitizeContextPatch, writeLiveContext } from "@/lib/webchat/live-context";
+import { publishWebchatContextChange } from "@/lib/webchat/tracking/realtime";
 import type { WebchatChannel } from "@/lib/webchat/session";
 import { matchWebchatRoutingRules, type WebchatMatchField } from "@/lib/webchat/v2-config";
 import { buildWebchatS2SNote, type WebchatS2SRequest } from "@/lib/webchat/s2s/body";
@@ -144,15 +145,22 @@ export async function processWebchatS2SIngress(
   if (req.fields) {
     const patch = sanitizeContextPatch(req.fields, { maxValueChars: v2.context.maxValueChars });
     if (patch) {
-      await writeLiveContext({
+      const written = await writeLiveContext({
         channelId: channel.id,
         owner: { contactId: contact.id },
         patch,
         maxKeys: v2.context.maxKeys,
       });
-      // TODO(webchat v2 B): publicar `webchat_context` no SSE do inbox com o
-      // publicador da frente B quando ela entrar na DEV. Até lá o painel lê
-      // o estado ao abrir a conversa.
+      // Painel "No site agora" ao vivo (publicador da frente B, best-effort).
+      if (written.changed) {
+        publishWebchatContextChange({
+          organizationId: channel.organizationId,
+          channelId: channel.id,
+          contactId: contact.id,
+          state: written.state,
+          updatedAt: written.updatedAt,
+        });
+      }
     }
   }
 
