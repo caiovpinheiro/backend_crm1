@@ -2,7 +2,13 @@ import { NextResponse } from "next/server";
 
 import { getLogger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
-import { inWebchatOrg, readLimitedText, rejectOversizedBody, webchatRateLimit } from "@/lib/webchat/http";
+import {
+  getClientIp,
+  inWebchatOrg,
+  readLimitedText,
+  rejectOversizedBody,
+  webchatRateLimit,
+} from "@/lib/webchat/http";
 import { isValidIdempotencyKey, parseWebchatS2SBody } from "@/lib/webchat/s2s/body";
 import {
   claimIdempotencyKey,
@@ -31,21 +37,27 @@ type Ctx = { params: Promise<{ publicKey: string }> };
  * HMAC-SHA256(segredo S2S, `${X-Timestamp}.${corpoCru}`), `Idempotency-Key`.
  * Corpo (≤ 32 KB): `{ external_id, ref?, category?, priority?, text?, fields?, links? }`.
  * 200 `{ conversation_id, url }` (repetição: o mesmo corpo + `Idempotent-Replayed: true`).
- * Erros `{ message, code }`: 404 CHANNEL_NOT_FOUND, 413, 429, 403 S2S_NOT_CONFIGURED,
- * 401 TIMESTAMP_EXPIRED | SIGNATURE_INVALID, 400 IDEMPOTENCY_KEY_INVALID |
+ * Erros `{ message, code }`: 429 (IP), 404 CHANNEL_NOT_FOUND, 413, 403 S2S_NOT_CONFIGURED,
+ * 401 TIMESTAMP_EXPIRED | SIGNATURE_INVALID, 429 (`webchat.s2s` por canal, só pedido
+ * assinado), 400 IDEMPOTENCY_KEY_INVALID |
  * INVALID_JSON | INVALID_BODY, 409 IDEMPOTENCY_KEY_REUSED | IDEMPOTENCY_IN_PROGRESS.
  */
 export async function POST(request: Request, ctx: Ctx) {
+  // A chave pública aparece no snippet do site: pedido sem assinatura não
+  // pode gastar a cota do canal. Antes de autenticar, só o teto por IP;
+  // a cota `webchat.s2s` do canal conta depois da assinatura conferida.
+  const ipRl = await webchatRateLimit(ROUTE, [
+    { profile: "webchat.track.ip", scope: "ip", id: getClientIp(request) },
+  ]);
+  if (!ipRl.ok) return ipRl.response;
+  const preHeaders = { "Cache-Control": "no-store" };
+
   const { publicKey } = await ctx.params;
   const channel = await loadWebchatChannelByKey((publicKey ?? "").trim());
-  if (!channel) return webchatError(404, "CHANNEL_NOT_FOUND", "Canal não encontrado.");
+  if (!channel) return webchatError(404, "CHANNEL_NOT_FOUND", "Canal não encontrado.", preHeaders);
 
   const oversized = rejectOversizedBody(request);
   if (oversized) return oversized;
-
-  const rl = await webchatRateLimit(ROUTE, [{ profile: "webchat.s2s", scope: "visitor", id: `ch:${channel.id}` }]);
-  if (!rl.ok) return rl.response;
-  const headers = { ...rl.headers, "Cache-Control": "no-store" };
 
   const read = await readLimitedText(request);
   if (!read.ok) return read.response;
@@ -57,7 +69,7 @@ export async function POST(request: Request, ctx: Ctx) {
     return row ? readWebchatSecret(row.config, "s2s") : null;
   });
   if (!secret) {
-    return webchatError(403, "S2S_NOT_CONFIGURED", "Servidor a servidor não configurado neste canal.", headers);
+    return webchatError(403, "S2S_NOT_CONFIGURED", "Servidor a servidor não configurado neste canal.", preHeaders);
   }
 
   const verified = verifyWebchatS2S({
@@ -68,9 +80,13 @@ export async function POST(request: Request, ctx: Ctx) {
   });
   if (!verified.ok) {
     return verified.code === "TIMESTAMP_EXPIRED"
-      ? webchatError(401, "TIMESTAMP_EXPIRED", "X-Timestamp ausente ou fora da janela de 5 minutos.", headers)
-      : webchatError(401, "SIGNATURE_INVALID", "Assinatura inválida.", headers);
+      ? webchatError(401, "TIMESTAMP_EXPIRED", "X-Timestamp ausente ou fora da janela de 5 minutos.", preHeaders)
+      : webchatError(401, "SIGNATURE_INVALID", "Assinatura inválida.", preHeaders);
   }
+
+  const rl = await webchatRateLimit(ROUTE, [{ profile: "webchat.s2s", scope: "visitor", id: `ch:${channel.id}` }]);
+  if (!rl.ok) return rl.response;
+  const headers = { ...rl.headers, ...preHeaders };
 
   const idemKey = request.headers.get("idempotency-key")?.trim() ?? null;
   if (!isValidIdempotencyKey(idemKey)) {

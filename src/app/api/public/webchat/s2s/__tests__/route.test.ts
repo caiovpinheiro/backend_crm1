@@ -235,6 +235,15 @@ describe("POST /api/public/webchat/s2s/{publicKey}", () => {
     expect(mocks.complete).not.toHaveBeenCalled();
   });
 
+  it("pedido sem assinatura não gasta a cota do canal (300/min)", async () => {
+    for (let i = 0; i < 305; i++) {
+      const res = await POST(...req(KEY_A, BODY, { secret: null }));
+      expect(res.status).toBe(401);
+    }
+    const ok = await POST(...req(KEY_A, BODY));
+    expect(ok.status).toBe(200);
+  });
+
   describe("isolamento de org", () => {
     it("assinado com o segredo do canal B na chave do canal A → 401", async () => {
       const res = await POST(...req(KEY_A, BODY, { secret: SECRET_B }));
