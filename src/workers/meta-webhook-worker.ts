@@ -24,6 +24,10 @@ import {
   startDealStageSnapshotSweeper,
   stopDealStageSnapshotSweeper,
 } from "@/services/deal-stage-snapshot-sweeper";
+import {
+  startWebchatRetentionSweeper,
+  stopWebchatRetentionSweeper,
+} from "@/lib/webchat/tracking/retention-sweeper";
 import { installGracefulShutdown, type ShutdownStep } from "@/workers/graceful-shutdown";
 
 const log = getLogger("worker.meta-webhook");
@@ -122,6 +126,9 @@ export function startMetaWebhookWorker() {
   // Snapshot diário do estoque por etapa (Evolução diária do Painel), 03:05 de
   // São Paulo. Uma instância por dia (trava no Redis). `DEAL_STAGE_SNAPSHOT_WORKER=0` desliga.
   startDealStageSnapshotSweeper();
+  // Retenção diária do webchat v2 (contexto vivo + eventos do site), pelo
+  // `retentionDays` de cada canal. `WEBCHAT_RETENTION_WORKER=0` desliga.
+  startWebchatRetentionSweeper();
 
   log.info({ concurrency }, "worker-meta-webhook iniciado");
   return worker;
@@ -137,6 +144,7 @@ function metaWebhookShutdownSteps(worker: Pick<Worker, "close">): ShutdownStep[]
         stopListenSweeper();
         stopDbRetentionSweeper();
         stopDealStageSnapshotSweeper();
+        stopWebchatRetentionSweeper();
       },
     },
     // Turnos da IA em execução: esperam até AI_TURN_SHUTDOWN_DRAIN_MS e os
