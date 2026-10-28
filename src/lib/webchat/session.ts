@@ -24,6 +24,7 @@ import {
   webchatOrgDefaults,
   type WebchatChannelConfig,
 } from "@/lib/webchat/config";
+import { readWebchatV2Config, type WebchatV2Config } from "@/lib/webchat/v2-config";
 import {
   bearerFrom,
   hashWebchatToken,
@@ -83,6 +84,11 @@ export type WebchatChannel = {
   publicKey: string;
   defaultPipelineId: string | null;
   config: WebchatChannelConfig;
+  /**
+   * Config v2 (privado: nunca vai no `GET /config`). Sem segredos — esses
+   * se leem do banco na hora (`readWebchatSecret`). §9.7.
+   */
+  v2: WebchatV2Config;
   /** Marca da org (cor/logo) que o tema herda quando o canal não define. */
   orgDefaults: { primary: string; avatarUrl: string | null };
 };
@@ -115,7 +121,17 @@ export type WebchatErrorCode =
   | "INVALID_JSON"
   | "INVALID_BODY"
   | "CONTENT_TOO_LONG"
-  | "PAYLOAD_TOO_LARGE";
+  | "PAYLOAD_TOO_LARGE"
+  // Webchat v2 (docs/decisoes/webchat-widget.md §9.3 e §9.6).
+  | "TRACKING_DISABLED"
+  | "TOO_MANY_EVENTS"
+  | "IDENTITY_NOT_CONFIGURED"
+  | "S2S_NOT_CONFIGURED"
+  | "SIGNATURE_INVALID"
+  | "TIMESTAMP_EXPIRED"
+  | "IDEMPOTENCY_KEY_INVALID"
+  | "IDEMPOTENCY_KEY_REUSED"
+  | "IDEMPOTENCY_IN_PROGRESS";
 
 export function webchatError(
   status: number,
@@ -161,13 +177,16 @@ function toWebchatChannel(row: ChannelRow | null): WebchatChannel | null {
     publicKey: row.publicKey,
     defaultPipelineId: row.defaultPipelineId,
     config: readWebchatConfig(row.config, row.publicKey),
+    v2: readWebchatV2Config(row.config),
     orgDefaults: webchatOrgDefaults(row.organization),
   };
 }
 
+// Chaves `webchat:s2:*`: o shape ganhou `v2` (entradas antigas sem ele
+// expiram sozinhas no TTL, ninguém as lê).
 export async function loadWebchatChannelByKey(publicKey: string): Promise<WebchatChannel | null> {
   if (!isWebchatPublicKey(publicKey)) return null;
-  return wrapChannelLookup(`webchat:s:key:${publicKey}`, CHANNEL_CACHE_TTL_SEC, async () =>
+  return wrapChannelLookup(`webchat:s2:key:${publicKey}`, CHANNEL_CACHE_TTL_SEC, async () =>
     toWebchatChannel(
       (await prismaBase.channel.findUnique({
         where: { publicKey },
@@ -178,7 +197,7 @@ export async function loadWebchatChannelByKey(publicKey: string): Promise<Webcha
 }
 
 export async function loadWebchatChannelById(id: string): Promise<WebchatChannel | null> {
-  return wrapChannelLookup(`webchat:s:id:${id}`, CHANNEL_CACHE_TTL_SEC, async () =>
+  return wrapChannelLookup(`webchat:s2:id:${id}`, CHANNEL_CACHE_TTL_SEC, async () =>
     toWebchatChannel(
       (await prismaBase.channel.findUnique({
         where: { id },

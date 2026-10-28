@@ -135,6 +135,11 @@ const SCOPED_MODELS = new Set<Prisma.ModelName>([
   "WhatsAppGroupMessage",
   // Sessão do visitante do widget de webchat (docs/decisoes/webchat-widget.md).
   "WebchatSession",
+  // Webchat v2 (contexto vivo, timeline, idempotência S2S, ref da conversa).
+  "WebchatLiveContext",
+  "WebchatEvent",
+  "WebchatIngressKey",
+  "WebchatConversationRef",
   "QuickReply",
   "MessageTemplate",
   "WhatsAppTemplateConfig",
