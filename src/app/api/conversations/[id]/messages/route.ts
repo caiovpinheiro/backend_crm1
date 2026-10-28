@@ -52,6 +52,7 @@ import {
 import { relabelFlowResponseContent } from "@/lib/meta-whatsapp/parse-flow-response";
 import { occurredAtWindow } from "@/lib/activity-events-window";
 import { getLogger } from "@/lib/logger";
+import { notifyWebchatConversationStatus } from "@/lib/webchat/s2s/callback";
 import { recordConditionalResponse } from "@/lib/metrics";
 import {
   cursorEtagMatches,
@@ -1747,6 +1748,9 @@ export async function POST(request: Request, context: RouteContext) {
         (err) =>
           log.warn({ err }, "[scheduled-messages] falha ao cancelar apos envio manual"),
       );
+
+      // Webchat v2 §9.6: callback "attended" dos refs da conversa (em segundo plano).
+      notifyWebchatConversationStatus({ organizationId: conv.organizationId, conversationIds: [conv.id], status: "attended", channel: "webchat" });
 
       return NextResponse.json(
         {
