@@ -64,6 +64,7 @@ import {
   SOURCE_NONE,
 } from "@/services/kanban-filters";
 import { normalizeHoursBeforeExpiry, WHATSAPP_SESSION_WINDOW_MS } from "@/services/whatsapp-session-expiry";
+import { notifyWebchatConversationStatus } from "@/lib/webchat/s2s/callback";
 
 const log = getLogger("conversations");
 /**
@@ -3250,6 +3251,11 @@ export async function updateConversationStatusInDb(
     include: { contact: { select: { id: true, number: true, name: true, email: true, phone: true, avatarUrl: true } } },
   });
 
+  // Webchat v2 §9.6: callback "resolved" dos refs (em segundo plano; outro canal não consulta nada).
+  if (status === "RESOLVED" && !followUp) {
+    notifyWebchatConversationStatus({ organizationId: updated.organizationId, conversationIds: [id], status: "resolved", channel: updated.channel });
+  }
+
   // Encerrou / reabriu / acompanhou muda de aba — zera badges da org.
   // Coalescido na janela de 15 s (`scheduleTabCountsInvalidation`): o
   // `conversation_updated` publicado abaixo cai na mesma janela, então a
@@ -3521,6 +3527,8 @@ export async function resolveConversationsInline(params: {
       data: closePatch,
     });
     updated += toResolve.length;
+    // Webchat v2 §9.6: callback "resolved" dos refs (em segundo plano).
+    notifyWebchatConversationStatus({ organizationId: toResolve[0]?.organizationId, conversationIds: toResolve.map((c) => c.id), status: "resolved" });
 
 
     if (!params.keepAgent) {
