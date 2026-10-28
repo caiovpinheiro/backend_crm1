@@ -3,9 +3,10 @@
  *
  * Cópia disciplinada de `processEvent` (src/lib/meta-webhook/messaging-handler.ts)
  * com platform "webchat": mesma ordem de contato → gatilho → deal → ticket →
- * mensagem → SSE/push/gatilho, para o inbox, a distribuição e as
- * automações enxergarem o webchat sem código novo. Sem turno de IA (ver o
- * fim de `processWebchatInbound`).
+ * mensagem → SSE/push/gatilho → turno de IA, para o inbox, a distribuição,
+ * as automações e o agente de IA enxergarem o webchat sem código novo. A IA
+ * responde pelo próprio widget (`sendAgentMessage`, ramo webchat) — nunca
+ * pela Meta.
  *
  * Roda dentro de `withSystemContext(organizationId)` (rota pública): o
  * `prisma` scoped injeta a org do canal.
@@ -25,6 +26,7 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { publishNewMessage } from "@/lib/realtime-events";
 import { notifyInboundMessage } from "@/lib/web-push";
 import { notePossibleDuplicatesInConversation } from "@/lib/webchat/duplicate-notice";
+import { recordWebchatConversationRef } from "@/lib/webchat/conversation-ref";
 import { contactTrackingFromSession, type WebchatSessionRow } from "@/lib/webchat/session";
 import { inheritContactAssigneeForNewTicket } from "@/services/ai/attendance-gate";
 import { ensureOpenDealForContact } from "@/services/auto-deals";
@@ -41,6 +43,7 @@ import {
   withConversationNumberRetry,
 } from "@/services/conversations";
 import { maybeDistributeNewInboundTicket } from "@/services/distribution";
+import { onInboundMessageForAi } from "@/services/ai/turn-manager";
 
 const log = getLogger("webchat-inbound");
 
@@ -60,6 +63,27 @@ export function webchatExternalId(visitorId: string, clientMessageId: string): s
 /** Nome do contato anônimo: "Visitante a1b2c3". */
 export function anonymousVisitorName(visitorId: string): string {
   return `Visitante ${visitorId.slice(-6)}`;
+}
+
+/** Nome é um placeholder de visitante anônimo ("Visitante a1b2c3")? */
+export function isAnonymousVisitorName(name: string | null | undefined): boolean {
+  return /^Visitante [A-Za-z0-9_-]{6}$/.test((name ?? "").trim());
+}
+
+/**
+ * A sessão foi identificada pelo site com assinatura válida (§9.4) e aponta
+ * para `contactId`? Esse contato é do visitante mesmo sem ter nascido na
+ * sessão (o site provou quem ele é).
+ */
+export async function isVerifiedSessionContact(
+  session: Pick<WebchatSessionRow, "id" | "contactId">,
+): Promise<boolean> {
+  if (!session.contactId) return false;
+  const row = await prisma.webchatSession.findFirst({
+    where: { id: session.id, contactId: session.contactId, identityVerifiedAt: { not: null } },
+    select: { id: true },
+  });
+  return Boolean(row);
 }
 
 export type WebchatInboundMessage = {
@@ -93,7 +117,8 @@ const MESSAGE_SELECT = {
  * só abriu o chat), cria por `webchatVisitorId` e grava na sessão. Corrida
  * (duas primeiras mensagens juntas) cai no unique (org, webchatVisitorId).
  * Sessão apontando para um contato que não nasceu nela (ligação do identify
- * antigo) não é reaproveitada: o visitante volta para o contato dele.
+ * antigo) não é reaproveitada: o visitante volta para o contato dele —
+ * exceto quando a ligação veio de um identify ASSINADO válido.
  */
 export async function ensureVisitorContact(
   session: WebchatSessionRow,
@@ -105,6 +130,13 @@ export async function ensureVisitorContact(
       select: { id: true, name: true },
     });
     if (existing) return { ...existing, isNew: false };
+    if (await isVerifiedSessionContact(session)) {
+      const verified = await prisma.contact.findFirst({
+        where: { id: session.contactId },
+        select: { id: true, name: true },
+      });
+      if (verified) return { ...verified, isNew: false };
+    }
   }
 
   const byVisitor = await prisma.contact.findFirst({
@@ -248,6 +280,10 @@ export async function processWebchatInbound(args: {
   session: WebchatSessionRow;
   clientMessageId: string;
   content: string;
+  /** `ref` do `open({ ref })` (já normalizado) — metadado da conversa (§9.4). */
+  ref?: string | null;
+  /** `config.v2.refDealCustomFieldId` do canal. */
+  refDealCustomFieldId?: string | null;
   now?: Date;
 }): Promise<WebchatInboundResult> {
   const { organizationId, channelId, session, clientMessageId, content } = args;
@@ -375,12 +411,30 @@ export async function processWebchatInbound(args: {
     log.error({ err }, "Falha ao disparar gatilho message_received");
   }
 
-  // IA: sem turno no webchat. O agente de IA só sabe responder pela Meta
-  // (WhatsApp) e, numa conversa webchat, o envio caía no cliente Meta global
-  // e mandava WhatsApp para o telefone que o visitante digitou. Responder
-  // pelo widget fica para quando existir entrega de IA pelo webchat (§6);
-  // até lá o ticket segue para atendimento humano. `sendAgentMessage` e
-  // `sendAgentMedia` também recusam conversa webchat (defesa em camadas).
+  if (args.ref) {
+    try {
+      await recordWebchatConversationRef({
+        conversationId: conversation.id,
+        contactId: contact.id,
+        ref: args.ref,
+        source: "widget",
+        refDealCustomFieldId: args.refDealCustomFieldId ?? null,
+      });
+    } catch (err) {
+      log.warn({ err, conversationId: conversation.id }, "ref da conversa não gravado");
+    }
+  }
+
+  // IA: o turno abre como nos outros canais. A resposta sai pelo próprio
+  // widget (`sendAgentMessage` grava a `out` como o composer); anexos e
+  // envios da Meta seguem recusados para conversa webchat (outbound-guard).
+  void onInboundMessageForAi({
+    conversationId: conversation.id,
+    contactId: contact.id,
+    messageId: msgCreated.id,
+    userMessage: content,
+    channel: "webchat",
+  }).catch((err) => log.warn({ err }, "turno de IA do webchat falhou"));
 
   const { organizationId: _org, ...message } = msgCreated;
   return { duplicate: false, message, conversationId: conversation.id, contactId: contact.id };

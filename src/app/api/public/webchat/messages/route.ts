@@ -9,6 +9,7 @@ import {
   rejectOversizedBody,
   webchatRateLimit,
 } from "@/lib/webchat/http";
+import { normalizeWebchatRef } from "@/lib/webchat/conversation-ref";
 import { isValidClientMessageId, processWebchatInbound } from "@/lib/webchat/inbound";
 import { authenticateWebchatVisitor, webchatError } from "@/lib/webchat/session";
 import {
@@ -64,9 +65,11 @@ export async function GET(request: Request) {
 /**
  * POST /api/public/webchat/messages  (Bearer do visitante)
  *
- * Body `{ clientMessageId, content }` — texto até 4000 chars;
+ * Body `{ clientMessageId, content, ref? }` — texto até 4000 chars;
  * `clientMessageId` `[A-Za-z0-9_-]{1,64}` gerado pelo widget. Idempotente
- * por `externalId = "wc:{visitorId}:{clientMessageId}"`.
+ * por `externalId = "wc:{visitorId}:{clientMessageId}"`. `ref` (v2, §9.4:
+ * o `open({ ref })` do site, ≤ 128) vira metadado da conversa; inválido é
+ * ignorado.
  * 201 (nova) / 200 (repetida) → `{ message, conversationId, contactId, duplicate }`.
  */
 export async function POST(request: Request) {
@@ -85,6 +88,7 @@ export async function POST(request: Request) {
   const parsed = await readJsonObject(request);
   if (!parsed.ok) return parsed.response;
   const { clientMessageId, content: rawContent } = parsed.body;
+  const ref = normalizeWebchatRef(parsed.body.ref);
   if (!isValidClientMessageId(clientMessageId)) {
     return webchatError(400, "INVALID_BODY", "clientMessageId inválido.", rl.headers);
   }
@@ -107,6 +111,8 @@ export async function POST(request: Request) {
         session,
         clientMessageId,
         content,
+        ref,
+        refDealCustomFieldId: channel.v2.refDealCustomFieldId,
       }),
     );
     const message: VisitorMessageDto = {

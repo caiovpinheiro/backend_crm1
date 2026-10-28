@@ -110,6 +110,8 @@ const mocks = vi.hoisted(() => {
     },
     webchatSession: {
       update: vi.fn(async () => ({})),
+      // Sessão sem identify assinado (identityVerifiedAt nulo): regra v1.
+      findFirst: vi.fn(async () => null),
       updateMany: vi.fn(async () => {
         throw new Error("identify nunca repontua sessões em massa");
       }),
@@ -168,6 +170,8 @@ vi.mock("@/services/conversations", () => ({
   withConversationNumberRetry: (fn: (n: number) => Promise<unknown>) => fn(1),
 }));
 vi.mock("@/services/distribution", () => ({ maybeDistributeNewInboundTicket: vi.fn(async () => {}) }));
+vi.mock("@/services/ai/turn-manager", () => ({ onInboundMessageForAi: vi.fn(async () => {}) }));
+vi.mock("@/lib/webchat/conversation-ref", () => ({ recordWebchatConversationRef: vi.fn(async () => ({})) }));
 
 import {
   WebchatIdentifyError,
