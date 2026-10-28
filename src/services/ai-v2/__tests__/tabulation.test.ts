@@ -96,6 +96,19 @@ describe("tabulação", () => {
     expect(mocks.apply).not.toHaveBeenCalled();
   });
 
+  it("transferência para outro agente não tabula; para pessoa, tabula", async () => {
+    const config = cfg({ enabled: true, when: "always", fallbackId: "leaf-a" });
+    const base = { config, theme: config.themes[0], moment: "transfer" as const, organizationId: "org", conversationId: "c1", agentId: "agent-1" };
+    expect(await applyV2Tabulation({ ...base, destinationType: "ai_agent" })).toBeNull();
+    expect(mocks.apply).not.toHaveBeenCalled();
+    await applyV2Tabulation({ ...base, destinationType: "department" });
+    expect(mocks.apply).toHaveBeenCalledWith(expect.objectContaining({ tabulationId: "leaf-a" }));
+    // Encerrar continua tabulando, qualquer que seja o destino informado.
+    mocks.apply.mockClear();
+    await applyV2Tabulation({ ...base, moment: "close", destinationType: "ai_agent" });
+    expect(mocks.apply).toHaveBeenCalledTimes(1);
+  });
+
   it("modo fixo não chama o modelo", async () => {
     await run({ enabled: true, fallbackId: "leaf-a" });
     expect(mocks.generate).not.toHaveBeenCalled();

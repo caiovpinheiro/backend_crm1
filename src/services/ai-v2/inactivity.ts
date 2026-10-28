@@ -469,6 +469,7 @@ export async function processIdleV2(now: Date = new Date()): Promise<{ nudged: n
             const tabulation = await applyV2Tabulation({
               config, theme, moment: "transfer", organizationId: row.organization_id,
               conversationId: row.conversation_id, contactId: row.contact_id, agentId: row.agent_config_id,
+              destinationType: destination.type,
             });
             await writeV2Summary({
               organizationId: row.organization_id, conversationId: row.conversation_id, contactId: row.contact_id,
