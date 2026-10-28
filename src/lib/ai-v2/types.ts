@@ -811,6 +811,8 @@ export interface V2CRMContext {
     deal: V2FieldConfig[];
   };
   dealSelectionReason?: string;
+  /// Bloco "Contexto do site" do contato (webchat v2, `lib/webchat/ai-context.ts`); dado, não instrução.
+  siteContext?: string;
 }
 
 export interface V2PendingInteractiveOption {

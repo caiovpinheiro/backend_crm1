@@ -5,14 +5,18 @@
  * anônimo. A frente C (servidor a servidor) reusa `publishWebchatContextChange`
  * depois de `writeLiveContext`.
  *
+ * Privacidade: o bus entrega por organização, então os eventos saem só como
+ * SINAL DE INVALIDAÇÃO, sem valores do site. Quem tem o painel da conversa
+ * aberto refaz o `GET /api/conversations/:id/webchat-context` (que confere o
+ * acesso à conversa); quem não pode ver a conversa não recebe nada além de ids.
+ *
  * Eventos (nome SSE → payload):
- *  - `webchat_context` → `{ organizationId, contactId, channelId, state, updatedAt }`
- *  - `webchat_event`   → `{ organizationId, contactId, channelId, event: { id, name, data, important, occurredAt } }`
+ *  - `webchat_context` → `{ organizationId, contactId, channelId, updatedAt }`
+ *  - `webchat_event`   → `{ organizationId, contactId, channelId, count, latestOccurredAt }` (um por lote)
  */
 import { getLogger } from "@/lib/logger";
 import { publishWebchatContext, publishWebchatEvent } from "@/lib/realtime-events";
 import type { WebchatContextState } from "@/lib/webchat/live-context";
-import { WEBCHAT_RECENT_EVENTS } from "@/lib/webchat/v2-config";
 
 const log = getLogger("webchat-tracking");
 
@@ -25,12 +29,15 @@ export type WebchatEventDto = {
   occurredAt: string;
 };
 
-/** Estado novo do contexto vivo do contato → inbox. */
+/**
+ * Estado novo do contexto vivo do contato → sinal para o inbox. `state` é
+ * aceito para manter a assinatura dos chamadores, mas NÃO sai no SSE.
+ */
 export function publishWebchatContextChange(args: {
   organizationId: string;
   channelId: string;
   contactId: string | null;
-  state: WebchatContextState;
+  state?: WebchatContextState;
   updatedAt: Date;
 }): void {
   if (!args.contactId) return;
@@ -39,7 +46,6 @@ export function publishWebchatContextChange(args: {
       organizationId: args.organizationId,
       contactId: args.contactId,
       channelId: args.channelId,
-      state: args.state,
       updatedAt: args.updatedAt.toISOString(),
     });
   } catch (err) {
@@ -47,32 +53,26 @@ export function publishWebchatContextChange(args: {
   }
 }
 
-/**
- * Eventos novos → inbox, um SSE por evento, só os `WEBCHAT_RECENT_EVENTS`
- * mais recentes do lote (o painel mostra só esses).
- */
+/** Eventos novos → um sinal por lote (sem nome nem dados dos eventos). */
 export function publishWebchatEventsAdded(args: {
   organizationId: string;
   channelId: string;
   contactId: string | null;
-  events: WebchatEventDto[];
+  events: Array<Pick<WebchatEventDto, "occurredAt">>;
 }): void {
   if (!args.contactId || args.events.length === 0) return;
-  const newest = [...args.events]
-    .sort((a, b) => b.occurredAt.localeCompare(a.occurredAt))
-    .slice(0, WEBCHAT_RECENT_EVENTS)
-    .reverse();
-  for (const event of newest) {
-    try {
-      publishWebchatEvent({
-        organizationId: args.organizationId,
-        contactId: args.contactId,
-        channelId: args.channelId,
-        event,
-      });
-    } catch (err) {
-      log.debug({ err }, "SSE webchat_event falhou (não-fatal)");
-      return;
-    }
+  const latestOccurredAt = args.events
+    .map((e) => e.occurredAt)
+    .reduce((a, b) => (b > a ? b : a));
+  try {
+    publishWebchatEvent({
+      organizationId: args.organizationId,
+      contactId: args.contactId,
+      channelId: args.channelId,
+      count: args.events.length,
+      latestOccurredAt,
+    });
+  } catch (err) {
+    log.debug({ err }, "SSE webchat_event falhou (não-fatal)");
   }
 }
