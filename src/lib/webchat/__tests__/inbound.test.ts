@@ -17,6 +17,7 @@ const mocks = vi.hoisted(() => {
     push: vi.fn(async () => {}),
     touchInbound: vi.fn(async () => {}),
     emitConversationCreated: vi.fn(),
+    noteDuplicates: vi.fn(async () => {}),
     dedup: { lose: false },
     prisma: {
       message: { findFirst: vi.fn(), create: vi.fn() },
@@ -41,6 +42,9 @@ vi.mock("@/lib/conversation-inbound", () => ({
   warnTouchInboundFailed: vi.fn(),
 }));
 vi.mock("@/services/ai/turn-manager", () => ({ onInboundMessageForAi: mocks.onAi }));
+vi.mock("@/lib/webchat/duplicate-notice", () => ({
+  notePossibleDuplicatesInConversation: mocks.noteDuplicates,
+}));
 vi.mock("@/services/ai/attendance-gate", () => ({
   inheritContactAssigneeForNewTicket: async () => null,
 }));
@@ -74,12 +78,15 @@ function session(over: Partial<WebchatSessionRow> = {}): WebchatSessionRow {
     channelId: "ch-1",
     contactId: null,
     tokenHash: "h",
+    prevTokenHash: null,
+    rotatedAt: null,
     expiresAt: new Date(Date.now() + 60_000),
     lastSeenAt: new Date(),
     firstUrl: "https://site.test/landing",
     lastUrl: null,
     referrer: "https://google.com/",
     utm: { utm_source: "google", gclid: "g-1" },
+    createdAt: new Date(),
     ...over,
   };
 }
@@ -106,7 +113,7 @@ beforeEach(() => {
 });
 
 describe("processWebchatInbound", () => {
-  it("visitante novo: cria contato anônimo, ticket webchat e mensagem com os efeitos do inbound", async () => {
+  it("visitante novo: cria contato anônimo, ticket webchat e mensagem com os efeitos do inbound (sem IA)", async () => {
     const s = session();
     const res = await processWebchatInbound({
       organizationId: "org-1",
@@ -161,9 +168,51 @@ describe("processWebchatInbound", () => {
     );
     expect(mocks.push).toHaveBeenCalledWith(expect.objectContaining({ channel: "Webchat" }));
     expect(mocks.fireTrigger).toHaveBeenCalledWith("message_received", expect.anything());
-    expect(mocks.onAi).toHaveBeenCalledWith(
-      expect.objectContaining({ conversationId: "conv-1", messageId: "msg-1" }),
+    // Webchat não abre turno de IA: o agente só responderia pela Meta/WhatsApp.
+    expect(mocks.onAi).not.toHaveBeenCalled();
+  });
+
+  it("ticket novo de visitante já identificado: confere possível duplicado no ticket", async () => {
+    const s = session({ contactId: "ct-1" });
+    mocks.prisma.contact.findFirst.mockResolvedValueOnce({ id: "ct-1", name: "Ana" });
+    mocks.prisma.contact.findUnique.mockResolvedValue({ id: "ct-1", email: "ana@x.com", phone: null });
+    await processWebchatInbound({
+      organizationId: "org-1",
+      channelId: "ch-1",
+      session: s,
+      clientMessageId: "c1",
+      content: "Oi",
+    });
+    await vi.waitFor(() =>
+      expect(mocks.noteDuplicates).toHaveBeenCalledWith({
+        organizationId: "org-1",
+        conversationId: "conv-1",
+        contact: { id: "ct-1", email: "ana@x.com", phone: null },
+      }),
     );
+    expect(mocks.onAi).not.toHaveBeenCalled();
+  });
+
+  it("sessão apontando para contato que não nasceu nela: cria o contato próprio e repontua", async () => {
+    const s = session({ contactId: "ct-alheio" });
+    // posse ({ id, webchatVisitorId }) e busca por visitorId: nada
+    mocks.prisma.contact.findFirst.mockResolvedValue(null);
+    await processWebchatInbound({
+      organizationId: "org-1",
+      channelId: "ch-1",
+      session: s,
+      clientMessageId: "c1",
+      content: "Oi",
+    });
+    expect(mocks.prisma.contact.findFirst).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ where: { id: "ct-alheio", webchatVisitorId: s.id } }),
+    );
+    expect(mocks.insertContact).toHaveBeenCalledWith(
+      expect.objectContaining({ webchatVisitorId: s.id }),
+      expect.anything(),
+    );
+    expect(s.contactId).toBe("ct-1");
   });
 
   it("clientMessageId repetido devolve a mesma mensagem sem novos efeitos", async () => {
@@ -195,7 +244,7 @@ describe("processWebchatInbound", () => {
 
   it("corrida no unique (org, externalId): perdedor devolve a gravada, sem SSE/gatilho", async () => {
     const s = session({ contactId: "ct-1" });
-    mocks.prisma.contact.findUnique.mockResolvedValue({ id: "ct-1", name: "Ana" });
+    mocks.prisma.contact.findFirst.mockResolvedValue({ id: "ct-1", name: "Ana" });
     mocks.prisma.conversation.findFirst.mockResolvedValue({ id: "conv-1", channelId: "ch-1", assignedToId: null });
     mocks.dedup.lose = true;
     mocks.prisma.message.findFirst
@@ -216,7 +265,7 @@ describe("processWebchatInbound", () => {
 
   it("contato existente e ticket aberto: não recria contato nem ticket", async () => {
     const s = session({ contactId: "ct-1" });
-    mocks.prisma.contact.findUnique.mockResolvedValue({ id: "ct-1", name: "Ana" });
+    mocks.prisma.contact.findFirst.mockResolvedValue({ id: "ct-1", name: "Ana" });
     mocks.prisma.conversation.findFirst.mockResolvedValue({ id: "conv-7", channelId: "ch-1", assignedToId: "u-1" });
     const res = await processWebchatInbound({
       organizationId: "org-1",

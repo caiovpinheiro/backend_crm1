@@ -1,7 +1,12 @@
 import { NextResponse } from "next/server";
 
 import { publishTypingEvent } from "@/lib/realtime-events";
-import { inWebchatOrg, webchatRateLimit } from "@/lib/webchat/http";
+import {
+  inWebchatOrg,
+  readLimitedText,
+  rejectOversizedBody,
+  webchatRateLimit,
+} from "@/lib/webchat/http";
 import { authenticateWebchatVisitor } from "@/lib/webchat/session";
 import { activeVisitorConversation } from "@/lib/webchat/visitor-messages";
 
@@ -15,6 +20,8 @@ import { activeVisitorConversation } from "@/lib/webchat/visitor-messages";
  * 200 → `{ ok: true, published: boolean }`.
  */
 export async function POST(request: Request) {
+  const oversized = rejectOversizedBody(request);
+  if (oversized) return oversized;
   const auth = await authenticateWebchatVisitor(request);
   if (!auth.ok) return auth.response;
   const { channel, session } = auth.visitor;
@@ -25,7 +32,9 @@ export async function POST(request: Request) {
   if (!rl.ok) return rl.response;
 
   let typing = true;
-  const raw = await request.text().catch(() => "");
+  const read = await readLimitedText(request);
+  if (!read.ok) return read.response;
+  const raw = read.text;
   if (raw.trim()) {
     try {
       const body = JSON.parse(raw) as Record<string, unknown> | null;

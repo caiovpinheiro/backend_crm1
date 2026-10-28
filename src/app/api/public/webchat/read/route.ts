@@ -1,7 +1,12 @@
 import { NextResponse } from "next/server";
 
 import { getLogger } from "@/lib/logger";
-import { inWebchatOrg, webchatRateLimit } from "@/lib/webchat/http";
+import {
+  inWebchatOrg,
+  readLimitedText,
+  rejectOversizedBody,
+  webchatRateLimit,
+} from "@/lib/webchat/http";
 import { authenticateWebchatVisitor, webchatError } from "@/lib/webchat/session";
 import { markVisitorRead } from "@/lib/webchat/visitor-messages";
 
@@ -15,6 +20,8 @@ const log = getLogger("api/public/webchat/read");
  * inbox. 200 → `{ ok: true, updated: number }`.
  */
 export async function POST(request: Request) {
+  const oversized = rejectOversizedBody(request);
+  if (oversized) return oversized;
   const auth = await authenticateWebchatVisitor(request);
   if (!auth.ok) return auth.response;
   const { channel, session } = auth.visitor;
@@ -25,7 +32,9 @@ export async function POST(request: Request) {
   if (!rl.ok) return rl.response;
 
   let upToMessageId: string | null = null;
-  const raw = await request.text().catch(() => "");
+  const read = await readLimitedText(request);
+  if (!read.ok) return read.response;
+  const raw = read.text;
   if (raw.trim()) {
     let body: unknown;
     try {

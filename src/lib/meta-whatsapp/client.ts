@@ -10,6 +10,7 @@ import { metrics, templatizeRoute } from "@/lib/metrics";
 import { whatsappUploadAudioMime } from "@/lib/audio-convert";
 import { maskPhone } from "@/lib/pii-mask";
 import { getLogger } from "@/lib/logger";
+import { looksLikeWebchatChannelConfig } from "@/lib/webchat/outbound-guard";
 
 const log = getLogger("meta-whatsapp.client");
 
@@ -1737,6 +1738,10 @@ export function metaClientFromConfig(
   options?: { allowEnvFallback?: boolean },
 ): MetaWhatsAppClient {
   const allowEnvFallback = options?.allowEnvFallback !== false;
+
+  // Canal WEBCHAT não tem credencial Meta: sem isto caía no singleton do
+  // .env e conversa do widget saía por WhatsApp. Nunca há fallback aqui.
+  if (looksLikeWebchatChannelConfig(config)) return emptyMetaClient();
 
   if (!config) return allowEnvFallback ? metaWhatsApp : emptyMetaClient();
 

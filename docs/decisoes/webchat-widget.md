@@ -73,16 +73,26 @@ pelo composer normal e a resposta aparece no widget em tempo real.
   começar a conversar anônimo ("Visitante a1b2c3") e identificar-se depois —
   o widget oferece "Informe seu nome/e-mail/telefone" a qualquer momento, e o
   agente pode pedir. Endpoint `POST /session/identify`.
-- **Cruzamento com contato existente** (na identificação, por e-mail ou
-  telefone normalizado, dentro da org):
-  1. Achou contato → o contato anônimo do visitante é **fundido** nele
-     (`merge-contacts.ts`: o existente sobrevive; `webchatVisitorId` passa
-     para ele). A conversa webchat aberta é religada ao contato existente
-     (`linkContactToConversation`). Se ele já tinha um ticket webchat aberto,
-     as mensagens do anônimo são movidas para esse ticket (um ticket por
-     contato por canal, como `findOrCreateConversation` garante).
-  2. Não achou → o contato anônimo recebe nome/e-mail/telefone.
-  3. O inbox recebe `contact_updated` + `conversation_updated` → o card troca
+- **Nunca liga nem funde em contato existente** (decisão 2026-10-28,
+  revisão de segurança). O visitante é anônimo: digitar o e-mail/telefone de
+  alguém não prova que ele é essa pessoa. A versão anterior ligava a sessão
+  ao contato existente (o widget passava a mostrar o histórico webchat dele
+  em `GET /messages`), fundia contatos em identifies encadeados e um e-mail
+  desconhecido sobrescrevia o contato reivindicado.
+  1. O visitante fica no contato que **nasceu no webchat**
+     (`Contact.webchatVisitorId === session.id`; criado na hora se ainda não
+     existe). Só esse contato recebe nome/e-mail/telefone.
+  2. E-mail/telefone (com/sem o 9) que já pertence a outro contato da org →
+     **nota interna** na conversa do visitante (`messageType: "note"`,
+     `isPrivate: true`, autor "Webchat"): "Visitante do webchat informou o
+     e-mail X, que pertence ao contato Nome (#número) — possível duplicado.
+     Nada foi unido automaticamente; funda manualmente se for a mesma
+     pessoa." Sem ticket ainda (pré-chat), a nota entra quando o ticket
+     nascer. Uma nota por texto/ticket. O widget nunca lê nota privada.
+  3. A resposta ao widget só traz dados do próprio visitante (sem
+     `matchedBy`, sem id/nome do outro contato). `merged` é sempre `false`
+     (mantido para o widget antigo).
+  4. O inbox recebe `contact_updated` + `conversation_updated` → o card troca
      "Visitante a1b2c3" pelo nome real sem refresh.
 - **Conversas unificadas na janela de chat**: hoje o histórico (`history=1`
   em `api/conversations/[id]/messages`) filtra por `channel: conv.channel`.
@@ -119,6 +129,12 @@ pelo composer normal e a resposta aparece no widget em tempo real.
 
 - Token: JWT HS256 (`WEBCHAT_JWT_SECRET`, fallback derivado de `AUTH_SECRET`),
   claims `{ org, ch, vis, cid }`, validade 30 d, renovado a cada chamada.
+  `WEBCHAT_JWT_SECRET` definido com menos de 32 caracteres loga erro no 1º
+  uso (e segue no derivado). Ao girar, o token anterior vale por 60 s
+  (`webchat_sessions.prevTokenHash` + `rotatedAt`): outra aba ou poll em voo
+  não toma 401. Vida máxima da sessão: `WEBCHAT_SESSION_MAX_AGE_DAYS`
+  (padrão 90, contada do `createdAt`); passou, o token não autentica e
+  `POST /session` cria visitante novo em vez de renovar.
   Guardado em `localStorage` do **iframe** (origem nossa, não do site do
   cliente — o site não lê o token). Enviado em `Authorization: Bearer`.
 
@@ -157,7 +173,7 @@ Todas com `corsPathPolicy = tenant` (apex) e rate limit por IP + por visitante.
 |--------|------|--------|
 | `GET`  | `/config?key=` | tema, greeting, identification, online/offline (horário + presença de agentes com `canAccessChannel`) |
 | `POST` | `/session` | cria/renova visitante → `{ token, visitorId, contactId, conversation? }`. Body: `{ key, visitorId?, name?, email?, phone?, page, referrer, utm }` |
-| `POST` | `/session/identify` | `{ name?, email?, phone? }` → cruza com contato existente e funde (§3.2); devolve `{ contactId, merged: boolean }` |
+| `POST` | `/session/identify` | `{ name?, email?, phone? }` → grava no contato do próprio visitante; dado de outro contato vira nota de possível duplicado (§3.2); devolve `{ contactId, merged: false, contact, token, expiresAt }` |
 | `POST` | `/messages` | envia texto: `{ clientMessageId, content }` → pipeline inbound (§3.5). Idempotente por `externalId = "wc:" + visitorId + ":" + clientMessageId` |
 | `GET`  | `/messages?after=` | histórico/polling (cursor por `createdAt,id`); marca entregues |
 | `GET`  | `/stream` | SSE para o visitante (fase 4) — subscreve `sseBus` filtrando `conversationId` |
@@ -188,7 +204,7 @@ rotas com Bearer só checam `Origin` (o `host` foi validado ao abrir a sessão).
 |------|---------|----------|
 | `GET /config?key=wc_…&host=` | — | 200 `{ ...WebchatChannelConfig (achatado: publicKey, allowedOrigins, identification, greeting, offlineMessage, theme, businessHours?, collectTranscriptEmail), online: boolean, channel: { name } }` — `allowedOrigins` é público de propósito (o FE monta `frame-ancestors`). `theme` vem **resolvido**: `{ primary: string, avatarUrl: string \| null, position, title }` (herança abaixo) |
 | `POST /session` | `{ key, name?, email?, phone?, page?, referrer?, utm?: { utm_source…, gclid, fbclid }, host? }` + Bearer opcional (renova) | 200 `{ token, expiresAt, visitorId, contactId: string \| null, conversation: { id, number, status } \| null, contact: { name, email, phone, identified } \| null, renewed: boolean, merged?: boolean }` |
-| `POST /session/identify` | Bearer + `{ name?, email?, phone? }` (≥ 1) | 200 `{ contactId, merged: boolean, matchedBy: "email" \| "phone" \| null, token, expiresAt }` — **trocar o token salvo** |
+| `POST /session/identify` | Bearer + `{ name?, email?, phone? }` (≥ 1) | 200 `{ contactId, merged: false, contact: { name, email, phone, identified }, token, expiresAt }` — só dados do próprio visitante; **trocar o token salvo** (o anterior vale 60 s) |
 | `POST /messages` | Bearer + `{ clientMessageId: /[A-Za-z0-9_-]{1,64}/, content ≤ 4000 }` | 201 nova / 200 repetida `{ message: VisitorMessageDto, conversationId, contactId, duplicate: boolean }` |
 | `GET /messages?after=<cursor ou id da última msg>` | Bearer | 200 `{ messages: VisitorMessageDto[], cursor: string \| null, hasMore: boolean, agentTyping: boolean, agentReadAt: string \| null }` |
 | `POST /typing` | Bearer + `{ typing?: boolean }` (ausente = true; `false` não publica) | 200 `{ ok: true, published: boolean }` |
@@ -242,13 +258,14 @@ Rate limit real: `webchat.session` 10/min/IP só para visitante **novo**
    sessão (sem prova de posse seria sequestro de conversa) — o campo é
    aceito e ignorado. `identify` sempre devolve token novo.
 3. **Identify com pré-chat**: `POST /session` com `name/email/phone` já
-   identifica (mesma regra do `/session/identify`). Contato existente que
-   casa: o visitante é ligado direto nele (sem contato anônimo, sem deal
-   duplicado). `merged: true` = "o visitante foi ligado a um contato que já
-   existia" (com ou sem fusão de contato anônimo). Merge no meio da conversa
-   move também os deals do anônimo (`mergeContacts` não perde nada) — pode
-   sobrar um card a mais se o existente já tinha deal aberto.
-   **Título do deal:** depois do identify (com nome) ou do merge, os deals
+   identifica (mesma regra do `/session/identify`): sempre no contato do
+   próprio visitante, nunca ligado a um existente (§3.2, revisão
+   2026-10-28).
+   **Rate limit:** visitante novo sempre gasta do balde de criação por IP
+   (`webchat.session`, IPv6 agrupado por /64); o balde do visitante só vale
+   quando a renovação é de fato possível (token autêntico E aceito pela
+   sessão). Corpo das rotas públicas limitado a 32 KB (413).
+   **Título do deal:** depois do identify (com nome) ou do merge manual, os deals
    ABERTOS do contato que ainda têm exatamente o título gerado para o
    anônimo (`defaultDealTitleForContact("Visitante xxxxxx")` = "Negócio
    Visitante xxxxxx") passam para `defaultDealTitleForContact(nome real)`.
@@ -337,7 +354,11 @@ Novo `src/lib/webchat/inbound.ts`, cópia disciplinada de
 4. `findOrCreateConversation(contactId, "webchat", channelId)` — mesma função,
    mesma `activeConversationOnAccountWhere`; `maybeDistributeNewInboundTicket`.
 5. `createMessageDedup` → `Message { direction: "in", messageType: "text", externalId }`.
-6. `touchInbound` + `publishNewMessage` + `notifyInboundMessage` + `fireTrigger("message_received")` + `onInboundMessageForAi`.
+6. `touchInbound` + `publishNewMessage` + `notifyInboundMessage` + `fireTrigger("message_received")`.
+   **Sem `onInboundMessageForAi`** (revisão 2026-10-28): o agente de IA só
+   envia pela Meta e, no webchat, caía no cliente global do .env e mandava
+   WhatsApp para o telefone que o visitante digitou. O ticket segue para
+   atendimento humano até existir entrega de IA pelo widget.
 
 Resultado: inbox, distribuição inteligente, automações, IA v2, push e
 painéis enxergam o webchat sem código novo.
@@ -349,6 +370,14 @@ painéis enxergam o webchat sem código novo.
   side-effects normais (`afterOutboundSideEffects`). Sem API externa: a
   entrega é o próprio banco + stream do visitante. `delivered` quando o
   widget busca, `read` quando reporta.
+- **Nada de uma conversa webchat sai pela Meta/WhatsApp** (revisão
+  2026-10-28): `metaClientFromConfig` devolve cliente vazio para config de
+  canal webchat (nunca o singleton do .env); `sendWhatsAppText/Media`
+  recusam; anexo, modelo, encaminhamento e aprovação de rascunho de IA
+  respondem 422 `WEBCHAT_UNSUPPORTED`; `sendAgentMessage`/`sendAgentMedia`
+  pulam; passos de WhatsApp de automação cujo canal/conversa é webchat
+  falham com `MetaSendFailureError` (ramo "Falha ao enviar") sem abrir
+  ticket de WhatsApp. Só o texto do composer chega ao visitante.
 - `sendTextToConversation` (usado por automações/IA/integrações): trocar o
   guard `channel !== "whatsapp"` por um `switch` de canal — hoje **IA e
   automações não conseguiriam responder webchat**. Instagram tem o mesmo
@@ -401,7 +430,7 @@ CRM (bundle ≈ 40 KB, Preact ou React isolado).
 | 3 | CRM: dialog + painel de configuração do canal + ajustes do inbox/composer | 3 d |
 | 4 | SSE do visitante, typing, recibos de leitura, presença online | 2–3 d |
 | 5 | Anexos, horário comercial/offline + e-mail de transcrição, Turnstile anti-bot, retenção LGPD (`db-retention`) | 3–4 d |
-| — | **Fora de escopo por ora** (decisão 2026-10-17): IA/automações respondendo webchat (`sendTextToConversation` multi-canal, `automation-executor` com `channel: "whatsapp"` hardcoded). O inbound continua disparando gatilhos e `onInboundMessageForAi`; só o envio automático não acontece. | — |
+| — | **Fora de escopo por ora** (decisão 2026-10-17): IA/automações respondendo webchat (`sendTextToConversation` multi-canal, `automation-executor` com `channel: "whatsapp"` hardcoded). O inbound continua disparando gatilhos; o turno de IA não é aberto para webchat (revisão 2026-10-28) e todo envio automático por WhatsApp de conversa webchat é bloqueado. | — |
 
 Fase 1 já entrega o requisito central (conversa no inbox). Fases 1→3 são
 sequenciais; 4 e 5 são independentes entre si.
@@ -427,6 +456,8 @@ pedido explícito.
    `/api/public/webchat/*` via o mesmo apex (CORS atual cobre).
 2. **Identificação** — formulário **opcional** (configurável por canal).
    Com ou sem formulário, ao identificar-se o visitante é cruzado com contato
-   existente (e-mail/telefone) e fundido; as conversas ficam unificadas na
-   janela de chat do agente (§3.2).
+   existente (e-mail/telefone) — **revisto em 2026-10-28: não funde mais**,
+   só deixa nota de possível duplicado para o agente fundir manualmente.
+   O histórico unificado (`history=1`) respeita o escopo de canais do
+   agente (§3.2).
 3. **IA/automações** — **não** por enquanto (fora de escopo, ver §6).

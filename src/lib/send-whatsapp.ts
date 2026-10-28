@@ -11,6 +11,10 @@ import {
 import { prisma } from "@/lib/prisma";
 import { logMessageFailed } from "@/services/activity-log";
 import { noteMessageRowChange } from "@/lib/cache/message-versions";
+import {
+  isWebchatChannelRef,
+  WEBCHAT_UNSUPPORTED_SEND_MESSAGE,
+} from "@/lib/webchat/outbound-guard";
 
 type ChannelInfo = {
   id: string;
@@ -83,6 +87,11 @@ async function markFailed(
  */
 export async function sendWhatsAppText(opts: SendTextOpts): Promise<SendTextResult> {
   const provider = opts.channelRef?.provider;
+
+  // Conversa webchat não sai por WhatsApp (nem pelo cliente global do .env).
+  if (isWebchatChannelRef(opts.channelRef)) {
+    return markFailed(opts, WEBCHAT_UNSUPPORTED_SEND_MESSAGE, "api");
+  }
 
   if (provider === "BAILEYS_MD" && opts.channelRef) {
     return sendViaBaileys(opts);
@@ -204,6 +213,10 @@ type SendMediaOpts = {
  */
 export async function sendWhatsAppMedia(opts: SendMediaOpts): Promise<SendTextResult> {
   const provider = opts.channelRef?.provider;
+
+  if (isWebchatChannelRef(opts.channelRef)) {
+    return { externalId: null, failed: true, error: WEBCHAT_UNSUPPORTED_SEND_MESSAGE };
+  }
 
   if (provider === "BAILEYS_MD" && opts.channelRef) {
     let targetJid = opts.waJid ?? null;

@@ -37,6 +37,31 @@ const log = getLogger("webchat");
 const CHANNEL_CACHE_TTL_SEC = 60;
 /** `lastSeenAt` só é regravado depois deste intervalo (poll a cada 3 s). */
 const LAST_SEEN_WRITE_INTERVAL_MS = 60_000;
+/**
+ * Depois de girar o token, o anterior ainda vale por este tempo: outra aba
+ * ou um poll em voo com o token antigo não toma 401 (o widget relê o
+ * localStorage no 401, mas a corrida é comum ao abrir a página).
+ */
+export const WEBCHAT_TOKEN_GRACE_MS = 60_000;
+const DEFAULT_SESSION_MAX_AGE_DAYS = 90;
+const MAX_SESSION_MAX_AGE_DAYS = 3650;
+
+/**
+ * Vida máxima da sessão do visitante, contada da criação
+ * (`WEBCHAT_SESSION_MAX_AGE_DAYS`, padrão 90). Passado isso o token não
+ * autentica e a renovação cria um visitante novo em vez de renovar para
+ * sempre.
+ */
+export function webchatSessionMaxAgeMs(): number {
+  const raw = Number(process.env.WEBCHAT_SESSION_MAX_AGE_DAYS?.trim() || "");
+  const days =
+    Number.isFinite(raw) && raw > 0 ? Math.min(raw, MAX_SESSION_MAX_AGE_DAYS) : DEFAULT_SESSION_MAX_AGE_DAYS;
+  return days * 24 * 60 * 60 * 1000;
+}
+
+export function isWebchatSessionTooOld(createdAt: Date, now: number = Date.now()): boolean {
+  return now - createdAt.getTime() > webchatSessionMaxAgeMs();
+}
 const MAX_URL = 2000;
 const MAX_UTM_VALUE = 500;
 const UTM_KEYS = [
@@ -68,12 +93,16 @@ export type WebchatSessionRow = {
   channelId: string;
   contactId: string | null;
   tokenHash: string;
+  /** Hash do token anterior — vale até `rotatedAt + WEBCHAT_TOKEN_GRACE_MS`. */
+  prevTokenHash: string | null;
+  rotatedAt: Date | null;
   expiresAt: Date;
   lastSeenAt: Date;
   firstUrl: string | null;
   lastUrl: string | null;
   referrer: string | null;
   utm: Prisma.JsonValue | null;
+  createdAt: Date;
 };
 
 export type WebchatErrorCode =
@@ -85,7 +114,8 @@ export type WebchatErrorCode =
   | "TOKEN_EXPIRED"
   | "INVALID_JSON"
   | "INVALID_BODY"
-  | "CONTENT_TOO_LONG";
+  | "CONTENT_TOO_LONG"
+  | "PAYLOAD_TOO_LARGE";
 
 export function webchatError(
   status: number,
@@ -211,13 +241,34 @@ const SESSION_SELECT = {
   channelId: true,
   contactId: true,
   tokenHash: true,
+  prevTokenHash: true,
+  rotatedAt: true,
   expiresAt: true,
   lastSeenAt: true,
   firstUrl: true,
   lastUrl: true,
   referrer: true,
   utm: true,
+  createdAt: true,
 } as const;
+
+/**
+ * O token apresentado é o atual da sessão ou o imediatamente anterior,
+ * ainda dentro da carência pós-rotação.
+ */
+export function sessionAcceptsToken(
+  session: Pick<WebchatSessionRow, "tokenHash" | "prevTokenHash" | "rotatedAt">,
+  token: string,
+  now: number = Date.now(),
+): boolean {
+  const hash = hashWebchatToken(token);
+  if (session.tokenHash === hash) return true;
+  return (
+    session.prevTokenHash === hash &&
+    session.rotatedAt !== null &&
+    now - session.rotatedAt.getTime() <= WEBCHAT_TOKEN_GRACE_MS
+  );
+}
 
 /**
  * Bearer → sessão viva + canal. 401 para token ausente/inválido/vencido ou
@@ -248,10 +299,14 @@ export async function authenticateWebchatVisitor(
     !session ||
     session.organizationId !== claims.org ||
     session.channelId !== claims.ch ||
-    session.tokenHash !== hashWebchatToken(token as string) ||
+    !sessionAcceptsToken(session, token as string) ||
     session.expiresAt.getTime() <= Date.now()
   ) {
     return { ok: false, response: webchatError(401, "TOKEN_INVALID", "Sessão do chat inválida.") };
+  }
+  if (isWebchatSessionTooOld(session.createdAt)) {
+    // Vida máxima: o widget renova em POST /session, que cria visitante novo.
+    return { ok: false, response: webchatError(401, "TOKEN_EXPIRED", "Sessão do chat expirada.") };
   }
   const channel = await loadWebchatChannelById(session.channelId);
   if (!channel || channel.organizationId !== session.organizationId) {
@@ -334,49 +389,72 @@ export type IssuedSession = {
 };
 
 /**
- * Renova a sessão do Bearer (vencido vale, se for o último token emitido
- * para ela e do mesmo canal) ou cria um visitante novo. `visitorId` sozinho
- * não retoma nada: sem prova de posse seria sequestro de conversa.
+ * Sessão que o Bearer da requisição pode renovar, ou null. Só leitura —
+ * a rota decide o rate limit antes de gravar qualquer coisa:
+ *  - assinatura válida (vencido vale), mesmo canal/org;
+ *  - o token é o último emitido para a sessão (ou o anterior, na carência
+ *    pós-rotação);
+ *  - a sessão não passou da vida máxima (aí vira visitante novo).
+ * `visitorId` sozinho não retoma nada: sem prova de posse seria sequestro
+ * de conversa.
+ */
+export async function findRenewableWebchatSession(
+  request: Request,
+  channel: WebchatChannel,
+): Promise<WebchatSessionRow | null> {
+  const token = bearerFrom(request);
+  if (!token) return null;
+  const verified = await verifyWebchatToken(token, { allowExpired: true });
+  if (!verified.ok) return null;
+  if (verified.claims.ch !== channel.id || verified.claims.org !== channel.organizationId) return null;
+  const existing = (await prismaBase.webchatSession.findUnique({
+    where: { id: verified.claims.vis },
+    select: SESSION_SELECT,
+  })) as WebchatSessionRow | null;
+  if (!existing || existing.channelId !== channel.id) return null;
+  if (existing.organizationId !== channel.organizationId) return null;
+  if (!sessionAcceptsToken(existing, token)) return null;
+  if (isWebchatSessionTooOld(existing.createdAt)) return null;
+  return existing;
+}
+
+/** Dados de rotação: o token atual vira o anterior (carência). */
+function rotationData(current: Pick<WebchatSessionRow, "tokenHash">, now: Date) {
+  return { prevTokenHash: current.tokenHash, rotatedAt: now };
+}
+
+/**
+ * Renova `renewable` (de `findRenewableWebchatSession`) ou cria um
+ * visitante novo. Quem chama já cobrou o rate limit certo: o do visitante
+ * na renovação, o do IP na criação.
  */
 export async function issueWebchatSession(args: {
   request: Request;
   channel: WebchatChannel;
+  renewable: WebchatSessionRow | null;
   page: string | null;
   referrer: string | null;
   utm: Record<string, string> | null;
 }): Promise<IssuedSession> {
-  const { request, channel } = args;
+  const { request, channel, renewable: existing } = args;
   const now = new Date();
-  const token = bearerFrom(request);
-  if (token) {
-    const verified = await verifyWebchatToken(token, { allowExpired: true });
-    if (verified.ok && verified.claims.ch === channel.id && verified.claims.org === channel.organizationId) {
-      const existing = (await prismaBase.webchatSession.findUnique({
-        where: { id: verified.claims.vis },
-        select: SESSION_SELECT,
-      })) as WebchatSessionRow | null;
-      if (
-        existing &&
-        existing.channelId === channel.id &&
-        existing.tokenHash === hashWebchatToken(token)
-      ) {
-        const signed = await signWebchatToken(
-          { org: channel.organizationId, ch: channel.id, vis: existing.id, cid: existing.contactId },
-          now,
-        );
-        const session = (await prismaBase.webchatSession.update({
-          where: { id: existing.id },
-          data: {
-            tokenHash: signed.tokenHash,
-            expiresAt: signed.expiresAt,
-            lastSeenAt: now,
-            ...(args.page ? { lastUrl: args.page } : {}),
-          },
-          select: SESSION_SELECT,
-        })) as WebchatSessionRow;
-        return { token: signed.token, expiresAt: signed.expiresAt, session, renewed: true };
-      }
-    }
+  if (existing) {
+    const signed = await signWebchatToken(
+      { org: channel.organizationId, ch: channel.id, vis: existing.id, cid: existing.contactId },
+      now,
+    );
+    const session = (await prismaBase.webchatSession.update({
+      where: { id: existing.id },
+      data: {
+        tokenHash: signed.tokenHash,
+        ...rotationData(existing, now),
+        expiresAt: signed.expiresAt,
+        lastSeenAt: now,
+        ...(args.page ? { lastUrl: args.page } : {}),
+      },
+      select: SESSION_SELECT,
+    })) as WebchatSessionRow;
+    return { token: signed.token, expiresAt: signed.expiresAt, session, renewed: true };
   }
 
   const visitorId = generateVisitorId();
@@ -405,20 +483,36 @@ export async function issueWebchatSession(args: {
   return { token: signed.token, expiresAt: signed.expiresAt, session, renewed: false };
 }
 
-/** Novo token para a mesma sessão (depois do identify trocar o contato). */
+/**
+ * Novo token para a mesma sessão (o identify devolve token novo). O
+ * anterior segue valendo na carência. Lê o hash atual do banco: o da linha
+ * em memória pode ser de antes de outra aba girar.
+ */
 export async function reissueWebchatToken(
   session: WebchatSessionRow,
   contactId: string | null,
 ): Promise<{ token: string; expiresAt: Date }> {
-  const signed = await signWebchatToken({
-    org: session.organizationId,
-    ch: session.channelId,
-    vis: session.id,
-    cid: contactId,
+  const now = new Date();
+  const signed = await signWebchatToken(
+    {
+      org: session.organizationId,
+      ch: session.channelId,
+      vis: session.id,
+      cid: contactId,
+    },
+    now,
+  );
+  const current = await prismaBase.webchatSession.findUnique({
+    where: { id: session.id },
+    select: { tokenHash: true },
   });
   await prismaBase.webchatSession.update({
     where: { id: session.id },
-    data: { tokenHash: signed.tokenHash, expiresAt: signed.expiresAt },
+    data: {
+      tokenHash: signed.tokenHash,
+      ...rotationData(current ?? session, now),
+      expiresAt: signed.expiresAt,
+    },
   });
   return { token: signed.token, expiresAt: signed.expiresAt };
 }

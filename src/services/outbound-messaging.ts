@@ -42,6 +42,11 @@ import { getConversationLite, reopenResolvedAsNewTicket } from "@/services/conve
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
 import { getLogger } from "@/lib/logger";
 import { noteMessageChange } from "@/lib/cache/message-versions";
+import {
+  isWebchatConversation,
+  WEBCHAT_UNSUPPORTED_SEND_MESSAGE,
+  WEBCHAT_UNSUPPORTED_STATUS,
+} from "@/lib/webchat/outbound-guard";
 
 const log = getLogger("outbound-messaging");
 
@@ -1272,6 +1277,11 @@ export async function sendTemplateToConversation(
 
   let conv = await findConvFull(args.conversationId);
   if (!conv) return { ok: false, status: 404, message: "Conversa não encontrada." };
+  // Webchat: modelo do WhatsApp nunca sai de uma conversa do widget, nem
+  // com override para um número da org.
+  if (isWebchatConversation(conv)) {
+    return { ok: false, status: WEBCHAT_UNSUPPORTED_STATUS, message: WEBCHAT_UNSUPPORTED_SEND_MESSAGE };
+  }
 
   let reopenedConversationId: string | null = null;
   if (conv.status === "RESOLVED" && conv.contactId) {
