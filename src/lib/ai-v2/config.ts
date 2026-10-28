@@ -244,11 +244,15 @@ const themeRecognitionSchema = z.object({
   preset: z.enum(["strict", "balanced", "loose"]).optional(),
 }).optional();
 
+/** `tabulation.transferFallbackId` = sem padrão ao transferir. */
+export const TRANSFER_FALLBACK_NONE = "none";
+
 const tabulationSchema = z.object({
   enabled: z.boolean().optional().default(false),
   when: z.enum(["on_close", "on_transfer", "always"]).optional().default("on_close"),
   required: z.boolean().optional().default(false),
   fallbackId: z.string().optional(),
+  transferFallbackId: z.string().optional(),
   byTheme: z.record(z.string(), z.string()).optional().default({}),
   mode: z.enum(["suggest", "require"]).optional().default("suggest"),
   strategy: z.enum(["fixed", "ai"]).optional(),

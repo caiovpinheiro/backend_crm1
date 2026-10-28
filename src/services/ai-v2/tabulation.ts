@@ -14,6 +14,7 @@
 import { prisma } from "@/lib/prisma";
 import type { V2AgentConfig, V2Theme } from "@/lib/ai-v2/types";
 import { v2AuxModel } from "@/lib/ai-v2/models";
+import { TRANSFER_FALLBACK_NONE } from "@/lib/ai-v2/config";
 import { maskEvidenceText } from "./feedback-extract";
 import { speaker, type LearnMessage } from "./learn-extract";
 import { noteV2Fact, traceStep } from "./trace";
@@ -39,7 +40,13 @@ export function tabulationAppliesAt(config: V2AgentConfig, moment: V2TabulationM
 export function pickV2TabulationId(config: V2AgentConfig, theme: V2Theme | null | undefined, moment: V2TabulationMoment): string | null {
   if (!tabulationAppliesAt(config, moment)) return null;
   const t = config.tabulation!;
-  return theme?.tabulationId || (theme ? t.byTheme?.[theme.id] : undefined) || t.fallbackId || null;
+  const byTheme = theme?.tabulationId || (theme ? t.byTheme?.[theme.id] : undefined);
+  if (byTheme) return byTheme;
+  // Ao transferir, a padrão própria (ou nenhuma) vale no lugar da geral.
+  if (moment === "transfer" && t.transferFallbackId) {
+    return t.transferFallbackId === TRANSFER_FALLBACK_NONE ? null : t.transferFallbackId;
+  }
+  return t.fallbackId || null;
 }
 
 /** Resposta do modelo → folha da lista (id inventado ou fora da lista = null). */

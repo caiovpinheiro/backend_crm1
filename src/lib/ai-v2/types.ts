@@ -166,6 +166,11 @@ export interface V2TabulationConfig {
   when?: "on_close" | "on_transfer" | "always";
   required?: boolean;
   fallbackId?: string;
+  /**
+   * Padrão ao transferir para a equipe. Vazio: a mesma de `fallbackId`;
+   * "none": nenhuma; id: essa folha.
+   */
+  transferFallbackId?: string;
   byTheme?: Record<string, string>;
   mode?: "suggest" | "require";
   /**
