@@ -7,6 +7,7 @@ import { enqueueBaileysControl } from "@/lib/queue";
 import {
   deleteChannel,
   getChannelById,
+  redactWebchatChannel,
   updateChannel,
   withWebchatDefaults,
 } from "@/services/channels";
@@ -187,7 +188,7 @@ export async function DELETE(_request: Request, context: RouteContext) {
         await enqueueBaileysControl({ channelId: id, action: "logout" });
       }
       const channel = await deleteChannel(id);
-      return NextResponse.json({ channel });
+      return NextResponse.json({ channel: redactWebchatChannel(channel) });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Erro ao excluir.";
       if (msg.includes("não encontrado")) {
