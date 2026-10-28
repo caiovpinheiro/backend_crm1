@@ -4238,7 +4238,7 @@ export async function executeStep(
         );
       }
 
-      let flowToken = randomUUID();
+      let flowToken: string = randomUUID();
       let externalId: string | null = null;
       let displayContent = "";
       let outboundType: "interactive" | "template" = "interactive";
