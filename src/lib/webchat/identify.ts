@@ -31,6 +31,8 @@ import {
 import {
   anonymousVisitorName,
   ensureVisitorContact,
+  isAnonymousVisitorName,
+  isVerifiedSessionContact,
   WEBCHAT_CONVERSATION_CHANNEL,
 } from "@/lib/webchat/inbound";
 import type { WebchatSessionRow } from "@/lib/webchat/session";
@@ -145,21 +147,30 @@ export type OwnVisitorContactView = {
 
 /**
  * O que o widget pode ver do contato: só o do PRÓPRIO visitante
- * (`webchatVisitorId === session.id`). Sessão apontando para outro contato
+ * (`webchatVisitorId === session.id`) ou o ligado por identify ASSINADO
+ * válido (§9.4 — o site provou quem é). Sessão apontando para outro contato
  * (ligação antiga) devolve null — nunca dados de terceiros.
  */
 export async function ownVisitorContactView(
   session: Pick<WebchatSessionRow, "id" | "contactId">,
 ): Promise<OwnVisitorContactView | null> {
   if (!session.contactId) return null;
-  const row = await prisma.contact.findFirst({
+  const select = { id: true, name: true, email: true, phone: true } as const;
+  const own = await prisma.contact.findFirst({
     where: { id: session.contactId, webchatVisitorId: session.id },
-    select: { id: true, name: true, email: true, phone: true },
+    select,
   });
+  const row =
+    own ??
+    ((await isVerifiedSessionContact(session))
+      ? await prisma.contact.findFirst({ where: { id: session.contactId }, select })
+      : null);
   if (!row) return null;
   return {
     ...row,
-    identified: Boolean(row.email || row.phone) || row.name !== anonymousVisitorName(session.id),
+    identified:
+      Boolean(row.email || row.phone) ||
+      (row.name !== anonymousVisitorName(session.id) && !isAnonymousVisitorName(row.name)),
   };
 }
 
@@ -186,20 +197,38 @@ export async function identifyWebchatVisitor(args: {
     throw new WebchatIdentifyError("Informe nome, e-mail ou telefone.");
   }
 
-  // Contato do próprio visitante — nunca um que já existia na org.
+  // Contato do próprio visitante — nunca um que já existia na org. Sessão
+  // já identificada pelo site (assinatura válida): o contato é o dela, e o
+  // que o visitante digita só preenche campo vazio (não sobrescreve o CRM).
+  const verified = await isVerifiedSessionContact(session);
   const own = await ensureVisitorContact(session, identity);
+  let nameWritten = Boolean(identity.name);
   if (!own.isNew) {
+    let current: { name: string; email: string | null; phone: string | null } | null = null;
+    if (verified) {
+      current = await prisma.contact.findFirst({
+        where: { id: own.id },
+        select: { name: true, email: true, phone: true },
+      });
+    }
     const data: Record<string, string> = {};
-    if (identity.name) data.name = identity.name;
-    if (identity.email) data.email = identity.email;
-    if (identity.phone) data.phone = identity.phone;
-    // `webchatVisitorId` no where: só o contato nascido nesta sessão muda.
-    await prisma.contact.updateMany({
-      where: { id: own.id, webchatVisitorId: session.id },
-      data,
-    });
+    if (identity.name && (!current || isAnonymousVisitorName(current.name))) data.name = identity.name;
+    if (identity.email && (!current || !current.email)) data.email = identity.email;
+    if (identity.phone && (!current || !current.phone)) data.phone = identity.phone;
+    nameWritten = Boolean(data.name);
+    if (verified) {
+      if (Object.keys(data).length > 0) {
+        await prisma.contact.updateMany({ where: { id: own.id }, data });
+      }
+    } else {
+      // `webchatVisitorId` no where: só o contato nascido nesta sessão muda.
+      await prisma.contact.updateMany({
+        where: { id: own.id, webchatVisitorId: session.id },
+        data,
+      });
+    }
   }
-  if (identity.name) {
+  if (identity.name && nameWritten) {
     await renameAnonymousVisitorDeals(organizationId, own.id, session.id, identity.name);
   }
   publishContactUpdated({ organizationId, contactId: own.id, reason: "webchat_identified" });

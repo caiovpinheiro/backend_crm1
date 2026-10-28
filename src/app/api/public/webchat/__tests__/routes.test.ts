@@ -37,7 +37,10 @@ const mocks = vi.hoisted(() => {
         findMany: vi.fn(async (): Promise<unknown[]> => []),
         updateMany: vi.fn(async () => ({ count: 0 })),
       },
-      webchatSession: { update: vi.fn(async (_a?: unknown) => ({})) },
+      webchatSession: {
+        update: vi.fn(async (_a?: unknown) => ({})),
+        findFirst: vi.fn(async (_a?: unknown): Promise<unknown> => null),
+      },
     },
     publishMessageStatus: vi.fn(),
     agentTyping: { value: undefined as number | undefined },
@@ -617,8 +620,15 @@ describe("POST /api/public/webchat/session/identify", () => {
     );
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(Object.keys(body).sort()).toEqual(["contact", "contactId", "expiresAt", "merged", "token"]);
-    expect(body).toMatchObject({ contactId: "ct-1", merged: false });
+    expect(Object.keys(body).sort()).toEqual([
+      "contact",
+      "contactId",
+      "expiresAt",
+      "merged",
+      "token",
+      "verified",
+    ]);
+    expect(body).toMatchObject({ contactId: "ct-1", merged: false, verified: false });
     expect(body.contact).toEqual({
       name: "Visitante wv_v1",
       email: "ana@cliente.com",

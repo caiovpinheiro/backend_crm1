@@ -54,7 +54,11 @@ export const TURN_ACCUMULATING_STATUSES = [
   "READY",
 ] as const;
 
-export type TurnChannel = "meta" | "baileys" | "messaging";
+/**
+ * Ingest de origem. `webchat`: o envio é decidido pela conversa em
+ * `sendAgentMessage` (grava a resposta para o widget, nunca Meta).
+ */
+export type TurnChannel = "meta" | "baileys" | "messaging" | "webchat";
 
 export type InboundTurnInput = {
   conversationId: string;
@@ -410,8 +414,10 @@ export async function onInboundMessageForAi(
   // normal: nada na resposta revela que o comando existe.
   // `#reset` (motor v2): recomeça o atendimento para quem está testando.
   // Mesmo sigilo dos comandos de teste: número não autorizado segue normal.
+  // Webchat fica de fora: o telefone do visitante é digitado (não prova
+  // que ele é o testador autorizado).
   const { isV2ResetCommand } = await import("@/services/ai-v2/reset");
-  if (isV2ResetCommand(input.userMessage)) {
+  if (input.channel !== "webchat" && isV2ResetCommand(input.userMessage)) {
     const { handleV2ResetCommand } = await import("@/services/ai-v2/reset");
     const consumed = await handleV2ResetCommand({
       conversationId: input.conversationId,
