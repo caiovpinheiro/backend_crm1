@@ -63,7 +63,6 @@
   "src/services/distribution/__tests__/leads-engine.test.ts|TS2556|A spread argument must either have a tuple type or be passed to a rest parameter.": 6,
   "src/services/distribution/__tests__/leads-smart-guards.test.ts|TS2493|Tuple type '[]' of length '0' has no element at index '0'.": 5,
   "src/services/distribution/__tests__/leads-smart-guards.test.ts|TS2532|Object is possibly 'undefined'.": 5,
-  "src/services/distribution/__tests__/select-responsible.test.ts|TS2352|Conversion of type '{ userId: string; name: string; email: null; avatarUrl: null; role: \"AGENT\"; participates: true; visibleInCoverage: true; queueLimit: number; volume: number; type: null; paused: false; preLunchStopMinutes: number; ... 8 more ...; blockedReasons: never[]; }' to type 'DistributionResponsibleView' may be a mistake because neither type sufficiently overlaps with the other. If this was intentional, convert the expression to 'unknown' first.": 1,
   "src/services/distribution/engine.ts|TS2345|Argument of type 'string' is not assignable to parameter of type 'DistributionTriggerSource'.": 1,
   "src/services/distribution/engine.ts|TS2353|Object literal may only specify known properties, and 'createdAt' does not exist in type 'ActivityEventWhereInput'.": 1,
   "src/services/distribution/pending-drain.ts|TS2339|Property 'catch' does not exist on type 'RetryResult | Promise<RetryResult>'.": 1,

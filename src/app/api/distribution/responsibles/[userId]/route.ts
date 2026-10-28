@@ -43,6 +43,14 @@ const bodySchema = z
     preLunchStopMinutes: z.number().int().min(0).max(180).optional(),
     /** Sincroniza os departamentos do responsável (substitui o conjunto). */
     departmentIds: z.array(z.string().min(1)).max(100).optional(),
+    /**
+     * Peso por departamento (`departmentId → 1..100`; null = usa o peso
+     * geral). Só vale para departamentos dos quais o consultor é membro
+     * depois do `departmentIds` deste mesmo PATCH.
+     */
+    departmentWeights: z
+      .record(z.string().min(1), z.number().int().min(1).max(100).nullable())
+      .optional(),
     /** Upsert parcial do AgentSchedule (almoço / expediente). */
     schedule: z
       .object({
@@ -123,7 +131,12 @@ export async function PATCH(request: Request, context: RouteContext) {
     }
 
     try {
-      const { departmentIds, schedule: schedulePatch, ...respData } = parsed.data;
+      const {
+        departmentIds,
+        departmentWeights,
+        schedule: schedulePatch,
+        ...respData
+      } = parsed.data;
 
       // Sincroniza os departamentos do responsável (substitui o conjunto),
       // validando que pertencem à org. Isolado em try para não derrubar a
@@ -174,6 +187,27 @@ export async function PATCH(request: Request, context: RouteContext) {
           log.error({ err: e }, "[PATCH responsibles] falha ao sincronizar departamentos");
           return NextResponse.json(
             { message: "Erro ao atualizar departamentos do responsável." },
+            { status: 500 },
+          );
+        }
+      }
+
+      // Peso por departamento: só atualiza vínculos existentes desta org —
+      // departamento de fora (ou sem vínculo) é ignorado, nunca cria membro.
+      if (departmentWeights && Object.keys(departmentWeights).length > 0) {
+        try {
+          await prisma.$transaction(
+            Object.entries(departmentWeights).map(([departmentId, weight]) =>
+              prisma.departmentMember.updateMany({
+                where: { userId, organizationId: orgId, departmentId },
+                data: { distributionWeight: weight },
+              }),
+            ),
+          );
+        } catch (e) {
+          log.error({ err: e }, "[PATCH responsibles] falha ao gravar peso por departamento");
+          return NextResponse.json(
+            { message: "Erro ao atualizar o peso por departamento." },
             { status: 500 },
           );
         }
