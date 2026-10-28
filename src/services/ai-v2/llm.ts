@@ -1133,6 +1133,9 @@ function buildV2SystemPrompt(
     lines.push("Regra de citação: só escreva/repita para o cliente os campos listados em 'Dados que você pode citar na resposta'. Os demais servem apenas para você entender a situação.");
   }
 
+  // Webchat v2: contexto vivo + eventos recentes mandados pelo site (dado do contato).
+  if (context.siteContext) lines.push(`# ${context.siteContext}`);
+
   // Negócios abertos: listar quando há mais de um e o modo é perguntar.
   if (context.deals && context.deals.length > 1 && !context.selectedDeal && config.dealSelection === "ask") {
     lines.push("# Negócios abertos do cliente");
@@ -1694,7 +1697,7 @@ export async function callV2LLM(args: {
     // o marcador era barrada como "sem fonte". As fontes ganham o mesmo
     // marcador — o valor real não vai ao modelo que confere.
     const known = (s: string) => (vault.size > 0 ? vault.tokenizeKnown(s) : s);
-    const contextJson = known(JSON.stringify([args.context.contact, args.context.selectedDeal, args.context.citableContact, args.context.citableDeal]));
+    const contextJson = known(JSON.stringify([args.context.contact, args.context.selectedDeal, args.context.citableContact, args.context.citableDeal, args.context.siteContext ?? null]));
     const lookupTexts = lookupResultTexts(r.toolCalls).map(known);
     // Só o que é fonte de verdade. Com o prompt inteiro (guias, lista de
     // títulos de todos os materiais) qualquer palavra comum, como

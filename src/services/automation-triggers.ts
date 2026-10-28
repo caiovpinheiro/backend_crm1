@@ -6,6 +6,11 @@ import {
   recordBlockedEffect,
 } from "@/services/ai/replay-sandbox";
 import { getOrgIdOrNull } from "@/lib/request-context";
+import {
+  createSiteConditionReader,
+  evaluateSiteTriggerCondition,
+  type SiteConditionReader,
+} from "@/lib/webchat/automation-conditions";
 import { getActiveContext } from "@/services/automation-context";
 import {
   loadIntentionalStageClusterIds,
@@ -343,6 +348,18 @@ export async function evaluateTriggerConditions(
       return channelIdsCache;
     };
 
+    // Webchat v2: contexto vivo/eventos do site do contato (org do contato).
+    let siteReader: SiteConditionReader | null = null;
+    const loadSiteReader = async () => {
+      if (siteReader) return siteReader;
+      const rec = await loadContact();
+      siteReader = createSiteConditionReader({
+        organizationId: typeof rec?.organizationId === "string" ? rec.organizationId : null,
+        contactId,
+      });
+      return siteReader;
+    };
+
     // ── Avaliação (AND) ──────────────────────────────────────────────
     for (const raw of rawConditions) {
       const c = asRecord(raw);
@@ -395,6 +412,12 @@ export async function evaluateTriggerConditions(
         }
         const ids = await loadChannelIds();
         if (!ids.has(channelId)) return false;
+        continue;
+      }
+
+      if (type === "site_context" || type === "site_event") {
+        const ok = await evaluateSiteTriggerCondition(c, await loadSiteReader());
+        if (ok === false) return false;
         continue;
       }
 

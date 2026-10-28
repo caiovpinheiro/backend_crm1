@@ -51,6 +51,7 @@ import { MESSAGE_MODEL_MIN_COVERAGE, MESSAGE_MODEL_REPEATED, announcesSending, i
 import { attachmentsBlockedByResend } from "./material-attachments";
 import { buildV2Interactive, matchPendingOption, type V2InteractivePayload } from "./interactive";
 import { leadsHandoffOption, simpleHandoff } from "./handoff";
+import { loadWebchatAiContextBlock } from "@/lib/webchat/ai-context";
 import { formatCampaignDispatchBlock, hydrateOutboundTemplateContent, loadLastCampaignDispatchContext } from "@/services/ai/campaign-context";
 import { pickQueueNotice, queuedMessageFor } from "./queue-notice";
 import {
@@ -977,6 +978,13 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     citableDeal: loadedContext.citableDeal,
     fields: config.contextFields,
   };
+  // Webchat v2: contexto do site do contato (qualquer canal). Best-effort.
+  const siteContext = await loadWebchatAiContextBlock({
+    organizationId: orgId,
+    contactId,
+    timeZone: config.businessHours?.timezone,
+  }).catch(() => "");
+  if (siteContext) context.siteContext = siteContext;
 
   const vars = { ...messageVariables(config, context) };
   // Textos das mensagens com opções (lista/botões) definidos pela empresa.

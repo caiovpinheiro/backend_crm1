@@ -216,16 +216,16 @@ describe("POST /api/public/webchat/context", () => {
     expect(mocks.publishWebchatContext).toHaveBeenCalledTimes(1);
   });
 
-  it("SSE webchat_context com org, contato, canal e o estado inteiro", async () => {
+  it("SSE webchat_context é só sinal: org, contato, canal e updatedAt — sem o estado", async () => {
     const token = await visitor();
     await postContext(post("/api/public/webchat/context", { context: { etapa: "1" } }, auth(token)));
     expect(mocks.publishWebchatContext).toHaveBeenCalledWith({
       organizationId: "org-1",
       contactId: "ct-1",
       channelId: "ch-1",
-      state: { etapa: "1" },
       updatedAt: expect.any(String),
     });
+    expect(JSON.stringify(mocks.publishWebchatContext.mock.calls)).not.toContain("etapa");
   });
 
   it("sem identify assinado e canal sem anonymous → 403 TRACKING_DISABLED, nada gravado", async () => {
@@ -310,12 +310,18 @@ describe("POST /api/public/webchat/events", () => {
       data: { etapa: 2 },
       important: false,
     });
+    // SSE é só sinal (um por lote): sem nome nem dados do evento.
+    expect(mocks.publishWebchatEvent).toHaveBeenCalledTimes(1);
     expect(mocks.publishWebchatEvent).toHaveBeenCalledWith({
       organizationId: "org-1",
       contactId: "ct-1",
       channelId: "ch-1",
-      event: expect.objectContaining({ name: "passo_concluido", data: { etapa: 2 }, important: false }),
+      count: 1,
+      latestOccurredAt: expect.any(String),
     });
+    const sent = JSON.stringify(mocks.publishWebchatEvent.mock.calls);
+    expect(sent).not.toContain("passo_concluido");
+    expect(sent).not.toContain("etapa");
   });
 
   it("lote acima de maxPerBatch → 400 TOO_MANY_EVENTS", async () => {

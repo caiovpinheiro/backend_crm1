@@ -364,33 +364,33 @@ export type DealMovedPayload = {
 /** Valor simples do contexto/evento do site (`setContext`/`track`). */
 export type WebchatSiteValue = string | number | boolean;
 
-/**
- * Estado atual mandado pelo site mudou (docs/decisoes/webchat-widget.md
- * §9.3). Só sai para dono identificado (contato); o painel "No site agora"
- * troca o estado inteiro pelo do evento.
+/*
+ * Privacidade: o fan-out do bus é por organização e estes eventos não têm
+ * conversa/card para o gate por usuário. Por isso saem SÓ como sinal de
+ * invalidação, sem valores (nem estado, nem nome/dados de evento): o painel
+ * "No site agora" da conversa aberta refaz o
+ * `GET /api/conversations/:id/webchat-context`, que confere o acesso à
+ * conversa (docs/decisoes/webchat-widget.md §9.3).
  */
+
+/** O estado mandado pelo site para o contato mudou (sem o estado). */
 export type WebchatContextPayload = {
   organizationId: OrgId;
   contactId: string;
   channelId: string;
-  state: Record<string, WebchatSiteValue>;
   /** ISO — quando o estado mudou. */
   updatedAt: string;
 };
 
-/** Evento novo da linha do tempo do site (um por evento gravado). */
+/** Eventos novos na linha do tempo do site do contato (sem nome/dados). */
 export type WebchatEventPayload = {
   organizationId: OrgId;
   contactId: string;
   channelId: string;
-  event: {
-    id: string;
-    name: string;
-    data: Record<string, WebchatSiteValue> | null;
-    important: boolean;
-    /** ISO — quando aconteceu no site. */
-    occurredAt: string;
-  };
+  /** Quantos eventos entraram neste lote. */
+  count: number;
+  /** ISO — o mais recente do lote (quando aconteceu no site). */
+  latestOccurredAt: string;
 };
 
 // ── União discriminada ──────────────────────────────────────────────────
