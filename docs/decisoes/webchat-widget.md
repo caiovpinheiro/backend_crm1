@@ -593,9 +593,15 @@ identify (`adoptAnonymousVisitorData`, §9.8).
   `Evento no site: <nome>` + uma linha `rótulo-ou-chave: valor` por dado.
 - Rate limit: `webchat.track` 30 lotes/min/visitante + `webchat.track.ip`.
 
-**SSE para o inbox** (bus atual, mesmo filtro de org/escopo de canal):
-`{ type: "webchat_context", contactId, channelId, state, updatedAt }` e
-`{ type: "webchat_event", contactId, channelId, event: { id, name, data, important, occurredAt } }`.
+**SSE para o inbox** (bus atual, fan-out por org) — **só sinal de
+invalidação, sem valores do site**:
+`{ type: "webchat_context", contactId, channelId, updatedAt }` e
+`{ type: "webchat_event", contactId, channelId, count, latestOccurredAt }`
+(um por lote). O bus não tem conversa/card para filtrar por usuário, então
+estado, nomes e dados de evento nunca saem no SSE: o painel da conversa
+aberta, ao receber o sinal do seu contato/canal, refaz o
+`GET /api/conversations/:id/webchat-context`, que confere o acesso à
+conversa. Quem não pode ver a conversa recebe só ids.
 
 **Painel "No site agora" [B]:** lê a linha do contato/canal da conversa
 (estado + `updatedAt`) e os N últimos eventos (índice
@@ -798,6 +804,24 @@ limite total de `WEBCHAT_AI_CONTEXT_MAX_CHARS` (1 500) terminando em `…`.
 Sem contexto nem eventos, o bloco não entra. Automações: condições
 "contexto.<chave> existe / igual a" e "evento <nome> ocorreu nos últimos
 N min" leem as mesmas tabelas.
+
+Implementação (`src/lib/webchat/ai-context.ts`): o dado é do **contato**,
+então o bloco entra em qualquer canal (WhatsApp inclusive) — todas as
+linhas de contexto do contato (a mais recente vence por chave) e os 10
+eventos mais recentes, sempre filtrados por `organizationId`. Cada evento
+leva hora e tempo relativo (`- 14:02 (há 6 min) <nome> …`). Injeção:
+`V2CRMContext.siteContext`, montado em `services/ai-v2/engine.ts` e
+impresso em `buildV2SystemPrompt` (`services/ai-v2/llm.ts`) depois dos
+dados do cliente; também conta como fonte na checagem de resposta.
+
+Condições (`src/lib/webchat/automation-conditions.ts`):
+- passo **Condição**: `field: "siteContext.<chave>"` com `exists`,
+  `not_exists`, `eq`, `ne`, `includes` (e os comparadores numéricos);
+  `field: "siteEvent.<nome>"` com `occurred_within` /
+  `not_occurred_within` e `value` = N minutos (1 … 525 600);
+- **condições do gatilho** (`triggerConfig.conditions`, E):
+  `{ type: "site_context", key, op, value? }` e
+  `{ type: "site_event", name, minutes, op?: "occurred" | "not_occurred" }`.
 
 ### 9.11 Mapa de arquivos por frente
 

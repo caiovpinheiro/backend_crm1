@@ -11,6 +11,7 @@ import {
 import { conversationHasRealAttendance } from "@/lib/ai-agents/tabulation-classify-policy";
 import { rewriteStorageUrlsForWebhook } from "@/lib/public-media-url";
 import { normalizeConditionConfig } from "@/lib/automation-condition";
+import { createSiteConditionReader, evaluateSiteRule, isSiteRule } from "@/lib/webchat/automation-conditions";
 import {
   runWithAutomationOrigin,
   type AutomationOrigin,
@@ -2241,6 +2242,10 @@ function evalCondition(leftRaw: unknown, op: string, rightRaw: unknown): boolean
       if (typeof left === "string") return left.trim() !== "";
       if (Array.isArray(left)) return left.length > 0;
       return true;
+    case "exists":
+      return left !== undefined && left !== null;
+    case "not_exists":
+      return left === undefined || left === null;
     case "has_tag":
     case "not_has_tag": {
       // `left` é sempre um array (`contact.tags`, `contact.tagIds`,
@@ -4662,8 +4667,23 @@ export async function executeStep(
       };
 
       const conditionCfg = normalizeConditionConfig(cfg);
+      // Webchat v2: regras `siteContext.<chave>` / `siteEvent.<nome>` leem
+      // banco — avaliadas antes (com cache), o laço abaixo segue síncrono.
+      const siteResults = new Map<unknown, boolean>();
+      const siteRules = conditionCfg.branches.flatMap((b) => b.rules).filter(isSiteRule);
+      if (siteRules.length > 0) {
+        const siteReader = createSiteConditionReader({
+          organizationId: rt.contact?.organizationId ?? null,
+          contactId: rt.contactId ?? rt.contact?.id ?? null,
+        });
+        for (const rule of siteRules) {
+          siteResults.set(rule, await evaluateSiteRule(rule, siteReader).catch(() => false));
+        }
+      }
       for (const branch of conditionCfg.branches) {
         const allMatch = branch.rules.every((rule) => {
+          const siteResult = siteResults.get(rule);
+          if (siteResult !== undefined) return siteResult;
           let left = rule.field ? getByPath(evalRoot, rule.field) : undefined;
 
           // 27/mai/26 v2 — Para `has_tag`/`not_has_tag`, considera a
