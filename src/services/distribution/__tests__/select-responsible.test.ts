@@ -13,11 +13,12 @@ function agent(
     name: userId,
     email: null,
     avatarUrl: null,
-    role: "AGENT",
+    role: "MEMBER",
     participates: true,
     visibleInCoverage: true,
     queueLimit: 0,
     volume,
+    effectiveWeight: volume,
     type: null,
     paused: false,
     preLunchStopMinutes: 30,
@@ -30,7 +31,9 @@ function agent(
     totalQueueCount: queueCount,
     eligible: true,
     blockedReasons: [],
-  } as DistributionResponsibleView;
+    systemOnline: false,
+    lastSeenAt: null,
+  };
 }
 
 describe("selectResponsible (sorteio por peso)", () => {
