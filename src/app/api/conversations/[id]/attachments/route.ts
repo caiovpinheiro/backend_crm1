@@ -15,6 +15,11 @@ import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { enqueueMetaAttach } from "@/lib/queue";
 import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
+import {
+  isWebchatConversation,
+  WEBCHAT_UNSUPPORTED_SEND_MESSAGE,
+  WEBCHAT_UNSUPPORTED_STATUS,
+} from "@/lib/webchat/outbound-guard";
 import { sendWhatsAppMedia, isBaileysChannel } from "@/lib/send-whatsapp";
 import { publishNewMessage } from "@/lib/realtime-events";
 import {
@@ -419,6 +424,16 @@ export async function POST(request: Request, context: RouteContext) {
       const caption = source.caption;
       const requestedChannelId = source.requestedChannelId;
       const asNote = source.asNote === true;
+
+      // Webchat: o widget não baixa anexo (o arquivo fica atrás do
+      // /api/storage autenticado) e o caminho Meta abaixo mandaria pelo
+      // WhatsApp. Nota interna com anexo continua valendo.
+      if (!asNote && isWebchatConversation(conv)) {
+        return NextResponse.json(
+          { message: WEBCHAT_UNSUPPORTED_SEND_MESSAGE, code: "WEBCHAT_UNSUPPORTED" },
+          { status: WEBCHAT_UNSUPPORTED_STATUS },
+        );
+      }
 
       // Nota interna não reabre ticket nem passa pelo canal.
       const channel0 = performance.now();

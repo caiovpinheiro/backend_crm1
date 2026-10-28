@@ -6,14 +6,20 @@
  * com HMAC e rótulo próprio (o token do widget nunca vale como sessão do
  * CRM e vice-versa). O sha256 do token fica em `WebchatSession.tokenHash`:
  * só o último token emitido para a sessão é aceito (revogação = trocar o
- * hash).
+ * hash) — mais o imediatamente anterior por 60 s depois de girar
+ * (`prevTokenHash`, carência para outra aba / poll em voo; ver session.ts).
  *
- * `cid` é informativo: o contato da sessão sempre sai do banco (o merge da
- * identificação troca o contato sem invalidar o token).
+ * `cid` é informativo: o contato da sessão sempre sai do banco.
  */
 import { createHash, createHmac } from "node:crypto";
 
 import { SignJWT, errors as joseErrors, jwtVerify } from "jose";
+
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("webchat-token");
+/** Tamanho mínimo do `WEBCHAT_JWT_SECRET` (HS256 com 256 bits). */
+export const WEBCHAT_JWT_SECRET_MIN_LENGTH = 32;
 
 export const WEBCHAT_TOKEN_TTL_SEC = 30 * 24 * 60 * 60;
 const ISSUER = "crm-webchat";
@@ -35,14 +41,35 @@ export type WebchatTokenVerify =
   | { ok: false; reason: "missing" | "expired" | "invalid" };
 
 let memo: { raw: string; key: Uint8Array } | null = null;
+/** Último valor curto já reportado (loga uma vez por valor, não por token). */
+let warnedShortSecret: string | null = null;
+
+/**
+ * `WEBCHAT_JWT_SECRET` definido mas curto é erro de configuração: antes ele
+ * era ignorado em silêncio (caía no derivado do AUTH_SECRET) e o operador
+ * achava que o segredo próprio estava em uso. Continua caindo no derivado
+ * (o widget não para), mas agora com log de erro no 1º uso. Exportado para
+ * a checagem de boot e os testes.
+ */
+export function checkWebchatSecretConfig(): { ok: boolean; reason?: string } {
+  const explicit = process.env.WEBCHAT_JWT_SECRET?.trim() ?? "";
+  if (!explicit || explicit.length >= WEBCHAT_JWT_SECRET_MIN_LENGTH) return { ok: true };
+  const reason = `WEBCHAT_JWT_SECRET tem ${explicit.length} caracteres (mínimo ${WEBCHAT_JWT_SECRET_MIN_LENGTH}); usando o segredo derivado do AUTH_SECRET.`;
+  if (warnedShortSecret !== explicit) {
+    warnedShortSecret = explicit;
+    log.error({ length: explicit.length, min: WEBCHAT_JWT_SECRET_MIN_LENGTH }, reason);
+  }
+  return { ok: false, reason };
+}
 
 function secretKey(): Uint8Array {
   const explicit = process.env.WEBCHAT_JWT_SECRET?.trim() ?? "";
   const auth = (process.env.AUTH_SECRET ?? process.env.NEXTAUTH_SECRET ?? "").trim();
   const raw = `${explicit}\n${auth}`;
   if (memo && memo.raw === raw) return memo.key;
+  checkWebchatSecretConfig();
   let key: Uint8Array;
-  if (explicit.length >= 32) {
+  if (explicit.length >= WEBCHAT_JWT_SECRET_MIN_LENGTH) {
     key = new TextEncoder().encode(explicit);
   } else if (auth) {
     key = createHmac("sha256", auth).update("webchat-jwt:v1").digest();

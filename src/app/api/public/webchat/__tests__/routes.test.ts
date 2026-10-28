@@ -11,7 +11,13 @@ const mocks = vi.hoisted(() => {
     logger,
     prismaBase: {
       channel: { findUnique: vi.fn() },
-      webchatSession: { findUnique: vi.fn(), create: vi.fn(), update: vi.fn(async () => ({})) },
+      webchatSession: {
+        findUnique: vi.fn(),
+        create: vi.fn(),
+        update: vi.fn<(args: { where?: unknown; data: Record<string, unknown> }) => Promise<unknown>>(
+          async () => ({}),
+        ),
+      },
       systemUsageSession: { findFirst: vi.fn(async () => null) },
     },
     prisma: {
@@ -21,6 +27,17 @@ const mocks = vi.hoisted(() => {
         updateMany: vi.fn(async () => ({ count: 0 })),
       },
       conversation: { findFirst: vi.fn(async (): Promise<unknown> => null) },
+      contact: {
+        findFirst: vi.fn(async (_a?: unknown): Promise<unknown> => null),
+        findUnique: vi.fn(async (): Promise<unknown> => null),
+        findMany: vi.fn(async (): Promise<unknown[]> => []),
+        updateMany: vi.fn(async () => ({ count: 1 })),
+      },
+      deal: {
+        findMany: vi.fn(async (): Promise<unknown[]> => []),
+        updateMany: vi.fn(async () => ({ count: 0 })),
+      },
+      webchatSession: { update: vi.fn(async (_a?: unknown) => ({})) },
     },
     publishMessageStatus: vi.fn(),
     agentTyping: { value: undefined as number | undefined },
@@ -56,6 +73,10 @@ vi.mock("@/lib/cache/message-versions", () => ({
 import { GET as getConfig } from "@/app/api/public/webchat/config/route";
 import { GET as getMessages } from "@/app/api/public/webchat/messages/route";
 import { POST as postSession } from "@/app/api/public/webchat/session/route";
+import { POST as postIdentify } from "@/app/api/public/webchat/session/identify/route";
+import { POST as postMessage } from "@/app/api/public/webchat/messages/route";
+import { hashWebchatToken } from "@/lib/webchat/token";
+import { rateLimitIpKey } from "@/lib/webchat/http";
 import { resetRateLimitersForTests } from "@/lib/rate-limit";
 import { encodeVisitorCursor } from "@/lib/webchat/visitor-messages";
 import { WEBCHAT_TOKEN_TTL_SEC, signWebchatToken } from "@/lib/webchat/token";
@@ -80,12 +101,15 @@ function sessionRow(tokenHash: string, over: Record<string, unknown> = {}) {
     channelId: "ch-1",
     contactId: "ct-1",
     tokenHash,
+    prevTokenHash: null,
+    rotatedAt: null,
     expiresAt: new Date(Date.now() + 60_000),
     lastSeenAt: new Date(),
     firstUrl: null,
     lastUrl: null,
     referrer: null,
     utm: null,
+    createdAt: new Date(),
     ...over,
   };
 }
@@ -109,6 +133,9 @@ beforeEach(() => {
   mocks.prismaBase.channel.findUnique.mockResolvedValue(CHANNEL_ROW);
   mocks.prisma.conversation.findFirst.mockResolvedValue(null);
   mocks.prisma.message.findFirst.mockResolvedValue(null);
+  mocks.prisma.contact.findFirst.mockResolvedValue(null);
+  mocks.prisma.contact.findMany.mockResolvedValue([]);
+  delete process.env.WEBCHAT_SESSION_MAX_AGE_DAYS;
 });
 
 describe("GET /api/public/webchat/config", () => {
@@ -367,5 +394,245 @@ describe("POST /api/public/webchat/session — rate limit", () => {
     expect(body).toMatchObject({ contactId: null, conversation: null, renewed: false });
     expect(typeof body.token).toBe("string");
     expect(body.visitorId).toMatch(/^wv_/);
+  });
+});
+
+// ── Renovação × criação: qual balde paga ───────────────────────────
+
+function sessionCall(token: string | null, ip = "203.0.113.7") {
+  return postSession(
+    req("/api/public/webchat/session", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-forwarded-for": ip,
+        ...(token ? { authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify({ key: KEY }),
+    }),
+  );
+}
+
+function mockCreate() {
+  mocks.prismaBase.webchatSession.create.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({
+    ...sessionRow(data.tokenHash as string, { id: data.id, contactId: null }),
+  }));
+}
+
+function mockRenewUpdate() {
+  mocks.prismaBase.webchatSession.update.mockImplementation(
+    async ({ data }: { data: Record<string, unknown> }) => ({
+      ...sessionRow(data.tokenHash as string, { contactId: null }),
+    }),
+  );
+}
+
+type UpdateCall = [{ where: Record<string, unknown>; data: Record<string, unknown> }];
+const baseUpdates = () => mocks.prismaBase.webchatSession.update.mock.calls as unknown as UpdateCall[];
+
+describe("POST /api/public/webchat/session — rate limit sem atalho", () => {
+  it("token autêntico porém substituído (hash velho) cria visitante e gasta do balde do IP", async () => {
+    mockCreate();
+    const { token } = await visitorToken();
+    // A sessão já girou: o hash guardado é outro e a carência não vale.
+    mocks.prismaBase.webchatSession.findUnique.mockResolvedValue(sessionRow("hash-mais-novo"));
+    for (let i = 0; i < 10; i++) {
+      const res = await sessionCall(token);
+      expect(res.status).toBe(200);
+      expect((await res.json()).renewed).toBe(false);
+    }
+    expect(mocks.prismaBase.webchatSession.create).toHaveBeenCalledTimes(10);
+    expect((await sessionCall(token)).status).toBe(429);
+    expect(mocks.prismaBase.webchatSession.create).toHaveBeenCalledTimes(10);
+  });
+
+  it("renovação legítima gasta do balde do visitante (não do IP) e guarda o token anterior", async () => {
+    mockCreate();
+    // Esgota o balde de criação do IP.
+    for (let i = 0; i < 10; i++) expect((await sessionCall(null)).status).toBe(200);
+    expect((await sessionCall(null)).status).toBe(429);
+
+    const { token, tokenHash } = await visitorToken();
+    mocks.prismaBase.webchatSession.findUnique.mockResolvedValue(sessionRow(tokenHash, { contactId: null }));
+    mockRenewUpdate();
+    const res = await sessionCall(token);
+    expect(res.status).toBe(200);
+    expect((await res.json()).renewed).toBe(true);
+    const update = baseUpdates()[0]![0];
+    expect(update.where).toEqual({ id: "wv_v1" });
+    expect(update.data).toMatchObject({ prevTokenHash: tokenHash, rotatedAt: expect.any(Date) });
+    expect(update.data.tokenHash).not.toBe(tokenHash);
+  });
+
+  it("IPv6: endereços do mesmo /64 dividem o balde; outro /64 não", async () => {
+    mockCreate();
+    for (let i = 0; i < 10; i++) {
+      const res = await sessionCall(null, `2001:db8:abcd:12::${(i + 1).toString(16)}`);
+      expect(res.status).toBe(200);
+    }
+    expect((await sessionCall(null, "2001:db8:abcd:12:ffff:ffff:ffff:ffff")).status).toBe(429);
+    expect((await sessionCall(null, "2001:db8:abcd:13::1")).status).toBe(200);
+  });
+
+  it("rateLimitIpKey: IPv6 → /64; IPv4 intacto", () => {
+    expect(rateLimitIpKey("2001:db8:abcd:12::1")).toBe("2001:db8:abcd:12::/64");
+    expect(rateLimitIpKey("2001:0db8:abcd:0012:1:2:3:4")).toBe("2001:db8:abcd:12::/64");
+    expect(rateLimitIpKey("203.0.113.7")).toBe("203.0.113.7");
+  });
+
+  it("sessão além da vida máxima: não renova, cria visitante novo (balde do IP)", async () => {
+    mockCreate();
+    process.env.WEBCHAT_SESSION_MAX_AGE_DAYS = "90";
+    const { token, tokenHash } = await visitorToken();
+    mocks.prismaBase.webchatSession.findUnique.mockResolvedValue(
+      sessionRow(tokenHash, { createdAt: new Date(Date.now() - 91 * 24 * 3600 * 1000) }),
+    );
+    const res = await sessionCall(token);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.renewed).toBe(false);
+    expect(body.visitorId).not.toBe("wv_v1");
+    expect(mocks.prismaBase.webchatSession.update).not.toHaveBeenCalled();
+  });
+});
+
+// ── Carência do token anterior e vida máxima ───────────────────────
+
+describe("token anterior (carência de 60 s) e vida máxima", () => {
+  async function getWith(token: string) {
+    return getMessages(
+      req("/api/public/webchat/messages", { headers: { authorization: `Bearer ${token}` } }),
+    );
+  }
+
+  it("token anterior vale até 60 s depois da rotação; depois → 401", async () => {
+    mocks.prisma.message.findMany.mockResolvedValue([]);
+    const { token: oldToken, tokenHash: oldHash } = await visitorToken(new Date(Date.now() - 2_000));
+    const fresh = await signWebchatToken({ org: "org-1", ch: "ch-1", vis: "wv_v1", cid: "ct-1" });
+    mocks.prismaBase.webchatSession.findUnique.mockResolvedValue(
+      sessionRow(fresh.tokenHash, { prevTokenHash: oldHash, rotatedAt: new Date(Date.now() - 30_000) }),
+    );
+    expect((await getWith(oldToken)).status).toBe(200);
+    expect((await getWith(fresh.token)).status).toBe(200);
+
+    mocks.prismaBase.webchatSession.findUnique.mockResolvedValue(
+      sessionRow(fresh.tokenHash, { prevTokenHash: oldHash, rotatedAt: new Date(Date.now() - 61_000) }),
+    );
+    expect((await getWith(oldToken)).status).toBe(401);
+    expect((await getWith(fresh.token)).status).toBe(200);
+  });
+
+  it("token de duas rotações atrás não vale nem dentro da carência", async () => {
+    const { token: ancient } = await visitorToken(new Date(Date.now() - 5_000));
+    mocks.prismaBase.webchatSession.findUnique.mockResolvedValue(
+      sessionRow("hash-atual", { prevTokenHash: "hash-anterior", rotatedAt: new Date() }),
+    );
+    expect((await getWith(ancient)).status).toBe(401);
+  });
+
+  it("sessão além da vida máxima → 401 TOKEN_EXPIRED mesmo com token válido", async () => {
+    const { token, tokenHash } = await visitorToken();
+    mocks.prismaBase.webchatSession.findUnique.mockResolvedValue(
+      sessionRow(tokenHash, { createdAt: new Date(Date.now() - 200 * 24 * 3600 * 1000) }),
+    );
+    const res = await getWith(token);
+    expect(res.status).toBe(401);
+    expect((await res.json()).code).toBe("TOKEN_EXPIRED");
+  });
+
+  it("renovar com o token anterior (outra aba) gira de novo e o atual vira o anterior", async () => {
+    const { token: oldToken, tokenHash: oldHash } = await visitorToken(new Date(Date.now() - 2_000));
+    const current = await signWebchatToken({ org: "org-1", ch: "ch-1", vis: "wv_v1", cid: "ct-1" });
+    mocks.prismaBase.webchatSession.findUnique.mockResolvedValue(
+      sessionRow(current.tokenHash, {
+        contactId: null,
+        prevTokenHash: oldHash,
+        rotatedAt: new Date(Date.now() - 5_000),
+      }),
+    );
+    mockRenewUpdate();
+    const res = await sessionCall(oldToken);
+    expect(res.status).toBe(200);
+    expect((await res.json()).renewed).toBe(true);
+    expect(baseUpdates()[0]![0].data.prevTokenHash).toBe(current.tokenHash);
+    expect(hashWebchatToken(current.token)).toBe(current.tokenHash);
+  });
+});
+
+// ── Teto do corpo ──────────────────────────────────────────────────
+
+describe("teto do corpo nas rotas públicas", () => {
+  it("Content-Length acima de 32 KB → 413 antes de autenticar", async () => {
+    const res = await postMessage(
+      req("/api/public/webchat/messages", {
+        method: "POST",
+        headers: { "content-type": "application/json", "content-length": String(64 * 1024) },
+        body: "{}",
+      }),
+    );
+    expect(res.status).toBe(413);
+    expect((await res.json()).code).toBe("PAYLOAD_TOO_LARGE");
+    expect(mocks.prismaBase.webchatSession.findUnique).not.toHaveBeenCalled();
+  });
+
+  it("corpo sem Content-Length (stream) maior que o teto → 413", async () => {
+    const big = new TextEncoder().encode(JSON.stringify({ key: KEY, pad: "x".repeat(40 * 1024) }));
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (let i = 0; i < big.length; i += 8192) controller.enqueue(big.slice(i, i + 8192));
+        controller.close();
+      },
+    });
+    const init = {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-forwarded-for": "203.0.113.7" },
+      body: stream,
+      // Node exige `duplex` para corpo em stream.
+      duplex: "half",
+    } as RequestInit;
+    const res = await postSession(new Request("https://api.bwipo.com/api/public/webchat/session", init));
+    expect(res.status).toBe(413);
+    expect(mocks.prismaBase.channel.findUnique).not.toHaveBeenCalled();
+  });
+});
+
+// ── Identify: só dados do próprio visitante ────────────────────────
+
+describe("POST /api/public/webchat/session/identify", () => {
+  it("e-mail de outro contato: resposta só com o contato próprio, sem matchedBy nem dados alheios", async () => {
+    const { token, tokenHash } = await visitorToken();
+    mocks.prismaBase.webchatSession.findUnique.mockResolvedValue(sessionRow(tokenHash));
+    const own = { id: "ct-1", name: "Visitante wv_v1", email: "ana@cliente.com", phone: null };
+    mocks.prisma.contact.findFirst.mockImplementation(async (args: unknown) => {
+      const where = (args as { where: Record<string, unknown> }).where;
+      return where.webchatVisitorId === "wv_v1" ? own : null;
+    });
+    mocks.prisma.contact.findMany.mockResolvedValue([{ id: "ct-ana", name: "Ana Souza", number: 42 }]);
+    const res = await postIdentify(
+      req("/api/public/webchat/session/identify", {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+        body: JSON.stringify({ email: "ana@cliente.com" }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(Object.keys(body).sort()).toEqual(["contact", "contactId", "expiresAt", "merged", "token"]);
+    expect(body).toMatchObject({ contactId: "ct-1", merged: false });
+    expect(body.contact).toEqual({
+      name: "Visitante wv_v1",
+      email: "ana@cliente.com",
+      phone: null,
+      identified: true,
+    });
+    const text = JSON.stringify(body);
+    expect(text).not.toContain("ct-ana");
+    expect(text).not.toContain("Ana Souza");
+    // A sessão nunca é repontada para o contato existente.
+    const scoped = mocks.prisma.webchatSession.update.mock.calls as unknown as UpdateCall[];
+    for (const call of scoped) expect(call[0].data.contactId).not.toBe("ct-ana");
+    // O reissue guarda o token atual como anterior (carência).
+    const rotate = baseUpdates().at(-1)![0];
+    expect(rotate.data).toMatchObject({ prevTokenHash: expect.any(String), rotatedAt: expect.any(Date) });
   });
 });

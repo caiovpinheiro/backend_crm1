@@ -22,6 +22,7 @@ import {
 } from "@/lib/realtime-events";
 import { botOutboundReplyMark } from "@/lib/conversation-reply-marking";
 import { noteMessageChange } from "@/lib/cache/message-versions";
+import { isWebchatConversation } from "@/lib/webchat/outbound-guard";
 
 async function aiSenderName(agentUserId: string): Promise<string> {
   const u = await prisma.user.findUnique({
@@ -207,6 +208,18 @@ export async function sendAgentMessage(args: {
   if (isReplaySandboxActive()) {
     recordBlockedEffect("outbound_send", `agent_message:${args.conversationId}`);
     return saveDraft(args.conversationId, args.agentUserId, text);
+  }
+
+  // Webchat: o agente só envia pela Meta e o canal do widget não tem
+  // credencial — cairia no cliente global e mandaria WhatsApp para o
+  // telefone digitado pelo visitante. Sem rascunho: aprová-lo também
+  // enviaria pela Meta. (O inbound do webchat nem abre turno de IA.)
+  const webchatConv = await prisma.conversation.findUnique({
+    where: { id: args.conversationId },
+    select: { channel: true, channelRef: { select: { provider: true } } },
+  });
+  if (isWebchatConversation(webchatConv)) {
+    return { status: "skipped", reason: "webchat_unsupported" };
   }
 
   // Anti-spam: não reenvia a mesma informação se o bot já disse algo

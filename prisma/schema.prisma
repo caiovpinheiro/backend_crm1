@@ -7026,10 +7026,15 @@ model WebchatSession {
   channelId      String
   channel        Channel      @relation(fields: [channelId], references: [id], onDelete: Cascade)
   /// Null até o visitante escrever ou se identificar: abrir a página não
-  /// cria contato. Merge/identify troca para o contato sobrevivente.
+  /// cria contato. Sempre o contato nascido nesta sessão
+  /// (`Contact.webchatVisitorId`) — o identify nunca liga a outro.
   contactId      String?
   contact        Contact?     @relation(fields: [contactId], references: [id], onDelete: Cascade)
   tokenHash      String       @unique
+  /// Hash do token anterior: vale por 60 s depois de `rotatedAt` (outra
+  /// aba / poll em voo não toma 401 na rotação).
+  prevTokenHash  String?
+  rotatedAt      DateTime?
   expiresAt      DateTime
   lastSeenAt     DateTime
   firstUrl       String?

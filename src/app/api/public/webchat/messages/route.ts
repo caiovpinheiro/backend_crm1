@@ -2,7 +2,13 @@ import { NextResponse } from "next/server";
 
 import { getLogger } from "@/lib/logger";
 import { WEBCHAT_MAX_CONTENT_CHARS } from "@/lib/webchat/config";
-import { getClientIp, inWebchatOrg, readJsonObject, webchatRateLimit } from "@/lib/webchat/http";
+import {
+  getClientIp,
+  inWebchatOrg,
+  readJsonObject,
+  rejectOversizedBody,
+  webchatRateLimit,
+} from "@/lib/webchat/http";
 import { isValidClientMessageId, processWebchatInbound } from "@/lib/webchat/inbound";
 import { authenticateWebchatVisitor, webchatError } from "@/lib/webchat/session";
 import {
@@ -64,6 +70,8 @@ export async function GET(request: Request) {
  * 201 (nova) / 200 (repetida) → `{ message, conversationId, contactId, duplicate }`.
  */
 export async function POST(request: Request) {
+  const oversized = rejectOversizedBody(request);
+  if (oversized) return oversized;
   const auth = await authenticateWebchatVisitor(request);
   if (!auth.ok) return auth.response;
   const { channel, session } = auth.visitor;

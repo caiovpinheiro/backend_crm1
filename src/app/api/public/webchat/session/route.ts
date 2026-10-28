@@ -1,18 +1,23 @@
 import { NextResponse } from "next/server";
 
 import { getLogger } from "@/lib/logger";
-import { prisma } from "@/lib/prisma";
-import { getClientIp, inWebchatOrg, readJsonObject, webchatRateLimit } from "@/lib/webchat/http";
+import {
+  getClientIp,
+  inWebchatOrg,
+  readJsonObject,
+  webchatRateLimit,
+} from "@/lib/webchat/http";
 import {
   WebchatIdentifyError,
   hasIdentity,
   identifyWebchatVisitor,
+  ownVisitorContactView,
   parseWebchatIdentity,
 } from "@/lib/webchat/identify";
-import { anonymousVisitorName } from "@/lib/webchat/inbound";
 import { activeVisitorConversation } from "@/lib/webchat/visitor-messages";
 import {
   checkWebchatOrigin,
+  findRenewableWebchatSession,
   issueWebchatSession,
   loadWebchatChannelByKey,
   originDenied,
@@ -21,7 +26,6 @@ import {
   sanitizeUtm,
   webchatError,
 } from "@/lib/webchat/session";
-import { bearerFrom, verifyWebchatToken } from "@/lib/webchat/token";
 
 const log = getLogger("api/public/webchat/session");
 const ROUTE = "POST /api/public/webchat/session";
@@ -30,15 +34,25 @@ const ROUTE = "POST /api/public/webchat/session";
  * POST /api/public/webchat/session
  *
  * Cria o visitante ou renova a sessão do Bearer (vencido vale se for o
- * último token emitido). Body:
+ * último token emitido — ou o anterior na carência de 60 s — e a sessão não
+ * passou da vida máxima). Body:
  * `{ key, visitorId?, name?, email?, phone?, page?, referrer?, utm?, host? }`.
- * Com nome/e-mail/telefone (pré-chat) já identifica (§3.2). Abrir o chat não
- * cria contato: `contactId` fica null até a 1ª mensagem ou a identificação.
+ * Com nome/e-mail/telefone (pré-chat) já identifica (§3.2) — sempre no
+ * contato do próprio visitante. Abrir o chat não cria contato: `contactId`
+ * fica null até a 1ª mensagem ou a identificação.
+ *
+ * Rate limit: visitante NOVO sempre gasta do balde de criação por IP (IPv6
+ * por /64); o balde do visitante só vale quando a renovação é de fato
+ * possível (token autêntico E aceito pela sessão). Antes, qualquer token
+ * com assinatura válida — mesmo velho — desviava para o balde do visitante
+ * e criava visitante novo a cada chamada sem tocar no limite por IP.
  *
  * 200 → `{ token, expiresAt, visitorId, contactId, conversation, contact, renewed, merged? }`
- * (`contact` = `{ name, email, phone, identified }` ou null sem contato).
+ * (`contact` = `{ name, email, phone, identified }` do próprio visitante ou
+ * null; `merged` é sempre false — mantido para o widget antigo).
  */
 export async function POST(request: Request) {
+  // Teto de corpo (Content-Length e leitura cortada) antes de parsear.
   const parsed = await readJsonObject(request);
   if (!parsed.ok) return parsed.response;
   const b = parsed.body;
@@ -50,10 +64,10 @@ export async function POST(request: Request) {
   const host = typeof b.host === "string" ? b.host : null;
   if (!checkWebchatOrigin(request, channel.config, host)) return originDenied();
 
-  // Renovação (Bearer autêntico) gasta do visitante; visitante novo, do IP.
-  const prior = await verifyWebchatToken(bearerFrom(request), { allowExpired: true });
-  const rl = prior.ok
-    ? await webchatRateLimit(ROUTE, [{ profile: "webchat.poll", scope: "visitor", id: prior.claims.vis }])
+  // Só leitura: decide o balde antes de gravar qualquer coisa.
+  const renewable = await findRenewableWebchatSession(request, channel);
+  const rl = renewable
+    ? await webchatRateLimit(ROUTE, [{ profile: "webchat.poll", scope: "visitor", id: renewable.id }])
     : await webchatRateLimit(ROUTE, [
         { profile: "webchat.session", scope: "ip", id: getClientIp(request) },
       ]);
@@ -74,13 +88,14 @@ export async function POST(request: Request) {
       const issued = await issueWebchatSession({
         request,
         channel,
+        renewable,
         page: sanitizeUrl(b.page),
         referrer: sanitizeUrl(b.referrer),
         utm: sanitizeUtm(b.utm),
       });
       let { token, expiresAt } = issued;
       const session = issued.session;
-      let merged: boolean | undefined;
+      let identified = false;
       if (hasIdentity(identity)) {
         const before = session.contactId;
         const res = await identifyWebchatVisitor({
@@ -88,38 +103,32 @@ export async function POST(request: Request) {
           session,
           identity,
         });
-        merged = res.merged;
+        identified = true;
         if (res.contactId !== before) {
           ({ token, expiresAt } = await reissueWebchatToken(session, res.contactId));
         }
       }
-      const conversation = await activeVisitorConversation(session.contactId, channel.id);
-      const row = session.contactId
-        ? await prisma.contact.findUnique({
-            where: { id: session.contactId },
-            select: { name: true, email: true, phone: true },
-          })
-        : null;
-      // "Identificado" = deu e-mail/telefone ou um nome que não é o placeholder.
-      const contact = row
-        ? {
-            name: row.name,
-            email: row.email,
-            phone: row.phone,
-            identified:
-              Boolean(row.email || row.phone) || row.name !== anonymousVisitorName(session.id),
-          }
+      const contact = await ownVisitorContactView(session);
+      const conversation = contact
+        ? await activeVisitorConversation(contact.id, channel.id)
         : null;
       return NextResponse.json(
         {
           token,
           expiresAt: expiresAt.toISOString(),
           visitorId: session.id,
-          contactId: session.contactId,
+          contactId: contact?.id ?? null,
           conversation,
-          contact,
+          contact: contact
+            ? {
+                name: contact.name,
+                email: contact.email,
+                phone: contact.phone,
+                identified: contact.identified,
+              }
+            : null,
           renewed: issued.renewed,
-          ...(merged !== undefined ? { merged } : {}),
+          ...(identified ? { merged: false } : {}),
         },
         { headers: { ...rl.headers, "Cache-Control": "no-store" } },
       );

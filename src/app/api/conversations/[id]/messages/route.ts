@@ -7,6 +7,7 @@ import { debugLog } from "@/lib/debug-log";
 import type { AppUserRole } from "@/lib/auth-types";
 import {
   canDoChannelAction,
+  listAllowedChannelIds,
   requireChannelScope,
 } from "@/lib/authz/resource-policy";
 import { getContactChannelSession, getConversationSession } from "@/lib/channel-session";
@@ -898,8 +899,41 @@ export async function GET(request: Request, context: RouteContext) {
     // qualquer canal + ativos dos outros canais — os ativos do próprio
     // webchat já estão na página principal). docs/decisoes/webchat-widget.md §3.2.
     const unifiedHistory = conv.channel === "webchat";
+    // O histórico unificado cruza canais: respeita o escopo de canais do
+    // agente (mesma regra do GET /conversations). Os tickets do próprio canal
+    // da conversa continuam (ele já tem acesso a ela). Sem política de canal
+    // (`null`) não há recorte.
+    const historyChannelIds = unifiedHistory
+      ? await listAllowedChannelIds(
+          {
+            id: accessUser.id,
+            role: accessUser.role,
+            organizationId:
+              (authResult.user as { organizationId?: string | null }).organizationId ??
+              conv.organizationId,
+            isSuperAdmin: Boolean(
+              (authResult.user as { isSuperAdmin?: boolean | null }).isSuperAdmin,
+            ),
+          },
+          memo,
+        )
+      : null;
     const historyTicketWhere: Prisma.ConversationWhereInput = unifiedHistory
-      ? { OR: [{ status: "RESOLVED" }, { channel: { not: conv.channel } }] }
+      ? {
+          AND: [
+            { OR: [{ status: "RESOLVED" }, { channel: { not: conv.channel } }] },
+            ...(historyChannelIds
+              ? [
+                  {
+                    OR: [
+                      ...(conv.channelId ? [{ channelId: conv.channelId }] : []),
+                      { channelId: { in: historyChannelIds } },
+                    ],
+                  },
+                ]
+              : []),
+          ],
+        }
       : { status: "RESOLVED", ...(conv.channel ? { channel: conv.channel } : {}) };
     const olderTicketsProbe =
       !includeHistory && !before && conv.contactId

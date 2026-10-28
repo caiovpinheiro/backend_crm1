@@ -54,8 +54,8 @@ export async function mergeContacts(
   }
 
   const [keep, remove] = await Promise.all([
-    prisma.contact.findUnique({ where: { id: keepId }, select: { id: true } }),
-    prisma.contact.findUnique({ where: { id: removeId }, select: { id: true } }),
+    prisma.contact.findUnique({ where: { id: keepId }, select: { id: true, webchatVisitorId: true } }),
+    prisma.contact.findUnique({ where: { id: removeId }, select: { id: true, webchatVisitorId: true } }),
   ]);
 
   if (!keep) return { ok: false, error: { kind: "keep_not_found" } };
@@ -195,6 +195,19 @@ export async function mergeContacts(
         where: { contactId: removeId },
         data: { contactId: keepId },
       });
+      // O widget só usa o contato que "nasceu" na sessão (`webchatVisitorId
+      // === session.id`, ver lib/webchat/inbound.ts). O operador confirmou
+      // que é a mesma pessoa: o visitante passa a ser dono do que ficou —
+      // sem isso a próxima mensagem dele abriria um contato novo. Se o que
+      // ficou já é de outro visitante, o unique (org, webchatVisitorId)
+      // não comporta dois: o do removido fica sem dono.
+      if (remove.webchatVisitorId && !keep.webchatVisitorId) {
+        await tx.contact.update({ where: { id: removeId }, data: { webchatVisitorId: null } });
+        await tx.contact.update({
+          where: { id: keepId },
+          data: { webchatVisitorId: remove.webchatVisitorId },
+        });
+      }
 
       // Finalmente, descarta o duplicado. Cascades já não vão derrubar
       // mais nada útil porque já reapontamos tudo.

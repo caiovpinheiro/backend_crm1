@@ -34,7 +34,7 @@ import {
   metaClientFromConfig,
   formatMetaSendError,
   isMetaGraphError,
-  type MetaWhatsAppClient,
+  MetaWhatsAppClient,
 } from "@/lib/meta-whatsapp/client";
 import {
   renderTemplatePreview,
@@ -110,6 +110,7 @@ import {
 } from "@/services/whatsapp-conversation";
 import { activeConversationOnAccountWhere } from "@/services/conversations";
 import { noteMessageChange, noteMessageRowChange } from "@/lib/cache/message-versions";
+import { isWebchatChannelRef, isWebchatConversation } from "@/lib/webchat/outbound-guard";
 
 const log = getLogger("automation");
 
@@ -410,6 +411,13 @@ async function resolveAutomationSendConv(
   if (!contactId) return null;
   const preferredId =
     typeof opts?.conversationId === "string" ? opts.conversationId.trim() : "";
+  // Gatilho vindo do webchat: não abre/procura ticket de WhatsApp para o
+  // visitante (o envio é recusado em `resolveAutomationMetaClient`).
+  if (
+    await isWebchatAutomationTarget({ conversationId: preferredId, channelId: opts?.channelId })
+  ) {
+    return preferredId ? { id: preferredId } : null;
+  }
   if (preferredId) {
     const pinned = await prisma.conversation.findFirst({
       where: { id: preferredId, contactId },
@@ -779,6 +787,31 @@ async function finishConversationsForContact(
   }
 }
 
+/** Conversa ou canal de envio do passo é do webchat? */
+async function isWebchatAutomationTarget(opts: {
+  conversationId?: string | null;
+  channelId?: string | null;
+}): Promise<boolean> {
+  const channelId = typeof opts.channelId === "string" ? opts.channelId.trim() : "";
+  if (channelId) {
+    const ch = await prisma.channel.findFirst({
+      where: { id: channelId },
+      select: { provider: true },
+    });
+    if (isWebchatChannelRef(ch)) return true;
+  }
+  const conversationId =
+    typeof opts.conversationId === "string" ? opts.conversationId.trim() : "";
+  if (conversationId) {
+    const conv = await prisma.conversation.findUnique({
+      where: { id: conversationId },
+      select: { channel: true, channelRef: { select: { provider: true } } },
+    });
+    if (isWebchatConversation(conv)) return true;
+  }
+  return false;
+}
+
 /**
  * Resolve o cliente Meta WhatsApp correto para uma automação multi-tenant.
  *
@@ -805,6 +838,21 @@ async function resolveAutomationMetaClient(opts: {
   /** Quando o passo escolhe um canal Cloud API explícito (ex.: template por WABA). */
   channelId?: string | null;
 }): Promise<MetaWhatsAppClient> {
+  // Conversa/canal webchat nunca sai por WhatsApp: sem isto o passo caía no
+  // 1º canal Meta da org e mandava WhatsApp para o telefone que o
+  // visitante digitou (gatilho message_received do webchat sem filtro de
+  // canal). Devolve cliente NÃO configurado (nunca lança): o resolve do
+  // início do run (marcar como lida) também passa por aqui e não pode
+  // derrubar passos que não enviam; cada passo de envio já lança
+  // `MetaSendFailureError` com cliente não configurado (ramo "Falha ao
+  // enviar").
+  if (await isWebchatAutomationTarget(opts)) {
+    log.warn(
+      `Envio por WhatsApp bloqueado: conversa/canal do webchat (automation=${opts.automationId ?? "—"}, conv=${opts.conversationId ?? "—"}, canal=${opts.channelId ?? "—"}).`,
+    );
+    // Sem credencial: `configured === false`, nenhuma chamada à Graph.
+    return new MetaWhatsAppClient("", "", "");
+  }
   let resolvedOrgId: string | null = null;
 
   const preferredChannelId =

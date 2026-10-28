@@ -8,6 +8,11 @@ import { touchChatLastMessageAt } from "@/lib/conversation-last-message";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { metaClientFromConfig, formatMetaSendError } from "@/lib/meta-whatsapp/client";
+import {
+  isWebchatConversation,
+  WEBCHAT_UNSUPPORTED_SEND_MESSAGE,
+  WEBCHAT_UNSUPPORTED_STATUS,
+} from "@/lib/webchat/outbound-guard";
 import { publishNewMessage } from "@/lib/realtime-events";
 import { getConversationLite } from "@/services/conversations";
 import { fireTrigger, buildMessageTriggerData } from "@/services/automation-triggers";
@@ -84,6 +89,13 @@ export async function POST(request: Request, context: RouteContext) {
       const sourceConv = await getConversationLite(sourceConversationId);
       if (!targetConv || !sourceConv) {
         return NextResponse.json({ message: "Conversa não encontrada." }, { status: 404 });
+      }
+      // Encaminhar sai pela Meta: destino webchat recusa (nunca WhatsApp).
+      if (isWebchatConversation(targetConv)) {
+        return NextResponse.json(
+          { message: WEBCHAT_UNSUPPORTED_SEND_MESSAGE, code: "WEBCHAT_UNSUPPORTED" },
+          { status: WEBCHAT_UNSUPPORTED_STATUS },
+        );
       }
 
       const sourceMsg = await prisma.message.findFirst({
