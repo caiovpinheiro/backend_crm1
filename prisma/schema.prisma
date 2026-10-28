@@ -3848,6 +3848,9 @@ model DepartmentMember {
   department     Department   @relation(fields: [departmentId], references: [id], onDelete: Cascade)
   userId         String
   user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// Peso na distribuição inteligente DENTRO deste departamento (1..100).
+  /// NULL = usa o peso geral (`DistributionResponsible.volume`).
+  distributionWeight Int?
   createdAt      DateTime     @default(now())
 
   @@unique([departmentId, userId])
@@ -4271,7 +4274,8 @@ model DistributionResponsible {
   visibleInCoverage Boolean    @default(true)
   /// Teto da fila. 0 = não recebe. Bloqueia quando filaAtual >= queueLimit.
   queueLimit      Int          @default(0)
-  /// Peso/volume exibido na v2 (default 1). Nao altera a selecao v1.
+  /// Peso geral no sorteio da distribuição inteligente (default 1).
+  /// `DepartmentMember.distributionWeight`, quando preenchido, vale no lugar dele naquele departamento.
   volume          Int          @default(1)
   /// Tipo/segmento opcional para compatibilidade de distribuicao.
   type            String?

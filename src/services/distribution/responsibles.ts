@@ -130,8 +130,17 @@ export interface DistributionResponsibleView {
   /** Minutos antes do almoço em que para de receber leads. */
   preLunchStopMinutes: number;
   lastExecutionAt: string | null;
-  /** Departamentos dos quais é membro (dirige o roteamento por departamento). */
-  departments: { id: string; name: string }[];
+  /**
+   * Departamentos dos quais é membro (dirige o roteamento por departamento).
+   * `weight` = peso só naquele departamento (null = usa `volume`).
+   */
+  departments: { id: string; name: string; weight: number | null }[];
+  /**
+   * Bilhetes no sorteio DESTA chamada: com escopo de departamento, o peso do
+   * consultor no departamento do lead (o maior, se o pool tiver vários);
+   * sem peso no departamento ou sem escopo, `volume`.
+   */
+  effectiveWeight: number;
   /** Presença operacional (null = sem registro). */
   status: AgentOnlineStatus | null;
   /** Tem expediente configurado. */
@@ -159,6 +168,22 @@ export interface DistributionResponsibleView {
    */
   systemOnline: boolean;
   lastSeenAt: string | null;
+}
+
+/**
+ * Peso do consultor no sorteio. Sem escopo de departamento: `volume`.
+ * Com escopo: cada departamento do pool do qual ele é membro vale o peso
+ * daquele departamento (ou `volume`, se vazio); fica o maior — membro de
+ * dois departamentos do mesmo pool não ganha bilhete em dobro.
+ */
+export function resolveEffectiveWeight(
+  volume: number,
+  scopeMemberships: { distributionWeight: number | null }[] | null,
+): number {
+  if (!scopeMemberships || scopeMemberships.length === 0) return volume;
+  return Math.max(
+    ...scopeMemberships.map((m) => m.distributionWeight ?? volume),
+  );
 }
 
 export interface GetResponsiblesOptions {
@@ -207,20 +232,19 @@ export async function getDistributionResponsibles(
       ].filter((id): id is string => typeof id === "string" && id.length > 0),
     ),
   );
-  const departmentMemberIds =
+  const scopeMembers =
     scopeDeptIds.length > 0
-      ? new Set(
-          (
-            await prisma.departmentMember.findMany({
-              where: {
-                departmentId: { in: scopeDeptIds },
-                userId: { in: userIds },
-              },
-              select: { userId: true },
-            })
-          ).map((m) => m.userId),
-        )
+      ? await prisma.departmentMember.findMany({
+          where: {
+            departmentId: { in: scopeDeptIds },
+            userId: { in: userIds },
+          },
+          select: { userId: true, distributionWeight: true },
+        })
       : null;
+  const departmentMemberIds = scopeMembers
+    ? new Set(scopeMembers.map((m) => m.userId))
+    : null;
 
   const [
     responsibles,
@@ -262,7 +286,11 @@ export async function getDistributionResponsibles(
       : Promise.resolve(null),
     prisma.departmentMember.findMany({
       where: { userId: { in: userIds }, organizationId: orgId },
-      select: { userId: true, department: { select: { id: true, name: true } } },
+      select: {
+        userId: true,
+        distributionWeight: true,
+        department: { select: { id: true, name: true } },
+      },
     }),
     // Presença de USO (aba do CRM aberta) — falha "aberta": em erro,
     // devolvemos Map vazio para não bloquear a tela de Distribuição.
@@ -270,11 +298,18 @@ export async function getDistributionResponsibles(
   ]);
 
   // userId → lista de departamentos (nome), para exibição e roteamento.
-  const deptsByUser = new Map<string, { id: string; name: string }[]>();
+  const deptsByUser = new Map<
+    string,
+    { id: string; name: string; weight: number | null }[]
+  >();
   for (const m of memberships) {
     if (!m.department) continue;
     const arr = deptsByUser.get(m.userId) ?? [];
-    arr.push({ id: m.department.id, name: m.department.name });
+    arr.push({
+      id: m.department.id,
+      name: m.department.name,
+      weight: m.distributionWeight ?? null,
+    });
     deptsByUser.set(m.userId, arr);
   }
 
@@ -338,6 +373,10 @@ export async function getDistributionResponsibles(
       visibleInCoverage: cfg.visibleInCoverage ?? true,
       queueLimit: cfg.queueLimit,
       volume: cfg.volume,
+      effectiveWeight: resolveEffectiveWeight(
+        cfg.volume,
+        scopeMembers?.filter((m) => m.userId === u.id) ?? null,
+      ),
       type: cfg.type,
       paused: cfg.paused,
       preLunchStopMinutes: cfg.preLunchStopMinutes,
