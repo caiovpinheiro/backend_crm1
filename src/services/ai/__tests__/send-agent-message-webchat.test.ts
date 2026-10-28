@@ -17,7 +17,9 @@ const h = vi.hoisted(() => ({
   publishNewMessage: vi.fn(),
   markTyping: vi.fn(async () => {}),
   cacheGet: vi.fn(async (): Promise<unknown> => undefined),
+  notifyStatus: vi.fn(),
 }));
+vi.mock("@/lib/webchat/s2s/callback", () => ({ notifyWebchatConversationStatus: h.notifyStatus }));
 
 vi.mock("@/lib/meta-whatsapp/client", () => ({ metaClientFromConfig: h.metaClientFromConfig }));
 vi.mock("@/lib/prisma", () => ({
@@ -109,6 +111,13 @@ describe("sendAgentMessage × webchat", () => {
     expect(h.publishNewMessage).toHaveBeenCalledWith(
       expect.objectContaining({ conversationId: "conv-wc", direction: "out", organizationId: "org-1" }),
     );
+    // Callback "attended" do S2S (§9.6), como na resposta do composer.
+    expect(h.notifyStatus).toHaveBeenCalledWith({
+      organizationId: "org-1",
+      conversationIds: ["conv-wc"],
+      status: "attended",
+      channel: "webchat",
+    });
   });
 
   it("mensagem interativa vira o texto com as opções (sem botões da Meta)", async () => {
@@ -155,6 +164,7 @@ describe("sendAgentMessage × webchat", () => {
     const res = await sendAgentMessage({ ...BASE, autonomyMode: "AUTONOMOUS" });
     expect(res).toEqual({ status: "skipped", reason: "assignee_not_ai" });
     expect(h.messageCreate).not.toHaveBeenCalled();
+    expect(h.notifyStatus).not.toHaveBeenCalled();
     expect(h.metaClientFromConfig).not.toHaveBeenCalled();
   });
 

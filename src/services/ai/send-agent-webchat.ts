@@ -19,6 +19,7 @@ import { publishNewMessage } from "@/lib/realtime-events";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { computeTypingDelayMs, typingDelayWithinBudget } from "@/lib/typing-delay";
 import { markWebchatAgentTyping, WEBCHAT_AGENT_TYPING_TTL_SEC } from "@/lib/webchat/agent-typing";
+import { notifyWebchatConversationStatus } from "@/lib/webchat/s2s/callback";
 
 const log = getLogger("ai.send-agent-webchat");
 
@@ -117,6 +118,14 @@ export async function deliverAgentWebchatMessage(args: {
     content: args.text,
     senderName: args.senderName,
     timestamp: saved.createdAt,
+  });
+  // §9.6: callback "attended" dos refs da conversa (humano ou IA), em
+  // segundo plano — o mesmo gancho do envio do composer.
+  notifyWebchatConversationStatus({
+    organizationId: orgId,
+    conversationIds: [args.conversationId],
+    status: "attended",
+    channel: "webchat",
   });
   return { status: "sent", messageId: saved.id };
 }
