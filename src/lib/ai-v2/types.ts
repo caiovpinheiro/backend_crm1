@@ -129,6 +129,17 @@ export interface V2InactivityConfig {
  * questionMessage; outra → message); `generated`: o agente escreve a partir
  * da conversa (sem dado novo), com o texto do modo anterior como reserva.
  */
+export interface V2ThemeIdle {
+  /** Lembretes deste assunto; vazio = os do agente. */
+  followUps?: V2FollowUpStep[];
+  /** Prazo até o fim, em minutos; vazio = o do agente. */
+  closeAfter?: number;
+  /** No fim do prazo: encerrar (como o agente) ou transferir para o destino do assunto. */
+  onTimeout?: "close" | "handoff";
+  /** Mensagem ao transferir no fim do prazo; vazio = a do destino. */
+  timeoutMessage?: string;
+}
+
 export interface V2FollowUpStep {
   /** Minutos desde a última mensagem do agente. */
   after: number;
@@ -229,6 +240,8 @@ export interface V2Theme {
   handoffDestination?: V2Destination;
   /** Assunto que vai direto para o destino, sem resposta do agente. */
   directHandoff?: boolean;
+  /** Cliente sem responder neste assunto (vazio = a regra do agente). */
+  idle?: V2ThemeIdle;
   /** Material + mensagem pronta neste assunto (vazio = o do agente). */
   messageModelMode?: import("./message-model-mode").MessageModelMode;
   /** Tabulação sugerida ao encerrar/transferir por este tema. */

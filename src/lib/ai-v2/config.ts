@@ -87,6 +87,31 @@ const replyEndingSchema = z.object({
   info: replyEndingRuleSchema.optional().default({ enabled: false, phrases: [] }),
 });
 
+/** Lembretes antes de encerrar (até 3), cada um com o próprio prazo. */
+const followUpStepsSchema = z.preprocess(
+  (v) => (Array.isArray(v) ? v.filter((s) => s && typeof s === "object" && Number((s as { after?: unknown }).after) > 0).slice(0, 3) : []),
+  z.array(z.object({
+    after: z.coerce.number().int().min(1),
+    mode: z.enum(["fixed", "by_reply", "generated"]).optional().default("fixed"),
+    message: optionalText,
+    procedureMessage: optionalText,
+    questionMessage: optionalText,
+  })),
+);
+
+/**
+ * Cliente sem responder neste assunto. Vazio: vale a regra do agente.
+ * Lembretes próprios substituem os do agente; no fim do prazo, encerra (como
+ * o agente) ou transfere para o destino do assunto.
+ */
+const themeIdleSchema = z.object({
+  followUps: followUpStepsSchema.optional(),
+  closeAfter: z.coerce.number().int().min(1).optional(),
+  onTimeout: z.enum(["close", "handoff"]).optional().default("close"),
+  /** Mensagem ao transferir no fim do prazo. Vazio: a do destino do assunto. */
+  timeoutMessage: optionalText,
+}).optional();
+
 const themeSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -112,6 +137,7 @@ const themeSchema = z.object({
   handoffDestination: destinationSchema.optional(),
   // A tela tinha o botão, mas o schema descartava o valor ao salvar.
   directHandoff: z.boolean().optional().default(false),
+  idle: themeIdleSchema,
   tabulationId: z.string().optional(),
   maxTurns: z.number().int().min(0).optional(),
   answerBy: z.enum(["self"]).or(z.string()).optional().default("self"),
@@ -209,16 +235,7 @@ const inactivitySchema = z.object({
     stageId: z.string().optional(),
     reasonId: z.string().optional(),
   }).optional(),
-  followUps: z.preprocess(
-    (v) => (Array.isArray(v) ? v.filter((s) => s && typeof s === "object" && Number((s as { after?: unknown }).after) > 0).slice(0, 3) : []),
-    z.array(z.object({
-      after: z.coerce.number().int().min(1),
-      mode: z.enum(["fixed", "by_reply", "generated"]).optional().default("fixed"),
-      message: optionalText,
-      procedureMessage: optionalText,
-      questionMessage: optionalText,
-    })),
-  ).optional(),
+  followUps: followUpStepsSchema.optional(),
 }).optional();
 
 // Réguas de similaridade são opções com nome; os números ficam no motor
