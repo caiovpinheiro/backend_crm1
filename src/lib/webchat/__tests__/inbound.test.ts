@@ -23,7 +23,10 @@ const mocks = vi.hoisted(() => {
       message: { findFirst: vi.fn(), create: vi.fn() },
       contact: { findUnique: vi.fn(), findFirst: vi.fn() },
       conversation: { findFirst: vi.fn(), create: vi.fn(), update: vi.fn(async () => ({})) },
-      webchatSession: { update: vi.fn(async () => ({})), findFirst: vi.fn(async () => null) },
+      webchatSession: {
+        update: vi.fn(async () => ({})),
+        findFirst: vi.fn(async (_a?: unknown): Promise<unknown> => null),
+      },
     },
     recordRef: vi.fn(async () => ({ id: "ref-1", created: true })),
   };
