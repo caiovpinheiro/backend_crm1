@@ -3176,6 +3176,13 @@ export async function processMetaWebhookPayload(
                 parsed.replyToWaMessageId,
                 parsed.type,
               );
+          // Clique no botão da campanha, sem automação pausada: conta como
+          // mensagem do cliente no gatilho. Texto citado e fluxo pausado
+          // continuam sem `message_received`. A IA e a distribuição não mudam.
+          const campaignButtonInbound =
+            !pausedReply &&
+            Boolean(campaignReply) &&
+            (parsed.type === "button" || parsed.interactiveKind === "button_reply");
           const conversation = pausedReply
             ? {
                 ...pausedReply,
@@ -3187,6 +3194,9 @@ export async function processMetaWebhookPayload(
                 ...campaignReply,
                 deferDistribution: true as const,
                 suppressInboundAutomations: true as const,
+                ...(campaignButtonInbound
+                  ? { campaignButtonInbound: true as const }
+                  : {}),
               }
             : await findOrCreateConversation(
                 contact.id,
@@ -3657,15 +3667,20 @@ export async function processMetaWebhookPayload(
               log.error("Falha no salesbot:", err);
             }
 
+            const buttonCountsAsMessage =
+              "campaignButtonInbound" in conversation &&
+              conversation.campaignButtonInbound;
             const automationOwnsReply =
               salesbotHandled ||
               salesbotReplied ||
-              ("suppressInboundAutomations" in conversation &&
-                conversation.suppressInboundAutomations);
+              (("suppressInboundAutomations" in conversation &&
+                conversation.suppressInboundAutomations) &&
+                !buttonCountsAsMessage);
             if (
               "deferDistribution" in conversation &&
               conversation.deferDistribution &&
-              !automationOwnsReply
+              !automationOwnsReply &&
+              !buttonCountsAsMessage
             ) {
               await maybeDistributeNewInboundTicket({
                 conversationId: conversation.id,
