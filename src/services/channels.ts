@@ -25,6 +25,19 @@ import {
   readWebchatConfig,
   webchatOrgDefaults,
 } from "@/lib/webchat/config";
+import {
+  pickWebchatSecretFields,
+  stripWebchatSecrets,
+  webchatSecretsStatus,
+  withRotatedWebchatSecret,
+  type WebchatSecretKind,
+  type WebchatSecretsStatus,
+} from "@/lib/webchat/secrets";
+import {
+  defaultWebchatV2Config,
+  normalizeWebchatV2Config,
+  readWebchatV2Config,
+} from "@/lib/webchat/v2-config";
 
 /** Lista de canais em cache (`GET /api/channels`, bootstrap): sobe a versão. */
 export async function invalidateChannelsList(orgId: string | null | undefined): Promise<void> {
@@ -91,7 +104,28 @@ export type ChannelWithOrgSlug = Channel & {
    * "herdado"). docs/decisoes/webchat-widget.md §3.4.1.
    */
   webchatDefaults?: { primary: string; avatarUrl: string | null };
+  /**
+   * Só em canais WEBCHAT: segredos v2 configurados (sim/não + data). O valor
+   * nunca sai daqui — `config` vem sem os campos de segredo. §9.5.
+   */
+  webchatSecrets?: WebchatSecretsStatus;
 };
+
+/**
+ * Canal WEBCHAT como o painel pode ver: `config` sem os segredos
+ * (`identitySecret`/`s2sSecret`) e `webchatSecrets` com o status. Outros
+ * tipos passam intactos. Use em TODA resposta que devolve a linha do canal.
+ */
+export function redactWebchatChannel<T extends { provider: ChannelProvider; config: unknown }>(
+  channel: T,
+): T & { webchatSecrets?: WebchatSecretsStatus } {
+  if (channel.provider !== "WEBCHAT") return channel;
+  return {
+    ...channel,
+    config: stripWebchatSecrets(channel.config) as T["config"],
+    webchatSecrets: webchatSecretsStatus(channel.config),
+  };
+}
 
 type OrgBrandingRef = {
   slug: string;
@@ -106,7 +140,7 @@ function attachOrgSlug<T extends Channel & { organization: OrgBrandingRef }>(
 ): ChannelWithOrgSlug {
   const { organization, ...rest } = channel;
   return {
-    ...rest,
+    ...redactWebchatChannel(rest),
     organizationSlug: organization?.slug ?? "",
     ...(rest.provider === "WEBCHAT" ? { webchatDefaults: webchatOrgDefaults(organization) } : {}),
   };
@@ -115,13 +149,18 @@ function attachOrgSlug<T extends Channel & { organization: OrgBrandingRef }>(
 /** Resposta de POST/PUT: canal WEBCHAT ganha `webchatDefaults` (marca da org). */
 export async function withWebchatDefaults<T extends Channel>(
   channel: T,
-): Promise<T & { webchatDefaults?: { primary: string; avatarUrl: string | null } }> {
+): Promise<
+  T & {
+    webchatDefaults?: { primary: string; avatarUrl: string | null };
+    webchatSecrets?: WebchatSecretsStatus;
+  }
+> {
   if (channel.provider !== "WEBCHAT") return channel;
   const org = await prisma.organization.findUnique({
     where: { id: channel.organizationId },
     select: { primaryColor: true, logoUrl: true },
   });
-  return { ...channel, webchatDefaults: webchatOrgDefaults(org) };
+  return { ...redactWebchatChannel(channel), webchatDefaults: webchatOrgDefaults(org) };
 }
 
 export async function getChannels(): Promise<ChannelWithOrgSlug[]> {
@@ -308,7 +347,14 @@ export async function findMetaCloudChannelByPhoneNumberId(
 async function createWebchatChannel(data: CreateChannelData): Promise<Channel> {
   for (let attempt = 0; ; attempt++) {
     const publicKey = generateWebchatPublicKey();
-    const config = normalizeWebchatConfig(data.config, defaultWebchatConfig(publicKey));
+    const config = {
+      ...normalizeWebchatConfig(data.config, defaultWebchatConfig(publicKey)),
+      // v2 (§9.7): defaults seguros; segredos só pela rota de geração.
+      v2: normalizeWebchatV2Config(
+        (data.config as Record<string, unknown> | undefined)?.v2,
+        defaultWebchatV2Config(),
+      ),
+    };
     try {
       return await prisma.channel.create({
         data: withOrgFromCtx({
@@ -375,11 +421,18 @@ export async function updateChannel(id: string, data: UpdateChannelData): Promis
   if (data.provider !== undefined) patch.provider = data.provider;
   if (before?.provider === "WEBCHAT") {
     // Webchat: config é patch parcial validado sobre o gravado; a chave
-    // pública não muda por aqui. Sem janela de 24h nem encriptação.
+    // pública não muda por aqui. Sem janela de 24h. `v2` é mesclado sobre o
+    // gravado; os segredos (encriptados) nunca vêm do cliente — preservados
+    // do banco (só a rota de geração os troca, §9.5).
     if (data.config !== undefined) {
       const publicKey = before.publicKey ?? "";
       const current = readWebchatConfig(before.config, publicKey);
-      patch.config = normalizeWebchatConfig(data.config, current) as unknown as Prisma.InputJsonValue;
+      const incoming = data.config as Record<string, unknown> | null;
+      patch.config = {
+        ...normalizeWebchatConfig(data.config, current),
+        v2: normalizeWebchatV2Config(incoming?.v2, readWebchatV2Config(before.config)),
+        ...pickWebchatSecretFields(before.config),
+      } as unknown as Prisma.InputJsonValue;
     }
   } else if (data.config !== undefined || data.resetSessionWindow) {
     // PR-1.2: encriptacao precisa do provider. Se nao vier no patch, usa o
@@ -484,6 +537,34 @@ export async function deleteChannel(id: string): Promise<Channel> {
     before: pickFields(deleted, CHANNEL_AUDIT_FIELDS),
   });
   return deleted;
+}
+
+/**
+ * Gera (ou gira) um segredo v2 do canal WEBCHAT e devolve o valor em claro
+ * UMA vez. O anterior deixa de valer na hora. Auditoria sem o valor.
+ * `null` = canal não existe (na org do contexto) ou não é WEBCHAT.
+ */
+export async function rotateWebchatChannelSecret(
+  id: string,
+  kind: WebchatSecretKind,
+): Promise<{ secret: string; rotatedAt: string; status: WebchatSecretsStatus } | null> {
+  const before = await prisma.channel.findUnique({ where: { id } });
+  if (!before || before.provider !== "WEBCHAT") return null;
+  const next = withRotatedWebchatSecret(before.config, kind);
+  const updated = await prisma.channel.update({
+    where: { id },
+    data: { config: next.config as Prisma.InputJsonValue },
+  });
+  await cache.del(channelKey(id));
+  await invalidateChannelLookups(updated.organizationId);
+  await invalidateChannelsList(updated.organizationId);
+  await logAudit({
+    entity: "channel",
+    action: "update",
+    entityId: id,
+    after: { webchatSecretRotated: kind, rotatedAt: next.rotatedAt },
+  });
+  return { secret: next.plain, rotatedAt: next.rotatedAt, status: webchatSecretsStatus(next.config) };
 }
 
 export async function updateChannelStatus(

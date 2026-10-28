@@ -21,6 +21,7 @@
 
 import { carryContactLastMessage } from "@/lib/conversation-last-message";
 import { prisma, type ScopedTx } from "@/lib/prisma";
+import { mergeContactVisitorData } from "@/lib/webchat/visitor-data";
 
 export type MergeContactsResult = {
   keptId: string;
@@ -54,8 +55,14 @@ export async function mergeContacts(
   }
 
   const [keep, remove] = await Promise.all([
-    prisma.contact.findUnique({ where: { id: keepId }, select: { id: true, webchatVisitorId: true } }),
-    prisma.contact.findUnique({ where: { id: removeId }, select: { id: true, webchatVisitorId: true } }),
+    prisma.contact.findUnique({
+      where: { id: keepId },
+      select: { id: true, webchatVisitorId: true, externalId: true },
+    }),
+    prisma.contact.findUnique({
+      where: { id: removeId },
+      select: { id: true, webchatVisitorId: true, externalId: true },
+    }),
   ]);
 
   if (!keep) return { ok: false, error: { kind: "keep_not_found" } };
@@ -207,6 +214,18 @@ export async function mergeContacts(
           where: { id: keepId },
           data: { webchatVisitorId: remove.webchatVisitorId },
         });
+      }
+
+      // Webchat v2: contexto vivo e timeline do site acompanham o contato
+      // (chave repetida do contexto: vence o estado mais recente).
+      await mergeContactVisitorData(tx, keepId, removeId);
+      // `externalId` (id do sistema de origem; também a identidade assinada
+      // do webchat v2): se só o removido tem, passa para o que fica — senão
+      // a próxima identificação do site criaria/acharia o contato errado.
+      // Se os dois têm, fica o do keep (unique por org).
+      if (remove.externalId && !keep.externalId) {
+        await tx.contact.update({ where: { id: removeId }, data: { externalId: null } });
+        await tx.contact.update({ where: { id: keepId }, data: { externalId: remove.externalId } });
       }
 
       // Finalmente, descarta o duplicado. Cascades já não vão derrubar

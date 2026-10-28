@@ -8,7 +8,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const h = vi.hoisted(() => ({
   calls: [] as { op: string; args: unknown }[],
-  contacts: new Map<string, { id: string; webchatVisitorId: string | null }>(),
+  contacts: new Map<string, { id: string; webchatVisitorId: string | null; externalId?: string | null }>(),
 }));
 
 vi.mock("@/lib/conversation-last-message", () => ({ carryContactLastMessage: vi.fn(async () => {}) }));
@@ -70,6 +70,29 @@ describe("mergeContacts × webchat", () => {
     h.contacts.set("ct-keep", { id: "ct-keep", webchatVisitorId: "wv_a" });
     h.contacts.set("ct-visit", { id: "ct-visit", webchatVisitorId: "wv_b" });
     await mergeContacts("ct-keep", "ct-visit");
+    expect(h.calls.filter((c) => c.op === "contact.update")).toEqual([]);
+  });
+  it("v2: contexto/timeline acompanham e o externalId do removido passa para o que fica", async () => {
+    h.contacts.set("ct-keep", { id: "ct-keep", webchatVisitorId: null, externalId: null });
+    h.contacts.set("ct-rm", { id: "ct-rm", webchatVisitorId: null, externalId: "ext-1" });
+    await mergeContacts("ct-keep", "ct-rm");
+    const ops = h.calls.map((c) => c.op);
+    expect(h.calls).toContainEqual({
+      op: "webchatEvent.updateMany",
+      args: { where: { contactId: "ct-rm" }, data: { contactId: "ct-keep" } },
+    });
+    expect(ops).toContain("webchatLiveContext.findMany");
+    expect(h.calls.filter((c) => c.op === "contact.update").map((c) => c.args)).toEqual([
+      { where: { id: "ct-rm" }, data: { externalId: null } },
+      { where: { id: "ct-keep" }, data: { externalId: "ext-1" } },
+    ]);
+    expect(ops.lastIndexOf("contact.update")).toBeLessThan(ops.indexOf("contact.delete"));
+  });
+
+  it("v2: os dois têm externalId -> fica o do keep", async () => {
+    h.contacts.set("ct-keep", { id: "ct-keep", webchatVisitorId: null, externalId: "ext-k" });
+    h.contacts.set("ct-rm", { id: "ct-rm", webchatVisitorId: null, externalId: "ext-r" });
+    await mergeContacts("ct-keep", "ct-rm");
     expect(h.calls.filter((c) => c.op === "contact.update")).toEqual([]);
   });
 });
