@@ -10,7 +10,7 @@
 import { prismaBase } from "@/lib/prisma-base";
 import { normalizeV2Config } from "@/lib/ai-v2/config";
 import { buildVariableMap, defaultFormatter, renderMessage } from "@/lib/ai-v2/message-render";
-import type { V2AgentConfig, V2FollowUpStep, V2InactivityConfig } from "@/lib/ai-v2/types";
+import type { V2AgentConfig, V2FollowUpStep, V2InactivityConfig, V2Theme } from "@/lib/ai-v2/types";
 import { getLogger } from "@/lib/logger";
 import { asksClient, classifyReply, replyEndingPhrases, withoutReplyEndings } from "./reply-ending";
 
@@ -81,6 +81,26 @@ export type V2IdleKind = "procedure" | "question" | "other";
  * Lembretes valendo, em ordem de prazo, até 3, só os que saem antes do
  * encerramento. Sem lista, o aviso único antigo (`nudgeAfter`) é o lembrete.
  */
+/**
+ * Regra de "cliente sem responder" que vale na conversa: a do assunto (se ele
+ * tiver lembretes ou prazo próprios) por cima da do agente. Lembretes do
+ * assunto substituem os do agente, inclusive o aviso único antigo.
+ */
+export function effectiveInactivity(
+  base: V2InactivityConfig | undefined,
+  theme: Pick<V2Theme, "idle"> | null | undefined,
+): V2InactivityConfig | undefined {
+  const idle = theme?.idle;
+  if (!base || !idle) return base;
+  const steps = (idle.followUps ?? []).filter((st) => st && st.after > 0);
+  if (steps.length === 0 && !idle.closeAfter) return base;
+  return {
+    ...base,
+    ...(steps.length > 0 ? { followUps: steps, nudgeAfter: 0 } : {}),
+    ...(idle.closeAfter ? { closeAfter: idle.closeAfter } : {}),
+  };
+}
+
 export function followUpSteps(cfg: V2InactivityConfig | undefined): V2FollowUpStep[] {
   if (!cfg) return [];
   const closeAfter = Math.max(0, cfg.closeAfter ?? 0);
@@ -242,7 +262,13 @@ async function listIdleV2(now: Date): Promise<IdleRow[]> {
         AND last_out."createdAt" < $1::timestamptz - make_interval(mins => LEAST(
               COALESCE(NULLIF((a."simpleConfig"->'inactivity'->'followUps'->0->>'after')::int, 0), 1000000),
               COALESCE(NULLIF((a."simpleConfig"->'inactivity'->>'nudgeAfter')::int, 0), 1000000),
-              COALESCE(NULLIF((a."simpleConfig"->'inactivity'->>'closeAfter')::int, 0), 1000000)))
+              COALESCE(NULLIF((a."simpleConfig"->'inactivity'->>'closeAfter')::int, 0), 1000000),
+              -- Assunto com lembretes ou prazo próprios (menor de todos).
+              COALESCE((SELECT MIN(NULLIF((f->>'after')::int, 0))
+                          FROM jsonb_array_elements(COALESCE(a."simpleConfig"->'themes', '[]'::jsonb)) t,
+                               jsonb_array_elements(COALESCE(t->'idle'->'followUps', '[]'::jsonb)) f), 1000000),
+              COALESCE((SELECT MIN(NULLIF((t->'idle'->>'closeAfter')::int, 0))
+                          FROM jsonb_array_elements(COALESCE(a."simpleConfig"->'themes', '[]'::jsonb)) t), 1000000)))
       ORDER BY last_out."createdAt" ASC
       LIMIT 300`,
     now,
@@ -319,6 +345,7 @@ export async function processIdleV2(now: Date = new Date()): Promise<{ nudged: n
   const rows = await listIdleV2(now);
   let nudged = 0;
   let closed = 0;
+  let transferred = 0;
   if (rows.length === 0) return { nudged, closed };
   const { withSystemContext } = await import("@/lib/webhook-context");
   const { sendV2TextMessage, v2HumanBehavior } = await import("./actions");
@@ -334,7 +361,10 @@ export async function processIdleV2(now: Date = new Date()): Promise<{ nudged: n
     } catch {
       continue;
     }
-    const inactivity = config.inactivity;
+    // Assunto da conversa com regra própria de "cliente sem responder".
+    const theme = getV2ThemeById(config, row.theme_id ?? undefined);
+    const inactivity = effectiveInactivity(config.inactivity, theme);
+    const idleConfig: V2AgentConfig = inactivity === config.inactivity ? config : { ...config, inactivity };
     // Pergunta pós-encerramento sem resposta: o atendimento anterior já foi
     // encerrado (com despedida); no prazo de encerramento, só fecha o ticket
     // novo — sem lembrete, sem mensagem, sem mexer no negócio.
@@ -375,7 +405,7 @@ export async function processIdleV2(now: Date = new Date()): Promise<{ nudged: n
       continue;
     }
     const vars = buildVariableMap(config.variables, null, null, { id: row.contact_id, name: row.contact_name ?? "" });
-    const progress = idleProgress(row, config);
+    const progress = idleProgress(row, idleConfig);
     const decision = decideV2Idle({
       inactivity,
       anchorAt: progress.anchorAt,
@@ -420,6 +450,57 @@ export async function processIdleV2(now: Date = new Date()): Promise<{ nudged: n
                 kind: progress.kind,
               }, now);
             }
+          } else if (theme?.idle?.onTimeout === "handoff") {
+            // Fim do prazo neste assunto: transfere para o destino dele (ou o
+            // padrão do agente), com a mensagem configurada, tabulação e resumo.
+            const [{ applyV2Tabulation }, { writeV2Summary }, { simpleHandoff, leadsHandoffOption }, { upsertV2ConversationState }, { outsideHoursNote }] = await Promise.all([
+              import("./tabulation"), import("./summary"), import("./handoff"), import("./state"), import("./rules"),
+            ]);
+            const destination = theme.handoffDestination?.type ? theme.handoffDestination : config.handoff.defaultDestination;
+            traceStep("inatividade", `Cliente sem responder há ${inactivity?.closeAfter} min no assunto "${theme.name}" → transfere (${destination.type}${destination.id ? ` ${destination.id}` : ""})`);
+            const baseText = theme.idle.timeoutMessage?.trim() || destination.message?.trim() || config.handoff.message?.trim() || "";
+            let text = baseText ? renderMessage(baseText, vars, defaultFormatter()) : "";
+            if (text && destination.type !== "ai_agent") {
+              const note = outsideHoursNote(config);
+              if (note && !text.includes(note)) text = `${text.trim()}\n\n${note}`;
+            }
+            const canText = !!row.last_inbound_at && now.getTime() - new Date(row.last_inbound_at).getTime() < WINDOW_24H;
+            if (text && canText && (await send(text)).sent) reply = text;
+            const tabulation = await applyV2Tabulation({
+              config, theme, moment: "transfer", organizationId: row.organization_id,
+              conversationId: row.conversation_id, contactId: row.contact_id, agentId: row.agent_config_id,
+            });
+            await writeV2Summary({
+              organizationId: row.organization_id, conversationId: row.conversation_id, contactId: row.contact_id,
+              agentId: row.agent_config_id, config, moment: "transfer", reason: "inactivity", tabulation,
+            });
+            await simpleHandoff({
+              conversationId: row.conversation_id, contactId: row.contact_id, dealId: row.deal_id ?? undefined,
+              destination, leads: leadsHandoffOption(config), moveToStageId: config.handoff?.moveToStageId,
+            });
+            await upsertV2ConversationState({
+              organizationId: row.organization_id, conversationId: row.conversation_id, agentId: row.agent_config_id,
+              owner: "pessoa", ...(row.theme_id ? { themeId: row.theme_id } : {}),
+            });
+            transferred++;
+            await logV2Turn({
+              organizationId: row.organization_id,
+              conversationId: row.conversation_id,
+              agentId: row.agent_config_id,
+              inboundText: "",
+              crmContext: { contact: null, deals: [], selectedDeal: null, fields: { contact: [], deal: [] } },
+              prompt: "inactivity",
+              ...(reply ? { reply } : {}),
+              executedActions: [{ action: { type: "handoff", destination }, ok: true }],
+              discardedActions: [],
+              handoff: true,
+              latencyMs: 0,
+              inputTokens: 0,
+              outputTokens: 0,
+              owner: "pessoa",
+              stage: "active",
+            });
+            return;
           } else {
             traceStep("inatividade", `Cliente sem responder há ${inactivity?.closeAfter} min → encerramento`);
             const closeText = inactivity?.closeMessage?.trim() ? renderMessage(inactivity.closeMessage, vars, defaultFormatter()) : "";
@@ -465,7 +546,7 @@ export async function processIdleV2(now: Date = new Date()): Promise<{ nudged: n
       );
     }
   }
-  if (nudged + closed > 0) log.info({ lembretes: nudged, encerradas: closed }, "[ai-v2 inatividade] resumo");
+  if (nudged + closed + transferred > 0) log.info({ lembretes: nudged, encerradas: closed, transferidas: transferred }, "[ai-v2 inatividade] resumo");
   return { nudged, closed };
 }
 

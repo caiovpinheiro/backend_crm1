@@ -14,6 +14,10 @@ const mocks = vi.hoisted(() => ({
   executeRaw: vi.fn(async (..._args: unknown[]) => 1),
   apiKey: vi.fn(async (_id: string): Promise<string | null> => "chave"),
   generate: vi.fn(async (_args: Record<string, unknown>) => ({ text: "" })),
+  handoff: vi.fn(async (_args: Record<string, unknown>) => undefined),
+  tabulation: vi.fn(async (_args: Record<string, unknown>): Promise<string | null> => "tab-1"),
+  summary: vi.fn(async (_args: Record<string, unknown>): Promise<string | null> => null),
+  upsertState: vi.fn(async (_args: Record<string, unknown>) => ({})),
 }));
 
 vi.mock("@/services/ai/agent-key", () => ({ tryGetAgentApiKey: mocks.apiKey }));
@@ -28,8 +32,13 @@ vi.mock("../actions", () => ({
 }));
 vi.mock("../engine", () => ({ closeState: mocks.closeState }));
 vi.mock("../log", () => ({ logV2Turn: mocks.logTurn }));
+vi.mock("../handoff", () => ({ simpleHandoff: mocks.handoff, leadsHandoffOption: () => undefined }));
+vi.mock("../tabulation", () => ({ applyV2Tabulation: mocks.tabulation }));
+vi.mock("../summary", () => ({ writeV2Summary: mocks.summary }));
+vi.mock("../state", () => ({ upsertV2ConversationState: mocks.upsertState }));
+vi.mock("../rules", () => ({ outsideHoursNote: () => "" }));
 
-import { NUDGE_MESSAGE_DEFAULT, processIdleV2 } from "../inactivity";
+import { effectiveInactivity, NUDGE_MESSAGE_DEFAULT, processIdleV2 } from "../inactivity";
 
 const NOW = new Date("2026-03-10T15:00:00.000Z");
 const minutesAgo = (m: number) => new Date(NOW.getTime() - m * 60_000);
@@ -75,6 +84,67 @@ describe("passada de inatividade", () => {
     mocks.queryRaw.mockResolvedValue([row({ simple_config: config, post_close_asked: true, last_out_at: minutesAgo(10), last_inbound_at: minutesAgo(11) })]);
     expect(await processIdleV2(NOW)).toEqual({ nudged: 0, closed: 0 });
     expect(mocks.closeState).not.toHaveBeenCalled();
+  });
+
+  describe("regra própria do assunto", () => {
+    const THEME = {
+      id: "t-saida", name: "Saída", when: [], examples: [], instructions: "",
+      handoffDestination: { type: "department", id: "dep-1" },
+      idle: {
+        followUps: [{ after: 10, mode: "by_reply", questionMessage: "Ainda está por aí? Me conta o motivo para eu seguir." }],
+        closeAfter: 30,
+        onTimeout: "handoff",
+        timeoutMessage: "Vou te passar para a equipe que cuida disso.",
+      },
+    };
+    const config = {
+      name: "Agente", tone: "Objetivo", autonomyMode: "auto",
+      inactivity: { enabled: true, closeAfter: 1440, closeMessage: "Vou encerrar por aqui." },
+      themes: [THEME],
+    };
+
+    it("lembrete do assunto no lugar do do agente", async () => {
+      mocks.queryRaw.mockResolvedValue([row({
+        simple_config: config, theme_id: "t-saida",
+        last_out_content: "O que está pesando nessa decisão?", last_out_at: minutesAgo(12), last_inbound_at: minutesAgo(13),
+      })]);
+      expect(await processIdleV2(NOW)).toEqual({ nudged: 1, closed: 0 });
+      expect(mocks.send.mock.calls[0][0].text).toBe("Ainda está por aí? Me conta o motivo para eu seguir.");
+    });
+
+    it("fim do prazo do assunto: transfere para o destino dele, com mensagem, tabulação e resumo", async () => {
+      mocks.queryRaw.mockResolvedValue([row({
+        simple_config: config, theme_id: "t-saida",
+        last_out_content: "Ainda está por aí? Me conta o motivo para eu seguir.",
+        last_out_at: minutesAgo(25), last_inbound_at: minutesAgo(36),
+        idle_follow_up: { anchorAt: minutesAgo(35).toISOString(), sent: 1, lastAt: minutesAgo(25).toISOString(), kind: "question" },
+      })]);
+      await processIdleV2(NOW);
+      expect(mocks.send.mock.calls.map((c) => c[0].text)).toEqual(["Vou te passar para a equipe que cuida disso."]);
+      expect(mocks.handoff).toHaveBeenCalledWith(expect.objectContaining({ conversationId: "conv-1", destination: { type: "department", id: "dep-1" } }));
+      expect(mocks.tabulation).toHaveBeenCalledWith(expect.objectContaining({ moment: "transfer" }));
+      expect(mocks.summary).toHaveBeenCalledWith(expect.objectContaining({ moment: "transfer", tabulation: "tab-1" }));
+      expect(mocks.closeState).not.toHaveBeenCalled();
+      expect(mocks.logTurn).toHaveBeenCalledWith(expect.objectContaining({ prompt: "inactivity", handoff: true }));
+    });
+
+    it("assunto sem regra própria: vale a do agente (encerra)", async () => {
+      const plain = { ...config, themes: [{ ...THEME, idle: undefined }] };
+      mocks.queryRaw.mockResolvedValue([row({
+        simple_config: { ...plain, inactivity: { enabled: true, closeAfter: 30, closeMessage: "Vou encerrar por aqui." } },
+        theme_id: "t-saida", last_out_at: minutesAgo(40), last_inbound_at: minutesAgo(41),
+      })]);
+      expect(await processIdleV2(NOW)).toEqual({ nudged: 0, closed: 1 });
+      expect(mocks.handoff).not.toHaveBeenCalled();
+    });
+
+    it("effectiveInactivity: lembretes e prazo do assunto por cima; vazio não muda nada", () => {
+      const base = { enabled: true, nudgeAfter: 20, closeAfter: 60 };
+      expect(effectiveInactivity(base as never, { idle: undefined })).toBe(base);
+      expect(effectiveInactivity(base as never, { idle: { onTimeout: "handoff" } } as never)).toBe(base);
+      const eff = effectiveInactivity(base as never, { idle: { followUps: [{ after: 5, mode: "fixed" }], closeAfter: 15 } } as never);
+      expect(eff).toMatchObject({ nudgeAfter: 0, closeAfter: 15, followUps: [{ after: 5 }] });
+    });
   });
 
   it("sem conversas paradas: não carrega nada e não registra", async () => {
