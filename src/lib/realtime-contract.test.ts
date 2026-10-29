@@ -39,6 +39,8 @@ import {
   publishSystemPresenceUpdate,
   publishTeamChat,
   publishTypingEvent,
+  publishWebchatContext,
+  publishWebchatEvent,
   publishWhatsappCall,
   REALTIME_EVENT_NAMES,
   TYPING_TTL_MS,
@@ -595,6 +597,42 @@ const CASES: Case[] = [
       requesterId: "user_1",
       assignedToId: "user_2",
       message: { id: "sm_1", content: "ajuda" },
+    },
+  },
+  {
+    name: "publishWebchatContext",
+    event: "webchat_context",
+    run: () =>
+      publishWebchatContext({
+        organizationId: ORG,
+        contactId: "contact_1",
+        channelId: "chan_1",
+        updatedAt: "2026-10-01T12:00:00.000Z",
+      }),
+    payload: {
+      organizationId: ORG,
+      contactId: "contact_1",
+      channelId: "chan_1",
+      updatedAt: "2026-10-01T12:00:00.000Z",
+    },
+  },
+  {
+    name: "publishWebchatEvent",
+    event: "webchat_event",
+    run: () =>
+      publishWebchatEvent({
+        organizationId: ORG,
+        contactId: "contact_1",
+        channelId: "chan_1",
+        count: 2,
+        latestOccurredAt: "2026-10-01T12:00:00.000Z",
+      }),
+    payload: {
+      organizationId: ORG,
+      contactId: "contact_1",
+      channelId: "chan_1",
+      count: 2,
+      latestOccurredAt: "2026-10-01T12:00:00.000Z",
     },
   },
   ...(

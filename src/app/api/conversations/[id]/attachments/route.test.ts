@@ -297,3 +297,26 @@ describe("enqueueMetaAttach — idempotência", () => {
     }
   });
 });
+
+describe("POST /attachments (conversa webchat)", () => {
+  it("anexo em conversa webchat → 422, sem mensagem, sem fila e sem Meta", async () => {
+    const original = { channel: h.conv.channel, channelRef: h.conv.channelRef };
+    h.conv.channel = "webchat";
+    h.conv.channelRef = {
+      ...h.conv.channelRef,
+      provider: "WEBCHAT",
+      config: { publicKey: "wc_ABCDEFGHIJKLMNOPQRSTUVWX", allowedOrigins: [] } as never,
+    };
+    try {
+      const res = await POST(uploadRequest(), ctx);
+      expect(res.status).toBe(422);
+      expect((await res.json()).code).toBe("WEBCHAT_UNSUPPORTED");
+      expect(h.calls).not.toContain("message.create");
+      expect(h.enqueue).not.toHaveBeenCalled();
+      expect(h.graph).not.toHaveBeenCalled();
+    } finally {
+      h.conv.channel = original.channel;
+      h.conv.channelRef = original.channelRef;
+    }
+  });
+});

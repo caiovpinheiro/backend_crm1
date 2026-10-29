@@ -133,6 +133,27 @@ export const RATE_LIMIT_PROFILES = {
 
   /** Bearer API tokens (n8n/integrações). Teto por token = TOKEN_ORG_RATE_LIMIT_RPM. */
   "api.token": { points: getTokenOrgRateLimitRpm(), durationSec: 60 },
+  // Webchat público (docs/decisoes/webchat-widget.md §3.4). Visitante = id
+  // da sessão do widget; IP só como teto de rajada (NAT de escritório).
+  /** `POST /api/public/webchat/session` — visitante novo, por IP. */
+  "webchat.session": { points: 10, durationSec: 60 },
+  /** `POST /api/public/webchat/messages` — por visitante. */
+  "webchat.message": { points: 20, durationSec: 60 },
+  /** `POST /api/public/webchat/messages` — por IP. */
+  "webchat.message.ip": { points: 120, durationSec: 60 },
+  /** Polling `GET /messages`, `typing`, `read`, renovação de sessão — por visitante. */
+  "webchat.poll": { points: 60, durationSec: 60 },
+  /** `GET /api/public/webchat/config` — por IP (uma vez por carga de página). */
+  "webchat.config": { points: 120, durationSec: 60 },
+  // Webchat v2 (docs/decisoes/webchat-widget.md §9.3/§9.6).
+  /** `POST /api/public/webchat/context` — por visitante (o loader agrega). */
+  "webchat.context": { points: 30, durationSec: 60 },
+  /** `POST /api/public/webchat/events` — lotes por visitante. */
+  "webchat.track": { points: 30, durationSec: 60 },
+  /** `context` + `events` — por IP (teto de rajada). */
+  "webchat.track.ip": { points: 600, durationSec: 60 },
+  /** `POST /api/public/webchat/s2s/{publicKey}` — por canal. */
+  "webchat.s2s": { points: 300, durationSec: 60 },
   // Sessão cookie (NextAuth) NÃO tem perfil aqui: o antigo `api.session`
   // (600 pontos/60 s por usuário) bloqueava o usuário inteiro até a janela
   // virar. Agora é por classe de custo da rota — `api-cost-limit.ts`
@@ -331,7 +352,7 @@ export function hashRateLimitId(value: string): string {
   return createHash("sha256").update(value).digest("hex").slice(0, 32);
 }
 
-export type RateLimitScope = "org" | "user" | "ip" | "email";
+export type RateLimitScope = "org" | "user" | "ip" | "email" | "visitor";
 
 export type WithRateLimitOpts = {
   /** Identificador da rota (template, não path). Vai pro key e pra métrica. */

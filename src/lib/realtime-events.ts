@@ -359,6 +359,40 @@ export type DealMovedPayload = {
   card?: DealMovedCard;
 };
 
+// ── Webchat v2: contexto vivo e linha do tempo do site ──────────────────
+
+/** Valor simples do contexto/evento do site (`setContext`/`track`). */
+export type WebchatSiteValue = string | number | boolean;
+
+/*
+ * Privacidade: o fan-out do bus é por organização e estes eventos não têm
+ * conversa/card para o gate por usuário. Por isso saem SÓ como sinal de
+ * invalidação, sem valores (nem estado, nem nome/dados de evento): o painel
+ * "No site agora" da conversa aberta refaz o
+ * `GET /api/conversations/:id/webchat-context`, que confere o acesso à
+ * conversa (docs/decisoes/webchat-widget.md §9.3).
+ */
+
+/** O estado mandado pelo site para o contato mudou (sem o estado). */
+export type WebchatContextPayload = {
+  organizationId: OrgId;
+  contactId: string;
+  channelId: string;
+  /** ISO — quando o estado mudou. */
+  updatedAt: string;
+};
+
+/** Eventos novos na linha do tempo do site do contato (sem nome/dados). */
+export type WebchatEventPayload = {
+  organizationId: OrgId;
+  contactId: string;
+  channelId: string;
+  /** Quantos eventos entraram neste lote. */
+  count: number;
+  /** ISO — o mais recente do lote (quando aconteceu no site). */
+  latestOccurredAt: string;
+};
+
 // ── União discriminada ──────────────────────────────────────────────────
 
 export type RealtimeEventMap = {
@@ -388,6 +422,8 @@ export type RealtimeEventMap = {
   team_chat_work_item_updated: TeamChatPayload;
   team_chat_forward_updated: TeamChatPayload;
   deal_moved: DealMovedPayload;
+  webchat_context: WebchatContextPayload;
+  webchat_event: WebchatEventPayload;
 };
 
 export type RealtimeEventName = keyof RealtimeEventMap;
@@ -425,6 +461,8 @@ export const REALTIME_EVENT_NAMES = [
   "team_chat_work_item_updated",
   "team_chat_forward_updated",
   "deal_moved",
+  "webchat_context",
+  "webchat_event",
 ] as const satisfies readonly RealtimeEventName[];
 
 /** Único ponto que fala com o barramento. */
@@ -675,4 +713,16 @@ export function publishTeamChat(
   audienceUserIds: string[],
 ): void {
   publish(event, payload, { audienceUserIds });
+}
+
+// ── Publishers: webchat v2 ──────────────────────────────────────────────
+
+/** Contexto vivo do contato mudou (painel "No site agora"). */
+export function publishWebchatContext(payload: WebchatContextPayload): void {
+  publish("webchat_context", payload);
+}
+
+/** Evento novo na linha do tempo do site do contato. */
+export function publishWebchatEvent(payload: WebchatEventPayload): void {
+  publish("webchat_event", payload);
 }

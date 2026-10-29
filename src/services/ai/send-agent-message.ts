@@ -22,6 +22,8 @@ import {
 } from "@/lib/realtime-events";
 import { botOutboundReplyMark } from "@/lib/conversation-reply-marking";
 import { noteMessageChange } from "@/lib/cache/message-versions";
+import { isWebchatConversation } from "@/lib/webchat/outbound-guard";
+import { deliverAgentWebchatMessage } from "@/services/ai/send-agent-webchat";
 
 async function aiSenderName(agentUserId: string): Promise<string> {
   const u = await prisma.user.findUnique({
@@ -209,6 +211,19 @@ export async function sendAgentMessage(args: {
     return saveDraft(args.conversationId, args.agentUserId, text);
   }
 
+  // Webchat: a resposta vai pelo próprio widget (send-agent-webchat), nunca
+  // pela Meta — o canal do widget não tem credencial e o cliente global
+  // mandaria WhatsApp para o telefone digitado pelo visitante. Só no modo
+  // autônomo: rascunho não serve (aprovar responde 422 no webchat).
+  const webchatConv = await prisma.conversation.findUnique({
+    where: { id: args.conversationId },
+    select: { channel: true, channelRef: { select: { provider: true } } },
+  });
+  const isWebchat = isWebchatConversation(webchatConv);
+  if (isWebchat && args.autonomyMode !== "AUTONOMOUS") {
+    return { status: "skipped", reason: "webchat_requires_autonomous" };
+  }
+
   // Anti-spam: não reenvia a mesma informação se o bot já disse algo
   // muito parecido nos últimos minutos (fila/conexão ou overlap alto).
   if (!args.bypassDuplicateGuard) {
@@ -297,6 +312,25 @@ export async function sendAgentMessage(args: {
     if (lastOut?.authorType === "human") {
       return { status: "skipped", reason: "human_last_outbound" };
     }
+  }
+
+  if (isWebchat) {
+    return deliverAgentWebchatMessage({
+      conversationId: args.conversationId,
+      contactId: args.contactId,
+      agentUserId: args.agentUserId,
+      text,
+      senderName: await aiSenderName(args.agentUserId),
+      humanBehavior: args.humanBehavior,
+      reauthorize: args.bypassAssigneeCheck
+        ? undefined
+        : () =>
+            assertAiStillAuthorized({
+              conversationId: args.conversationId,
+              expectedAgentUserId: args.agentUserId,
+              generationId: args.generationId,
+            }),
+    });
   }
 
   const isMeta = args.channel === "meta" || args.channel == null;

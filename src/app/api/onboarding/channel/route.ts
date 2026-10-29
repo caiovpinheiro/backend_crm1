@@ -5,7 +5,7 @@ import { requireAuth, withOrgContext } from "@/lib/auth-helpers";
 import { createChannel } from "@/services/channels";
 
 const TYPES = new Set<string>(["WHATSAPP", "INSTAGRAM", "FACEBOOK", "EMAIL", "WEBCHAT"]);
-const PROVIDERS = new Set<string>(["META_CLOUD_API", "BAILEYS_MD"]);
+const PROVIDERS = new Set<string>(["META_CLOUD_API", "BAILEYS_MD", "WEBCHAT"]);
 
 export async function POST(request: Request) {
   const r = await requireAuth();
@@ -23,7 +23,9 @@ export async function POST(request: Request) {
   const b = body as Record<string, unknown>;
   const name = typeof b.name === "string" ? b.name.trim() : "";
   const type = typeof b.type === "string" ? b.type : "";
-  const provider = typeof b.provider === "string" ? b.provider : "";
+  // Webchat não tem provedor externo: type=WEBCHAT é sempre provider=WEBCHAT.
+  const provider =
+    type === "WEBCHAT" ? "WEBCHAT" : typeof b.provider === "string" ? b.provider : "";
 
   if (!name) {
     return NextResponse.json({ message: "Nome do canal é obrigatório." }, { status: 400 });
@@ -31,7 +33,7 @@ export async function POST(request: Request) {
   if (!TYPES.has(type)) {
     return NextResponse.json({ message: "Tipo inválido." }, { status: 400 });
   }
-  if (!PROVIDERS.has(provider)) {
+  if (!PROVIDERS.has(provider) || (provider === "WEBCHAT" && type !== "WEBCHAT")) {
     return NextResponse.json({ message: "Provedor inválido." }, { status: 400 });
   }
 

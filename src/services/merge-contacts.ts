@@ -21,6 +21,7 @@
 
 import { carryContactLastMessage } from "@/lib/conversation-last-message";
 import { prisma, type ScopedTx } from "@/lib/prisma";
+import { mergeContactVisitorData } from "@/lib/webchat/visitor-data";
 
 export type MergeContactsResult = {
   keptId: string;
@@ -54,8 +55,14 @@ export async function mergeContacts(
   }
 
   const [keep, remove] = await Promise.all([
-    prisma.contact.findUnique({ where: { id: keepId }, select: { id: true } }),
-    prisma.contact.findUnique({ where: { id: removeId }, select: { id: true } }),
+    prisma.contact.findUnique({
+      where: { id: keepId },
+      select: { id: true, webchatVisitorId: true, externalId: true },
+    }),
+    prisma.contact.findUnique({
+      where: { id: removeId },
+      select: { id: true, webchatVisitorId: true, externalId: true },
+    }),
   ]);
 
   if (!keep) return { ok: false, error: { kind: "keep_not_found" } };
@@ -188,6 +195,38 @@ export async function mergeContacts(
         where: { contactId: removeId },
         data: { contactId: keepId },
       });
+
+      // Visitante do webchat: a sessão do widget acompanha o contato (a FK
+      // em cascata apagaria a sessão e o visitante perderia a conversa).
+      await tx.webchatSession.updateMany({
+        where: { contactId: removeId },
+        data: { contactId: keepId },
+      });
+      // O widget só usa o contato que "nasceu" na sessão (`webchatVisitorId
+      // === session.id`, ver lib/webchat/inbound.ts). O operador confirmou
+      // que é a mesma pessoa: o visitante passa a ser dono do que ficou —
+      // sem isso a próxima mensagem dele abriria um contato novo. Se o que
+      // ficou já é de outro visitante, o unique (org, webchatVisitorId)
+      // não comporta dois: o do removido fica sem dono.
+      if (remove.webchatVisitorId && !keep.webchatVisitorId) {
+        await tx.contact.update({ where: { id: removeId }, data: { webchatVisitorId: null } });
+        await tx.contact.update({
+          where: { id: keepId },
+          data: { webchatVisitorId: remove.webchatVisitorId },
+        });
+      }
+
+      // Webchat v2: contexto vivo e timeline do site acompanham o contato
+      // (chave repetida do contexto: vence o estado mais recente).
+      await mergeContactVisitorData(tx, keepId, removeId);
+      // `externalId` (id do sistema de origem; também a identidade assinada
+      // do webchat v2): se só o removido tem, passa para o que fica — senão
+      // a próxima identificação do site criaria/acharia o contato errado.
+      // Se os dois têm, fica o do keep (unique por org).
+      if (remove.externalId && !keep.externalId) {
+        await tx.contact.update({ where: { id: removeId }, data: { externalId: null } });
+        await tx.contact.update({ where: { id: keepId }, data: { externalId: remove.externalId } });
+      }
 
       // Finalmente, descarta o duplicado. Cascades já não vão derrubar
       // mais nada útil porque já reapontamos tudo.

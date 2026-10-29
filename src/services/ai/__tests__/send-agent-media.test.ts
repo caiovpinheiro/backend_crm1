@@ -133,3 +133,22 @@ describe("anexo do agente pelo canal Meta — upload onde o arquivo existe", () 
     expect(mocks.enqueue).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("conversa webchat", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("anexo do agente não sai: sem mensagem, sem upload, sem fila", async () => {
+    const { prisma } = await import("@/lib/prisma");
+    vi.mocked(prisma.conversation.findUnique).mockResolvedValueOnce({
+      id: "conv-1",
+      organizationId: "org-1",
+      channelId: "ch-wc",
+      waJid: null,
+      channelRef: { id: "ch-wc", config: { publicKey: "wc_X", allowedOrigins: [] }, provider: "WEBCHAT" },
+    } as never);
+    expect(await send()).toBe(0);
+    expect(prisma.message.create).not.toHaveBeenCalled();
+    expect(mocks.upload).not.toHaveBeenCalled();
+    expect(mocks.enqueue).not.toHaveBeenCalled();
+  });
+});

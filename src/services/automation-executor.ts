@@ -11,6 +11,7 @@ import {
 import { conversationHasRealAttendance } from "@/lib/ai-agents/tabulation-classify-policy";
 import { rewriteStorageUrlsForWebhook } from "@/lib/public-media-url";
 import { normalizeConditionConfig } from "@/lib/automation-condition";
+import { createSiteConditionReader, evaluateSiteRule, isSiteRule } from "@/lib/webchat/automation-conditions";
 import {
   runWithAutomationOrigin,
   type AutomationOrigin,
@@ -34,7 +35,7 @@ import {
   metaClientFromConfig,
   formatMetaSendError,
   isMetaGraphError,
-  type MetaWhatsAppClient,
+  MetaWhatsAppClient,
 } from "@/lib/meta-whatsapp/client";
 import {
   renderTemplatePreview,
@@ -110,6 +111,7 @@ import {
 } from "@/services/whatsapp-conversation";
 import { activeConversationOnAccountWhere } from "@/services/conversations";
 import { noteMessageChange, noteMessageRowChange } from "@/lib/cache/message-versions";
+import { isWebchatChannelRef, isWebchatConversation } from "@/lib/webchat/outbound-guard";
 
 const log = getLogger("automation");
 
@@ -410,6 +412,13 @@ async function resolveAutomationSendConv(
   if (!contactId) return null;
   const preferredId =
     typeof opts?.conversationId === "string" ? opts.conversationId.trim() : "";
+  // Gatilho vindo do webchat: não abre/procura ticket de WhatsApp para o
+  // visitante (o envio é recusado em `resolveAutomationMetaClient`).
+  if (
+    await isWebchatAutomationTarget({ conversationId: preferredId, channelId: opts?.channelId })
+  ) {
+    return preferredId ? { id: preferredId } : null;
+  }
   if (preferredId) {
     const pinned = await prisma.conversation.findFirst({
       where: { id: preferredId, contactId },
@@ -779,6 +788,31 @@ async function finishConversationsForContact(
   }
 }
 
+/** Conversa ou canal de envio do passo é do webchat? */
+async function isWebchatAutomationTarget(opts: {
+  conversationId?: string | null;
+  channelId?: string | null;
+}): Promise<boolean> {
+  const channelId = typeof opts.channelId === "string" ? opts.channelId.trim() : "";
+  if (channelId) {
+    const ch = await prisma.channel.findFirst({
+      where: { id: channelId },
+      select: { provider: true },
+    });
+    if (isWebchatChannelRef(ch)) return true;
+  }
+  const conversationId =
+    typeof opts.conversationId === "string" ? opts.conversationId.trim() : "";
+  if (conversationId) {
+    const conv = await prisma.conversation.findUnique({
+      where: { id: conversationId },
+      select: { channel: true, channelRef: { select: { provider: true } } },
+    });
+    if (isWebchatConversation(conv)) return true;
+  }
+  return false;
+}
+
 /**
  * Resolve o cliente Meta WhatsApp correto para uma automação multi-tenant.
  *
@@ -805,6 +839,21 @@ async function resolveAutomationMetaClient(opts: {
   /** Quando o passo escolhe um canal Cloud API explícito (ex.: template por WABA). */
   channelId?: string | null;
 }): Promise<MetaWhatsAppClient> {
+  // Conversa/canal webchat nunca sai por WhatsApp: sem isto o passo caía no
+  // 1º canal Meta da org e mandava WhatsApp para o telefone que o
+  // visitante digitou (gatilho message_received do webchat sem filtro de
+  // canal). Devolve cliente NÃO configurado (nunca lança): o resolve do
+  // início do run (marcar como lida) também passa por aqui e não pode
+  // derrubar passos que não enviam; cada passo de envio já lança
+  // `MetaSendFailureError` com cliente não configurado (ramo "Falha ao
+  // enviar").
+  if (await isWebchatAutomationTarget(opts)) {
+    log.warn(
+      `Envio por WhatsApp bloqueado: conversa/canal do webchat (automation=${opts.automationId ?? "—"}, conv=${opts.conversationId ?? "—"}, canal=${opts.channelId ?? "—"}).`,
+    );
+    // Sem credencial: `configured === false`, nenhuma chamada à Graph.
+    return new MetaWhatsAppClient("", "", "");
+  }
   let resolvedOrgId: string | null = null;
 
   const preferredChannelId =
@@ -2193,6 +2242,10 @@ function evalCondition(leftRaw: unknown, op: string, rightRaw: unknown): boolean
       if (typeof left === "string") return left.trim() !== "";
       if (Array.isArray(left)) return left.length > 0;
       return true;
+    case "exists":
+      return left !== undefined && left !== null;
+    case "not_exists":
+      return left === undefined || left === null;
     case "has_tag":
     case "not_has_tag": {
       // `left` é sempre um array (`contact.tags`, `contact.tagIds`,
@@ -4621,8 +4674,23 @@ export async function executeStep(
       };
 
       const conditionCfg = normalizeConditionConfig(cfg);
+      // Webchat v2: regras `siteContext.<chave>` / `siteEvent.<nome>` leem
+      // banco — avaliadas antes (com cache), o laço abaixo segue síncrono.
+      const siteResults = new Map<unknown, boolean>();
+      const siteRules = conditionCfg.branches.flatMap((b) => b.rules).filter(isSiteRule);
+      if (siteRules.length > 0) {
+        const siteReader = createSiteConditionReader({
+          organizationId: rt.contact?.organizationId ?? null,
+          contactId: rt.contactId ?? rt.contact?.id ?? null,
+        });
+        for (const rule of siteRules) {
+          siteResults.set(rule, await evaluateSiteRule(rule, siteReader).catch(() => false));
+        }
+      }
       for (const branch of conditionCfg.branches) {
         const allMatch = branch.rules.every((rule) => {
+          const siteResult = siteResults.get(rule);
+          if (siteResult !== undefined) return siteResult;
           let left = rule.field ? getByPath(evalRoot, rule.field) : undefined;
 
           // 27/mai/26 v2 — Para `has_tag`/`not_has_tag`, considera a

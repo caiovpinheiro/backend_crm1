@@ -14,6 +14,7 @@ import { isBaileysChannel, sendWhatsAppMedia } from "@/lib/send-whatsapp";
 import { resolveOutboundAttachmentMime } from "@/lib/storage/local";
 import { isOrgOwnedStorageUrl, isStorageUrlOfOrg, readStoredMediaForSend } from "@/lib/storage/read-for-send";
 import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
+import { isWebchatConversation } from "@/lib/webchat/outbound-guard";
 import type { AgentFaqMedia } from "@/services/ai/message-models-retrieval";
 import { traceStep } from "@/services/ai-v2/trace";
 import { getLogger } from "@/lib/logger";
@@ -98,12 +99,16 @@ export async function sendAgentFollowUpMedia(args: {
     select: {
       id: true,
       organizationId: true,
+      channel: true,
       channelId: true,
       waJid: true,
       channelRef: { select: { id: true, config: true, provider: true } },
     },
   });
   if (!conv) return 0;
+  // Webchat: anexo do agente não sai (nem pela Meta, nem pelo widget) —
+  // pela conversa ou pelo canal (ticket sem canal ligado também conta).
+  if (isWebchatConversation(conv)) return 0;
 
   const useBaileys = isBaileysChannel(conv.channelRef);
   let sentCount = 0;

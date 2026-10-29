@@ -49,7 +49,14 @@ export type ConditionOp =
   // O avaliador curto-circuita antes de `evalCondition` (comparação
   // não é escalar).
   | "in_business_hours"
-  | "not_in_business_hours";
+  | "not_in_business_hours"
+  // Webchat v2 — `exists`/`not_exists` (chave presente, útil em
+  // `siteContext.<chave>`) e "evento <nome> ocorreu nos últimos N min"
+  // (`siteEvent.<nome>`, `value` = N). Ver `lib/webchat/automation-conditions.ts`.
+  | "exists"
+  | "not_exists"
+  | "occurred_within"
+  | "not_occurred_within";
 
 export type ConditionRule = {
   field: string;
@@ -101,6 +108,7 @@ function normalizeOp(raw: unknown): ConditionOp {
     "includes", "starts_with", "ends_with",
     "empty", "not_empty",
     "has_tag", "not_has_tag",
+    "exists", "not_exists", "occurred_within", "not_occurred_within",
   ];
   return (allowed.includes(s as ConditionOp) ? s : "eq") as ConditionOp;
 }
@@ -185,6 +193,15 @@ function describeRule(rule: ConditionRule): string {
   if (rule.op === "not_has_tag") {
     return `não tem tag "${String(rule.value ?? "")}"`;
   }
+  if (rule.field.startsWith("siteEvent.")) {
+    const name = rule.field.slice("siteEvent.".length);
+    const when = `nos últimos ${String(rule.value ?? "")} min`;
+    return rule.op === "not_occurred_within"
+      ? `evento "${name}" não ocorreu ${when}`
+      : `evento "${name}" ocorreu ${when}`;
+  }
+  if (rule.op === "exists") return `${rule.field} existe`;
+  if (rule.op === "not_exists") return `${rule.field} não existe`;
   return `${rule.field} ${rule.op} ${String(rule.value ?? "").slice(0, 20)}`;
 }
 

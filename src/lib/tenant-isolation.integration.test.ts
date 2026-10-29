@@ -463,6 +463,67 @@ describe.skipIf(!LOCAL)("tenant isolation integration (Postgres local)", () => {
     expect(systemic?.organizationId).toBe(orgBId);
   });
 
+  it("11. webchat_sessions: A não lê, altera nem cria sessão de visitante de B", async () => {
+    const { prisma } = await import("@/lib/prisma");
+    const { prismaBase } = await import("@/lib/prisma-base");
+    const { runWithContext } = await import("@/lib/request-context");
+    const ctxA = { organizationId: orgAId, userId: userAId, isSuperAdmin: false };
+
+    const channelB = await prismaBase.channel.create({
+      data: {
+        organizationId: orgBId,
+        name: `Webchat B ${suffix}`,
+        type: "WEBCHAT",
+        provider: "WEBCHAT",
+        status: "CONNECTED",
+        publicKey: `wc_test${suffix}${"x".repeat(13)}`,
+      },
+      select: { id: true },
+    });
+    const sessB = await prismaBase.webchatSession.create({
+      data: {
+        id: `wv_iso_b_${suffix}`,
+        organizationId: orgBId,
+        channelId: channelB.id,
+        tokenHash: `hash-b-${suffix}`,
+        expiresAt: new Date(Date.now() + 60_000),
+        lastSeenAt: new Date(),
+      },
+      select: { id: true },
+    });
+
+    const byId = await runWithContext(ctxA, async () =>
+      prisma.webchatSession.findUnique({ where: { id: sessB.id }, select: { id: true } }),
+    );
+    expect(byId).toBeNull();
+    const byHash = await runWithContext(ctxA, async () =>
+      prisma.webchatSession.findFirst({ where: { tokenHash: `hash-b-${suffix}` }, select: { id: true } }),
+    );
+    expect(byHash).toBeNull();
+    const listed = await runWithContext(ctxA, async () =>
+      prisma.webchatSession.findMany({ select: { id: true } }),
+    );
+    expect(listed.map((r) => r.id)).not.toContain(sessB.id);
+    const updated = await runWithContext(ctxA, async () =>
+      prisma.webchatSession.updateMany({ where: { id: sessB.id }, data: { lastUrl: "https://x.test" } }),
+    );
+    expect(updated.count).toBe(0);
+    await expect(
+      runWithContext(ctxA, async () =>
+        prisma.webchatSession.create({
+          data: {
+            id: `wv_iso_x_${suffix}`,
+            organizationId: orgBId,
+            channelId: channelB.id,
+            tokenHash: `hash-x-${suffix}`,
+            expiresAt: new Date(Date.now() + 60_000),
+            lastSeenAt: new Date(),
+          },
+        }),
+      ),
+    ).rejects.toThrow();
+  });
+
   afterAll(async () => {
     if (!orgAId && !orgBId) return;
     const { prismaBase } = await import("@/lib/prisma-base");
