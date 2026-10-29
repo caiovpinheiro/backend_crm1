@@ -131,22 +131,68 @@ export function sanitizeWebchatEventBatch(
   return { ok: true, events, ignored };
 }
 
-/** Valor de contexto/evento como texto de uma linha. */
+/** Valor de contexto/evento como texto de uma linha (booleano = sim/não). */
 export function formatWebchatValue(v: string | number | boolean): string {
+  if (typeof v === "boolean") return v ? "sim" : "não";
   return String(v).replace(/[\r\n]+/g, " ");
 }
 
+/** Teto de linhas de dados na nota (o painel do inbox mostra o resto). */
+export const WEBCHAT_NOTE_MAX_DATA_LINES = 5;
+
 /**
- * Texto neutro da nota de evento importante:
- * `Evento no site: <nome>` + uma linha `rótulo-ou-chave: valor` por dado.
+ * Chave/nome do site legível: `_`/`-` viram espaço, camelCase ganha
+ * espaço, primeira letra maiúscula (`nivel_titulo` → "Nivel titulo",
+ * `pageView` → "Page view"). Siglas ficam como estão (`pageURL` → "Page URL").
+ */
+export function humanizeWebchatKey(key: string): string {
+  const spaced = key
+    .replace(/[_-]+/g, " ")
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!spaced) return key;
+  const words = spaced
+    .split(" ")
+    .map((w, i) => (i > 0 && /^[A-Z][a-z]/.test(w) ? w.toLowerCase() : w));
+  const text = words.join(" ");
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+/** Rótulo da config do canal; sem rótulo, a chave legível. */
+export function webchatKeyLabel(key: string, labels: Record<string, string>): string {
+  const label = Object.prototype.hasOwnProperty.call(labels, key) ? labels[key] : undefined;
+  return typeof label === "string" && label.trim() ? label.trim() : humanizeWebchatKey(key);
+}
+
+/**
+ * Texto neutro e curto da nota de evento importante:
+ * `📍 Evento no site · <nome legível>` + uma linha `rótulo: valor` por
+ * dado (rótulo da config ou chave legível). Texto repetido de outra chave
+ * sai uma vez só (número e booleano nunca: `1` em duas chaves são dados
+ * diferentes); no máximo `WEBCHAT_NOTE_MAX_DATA_LINES` linhas de dados
+ * (o resto vira `+N outros dados`).
  */
 export function buildImportantEventNote(
   event: { name: string; data: WebchatContextState | null },
   labels: Record<string, string>,
 ): string {
-  const lines = [`Evento no site: ${event.name}`];
+  const lines = [`📍 Evento no site · ${webchatKeyLabel(event.name, labels)}`];
+  const seen = new Set<string>();
+  let hidden = 0;
   for (const [key, value] of Object.entries(event.data ?? {})) {
-    lines.push(`${labels[key] ?? key}: ${formatWebchatValue(value)}`);
+    const text = formatWebchatValue(value).trim();
+    if (!text) continue;
+    if (typeof value === "string" && /\p{L}/u.test(text)) {
+      if (seen.has(text)) continue;
+      seen.add(text);
+    }
+    if (lines.length - 1 >= WEBCHAT_NOTE_MAX_DATA_LINES) {
+      hidden++;
+      continue;
+    }
+    lines.push(`${webchatKeyLabel(key, labels)}: ${text}`);
   }
+  if (hidden > 0) lines.push(`+${hidden} ${hidden === 1 ? "outro dado" : "outros dados"}`);
   return lines.join("\n");
 }
