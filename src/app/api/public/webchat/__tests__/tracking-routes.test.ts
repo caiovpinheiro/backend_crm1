@@ -371,7 +371,7 @@ describe("POST /api/public/webchat/events", () => {
       organizationId: "org-1",
       conversationId: "conv-1",
       contactId: "ct-1",
-      content: "Evento no site: pediu_ajuda\nEtapa: 2",
+      content: "📍 Evento no site · Pediu ajuda\nEtapa: 2",
     });
     expect(mocks.db.events.map((e) => e.important)).toEqual([true, false]);
   });
@@ -390,7 +390,7 @@ describe("POST /api/public/webchat/events", () => {
     await postEvents(post("/api/public/webchat/events", { events: [{ name: "pediu_ajuda" }] }, auth(token)));
     expect(mocks.findOrCreateWebchatConversation).toHaveBeenCalledWith("ct-1", "ch-1");
     expect(mocks.createWebchatSiteNote).toHaveBeenCalledWith(
-      expect.objectContaining({ conversationId: "conv-new", content: "Evento no site: pediu_ajuda" }),
+      expect.objectContaining({ conversationId: "conv-new", content: "📍 Evento no site · Pediu ajuda" }),
     );
   });
 

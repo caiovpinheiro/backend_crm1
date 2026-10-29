@@ -589,8 +589,14 @@ identify (`adoptAnonymousVisitorData`, §9.8).
   (`isImportantWebchatEvent`): vira nota privada na conversa webchat
   ativa (`createWebchatSiteNote`); sem conversa ativa só abre uma se
   `importantOpensConversation` **e** houver contato
-  (`findOrCreateWebchatConversation`). Texto neutro:
-  `Evento no site: <nome>` + uma linha `rótulo-ou-chave: valor` por dado.
+  (`findOrCreateWebchatConversation`). Texto neutro e curto
+  (`buildImportantEventNote`): `📍 Evento no site · <nome legível>` + uma
+  linha `rótulo: valor` por dado. Rótulo = `context.labels[chave]`; sem
+  rótulo, a chave legível (`humanizeWebchatKey`: `_`/`-` viram espaço,
+  camelCase separado, primeira maiúscula). O nome do evento segue a mesma
+  regra. Texto repetido de outra chave sai uma vez (número/booleano não);
+  no máximo `WEBCHAT_NOTE_MAX_DATA_LINES` (5) linhas de dados, o resto vira
+  `+N outros dados`. Booleano = sim/não.
 - Rate limit: `webchat.track` 30 lotes/min/visitante + `webchat.track.ip`.
 
 **SSE para o inbox** (bus atual, fan-out por org) — **só sinal de
