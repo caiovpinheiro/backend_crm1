@@ -25,7 +25,12 @@ const h = vi.hoisted(() => {
 
 vi.mock("@/lib/prisma", () => ({
   prisma: {
-    channel: { findFirst: h.channelFindFirst },
+    channel: {
+      findFirst: h.channelFindFirst,
+      findMany: vi.fn(async (args: { where: { id: { in: string[] } } }) =>
+        args.where.id.in.map((id) => ({ id })),
+      ),
+    },
     conversation: {
       findUnique: h.conversationFindUnique,
       findFirst: h.conversationFindFirst,

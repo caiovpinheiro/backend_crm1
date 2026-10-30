@@ -1079,6 +1079,38 @@ export function resolveOutboundChannelId(
   return cfgChannelId || bound || null;
 }
 
+/**
+ * `resolveOutboundChannelId` + garantia de que o canal ainda existe.
+ *
+ * Passo salvo antes de uma troca de número guarda o `channelId` do canal
+ * excluído (a UI mostra "Selecionar tudo" e não regrava o campo). O envio
+ * saía pelo fallback do cliente Meta, mas o `message.create` gravava o id
+ * morto e estourava `messages_channelId_fkey` — mensagem entregue sem
+ * registro no inbox e fluxo interrompido. Canal inexistente cai para o
+ * canal da conversa/payload (se existir) ou `null`, e o cliente Meta
+ * resolve pela conversa / 1º canal conectado da org.
+ */
+async function resolveExistingOutboundChannelId(
+  cfg: Record<string, unknown>,
+  rt: RuntimeContext,
+): Promise<string | null> {
+  const resolved = resolveOutboundChannelId(cfg, rt);
+  if (!resolved) return null;
+  const bound = resolveBoundChannelId(rt);
+  const candidates = [resolved, ...(bound && bound !== resolved ? [bound] : [])];
+  const existing = await prisma.channel.findMany({
+    where: { id: { in: candidates } },
+    select: { id: true },
+  });
+  const ids = new Set(existing.map((c) => c.id));
+  if (ids.has(resolved)) return resolved;
+  const fallback = bound && ids.has(bound) ? bound : null;
+  log.warn(
+    `Canal ${resolved} do passo não existe mais (automation=${rt.automationId}) — usando ${fallback ?? "canal da conversa/org"}. Regrave o canal no passo.`,
+  );
+  return fallback;
+}
+
 const EMAIL_ADDRESS_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const HTML_TAG_RE = /<\/?[a-z][^>]*>/i;
 
@@ -3250,7 +3282,7 @@ export async function executeStep(
         );
       }
 
-      const resolvedChannelId = resolveOutboundChannelId(cfg, rt);
+      const resolvedChannelId = await resolveExistingOutboundChannelId(cfg, rt);
       let conversationId: string | undefined;
       if (rt.contactId) {
         const conv = await resolveAutomationSendConv(
@@ -3515,7 +3547,7 @@ export async function executeStep(
         );
       }
 
-      const tplChannelId = resolveOutboundChannelId(cfg, rt);
+      const tplChannelId = await resolveExistingOutboundChannelId(cfg, rt);
       let tplConversationId: string | undefined;
       if (rt.contactId) {
         const conv = await resolveAutomationSendConv(
@@ -3780,7 +3812,7 @@ export async function executeStep(
       const caption = readString(cfg, "caption") ?? "";
       const filename = readString(cfg, "filename") ?? "";
 
-      const mediaChannelId = resolveOutboundChannelId(cfg, rt);
+      const mediaChannelId = await resolveExistingOutboundChannelId(cfg, rt);
       let mediaConversationId: string | undefined;
       if (rt.contactId) {
         const conv = await resolveAutomationSendConv(
@@ -3971,7 +4003,7 @@ export async function executeStep(
         ? `${body}\n[Lista: ${btnLabels}]`
         : `${body}\n[Botões: ${btnLabels}]`;
 
-      const interactiveChannelId = resolveOutboundChannelId(cfg, rt);
+      const interactiveChannelId = await resolveExistingOutboundChannelId(cfg, rt);
       let conversationId: string | undefined;
       if (rt.contactId) {
         const conv = await resolveAutomationSendConv(
@@ -4152,7 +4184,7 @@ export async function executeStep(
       const rowLabels = rows.map((r) => r.title).join(", ");
       const displayContent = `${body}\n[Lista: ${rowLabels}]`;
 
-      const listChannelId = resolveOutboundChannelId(cfg, rt);
+      const listChannelId = await resolveExistingOutboundChannelId(cfg, rt);
       let conversationId: string | undefined;
       if (rt.contactId) {
         const conv = await resolveAutomationSendConv(
@@ -4289,7 +4321,7 @@ export async function executeStep(
       const flowVars = (cfg as Record<string, unknown>)["__variables"] as
         | Record<string, unknown>
         | undefined;
-      const flowChannelId = resolveOutboundChannelId(cfg, rt);
+      const flowChannelId = await resolveExistingOutboundChannelId(cfg, rt);
       let conversationId: string | undefined;
       if (rt.contactId) {
         const conv = await resolveAutomationSendConv(
@@ -4865,7 +4897,7 @@ export async function executeStep(
         const vars = (cfg as Record<string, unknown>)["__variables"] as Record<string, unknown> | undefined;
         const interpolated = await interpolateMessageVariables(content, rt, vars);
 
-        const questionChannelId = resolveOutboundChannelId(cfg, rt);
+        const questionChannelId = await resolveExistingOutboundChannelId(cfg, rt);
         const conv = await resolveAutomationSendConv(
           rt.contactId,
           sendConvOptsFromRt(rt, questionChannelId),
