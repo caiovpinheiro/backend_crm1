@@ -30,6 +30,8 @@ import {
   decideFlowStepInbound,
   flowTemplateRowHasFlowButton,
   sessionFlowWindowOpen,
+  nextStepOwnsReplyWait,
+  menuHandsWaitToNextStep,
   isInFlightPlainSend,
 } from "@/services/automation-context";
 
@@ -993,6 +995,54 @@ describe("send_whatsapp_flow — template e janela de 24h", () => {
     expect(sessionFlowWindowOpen(new Date(now - DAY + 60_000), now)).toBe(true);
     expect(sessionFlowWindowOpen(new Date(now - DAY - 1), now)).toBe(false);
     expect(sessionFlowWindowOpen(null, now)).toBe(false);
+  });
+});
+
+// DNAWORK "Perdido" (28/out/26): Formulário FLOW → Aguardar resposta (1h)
+// → Perda. O Flow pausava 24h sem aresta de timeout e o contexto acabava
+// sem nunca chegar ao Aguardar resposta.
+describe("nextStepOwnsReplyWait — passo de espera logo depois dona o timer", () => {
+  it("Aguardar resposta, Aguardar documento e protocolo assumem a espera", () => {
+    expect(nextStepOwnsReplyWait("wait_for_reply")).toBe(true);
+    expect(nextStepOwnsReplyWait("wait_for_document")).toBe(true);
+    expect(nextStepOwnsReplyWait("closing_protocol")).toBe(true);
+  });
+
+  it("sem espera dedicada depois, o envio continua com a própria espera", () => {
+    expect(nextStepOwnsReplyWait("move_stage")).toBe(false);
+    expect(nextStepOwnsReplyWait(null)).toBe(false);
+    expect(nextStepOwnsReplyWait(undefined)).toBe(false);
+  });
+});
+
+describe("menuHandsWaitToNextStep — Botões e Lista antes de um passo de espera", () => {
+  const opts = [{ title: "Sim" }, { title: "Não" }];
+
+  it("sem aresta própria, a espera vai para o Aguardar resposta", () => {
+    expect(menuHandsWaitToNextStep({ nextStepType: "wait_for_reply", options: opts })).toBe(true);
+  });
+
+  it("botão com aresta continua esperando o clique no próprio passo", () => {
+    expect(
+      menuHandsWaitToNextStep({
+        nextStepType: "wait_for_reply",
+        options: [{ title: "Sim", gotoStepId: "step-sim" }, { title: "Não" }],
+      }),
+    ).toBe(false);
+  });
+
+  it("Outra resposta ligada continua no próprio passo", () => {
+    expect(
+      menuHandsWaitToNextStep({
+        nextStepType: "wait_for_reply",
+        options: opts,
+        elseGotoStepId: "step-else",
+      }),
+    ).toBe(false);
+  });
+
+  it("próximo passo que não é espera mantém a pausa do menu", () => {
+    expect(menuHandsWaitToNextStep({ nextStepType: "move_stage", options: opts })).toBe(false);
   });
 });
 

@@ -589,6 +589,34 @@ export function sessionFlowWindowOpen(
   return inboundAt > 0 && now - inboundAt < WHATSAPP_SESSION_WINDOW_MS;
 }
 
+/** Passos que já são a espera de resposta — o envio anterior não pausa. */
+const REPLY_WAIT_STEP_TYPES = new Set(["wait_for_reply", "wait_for_document", "closing_protocol"]);
+
+/**
+ * Envio seguido de Aguardar resposta, Aguardar documento ou protocolo de
+ * encerramento: a espera e o "não responde" são desse passo. O Formulário
+ * FLOW pausava 24h sem aresta de timeout e o contexto terminava sem chegar
+ * ao Aguardar resposta (DNAWORK "Perdido").
+ */
+export function nextStepOwnsReplyWait(nextStepType: string | null | undefined): boolean {
+  return REPLY_WAIT_STEP_TYPES.has(nextStepType ?? "");
+}
+
+/**
+ * Botões e Lista só entregam a espera ao passo seguinte quando não têm o
+ * que rotear: nenhuma opção com aresta própria e sem Outra resposta. Com
+ * aresta, o clique precisa voltar para este passo.
+ */
+export function menuHandsWaitToNextStep(input: {
+  nextStepType: string | null | undefined;
+  options: readonly unknown[];
+  elseGotoStepId?: string | null;
+}): boolean {
+  if (!nextStepOwnsReplyWait(input.nextStepType)) return false;
+  if (readStepRef(input, "elseGotoStepId")) return false;
+  return !input.options.some((o) => readStepRef(o, "gotoStepId"));
+}
+
 /** Clique de botão/lista ou nfm_reply deve retomar menu pausado mesmo com humano atendendo. */
 export function shouldResumePausedMenuDespiteHumanAttendance(opts?: {
   interactiveId?: string | null;

@@ -100,6 +100,8 @@ import {
   pausedStepTimeoutMs,
   shouldPersistDelay,
   AWAITING_FLOW_VAR,
+  menuHandsWaitToNextStep,
+  nextStepOwnsReplyWait,
   flowTemplateRowHasFlowButton,
   readStepRef,
   sessionFlowWindowOpen,
@@ -220,9 +222,6 @@ function resolveNextStepId(cfg: Record<string, unknown>): string | null {
   return id;
 }
 
-/** Passos que já são a espera de resposta — o envio anterior não deve pausar. */
-const NEXT_STEP_OWNS_REPLY_WAIT = new Set(["wait_for_reply", "closing_protocol"]);
-
 /**
  * Pausa pós-envio só faz sentido se "Sem resposta" leva a um destino
  * diferente de "Enviado" E o próximo passo não é um wait dedicado.
@@ -237,7 +236,7 @@ function shouldPauseAfterSendForTimeout(
   if (!timeoutGoto) return false;
   const nextGoto = resolveNextStepId(cfg);
   if (nextGoto && nextGoto === timeoutGoto) return false;
-  if (nextGoto && NEXT_STEP_OWNS_REPLY_WAIT.has(nextStepType ?? "")) return false;
+  if (nextGoto && nextStepOwnsReplyWait(nextStepType)) return false;
   return true;
 }
 
@@ -3742,7 +3741,7 @@ export async function executeStep(
         (b) => typeof b?.gotoStepId === "string" && b.gotoStepId.trim() !== "",
       );
       const tplHasTimeout = shouldPauseAfterSendForTimeout(cfg, rt.nextStepType);
-      const nextOwnsWait = NEXT_STEP_OWNS_REPLY_WAIT.has(rt.nextStepType ?? "");
+      const nextOwnsWait = nextStepOwnsReplyWait(rt.nextStepType);
       if ((tplHasRouting || tplHasTimeout) && !nextOwnsWait) {
         const rawTimeout = readNumber(cfg, "timeoutMs");
         const tplTimeoutMs =
@@ -4070,6 +4069,17 @@ export async function executeStep(
       const INTERACTIVE_DEFAULT_TIMEOUT_MS = 86_400_000;
       const rawTimeout = readNumber(cfg, "timeoutMs");
       const interactiveTimeoutMs = rawTimeout && rawTimeout > 0 ? rawTimeout : INTERACTIVE_DEFAULT_TIMEOUT_MS;
+      // Aguardar resposta logo depois e nenhum botão com aresta própria:
+      // segue para ele, que dona o timer e o "não responde".
+      if (
+        menuHandsWaitToNextStep({
+          nextStepType: rt.nextStepType,
+          options: rawButtons,
+          elseGotoStepId: readString(cfg, "elseGotoStepId"),
+        })
+      ) {
+        return {};
+      }
       if (stepId && rt.contactId) {
         await persistPausedContext(rt, stepId, interactiveTimeoutMs);
       }
@@ -4236,6 +4246,17 @@ export async function executeStep(
       const rawTimeout = readNumber(cfg, "timeoutMs");
       const listTimeoutMs =
         rawTimeout && rawTimeout > 0 ? rawTimeout : LIST_DEFAULT_TIMEOUT_MS;
+      // Mesma regra dos botões: sem opção com aresta própria, o Aguardar
+      // resposta seguinte dona a espera.
+      if (
+        menuHandsWaitToNextStep({
+          nextStepType: rt.nextStepType,
+          options: rawRows,
+          elseGotoStepId: readString(cfg, "elseGotoStepId"),
+        })
+      ) {
+        return {};
+      }
       if (stepId && rt.contactId) {
         await persistPausedContext(rt, stepId, listTimeoutMs);
       }
@@ -4464,6 +4485,13 @@ export async function executeStep(
       const FLOW_DEFAULT_TIMEOUT_MS = 86_400_000;
       const rawTimeout = readNumber(cfg, "timeoutMs");
       const flowTimeoutMs = rawTimeout && rawTimeout > 0 ? rawTimeout : FLOW_DEFAULT_TIMEOUT_MS;
+      // Aguardar resposta logo depois: segue para ele, que dona o timer e
+      // o "não responde". A resposta do formulário chega como inbound e
+      // retoma esse passo; os dados já vão para o lead no webhook.
+      if (nextStepOwnsReplyWait(rt.nextStepType)) {
+        return {};
+      }
+
       if (stepId && rt.contactId) {
         const nextId = readStepRef(cfg, "nextStepId");
         await persistPausedContext(rt, stepId, flowTimeoutMs, {
