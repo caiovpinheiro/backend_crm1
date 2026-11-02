@@ -113,6 +113,7 @@ export async function POST(request: Request) {
         content,
         ref,
         refDealCustomFieldId: channel.v2.refDealCustomFieldId,
+        v2: channel.v2,
       }),
     );
     const message: VisitorMessageDto = {

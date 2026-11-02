@@ -15,6 +15,7 @@ import { Prisma } from "@prisma/client";
 
 import { getConversationSession } from "@/lib/channel-session";
 import { isDistributionEnabled } from "./enabled";
+import { WEBCHAT_ROUTING_VIA } from "@/lib/conversation-route";
 import { ASSIGN_OWNER_VIA } from "./mode";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
@@ -56,7 +57,9 @@ export type DistributionTriggerSource =
   | "MANUAL"
   | "SIMULATION"
   /** Handoff / execute_distribution solicitado pelo agente de IA. */
-  | "AI_AGENT";
+  | "AI_AGENT"
+  /** Atendimento configurado no canal webchat (visitante identificado). */
+  | "WEBCHAT_ROUTING";
 
 export type DistributionReason =
   | "ASSIGNED"
@@ -461,6 +464,7 @@ const TRIGGER_MERGE_ORDER: DistributionTriggerSource[] = [
   "AI_AGENT",
   "AUTOMATION",
   "MANUAL",
+  "WEBCHAT_ROUTING",
   "SYSTEM",
   "SIMULATION",
 ];
@@ -738,7 +742,11 @@ export async function executeDistribution(
       // reavaliação do motor inteligente (offline / expediente / fila).
       // Sem `reassign` explícito, o dono permanece.
       const assignedVia = (already as { assignedVia?: string | null }).assignedVia;
-      if (assignedVia === "leads" || assignedVia === ASSIGN_OWNER_VIA) {
+      if (
+        assignedVia === "leads" ||
+        assignedVia === ASSIGN_OWNER_VIA ||
+        assignedVia === WEBCHAT_ROUTING_VIA
+      ) {
         const contactId = input.contactId ?? already.contactId ?? null;
         await resolvePendingFor(input.dealId, contactId, already.assignedToId);
         return {

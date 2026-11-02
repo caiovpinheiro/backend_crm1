@@ -29,6 +29,7 @@ import {
 import { metrics } from "@/lib/metrics";
 import { debugInfo, debugWarn } from "@/lib/debug-log";
 import { getOrgSettingBoolFresh } from "@/lib/org-settings";
+import { ACTIVE_PRIORITY_WHERE } from "@/lib/conversation-priority";
 import { activeInboxQueueGuardWhere } from "@/lib/inbox-queue-membership";
 import { prisma } from "@/lib/prisma";
 import {
@@ -88,6 +89,8 @@ export interface PendingDistributionView {
   channel: string;
   departmentId: string | null;
   departmentName: string | null;
+  /** Prioritária: atendida antes dos demais (§9.12 do webchat). */
+  priority: boolean;
   distributionType: string | null;
   triggerSource: string;
   attempts: number;
@@ -132,7 +135,11 @@ export async function isDistributionAutoOnInbound(): Promise<boolean> {
 }
 
 /** Quem pediu a distribuição. `SYSTEM` sozinho não conta. */
-export type RequestedDistributionSource = "AUTOMATION" | "AI_AGENT" | "MANUAL";
+export type RequestedDistributionSource =
+  | "AUTOMATION"
+  | "AI_AGENT"
+  | "MANUAL"
+  | "WEBCHAT_ROUTING";
 
 export function requestedDistributionSource(
   triggerSource: string | null | undefined,
@@ -141,6 +148,7 @@ export function requestedDistributionSource(
   if (src.includes("AI_AGENT")) return "AI_AGENT";
   if (src.includes("AUTOMATION")) return "AUTOMATION";
   if (src.includes("MANUAL")) return "MANUAL";
+  if (src.includes("WEBCHAT_ROUTING")) return "WEBCHAT_ROUTING";
   return null;
 }
 
@@ -160,6 +168,7 @@ export async function listRequestedPendingSources(): Promise<
         { triggerSource: { contains: "AUTOMATION" } },
         { triggerSource: { contains: "MANUAL" } },
         { triggerSource: { contains: "AI_AGENT" } },
+        { triggerSource: { contains: "WEBCHAT_ROUTING" } },
       ],
     },
     select: { conversationId: true, triggerSource: true },
@@ -282,11 +291,15 @@ export async function getPendingDistributions(opts: {
   await purgeUnansweredFromPendingQueue().catch(() => 0);
 
   const baseWhere = await getWaitingQueueWhere();
+  // Prioritárias vêm antes, na 1ª página; o cursor segue só a ordem de chegada.
+  const orderedWhere: Prisma.ConversationWhereInput = {
+    AND: [baseWhere, { NOT: ACTIVE_PRIORITY_WHERE }],
+  };
 
   const where: Prisma.ConversationWhereInput = cursor
     ? {
         AND: [
-          baseWhere,
+          orderedWhere,
           {
             OR: [
               { createdAt: { gt: cursor.createdAt } },
@@ -295,30 +308,41 @@ export async function getPendingDistributions(opts: {
           },
         ],
       }
-    : baseWhere;
+    : orderedWhere;
 
-  const [itemsPlus, total] = await Promise.all([
+  const queueSelect = {
+    id: true,
+    number: true,
+    channel: true,
+    contactId: true,
+    departmentId: true,
+    createdAt: true,
+    updatedAt: true,
+    contact: { select: { name: true, phone: true } },
+    department: { select: { id: true, name: true } },
+  } as const;
+
+  const [priorityItems, itemsPlus, total] = await Promise.all([
+    cursor
+      ? Promise.resolve([])
+      : prisma.conversation.findMany({
+          where: { AND: [baseWhere, ACTIVE_PRIORITY_WHERE] },
+          orderBy: [{ priorityAt: "asc" }, { id: "asc" }],
+          select: queueSelect,
+        }),
     prisma.conversation.findMany({
       where,
       orderBy: [{ createdAt: "asc" }, { id: "asc" }],
       take: limit + 1,
-      select: {
-        id: true,
-        number: true,
-        channel: true,
-        contactId: true,
-        departmentId: true,
-        createdAt: true,
-        updatedAt: true,
-        contact: { select: { name: true, phone: true } },
-        department: { select: { id: true, name: true } },
-      },
+      select: queueSelect,
     }),
     prisma.conversation.count({ where: baseWhere }),
   ]);
 
   const hasMore = itemsPlus.length > limit;
-  const items = hasMore ? itemsPlus.slice(0, limit) : itemsPlus;
+  const orderedItems = hasMore ? itemsPlus.slice(0, limit) : itemsPlus;
+  const prioritySet = new Set((priorityItems ?? []).map((c) => c.id));
+  const items = [...(priorityItems ?? []), ...orderedItems];
 
   if (items.length === 0) {
     return { pending: [], nextCursor: null, total };
@@ -377,6 +401,7 @@ export async function getPendingDistributions(opts: {
       channel: c.channel ?? "",
       departmentId: c.departmentId ?? c.department?.id ?? null,
       departmentName: c.department?.name ?? null,
+      priority: prioritySet.has(c.id),
       distributionType: meta?.distributionType ?? null,
       triggerSource: meta?.triggerSource ?? "INBOUND",
       attempts: meta?.attempts ?? 0,

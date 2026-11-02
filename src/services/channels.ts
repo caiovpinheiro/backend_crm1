@@ -37,6 +37,8 @@ import {
   defaultWebchatV2Config,
   normalizeWebchatV2Config,
   readWebchatV2Config,
+  WebchatV2ConfigError,
+  type WebchatV2Config,
 } from "@/lib/webchat/v2-config";
 
 /** Lista de canais em cache (`GET /api/channels`, bootstrap): sobe a versão. */
@@ -340,20 +342,41 @@ export async function findMetaCloudChannelByPhoneNumberId(
 }
 
 /**
+ * Campo de negócio do vínculo: precisa ser `entity=deal` e da org do canal.
+ * Só confere quando muda: campo apagado depois não pode travar outro ajuste
+ * do painel (em uso, cai no `externalId`).
+ */
+async function assertWebchatDealMatchField(next: WebchatV2Config, previous?: WebchatV2Config): Promise<void> {
+  const field = next.identity.matchField;
+  if (field.type !== "dealCustomField") return;
+  const before = previous?.identity.matchField;
+  if (before?.type === "dealCustomField" && before.customFieldId === field.customFieldId) return;
+  const found = await prisma.customField.findFirst({
+    where: { id: field.customFieldId, entity: "deal" },
+    select: { id: true },
+  });
+  if (!found) {
+    throw new WebchatV2ConfigError("identity.matchField: escolha um campo de negócio desta organização.");
+  }
+}
+
+/**
  * Webchat: sem handshake externo — nasce CONNECTED, com `publicKey` nova e
  * config default (+ o que o painel mandou, validado). Colisão da chave
  * (improvável: 62^24) repete com outra.
  */
 async function createWebchatChannel(data: CreateChannelData): Promise<Channel> {
+  const v2 = normalizeWebchatV2Config(
+    (data.config as Record<string, unknown> | undefined)?.v2,
+    defaultWebchatV2Config(),
+  );
+  await assertWebchatDealMatchField(v2);
   for (let attempt = 0; ; attempt++) {
     const publicKey = generateWebchatPublicKey();
     const config = {
       ...normalizeWebchatConfig(data.config, defaultWebchatConfig(publicKey)),
       // v2 (§9.7): defaults seguros; segredos só pela rota de geração.
-      v2: normalizeWebchatV2Config(
-        (data.config as Record<string, unknown> | undefined)?.v2,
-        defaultWebchatV2Config(),
-      ),
+      v2,
     };
     try {
       return await prisma.channel.create({
@@ -428,9 +451,12 @@ export async function updateChannel(id: string, data: UpdateChannelData): Promis
       const publicKey = before.publicKey ?? "";
       const current = readWebchatConfig(before.config, publicKey);
       const incoming = data.config as Record<string, unknown> | null;
+      const previousV2 = readWebchatV2Config(before.config);
+      const v2 = normalizeWebchatV2Config(incoming?.v2, previousV2);
+      await assertWebchatDealMatchField(v2, previousV2);
       patch.config = {
         ...normalizeWebchatConfig(data.config, current),
-        v2: normalizeWebchatV2Config(incoming?.v2, readWebchatV2Config(before.config)),
+        v2,
         ...pickWebchatSecretFields(before.config),
       } as unknown as Prisma.InputJsonValue;
     }

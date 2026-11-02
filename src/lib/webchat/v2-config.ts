@@ -48,9 +48,35 @@ const MAX_RULES = 20;
 const MAX_RULE_VALUE_CHARS = 64;
 const MAX_CALLBACK_URL_CHARS = 2000;
 
+/** Como o valor é comparado no campo de negócio. `digits`: só os dígitos. */
+export type WebchatMatchNormalize = "none" | "digits";
+
 export type WebchatMatchField =
   | { type: "externalId" }
-  | { type: "customField"; customFieldId: string };
+  | { type: "customField"; customFieldId: string }
+  /** Campo personalizado de NEGÓCIO: o contato vem do negócio com esse valor (§9.12). */
+  | { type: "dealCustomField"; customFieldId: string; normalize: WebchatMatchNormalize };
+
+/** Para onde vai quem chega identificado (§9.12). */
+export type WebchatRoutingTarget =
+  | { type: "distribution" }
+  | { type: "user" | "department" | "ai_agent"; id: string };
+
+/** Fila de quem chega identificado. `high`: atendido antes dos demais. */
+export type WebchatQueuePriority = "standard" | "high";
+
+/**
+ * Atendimento de visitante com identidade verificada. O padrão (fila normal,
+ * distribuição) mantém o comportamento de hoje, sem nenhum efeito.
+ */
+export type WebchatRoutingConfig = {
+  priority: WebchatQueuePriority;
+  destination: WebchatRoutingTarget;
+  /** Contato com responsável disponível fica com ele, em vez de ir ao destino. */
+  keepCurrentOwner: boolean;
+  /** Destino indisponível (offline, fora do horário, removido) cai aqui. */
+  fallback: WebchatRoutingTarget;
+};
 
 export type WebchatAttributeMapping = {
   /** Nome do atributo no `identify({ attributes })`. */
@@ -74,6 +100,10 @@ export type WebchatRoutingRule = {
   departmentId?: string;
   /** Fixa a nota do S2S no topo da conversa (`Conversation.pinnedNoteId`). */
   pinNote?: boolean;
+  /** Destino do atendimento; vale sobre o `routing` do canal. */
+  destination?: WebchatRoutingTarget;
+  /** Fila prioritária para esta entrada. */
+  queuePriority?: "high";
 };
 
 export type WebchatV2Config = {
@@ -108,6 +138,7 @@ export type WebchatV2Config = {
   };
   /** CustomField (entity=deal) que recebe o `ref` no negócio aberto do contato. */
   refDealCustomFieldId: string | null;
+  routing: WebchatRoutingConfig;
 };
 
 /** Subclasse do erro da v1: as rotas de canal já respondem 400 com `message`. */
@@ -116,6 +147,15 @@ export class WebchatV2ConfigError extends WebchatConfigError {
     super(message);
     this.name = "WebchatV2ConfigError";
   }
+}
+
+export function defaultWebchatRoutingConfig(): WebchatRoutingConfig {
+  return {
+    priority: "standard",
+    destination: { type: "distribution" },
+    keepCurrentOwner: true,
+    fallback: { type: "distribution" },
+  };
 }
 
 export function defaultWebchatV2Config(): WebchatV2Config {
@@ -136,6 +176,7 @@ export function defaultWebchatV2Config(): WebchatV2Config {
     },
     s2s: { queueTagId: null, callbackUrl: null, rules: [] },
     refDealCustomFieldId: null,
+    routing: defaultWebchatRoutingConfig(),
   };
 }
 
@@ -191,7 +232,50 @@ function parseMatchField(v: unknown, fallback: WebchatMatchField): WebchatMatchF
   if (o.type === "customField") {
     return { type: "customField", customFieldId: id(o.customFieldId, "identity.matchField.customFieldId") };
   }
-  throw new WebchatV2ConfigError('identity.matchField.type deve ser "externalId" ou "customField".');
+  if (o.type === "dealCustomField") {
+    const normalize = o.normalize ?? "none";
+    if (normalize !== "none" && normalize !== "digits") {
+      throw new WebchatV2ConfigError('identity.matchField.normalize deve ser "none" ou "digits".');
+    }
+    return {
+      type: "dealCustomField",
+      customFieldId: id(o.customFieldId, "identity.matchField.customFieldId"),
+      normalize,
+    };
+  }
+  throw new WebchatV2ConfigError(
+    'identity.matchField.type deve ser "externalId", "customField" ou "dealCustomField".',
+  );
+}
+
+function parseRoutingTarget(v: unknown, field: string): WebchatRoutingTarget {
+  if (!isObj(v)) throw new WebchatV2ConfigError(`${field} deve ser um objeto.`);
+  if (v.type === "distribution") return { type: "distribution" };
+  if (v.type === "user" || v.type === "department" || v.type === "ai_agent") {
+    return { type: v.type, id: id(v.id, `${field}.id`) };
+  }
+  throw new WebchatV2ConfigError(
+    `${field}.type deve ser "distribution", "user", "department" ou "ai_agent".`,
+  );
+}
+
+function parseRouting(v: unknown, base: WebchatRoutingConfig): WebchatRoutingConfig {
+  const o = obj(v, "routing");
+  if (!o) return base;
+  const priority = o.priority ?? base.priority;
+  if (priority !== "standard" && priority !== "high") {
+    throw new WebchatV2ConfigError('routing.priority deve ser "standard" ou "high".');
+  }
+  return {
+    priority,
+    destination:
+      o.destination === undefined
+        ? base.destination
+        : parseRoutingTarget(o.destination, "routing.destination"),
+    keepCurrentOwner: bool(o.keepCurrentOwner, "routing.keepCurrentOwner", base.keepCurrentOwner),
+    fallback:
+      o.fallback === undefined ? base.fallback : parseRoutingTarget(o.fallback, "routing.fallback"),
+  };
 }
 
 function parseAttributeMap(v: unknown, fallback: WebchatAttributeMapping[]): WebchatAttributeMapping[] {
@@ -304,7 +388,16 @@ function parseRules(v: unknown, fallback: WebchatRoutingRule[]): WebchatRoutingR
     if (tagId) rule.tagId = tagId;
     if (departmentId) rule.departmentId = departmentId;
     if (bool(raw.pinNote, `s2s.rules[${i}].pinNote`, false)) rule.pinNote = true;
-    if (!rule.tagId && !rule.departmentId && !rule.pinNote) {
+    if (raw.destination !== undefined && raw.destination !== null) {
+      rule.destination = parseRoutingTarget(raw.destination, `s2s.rules[${i}].destination`);
+    }
+    if (raw.queuePriority !== undefined && raw.queuePriority !== null) {
+      if (raw.queuePriority !== "high") {
+        throw new WebchatV2ConfigError(`s2s.rules[${i}].queuePriority deve ser "high".`);
+      }
+      rule.queuePriority = "high";
+    }
+    if (!rule.tagId && !rule.departmentId && !rule.pinNote && !rule.destination && !rule.queuePriority) {
       throw new WebchatV2ConfigError(`s2s.rules[${i}]: escolha ao menos uma ação.`);
     }
     return rule;
@@ -360,6 +453,7 @@ export function normalizeWebchatV2Config(patch: unknown, base: WebchatV2Config):
       rules: parseRules(s2s.rules, base.s2s.rules),
     },
     refDealCustomFieldId: optionalId(p.refDealCustomFieldId, "refDealCustomFieldId", base.refDealCustomFieldId),
+    routing: parseRouting(p.routing, base.routing),
   };
 }
 
@@ -372,7 +466,7 @@ export function readWebchatV2Config(rawConfig: unknown): WebchatV2Config {
   const raw = isObj(rawConfig) && isObj(rawConfig.v2) ? rawConfig.v2 : null;
   if (!raw) return base;
   const out = { ...base };
-  const blocks = ["identity", "context", "events", "s2s", "refDealCustomFieldId"] as const;
+  const blocks = ["identity", "context", "events", "s2s", "refDealCustomFieldId", "routing"] as const;
   for (const key of blocks) {
     try {
       const parsed = normalizeWebchatV2Config({ [key]: raw[key] }, base);
@@ -407,4 +501,31 @@ export function matchWebchatRoutingRules(
     if (r.priority && norm(r.priority) !== priority) return false;
     return true;
   });
+}
+
+/** Configuração que muda algo? O padrão não tem efeito nenhum (compatível). */
+export function hasWebchatRoutingEffect(routing: WebchatRoutingConfig): boolean {
+  return routing.priority === "high" || routing.destination.type !== "distribution";
+}
+
+/**
+ * Atendimento de uma entrada do S2S: o canal, com as regras que casaram por
+ * cima. Destino: a primeira regra com destino vence o canal. Prioridade: alta
+ * se o canal ou uma regra pedir. `force`: uma regra mandou um destino nesta
+ * entrada, então vale mesmo em ticket que já passou pelo atendimento.
+ */
+export function resolveS2SRouting(
+  channel: WebchatRoutingConfig,
+  rules: WebchatRoutingRule[],
+): { routing: WebchatRoutingConfig; force: boolean } {
+  const destination = rules.find((r) => r.destination)?.destination;
+  const high = rules.some((r) => r.queuePriority === "high");
+  return {
+    routing: {
+      ...channel,
+      ...(destination ? { destination } : {}),
+      ...(high ? { priority: "high" as const } : {}),
+    },
+    force: Boolean(destination),
+  };
 }

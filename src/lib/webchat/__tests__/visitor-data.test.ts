@@ -23,6 +23,7 @@ const matches = (row: Record<string, unknown>, where: Record<string, unknown>) =
   Object.entries(where).every(([k, v]) => row[k] === v);
 
 const tx = {
+  webchatIdentityLink: { findMany: async () => [] },
   webchatEvent: {
     updateMany: async ({ where, data }: { where: Record<string, unknown>; data: Partial<Ev> }) => {
       const hit = events.filter((e) => matches(e, where));

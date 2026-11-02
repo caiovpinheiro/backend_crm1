@@ -7,6 +7,7 @@
  * - Caso contrário retorna null (caminho v1).
  */
 
+import { HUMAN_ROUTE_MODE } from "@/lib/conversation-route";
 import { prismaBase } from "@/lib/prisma-base";
 import { phoneMatchesAllowlist, normalizePhoneDigits } from "@/services/ai/phone-allowlist";
 import { isAiAttendanceEnabled } from "@/services/ai/attendance-gate";
@@ -29,6 +30,7 @@ type ConversationForResolve = {
   assignedToId: string | null;
   closedAt?: Date | null;
   channelId?: string | null;
+  routeMode?: string | null;
   contact?: { phone: string | null } | null;
   assignedTo?: {
     id: string;
@@ -111,6 +113,7 @@ export async function resolveV2AgentForConversation(
       assignedToId: true,
       closedAt: true,
       channelId: true,
+      routeMode: true,
       contact: { select: { phone: true } },
       assignedTo: {
         select: {
@@ -151,6 +154,8 @@ export async function resolveV2AgentForConversation(
   // entrar em Agente IA com ele desligado; o v2 segue a mesma regra.
   if (!(await isAiAttendanceEnabled())) return null;
   if (await conversationHandedOffToHuman(conv)) return queueNoticeAgent(conv.id);
+  // O atendimento do canal mandou para pessoas: espera na fila, sem IA.
+  if (conv.routeMode === HUMAN_ROUTE_MODE) return null;
 
   const agents = await (prismaBase as unknown as {
     user: {

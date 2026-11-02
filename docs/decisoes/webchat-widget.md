@@ -625,7 +625,8 @@ opcionais: `{ externalId?, userHash?, attributes?, name?, email?, phone? }`.
   identidade + `verifyWebchatUserHash`):
   1. contato da org pelo campo de match (`findContactByWebchatIdentity`);
      não achou → o contato do próprio visitante (criado se preciso) recebe
-     a identidade (`setContactWebchatIdentity`);
+     a identidade (`setContactWebchatIdentity`). Com campo de negócio, a
+     resolução é a da §9.12;
   2. a sessão passa a apontar para esse contato e grava
      `identityVerifiedAt`; se o visitante já tinha contato próprio
      (`webchatVisitorId === session.id`) diferente, ele é fundido no
@@ -704,9 +705,12 @@ Helpers em `src/lib/webchat/signatures.ts` (tempo constante).
     `ref` → `recordWebchatConversationRef({ source: "s2s", category, priority })`.
     Regras `config.v2.s2s.rules` (`matchWebchatRoutingRules`): `tagId` →
     tag no contato; `departmentId` → departamento da conversa; `pinNote` →
-    fixa a nota (`Conversation.pinnedNoteId`).
-  - 200 `{ conversation_id: string, url: string }` — `url` abre a conversa
-    no CRM (`https://{slug}.{base}/inbox?c={number}`).
+    fixa a nota (`Conversation.pinnedNoteId`); `destination` e `queuePriority`
+    → atendimento (§9.12).
+  - 200 `{ conversation_id: string, url: string, deal_id?: string, deal_url?: string }`
+    — `url` abre a conversa no CRM (`https://{slug}.{base}/inbox?c={number}`).
+    `deal_id`/`deal_url` (`/pipeline?deal={id}`) só quando há negócio: o
+    encontrado pelo campo de negócio; nos outros modos, o aberto mais recente.
   - **Idempotência** (`webchat_ingress_keys`, 24 h por canal): mesma chave +
     mesmo corpo (sha256) → o mesmo 200 com `Idempotent-Replayed: true`;
     mesma chave + outro corpo → 409 `IDEMPOTENCY_KEY_REUSED`; ainda em
@@ -732,7 +736,7 @@ inválido → 400 `{ message }`.
 
 | Campo | Tipo | Padrão | Validação |
 |-------|------|--------|-----------|
-| `identity.matchField` | `{ type: "externalId" }` \| `{ type: "customField", customFieldId }` | externalId | id `[A-Za-z0-9_-]{1,64}` |
+| `identity.matchField` | `{ type: "externalId" }` \| `{ type: "customField", customFieldId }` \| `{ type: "dealCustomField", customFieldId, normalize?: "none" \| "digits" }` | externalId | id `[A-Za-z0-9_-]{1,64}`; o de negócio precisa ser `entity=deal` e da org ao salvar (§9.12) |
 | `identity.attributeMap` | `{ attribute, customFieldId }[]` | `[]` | ≤ 50, atributo `^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$`, sem repetir |
 | `context.labels` | `{ chave: rótulo }` | `{}` | ≤ 100, rótulo ≤ 80 (vazio some) |
 | `context.maxKeys` | int | 30 | 1–100 |
@@ -744,8 +748,12 @@ inválido → 400 `{ message }`.
 | `events.importantOpensConversation` | bool | `false` | |
 | `s2s.queueTagId` | id \| null | null | tag do contato quando o S2S abre conversa |
 | `s2s.callbackUrl` | https \| null | null | ≤ 2000, sem usuário/senha |
-| `s2s.rules` | `{ category?, priority?, tagId?, departmentId?, pinNote? }[]` | `[]` | ≤ 20; ≥ 1 critério (≤ 64) e ≥ 1 ação |
+| `s2s.rules` | `{ category?, priority?, tagId?, departmentId?, pinNote?, destination?, queuePriority?: "high" }[]` | `[]` | ≤ 20; ≥ 1 critério (≤ 64) e ≥ 1 ação |
 | `refDealCustomFieldId` | id \| null | null | campo (entity=deal) que recebe o `ref` |
+| `routing.priority` | `"standard"` \| `"high"` | standard | §9.12 |
+| `routing.destination` | `{ type: "distribution" }` \| `{ type: "user" \| "department" \| "ai_agent", id }` | distribution | id `[A-Za-z0-9_-]{1,64}` |
+| `routing.keepCurrentOwner` | bool | `true` | |
+| `routing.fallback` | igual a `destination` | distribution | |
 
 Ids inexistentes na org são ignorados em tempo de uso (não quebram o fluxo).
 
@@ -828,6 +836,108 @@ Condições (`src/lib/webchat/automation-conditions.ts`):
 - **condições do gatilho** (`triggerConfig.conditions`, E):
   `{ type: "site_context", key, op, value? }` e
   `{ type: "site_event", name, minutes, op?: "occurred" | "not_occurred" }`.
+
+### 9.12 Vínculo por campo de negócio e atendimento
+
+Contato é a pessoa com telefone; o identificador do site pode ficar num campo
+personalizado do negócio, escolhido por canal. Nada aqui tem regra de cliente.
+Sem configuração, tudo funciona como antes.
+
+**Vínculo** (`src/lib/webchat/deal-identity.ts`, mesma resolução no identify
+assinado e no S2S; sem assinatura válida, não roda):
+
+- `identity.matchField = { type: "dealCustomField", customFieldId, normalize }`.
+  `digits` compara só os dígitos (acha `12.345-6` com `123456`).
+- Vários negócios com o valor: o aberto mais recente; sem aberto, o mais
+  recente. Negócio com contato vem antes do sem contato. Log de ambiguidade.
+- Negócio sem contato: passa para o contato do visitante, com log.
+- Valor não encontrado: visitante fica no contato dele. O negócio automático
+  (ou o que já estava aberto nesse contato) recebe o valor, só se o campo estava
+  vazio. No telefone compartilhado e no S2S não se cria card novo.
+- `webchat_identity_links` guarda o valor verificado por `(canal, contato)`.
+  Dois uniques fazem a disputa ser atômica: `(channelId, value)` e
+  `(channelId, contactId)`. Merge de contatos leva o vínculo.
+- **Telefone compartilhado**: `visitorMessageWhere` filtra por contato e canal,
+  então dois valores no mesmo contato veriam as mensagens um do outro. Se o
+  contato do negócio já responde por outro valor, o visitante fica em contato
+  próprio, sem telefone (para não mudar quem atende esse número no WhatsApp) e
+  sem card novo. O negócio fica onde está e uma nota interna indica qual é.
+- Contato com vários negócios: `ref`, `copyRefToDeal` e a resposta do S2S usam o
+  negócio encontrado. A nota do S2S continua na conversa e cita esse negócio; não
+  entra na tabela `Note`, que exige um usuário autor.
+- Campo apagado depois de configurado: cai no `externalId`, sem quebrar.
+- Limite: quem escreve antes de se identificar já ganhou um card anônimo. Ele vai
+  junto na fusão, porque a fusão não apaga dados; o contato fica com dois cards.
+
+**Atendimento** (`src/lib/webchat/routing.ts`, só com identidade verificada; o
+padrão não tem efeito):
+
+Precedência, da mais forte para a mais fraca:
+
+1. pessoa que já respondeu nesta conversa;
+2. responsável atual, com `keepCurrentOwner` e disponível;
+3. destino configurado;
+4. alternativa (`fallback`), se o destino estiver indisponível;
+5. distribuição convencional (`maybeDistributeNewInboundTicket`), onde vivem a
+   volta ao consultor anterior e o 1º atendimento de IA.
+
+A Regra 0 (`resolvePostCloseInbound`) não roda no webchat, então não interfere.
+
+| Destino | Indisponível quando | Efeito |
+|---------|---------------------|--------|
+| `user` | removida; offline ou fora do horário. Fila cheia não conta. Sem distribuição ligada não há presença: só removida conta | responsável na conversa, no contato e nos negócios abertos; `assignedVia = webchat_routing` |
+| `department` | removido; ninguém elegível nele | departamento + pedido de distribuição. Se a alternativa for a distribuição, espera na fila do próprio departamento. Sem distribuição ligada, o departamento já é o destino |
+| `ai_agent` | removido, inativo, atendimento por IA desligado, fora da lista de números | responsável; o turno de IA responde pelo widget |
+| `distribution` | nunca | fila normal: as regras de hoje. Fila alta: pede a distribuição de fato e não passa pelo 1º atendimento de IA |
+
+- O último passo é sempre a distribuição convencional. Com a distribuição
+  desligada, o ticket fica na Entrada, visível à equipe.
+- Aplica uma vez por ticket (`Conversation.routedAt`): reaplicar desfaria
+  transferência e handoff. Exceção: a pessoa escolhida aqui que ficou
+  indisponível antes de responder; aí o ticket segue para a próxima opção.
+- `Conversation.routeMode = "human"` (`lib/conversation-route.ts`): o resolver
+  do agente e o 1º atendimento não pegam a conversa enquanto ela espera na fila.
+  Sem isso, a IA assumiria na mensagem seguinte.
+- `triggerSource = WEBCHAT_ROUTING` conta como pedido, como o bloco de automação.
+  O inbound `SYSTEM` continua sem distribuir. A pendência não é limpa por falta de
+  inbound, porque o S2S abre ticket antes de o cliente escrever.
+
+**S2S contra o canal** (`resolveS2SRouting`): a primeira regra com `destination`
+define o destino e vale mesmo em ticket já roteado; `queuePriority: "high"` da
+regra ou `routing.priority` do canal deixam a fila alta. O campo `priority` do
+S2S só tem efeito como critério de uma regra. Nada tira a conversa de quem já
+respondeu.
+
+**Prioridade** (`src/lib/conversation-priority.ts`): `Conversation.priorityAt`
+só vale com `status = OPEN` e `hasHumanReply = false`. Termina sozinha na primeira
+resposta humana ou ao encerrar, sem gancho nesses caminhos. A resposta de IA não
+encerra a prioridade. Na distribuição, uma passada só das prioritárias roda antes
+das demais, em todos os departamentos.
+
+**Inbox** (decisão confirmada em 2026-11-02): a query principal, o cursor e os
+índices de expressão não mudam. Só na 1ª página, com a ordem padrão, uma consulta à
+parte busca até 50 prioritárias e as coloca no topo. Ela lê o índice parcial
+`conversations_active_priority_idx`, que só contém prioritárias ativas. Medição em
+Postgres local, 600 mil conversas sintéticas, organização com 300 mil:
+
+| Consulta | Plano | Buffers |
+|----------|-------|---------|
+| Principal, antes e depois da coluna | índice parcial de abertas | 79 |
+| Extra, organização sem prioridade | índice novo | 2 |
+| Extra, 200 prioritárias | índice novo | 149 |
+| `ORDER BY` com prioridade na principal (descartada) | perde o índice e ordena tudo | 30.068 |
+
+O predicado da consulta extra é literal no SQL, para casar com o índice parcial.
+Falha nela nunca derruba a lista. A lista devolve `priorityAt` só enquanto vale.
+
+**Índice de busca**: `deal_custom_field_values_field_value_idx` é parcial por
+tamanho (`length(value) <= 128`), porque `value` é texto sem limite e um btree
+direto faria a gravação de um valor longo falhar em qualquer organização. A busca
+é SQL cru com a org explícita. Com `digits` ela percorre os valores do campo no
+índice, então o custo cresce com o número de negócios que têm esse campo.
+
+**Migration** `20261102120000_webchat_identity_routing`: aditiva. Os comandos
+`CONCURRENTLY` para rodar antes do deploy estão no cabeçalho.
 
 ### 9.11 Mapa de arquivos por frente
 

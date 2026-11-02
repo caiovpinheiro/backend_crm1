@@ -18,14 +18,34 @@ import { prismaBase } from "@/lib/prisma-base";
 import { publishConversationUpdated } from "@/lib/realtime-events";
 import { explicitAppOrigin } from "@/lib/app-origin";
 import { buildTenantUrl } from "@/lib/tenant-url";
-import { findContactByWebchatIdentity, setContactWebchatIdentity } from "@/lib/webchat/contact-match";
+import {
+  effectiveWebchatMatchField,
+  findContactByWebchatIdentity,
+  setContactWebchatIdentity,
+} from "@/lib/webchat/contact-match";
+import {
+  adoptOrphanDeal,
+  claimDealIdentity,
+  dealNoteLabel,
+  normalizeDealIdentityValue,
+  noteSeparatedIdentity,
+  resolveDealIdentity,
+  setDealIdentityLinkDeal,
+  type DealMatchField,
+} from "@/lib/webchat/deal-identity";
+import { applyWebchatRouting } from "@/lib/webchat/routing";
 import { recordWebchatConversationRef } from "@/lib/webchat/conversation-ref";
 import { createWebchatSiteNote, findActiveWebchatConversation } from "@/lib/webchat/conversation-notes";
 import { findOrCreateWebchatConversation } from "@/lib/webchat/inbound";
 import { sanitizeContextPatch, writeLiveContext } from "@/lib/webchat/live-context";
 import { publishWebchatContextChange } from "@/lib/webchat/tracking/realtime";
 import type { WebchatChannel } from "@/lib/webchat/session";
-import { matchWebchatRoutingRules, type WebchatMatchField } from "@/lib/webchat/v2-config";
+import {
+  hasWebchatRoutingEffect,
+  matchWebchatRoutingRules,
+  resolveS2SRouting,
+  type WebchatMatchField,
+} from "@/lib/webchat/v2-config";
 import { buildWebchatS2SNote, type WebchatS2SRequest } from "@/lib/webchat/s2s/body";
 import { fireTrigger } from "@/services/automation-triggers";
 import { insertContactWithNextNumber, isPrismaUniqueViolation } from "@/services/contacts";
@@ -42,16 +62,64 @@ export type WebchatS2SResult = {
   contactCreated: boolean;
   conversationCreated: boolean;
   noteId: string | null;
+  /** Negócio desta entrada: o encontrado pelo valor; sem ele, o aberto mais recente. */
+  dealId: string | null;
 };
 
-/** Campo de match configurado; campo personalizado inexistente → `externalId`. */
-async function effectiveMatchField(configured: WebchatMatchField): Promise<WebchatMatchField> {
-  if (configured.type === "externalId") return configured;
-  const field = await prisma.customField.findFirst({
-    where: { id: configured.customFieldId, entity: "contact" },
-    select: { id: true },
-  });
-  return field ? configured : { type: "externalId" };
+const DEAL_IDENTITY_ATTEMPTS = 3;
+
+async function createS2SContact(
+  externalId: string,
+  data: Partial<Prisma.ContactUncheckedCreateInput> = {},
+): Promise<{ id: string }> {
+  const created = (await insertContactWithNextNumber(
+    {
+      name: externalId,
+      lifecycleStage: "LEAD",
+      source: SOURCE_NAME,
+      ...data,
+    } as Omit<Prisma.ContactUncheckedCreateInput, "number" | "organizationId">,
+    { id: true },
+  )) as { id: string };
+  fireTrigger("contact_created", {
+    contactId: created.id,
+    data: { source: SOURCE_NAME, channel: SOURCE_NAME },
+  }).catch((err) => log.warn({ err }, "Falha no gatilho contact_created"));
+  return created;
+}
+
+/** Mesma resolução do identify assinado: contato pelo negócio com o valor (§9.12). */
+async function findOrCreateS2SDealContact(
+  channelId: string,
+  field: DealMatchField,
+  externalId: string,
+): Promise<{ id: string; created: boolean; dealId: string | null }> {
+  const value = normalizeDealIdentityValue(externalId, field) ?? externalId;
+  let createdId: string | null = null;
+  for (let attempt = 0; attempt < DEAL_IDENTITY_ATTEMPTS; attempt++) {
+    const res = await resolveDealIdentity(channelId, field, value);
+    if (res.kind === "contact") {
+      if (!res.linked) {
+        const won = await claimDealIdentity({
+          channelId,
+          contactId: res.contactId,
+          value,
+          dealId: res.dealId,
+        });
+        if (!won) continue;
+      } else if (res.dealId) {
+        await setDealIdentityLinkDeal(channelId, value, res.dealId);
+      }
+      if (res.orphanDealId) await adoptOrphanDeal(res.orphanDealId, res.contactId);
+      return { id: res.contactId, created: false, dealId: res.dealId };
+    }
+    createdId ??= (await createS2SContact(externalId)).id;
+    const dealId = res.kind === "not_found" ? null : res.dealId;
+    if (!(await claimDealIdentity({ channelId, contactId: createdId, value, dealId }))) continue;
+    if (res.kind === "orphan_deal") await adoptOrphanDeal(res.dealId, createdId);
+    return { id: createdId, created: true, dealId };
+  }
+  throw new Error("webchat s2s: vínculo por campo de negócio não concluído");
 }
 
 /**
@@ -60,7 +128,7 @@ async function effectiveMatchField(configured: WebchatMatchField): Promise<Webch
  * outra entrada do mesmo `external_id` cai no unique de `externalId`.
  */
 export async function findOrCreateS2SContact(
-  matchField: WebchatMatchField,
+  matchField: Exclude<WebchatMatchField, { type: "dealCustomField" }>,
   externalId: string,
 ): Promise<{ id: string; created: boolean }> {
   const found = await findContactByWebchatIdentity(matchField, externalId);
@@ -139,8 +207,11 @@ export async function processWebchatS2SIngress(
   req: WebchatS2SRequest,
 ): Promise<WebchatS2SResult> {
   const v2 = channel.v2;
-  const matchField = await effectiveMatchField(v2.identity.matchField);
-  const contact = await findOrCreateS2SContact(matchField, req.externalId);
+  const matchField = await effectiveWebchatMatchField(v2.identity.matchField);
+  const contact =
+    matchField.type === "dealCustomField"
+      ? await findOrCreateS2SDealContact(channel.id, matchField, req.externalId)
+      : { ...(await findOrCreateS2SContact(matchField, req.externalId)), dealId: null };
 
   if (req.fields) {
     const patch = sanitizeContextPatch(req.fields, { maxValueChars: v2.context.maxValueChars });
@@ -164,14 +235,23 @@ export async function processWebchatS2SIngress(
     }
   }
 
-  const noteContent = buildWebchatS2SNote(req.text, req.links);
+  // Atendimento: o do canal, com as regras desta entrada por cima (§9.12).
+  const rules = matchWebchatRoutingRules(v2.s2s.rules, { category: req.category, priority: req.priority });
+  const { routing, force } = resolveS2SRouting(v2.routing, rules);
+  const routingInput = hasWebchatRoutingEffect(routing) ? { routing, force } : null;
+
+  const noteBody = buildWebchatS2SNote(req.text, req.links);
+  const dealLabel = noteBody && contact.dealId ? await dealNoteLabel(contact.dealId) : null;
+  const noteContent = noteBody && dealLabel ? `${noteBody}\n\n${dealLabel}` : noteBody;
   let conversation = await findActiveWebchatConversation(contact.id, channel.id);
   let conversationCreated = false;
   if (!conversation) {
-    const opened = await findOrCreateWebchatConversation(contact.id, channel.id, {
-      content: noteContent,
-      messageType: "note",
-    });
+    const opened = await findOrCreateWebchatConversation(
+      contact.id,
+      channel.id,
+      { content: noteContent, messageType: "note" },
+      routingInput,
+    );
     const row = await prisma.conversation.findFirst({
       where: { id: opened.id },
       select: { id: true, number: true },
@@ -180,6 +260,17 @@ export async function processWebchatS2SIngress(
     conversation = row;
     conversationCreated = opened.created;
     if (opened.created && v2.s2s.queueTagId) await applyTag(contact.id, v2.s2s.queueTagId);
+  } else if (routingInput) {
+    await applyWebchatRouting({ conversationId: conversation.id, contactId: contact.id, ...routingInput });
+  }
+
+  if (matchField.type === "dealCustomField") {
+    await noteSeparatedIdentity({
+      organizationId: channel.organizationId,
+      channelId: channel.id,
+      conversationId: conversation.id,
+      contactId: contact.id,
+    });
   }
 
   const noteId = noteContent
@@ -200,15 +291,26 @@ export async function processWebchatS2SIngress(
       category: req.category,
       priority: req.priority,
       refDealCustomFieldId: v2.refDealCustomFieldId,
+      dealId: contact.dealId,
     });
   }
 
-  const rules = matchWebchatRoutingRules(v2.s2s.rules, { category: req.category, priority: req.priority });
   for (const rule of rules) {
     if (rule.tagId) await applyTag(contact.id, rule.tagId);
     if (rule.departmentId) await setDepartment(channel.organizationId, conversation.id, rule.departmentId);
     if (rule.pinNote && noteId) await pinNote(channel.organizationId, conversation.id, noteId);
   }
+
+  const dealId =
+    contact.dealId ??
+    (
+      await prisma.deal.findFirst({
+        where: { contactId: contact.id, status: "OPEN" },
+        orderBy: { updatedAt: "desc" },
+        select: { id: true },
+      })
+    )?.id ??
+    null;
 
   return {
     conversationId: conversation.id,
@@ -217,6 +319,7 @@ export async function processWebchatS2SIngress(
     contactCreated: contact.created,
     conversationCreated,
     noteId,
+    dealId,
   };
 }
 
@@ -225,7 +328,15 @@ export async function processWebchatS2SIngress(
  * slug, a origem explícita do app; sem nenhuma, o path relativo).
  */
 export async function webchatConversationUrl(organizationId: string, number: number): Promise<string> {
-  const path = `/inbox?c=${number}`;
+  return webchatCrmUrl(organizationId, `/inbox?c=${number}`);
+}
+
+/** Link do negócio no CRM (`/pipeline?deal={id}`), do mesmo jeito. */
+export async function webchatDealUrl(organizationId: string, dealId: string): Promise<string> {
+  return webchatCrmUrl(organizationId, `/pipeline?deal=${encodeURIComponent(dealId)}`);
+}
+
+async function webchatCrmUrl(organizationId: string, path: string): Promise<string> {
   try {
     // prismaBase: Organization não é tenant-scoped (lê só o slug da própria org).
     const org = await prismaBase.organization.findUnique({

@@ -2,6 +2,11 @@ import { Prisma, type ConversationStatus } from "@prisma/client";
 
 import type { AppUserRole } from "@/lib/auth-types";
 import { cache } from "@/lib/cache";
+import {
+  ACTIVE_PRIORITY_WHERE,
+  activePriorityAt,
+  INBOX_PRIORITY_PREFIX_LIMIT,
+} from "@/lib/conversation-priority";
 import { getLogger } from "@/lib/logger";
 import {
   inboxTabCountsFingerprint,
@@ -245,6 +250,7 @@ const listSelect = {
    * depois do backfill, e nunca NULL quando existe mensagem de chat.
    */
   lastMessageAt: true,
+  priorityAt: true,
   updatedAt: true,
   createdAt: true,
   assignedToId: true,
@@ -1489,6 +1495,7 @@ async function paintListRows(
       lastMessagePreview: previewMap.get(row.id)?.preview ?? null,
       lastInboundPreview: previewMap.get(row.id)?.inbound ?? null,
       lastMessageAt: previewMap.get(row.id)?.createdAt ?? null,
+      priorityAt: activePriorityAt(row),
       tags: Array.from(tagMap.values()),
       hasActiveAutomation: rowInAutomationQueue(row, automationQueueFlags),
     };
@@ -1542,6 +1549,43 @@ function listNeedsContactChannelCollapse(params: GetConversationsParams): boolea
   );
 }
 
+/**
+ * Ids das prioritárias ativas no recorte da lista, da mais antiga para a mais
+ * nova. Falha nunca derruba a lista: sem prioridade, a ordem é a de sempre.
+ */
+async function findPriorityConversationIds(where: Prisma.ConversationWhereInput): Promise<string[]> {
+  const orgId = getOrgIdOrNull();
+  if (!orgId) return [];
+  try {
+    const whereSql = sqlConversationWhere({ AND: [where, { organizationId: orgId }] }, orgId);
+    if (whereSql) {
+      // Predicado literal: é o que casa com o índice parcial.
+      const rows = await prisma.$queryRaw<{ id: string }[]>(Prisma.sql`
+        SELECT c.id
+        FROM conversations c
+        WHERE c."organizationId" = ${orgId}
+          AND c."priorityAt" IS NOT NULL
+          AND c.status = 'OPEN'
+          AND c."hasHumanReply" = false
+          AND (${whereSql})
+        ORDER BY c."priorityAt" ASC, c.id ASC
+        LIMIT ${INBOX_PRIORITY_PREFIX_LIMIT}
+      `);
+      return rows.map((r) => r.id);
+    }
+    const rows = await prisma.conversation.findMany({
+      where: { AND: [where, ACTIVE_PRIORITY_WHERE] },
+      orderBy: [{ priorityAt: "asc" }, { id: "asc" }],
+      take: INBOX_PRIORITY_PREFIX_LIMIT,
+      select: { id: true },
+    });
+    return rows.map((r) => r.id);
+  } catch (err) {
+    getLogger("conversations").warn({ err }, "prioritárias do inbox não carregadas");
+    return [];
+  }
+}
+
 export async function getConversations(
   params: GetConversationsParams = {}
 ): Promise<ConversationListPage> {
@@ -1579,7 +1623,17 @@ export async function getConversations(
     take: perPage + 1,
     cursor,
   });
-  const pageIds = windowIds.slice(0, perPage);
+  const mainIds = windowIds.slice(0, perPage);
+  // Prioritárias no topo da 1ª página (§9.12). A query principal não muda: é
+  // uma consulta à parte, que só lê o índice parcial das prioritárias ativas.
+  const priorityIds =
+    !cursor && page === 1 && !collapse && sortBy === DEFAULT_LIST_SORT_BY && sortOrder === "desc"
+      ? await findPriorityConversationIds(where)
+      : [];
+  const pageIds =
+    priorityIds.length > 0
+      ? [...priorityIds, ...mainIds.filter((id) => !priorityIds.includes(id))]
+      : mainIds;
   const [cachedTotal, hydrated, previewMap] = await Promise.all([
     knownTotal == null ? peekCachedTabTotal(params, collapse) : Promise.resolve(null),
     pageIds.length === 0
@@ -1601,8 +1655,10 @@ export async function getConversations(
 
   const items = await paintListRows(rows, previewMap);
   // Chave do cursor pela linha CRUA (coluna `lastMessageAt`), não pelo item
-  // pintado — no item `lastMessageAt` é o horário da prévia.
-  const lastRow = rows[rows.length - 1];
+  // pintado — no item `lastMessageAt` é o horário da prévia. Sai da query
+  // principal: as prioritárias do topo não mexem no cursor.
+  const lastMainId = mainIds[mainIds.length - 1];
+  const lastRow = lastMainId ? byIdRow.get(lastMainId) : undefined;
   const nextCursor =
     hasMore && lastRow
       ? encodeListCursor(sortBy, listSortValueOf(sortBy, lastRow), lastRow.id)

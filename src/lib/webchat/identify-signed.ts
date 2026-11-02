@@ -26,10 +26,23 @@ import { prisma, type ScopedTx } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { publishContactUpdated, publishConversationUpdated } from "@/lib/realtime-events";
 import {
+  effectiveWebchatMatchField,
   findContactByWebchatIdentity,
   normalizeWebchatExternalId,
   setContactWebchatIdentity,
 } from "@/lib/webchat/contact-match";
+import {
+  adoptOrphanDeal,
+  attachIdentityValueToContactDeal,
+  claimDealIdentity,
+  findOpenDealOfContact,
+  normalizeDealIdentityValue,
+  noteSeparatedIdentity,
+  resolveDealIdentity,
+  setDealIdentityLinkDeal,
+  type DealMatchField,
+} from "@/lib/webchat/deal-identity";
+import { applyWebchatRouting } from "@/lib/webchat/routing";
 import {
   findPossibleDuplicates,
   recordPossibleDuplicateNotice,
@@ -39,7 +52,7 @@ import { verifyWebchatUserHash } from "@/lib/webchat/signatures";
 import { adoptAnonymousVisitorData } from "@/lib/webchat/visitor-data";
 import { contactTrackingFromSession, type WebchatSessionRow } from "@/lib/webchat/session";
 import type { WebchatMatchField, WebchatV2Config } from "@/lib/webchat/v2-config";
-import { WEBCHAT_ATTRIBUTE_RE } from "@/lib/webchat/v2-config";
+import { hasWebchatRoutingEffect, WEBCHAT_ATTRIBUTE_RE } from "@/lib/webchat/v2-config";
 import {
   anonymousVisitorName,
   isAnonymousVisitorName,
@@ -119,7 +132,18 @@ export function mapWebchatAttributes(
 }
 
 /** O contato já guarda alguma identidade do site no campo de match? */
-async function hasWebchatIdentity(contactId: string, matchField: WebchatMatchField): Promise<boolean> {
+async function hasWebchatIdentity(
+  contactId: string,
+  matchField: WebchatMatchField,
+  channelId: string,
+): Promise<boolean> {
+  if (matchField.type === "dealCustomField") {
+    const link = await prisma.webchatIdentityLink.findFirst({
+      where: { channelId, contactId },
+      select: { id: true },
+    });
+    return Boolean(link);
+  }
   if (matchField.type === "externalId") {
     const row = await prisma.contact.findUnique({
       where: { id: contactId },
@@ -171,6 +195,85 @@ async function createIdentifiedContact(
   return created.id;
 }
 
+type ResolvedIdentity = { contactId: string; mergeFrom: string | null; dealId: string | null };
+
+/** Tentativas quando outro acesso simultâneo vence a disputa pelo vínculo. */
+const DEAL_IDENTITY_ATTEMPTS = 3;
+
+/**
+ * Identidade por campo de negócio (§9.12). O contato vem do negócio com o
+ * valor. Se esse contato já responde por outro valor, ou se o negócio não tem
+ * contato, ou se o valor é novo, o visitante fica no contato dele.
+ */
+async function resolveDealIdentifiedContact(
+  session: WebchatSessionRow,
+  field: DealMatchField,
+  externalId: string,
+  identity: WebchatIdentity,
+): Promise<ResolvedIdentity> {
+  const channelId = session.channelId;
+  const value = normalizeDealIdentityValue(externalId, field) ?? externalId;
+
+  for (let attempt = 0; attempt < DEAL_IDENTITY_ATTEMPTS; attempt++) {
+    const own = await prisma.contact.findFirst({
+      where: { webchatVisitorId: session.id },
+      select: { id: true },
+    });
+    const ownIsAnonymous = own ? !(await hasWebchatIdentity(own.id, field, channelId)) : false;
+    const res = await resolveDealIdentity(channelId, field, value);
+
+    if (res.kind === "contact") {
+      if (!res.linked) {
+        const won = await claimDealIdentity({
+          channelId,
+          contactId: res.contactId,
+          value,
+          dealId: res.dealId,
+        });
+        if (!won) continue;
+      } else if (res.dealId) {
+        await setDealIdentityLinkDeal(channelId, value, res.dealId);
+      }
+      if (res.orphanDealId) await adoptOrphanDeal(res.orphanDealId, res.contactId);
+      const mergeFrom = own && own.id !== res.contactId && ownIsAnonymous ? own.id : null;
+      return { contactId: res.contactId, mergeFrom, dealId: res.dealId };
+    }
+
+    // Telefone compartilhado: o número fica no contato do negócio, para não atrapalhar o WhatsApp.
+    const newContactIdentity = res.kind === "conflict" ? { ...identity, phone: null } : identity;
+    let target: string;
+    if (own && ownIsAnonymous) target = own.id;
+    else target = await createIdentifiedContact(session, newContactIdentity, !own);
+    const dealId = res.kind === "not_found" ? null : res.dealId;
+    if (!(await claimDealIdentity({ channelId, contactId: target, value, dealId }))) continue;
+    if (res.kind === "orphan_deal") await adoptOrphanDeal(res.dealId, target);
+    if (res.kind === "not_found") {
+      // O visitante já tinha card aberto (escreveu antes de entrar): recebe o valor.
+      const openDeal = await findOpenDealOfContact(target);
+      if (openDeal) {
+        await attachIdentityValueToContactDeal({
+          channelId,
+          contactId: target,
+          field,
+          value,
+          dealId: openDeal.id,
+        });
+        return { contactId: target, mergeFrom: null, dealId: openDeal.id };
+      }
+    }
+    return { contactId: target, mergeFrom: null, dealId };
+  }
+
+  // Disputa sem vencedor: o visitante fica no contato dele, sem ligar a nada.
+  log.warn({ channelId }, "vínculo por campo de negócio não concluído");
+  const own = await prisma.contact.findFirst({
+    where: { webchatVisitorId: session.id },
+    select: { id: true },
+  });
+  const contactId = own?.id ?? (await createIdentifiedContact(session, identity, true));
+  return { contactId, mergeFrom: null, dealId: null };
+}
+
 /**
  * Resolve o contato da identidade: o da org com esse `externalId`; senão o
  * do próprio visitante (anônimo) recebe a identidade; senão um novo.
@@ -181,19 +284,22 @@ async function resolveIdentifiedContact(
   matchField: WebchatMatchField,
   externalId: string,
   identity: WebchatIdentity,
-): Promise<{ contactId: string; mergeFrom: string | null }> {
+): Promise<ResolvedIdentity> {
+  if (matchField.type === "dealCustomField") {
+    return resolveDealIdentifiedContact(session, matchField, externalId, identity);
+  }
   const own = await prisma.contact.findFirst({
     where: { webchatVisitorId: session.id },
     select: { id: true },
   });
-  const ownIsAnonymous = own ? !(await hasWebchatIdentity(own.id, matchField)) : false;
+  const ownIsAnonymous = own ? !(await hasWebchatIdentity(own.id, matchField, session.channelId)) : false;
 
   const found = await findContactByWebchatIdentity(matchField, externalId);
   if (found) {
     // O contato anônimo do visitante vira o identificado. Um contato próprio
     // que já é de OUTRA identidade (outro login no mesmo navegador) fica.
     const mergeFrom = own && own.id !== found.id && ownIsAnonymous ? own.id : null;
-    return { contactId: found.id, mergeFrom };
+    return { contactId: found.id, mergeFrom, dealId: null };
   }
 
   // `targetIsOwn`: o alvo é o contato anônimo do próprio visitante.
@@ -211,12 +317,12 @@ async function resolveIdentifiedContact(
     // Corrida: outro request gravou a mesma identidade agora — fica o dele.
     const won = await findContactByWebchatIdentity(matchField, externalId);
     if (won && won.id !== targetId) {
-      return { contactId: won.id, mergeFrom: targetIsOwn ? targetId : null };
+      return { contactId: won.id, mergeFrom: targetIsOwn ? targetId : null, dealId: null };
     }
   } else if (res === "field_missing") {
     log.warn({ channelId: session.channelId }, "campo de match do webchat não existe na org");
   }
-  return { contactId: targetId, mergeFrom: null };
+  return { contactId: targetId, mergeFrom: null, dealId: null };
 }
 
 /** Grava os atributos mapeados (campo inexistente/de outra entidade: ignorado). */
@@ -249,6 +355,8 @@ async function fillEmptyContactFields(
   contactId: string,
   session: WebchatSessionRow,
   identity: WebchatIdentity,
+  /** Negócio de outro contato: o telefone fica lá, para não atrapalhar o WhatsApp. */
+  keepPhoneOff = false,
 ): Promise<{ email: string | null; phone: string | null }> {
   const row = await prisma.contact.findUnique({
     where: { id: contactId },
@@ -258,7 +366,7 @@ async function fillEmptyContactFields(
   const data: Record<string, string> = {};
   if (identity.name && (!row.name?.trim() || isAnonymousVisitorName(row.name))) data.name = identity.name;
   if (identity.email && !row.email) data.email = identity.email;
-  if (identity.phone && !row.phone) data.phone = identity.phone;
+  if (identity.phone && !row.phone && !keepPhoneOff) data.phone = identity.phone;
   if (Object.keys(data).length > 0) {
     await prisma.contact.update({ where: { id: contactId }, data });
   }
@@ -273,6 +381,8 @@ export type SignedIdentifyResult = {
   /** Contato anônimo do visitante fundido no identificado. */
   merged: boolean;
   attributesWritten: number;
+  /** Negócio encontrado pelo valor (identidade por campo de negócio). */
+  dealId: string | null;
 };
 
 export async function identifySignedWebchatVisitor(args: {
@@ -285,9 +395,12 @@ export async function identifySignedWebchatVisitor(args: {
   now?: Date;
 }): Promise<SignedIdentifyResult> {
   const { organizationId, session, config, externalId, identity } = args;
-  const matchField = config.identity.matchField;
+  const matchField =
+    config.identity.matchField.type === "dealCustomField"
+      ? await effectiveWebchatMatchField(config.identity.matchField)
+      : config.identity.matchField;
 
-  const { contactId, mergeFrom } = await resolveIdentifiedContact(
+  const { contactId, mergeFrom, dealId } = await resolveIdentifiedContact(
     session,
     matchField,
     externalId,
@@ -315,7 +428,19 @@ export async function identifySignedWebchatVisitor(args: {
   });
   session.contactId = contactId;
 
-  const written = await fillEmptyContactFields(organizationId, contactId, session, identity);
+  const dealOfOtherContact = dealId
+    ? (await prisma.deal.findFirst({
+        where: { id: dealId, NOT: { contactId } },
+        select: { id: true },
+      })) !== null
+    : false;
+  const written = await fillEmptyContactFields(
+    organizationId,
+    contactId,
+    session,
+    identity,
+    dealOfOtherContact,
+  );
   const attributesWritten = await writeMappedAttributes(
     contactId,
     mapWebchatAttributes(args.attributes, config),
@@ -333,6 +458,17 @@ export async function identifySignedWebchatVisitor(args: {
     select: { id: true },
   });
   if (conv) {
+    if (matchField.type === "dealCustomField") {
+      await noteSeparatedIdentity({
+        organizationId,
+        channelId: session.channelId,
+        conversationId: conv.id,
+        contactId,
+      });
+    }
+    if (hasWebchatRoutingEffect(config.routing)) {
+      await applyWebchatRouting({ conversationId: conv.id, contactId, routing: config.routing });
+    }
     if (written.email || written.phone) {
       try {
         const matches = await findPossibleDuplicates(contactId, written);
@@ -345,5 +481,5 @@ export async function identifySignedWebchatVisitor(args: {
     }
     publishConversationUpdated({ organizationId, conversationId: conv.id, contactId });
   }
-  return { contactId, merged, attributesWritten };
+  return { contactId, merged, attributesWritten, dealId };
 }

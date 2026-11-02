@@ -132,4 +132,46 @@ describe("processPendingDistributionQueue (BD-20)", () => {
     expect(h.convCount).toHaveBeenCalledTimes(1);
     expect(h.pendingFindMany).not.toHaveBeenCalled();
   });
+
+  it("prioritárias são tentadas antes das demais, em todos os departamentos", async () => {
+    const { executeDistribution } = await import("../engine");
+    const distribute = vi.mocked(executeDistribution);
+    distribute.mockClear();
+    const order: string[] = [];
+    distribute.mockImplementation(async (input) => {
+      order.push(String(input.conversationId));
+      return { success: true } as never;
+    });
+    h.convFindMany.mockImplementation(async (args: { where?: { departmentId?: unknown; select?: unknown } }) => {
+      const where = args.where as { id?: { in?: string[] }; priorityAt?: unknown; departmentId?: unknown };
+      if (where?.priorityAt) return [{ id: "conv_ai" }] as never;
+      if (where?.departmentId !== "d2") return [];
+      if (where.id?.in?.length === 1 && where.id.in[0] === "conv_ai") {
+        return [{ id: "conv_ai", contactId: "c", departmentId: "d2" }] as never;
+      }
+      return [];
+    });
+    await processPendingDistributionQueue({ trigger: "manual" });
+    // A passada normal pula a que a passada das prioritárias já tentou.
+    expect(order).toEqual(["conv_ai"]);
+    const passes = h.convFindMany.mock.calls.map(
+      (c) => (c[0] as unknown as { orderBy?: Record<string, string> }).orderBy,
+    );
+    const firstPriority = passes.findIndex((o) => o?.priorityAt === "asc");
+    const firstNormal = passes.findIndex((o) => o?.createdAt === "asc");
+    expect(firstPriority).toBeGreaterThanOrEqual(0);
+    expect(firstPriority).toBeLessThan(firstNormal);
+    h.convFindMany.mockReset();
+    h.convFindMany.mockImplementation(async () => []);
+    distribute.mockReset();
+    distribute.mockResolvedValue({ success: false, reason: "OTHER" } as never);
+  });
+
+  it("sem prioritária na fila: só a passada de sempre, pela ordem de chegada", async () => {
+    await processPendingDistributionQueue({ trigger: "manual" });
+    const orders = h.convFindMany.mock.calls
+      .map((c) => (c[0] as unknown as { orderBy?: Record<string, string> }).orderBy)
+      .filter(Boolean);
+    expect(orders.every((o) => o?.createdAt === "asc")).toBe(true);
+  });
 });

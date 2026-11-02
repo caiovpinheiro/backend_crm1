@@ -29,7 +29,12 @@ export const STALE_PROCESSING_MS = 2 * 60 * 1000;
 /** Limpeza oportunista das chaves vencidas: no máximo uma por canal neste intervalo. */
 const PURGE_INTERVAL_MS = 10 * 60 * 1000;
 
-export type S2SResponseBody = { conversation_id: string; url: string };
+export type S2SResponseBody = {
+  conversation_id: string;
+  url: string;
+  deal_id?: string;
+  deal_url?: string;
+};
 
 export type IdempotencyClaim =
   | { kind: "claimed"; id: string }
@@ -49,7 +54,12 @@ function readStoredResponse(v: unknown): S2SResponseBody | null {
   if (!v || typeof v !== "object" || Array.isArray(v)) return null;
   const r = v as Record<string, unknown>;
   return typeof r.conversation_id === "string" && typeof r.url === "string"
-    ? { conversation_id: r.conversation_id, url: r.url }
+    ? {
+        conversation_id: r.conversation_id,
+        url: r.url,
+        ...(typeof r.deal_id === "string" ? { deal_id: r.deal_id } : {}),
+        ...(typeof r.deal_url === "string" ? { deal_url: r.deal_url } : {}),
+      }
     : null;
 }
 
