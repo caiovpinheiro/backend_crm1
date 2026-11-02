@@ -152,6 +152,7 @@ export async function POST(request: Request, ctx: Ctx) {
               conversationId: conv.id,
               contactId: conv.contactId,
               direction: "out",
+              messageType: "note",
               content,
               timestamp: savedMsg.createdAt,
             });

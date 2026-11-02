@@ -35,3 +35,19 @@ export function redactNewMessageForUnlisted(
   }
   return out;
 }
+
+/** Nota interna e rascunhos da IA: o texto não sai pelo fan-out da organização. */
+const PRIVATE_MESSAGE_TYPES = new Set(["note", "ai_draft", "ai_summary"]);
+
+/**
+ * `new_message` privado sem conteúdo, para todas as conexões. Esses eventos não
+ * levam `card` (não mudam a prévia), então o gate por usuário não os alcança: sem
+ * isto, o texto chegaria a toda a organização. `cardOmitted: "hidden"` faz o cliente
+ * não pintar bolha e refazer o GET do chat aberto, que aplica o acesso.
+ */
+export function redactPrivateNewMessage<T extends { messageType?: string | null }>(
+  payload: T,
+): T {
+  if (!payload.messageType || !PRIVATE_MESSAGE_TYPES.has(payload.messageType)) return payload;
+  return redactNewMessageForUnlisted({ ...payload, cardOmitted: "hidden" }) as T;
+}

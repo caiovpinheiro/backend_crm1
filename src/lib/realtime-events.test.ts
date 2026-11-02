@@ -9,6 +9,7 @@ vi.mock("@/lib/sse-bus", () => ({ sseBus: { publish } }));
 
 import {
   __resetTypingThrottleForTests,
+  publishNewMessage,
   publishScheduledMessageUpdated,
   publishTypingEvent,
   TYPING_THROTTLE_MS,
@@ -121,5 +122,45 @@ describe("publishScheduledMessageUpdated", () => {
       status: "CANCELLED",
     });
     expect(publish).not.toHaveBeenCalled();
+  });
+});
+
+describe("publishNewMessage", () => {
+  beforeEach(() => publish.mockReset());
+
+  const base = {
+    organizationId: "org_1",
+    conversationId: "conv_1",
+    contactId: "contact_1",
+    direction: "out",
+    content: "texto privado",
+    senderName: "Webchat",
+    timestamp: new Date(T0),
+  } as const;
+
+  it.each(["note", "ai_draft", "ai_summary"])("%s sai sem texto, para todas as conexões", (messageType) => {
+    publishNewMessage({ ...base, messageType });
+    const [event, data] = publish.mock.calls[0]!;
+    expect(event).toBe("new_message");
+    expect(JSON.stringify(data)).not.toContain("texto privado");
+    expect(data).not.toHaveProperty("content");
+    expect(data).not.toHaveProperty("senderName");
+    expect(data).toMatchObject({
+      organizationId: "org_1",
+      conversationId: "conv_1",
+      contactId: "contact_1",
+      direction: "out",
+      messageType,
+      cardOmitted: "hidden",
+    });
+  });
+
+  it("mensagem pública segue com texto e sem marca", () => {
+    publishNewMessage({ ...base, messageType: "text" });
+    publishNewMessage({ ...base });
+    for (const [, data] of publish.mock.calls) {
+      expect(data).toMatchObject({ content: "texto privado", senderName: "Webchat" });
+      expect(data).not.toHaveProperty("cardOmitted");
+    }
   });
 });

@@ -47,6 +47,7 @@
  */
 import type { EntityViewer } from "@/lib/entity-presence";
 import { sseBus, type SsePublishOptions } from "@/lib/sse-bus";
+import { redactPrivateNewMessage } from "@/lib/sse-redact";
 
 /** Org do evento. `null`/`undefined` = o barramento descarta e loga. */
 type OrgId = string | null | undefined;
@@ -479,10 +480,11 @@ function publish<E extends RealtimeEventName>(
 
 /**
  * Mensagem nova na conversa (entrada, saída, nota, rascunho da IA,
- * linha de chamada). O barramento anexa `card` e o escopo do board.
+ * linha de chamada). O barramento anexa `card` e o escopo do board. Nota e
+ * rascunho saem sem o texto (`redactPrivateNewMessage`).
  */
 export function publishNewMessage(payload: NewMessagePayload): void {
-  publish("new_message", payload);
+  publish("new_message", redactPrivateNewMessage(payload));
 }
 
 /**
