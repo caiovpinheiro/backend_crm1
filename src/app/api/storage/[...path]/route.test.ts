@@ -189,4 +189,19 @@ describe("GET /api/storage/[...path] — Content-Disposition e X-Storage-Tenant"
     expect(res.status).toBe(401);
     expect(readStoredFile).not.toHaveBeenCalled();
   });
+
+  // A logo do webchat tem rota própria: abrir o gateway para visitante exporia o bucket.
+  it.each([
+    "org_a/branding/logo_1.png",
+    "org_a/attachments/contrato.png",
+    "org_a/keeps/nota.png",
+    "org_a/inbound-media/foto.png",
+    "org_a/data-exports/base.png",
+  ])("sem sessão, %s continua 401 sem ler o arquivo", async (path) => {
+    auth.mockResolvedValue(null);
+    readStoredFile.mockClear();
+    const res = await GET(get(path), ctx(path));
+    expect(res.status).toBe(401);
+    expect(readStoredFile).not.toHaveBeenCalled();
+  });
 });
