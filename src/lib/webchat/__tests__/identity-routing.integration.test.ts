@@ -464,6 +464,47 @@ describe.skipIf(!LOCAL)("vínculo por campo de negócio e atendimento (Postgres 
     expect(leaked).toEqual([]);
   });
 
+  it("fila alta sem ninguém disponível: ticket novo entra na fila de espera, sem IA", async () => {
+    h.widget = true;
+    try {
+      const channel = await makeChannel({
+        identity: { matchField: dealMatch() },
+        routing: { priority: "high" },
+      });
+      const session = await makeSession(channel.id);
+      await identify(channel, session, uid("val"));
+      const sent = await sendMessage(channel, session);
+      const conv = await base.conversation.findUnique({
+        where: { id: sent.conversationId },
+        select: { routeMode: true, assignedToId: true, priorityAt: true },
+      });
+      expect(conv?.routeMode).toBe("human");
+      expect(conv?.assignedToId).toBeNull();
+      expect(conv?.priorityAt).not.toBeNull();
+      const pending = await base.distributionPending.findFirst({
+        where: { conversationId: sent.conversationId, status: "PENDING" },
+        select: { triggerSource: true },
+      });
+      expect(pending?.triggerSource).toContain("WEBCHAT_ROUTING");
+      await base.conversation.update({ where: { id: sent.conversationId }, data: { status: "RESOLVED" } });
+    } finally {
+      h.widget = false;
+    }
+  });
+
+  it("digits: valor com letra não vira a pessoa de outro valor", async () => {
+    const channel = await makeChannel({
+      identity: { matchField: { type: "dealCustomField", customFieldId: fieldId, normalize: "digits" } },
+    });
+    const contact = await makeContact("Com letra");
+    const digits = String(Date.now()).slice(-8);
+    await makeDeal(contact.id, `A${digits}`);
+    const byLetter = await identify(channel, await makeSession(channel.id), `B${digits}`);
+    expect(byLetter.contactId).not.toBe(contact.id);
+    const byDigits = await identify(channel, await makeSession(channel.id), digits);
+    expect(byDigits.contactId).not.toBe(contact.id);
+  });
+
   it("destino agente de IA: assume o ticket, vence o 1º atendimento e a Regra 0", async () => {
     const agent = await base.user.create({
       data: { name: "Agente", email: `${uid("ag")}@t.test`, organizationId: orgId, type: "AI" },

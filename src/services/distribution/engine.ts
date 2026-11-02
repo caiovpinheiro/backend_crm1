@@ -279,8 +279,11 @@ async function enqueuePending(input: ExecuteDistributionInput): Promise<void> {
     // Sem inbound do cliente (ex.: só template BV/Bem-vindo) não entra na fila —
     // exceto redistribuição MANUAL (operador mandou p/ departamento com fila
     // cheia): aí o lead precisa aparecer na espera mesmo sem novo inbound.
-    const isManual = hydrated.triggerSource === "MANUAL";
-    if (hydrated.conversationId && !isManual) {
+    // O atendimento do webchat também: roda antes de gravar o inbound, e o S2S
+    // abre ticket antes de o cliente escrever.
+    const keepsWithoutInbound =
+      hydrated.triggerSource === "MANUAL" || hydrated.triggerSource === "WEBCHAT_ROUTING";
+    if (hydrated.conversationId && !keepsWithoutInbound) {
       const conv = await prisma.conversation.findUnique({
         where: { id: hydrated.conversationId },
         select: { lastInboundAt: true },

@@ -24,7 +24,8 @@ const m = vi.hoisted(() => {
     eligibleInDept: true,
     maybeDistribute: vi.fn(async (_a: unknown) => {}),
     executeDistribution: vi.fn(async (_a: unknown) => ({ success: true })),
-    executeLeads: vi.fn(async (_a: unknown) => ({ success: true })),
+    executeLeads: vi.fn(async (_a: unknown): Promise<{ success: boolean }> => ({ success: true })),
+    eligibleScope: vi.fn(async (_a: unknown) => ["u-1"]),
     clearOwnership: vi.fn(async (_a: unknown) => {}),
     logChanges: vi.fn(async (_a: unknown) => {}),
     propagate: vi.fn(async (..._a: unknown[]) => []),
@@ -98,6 +99,7 @@ vi.mock("@/services/distribution/responsibles", () => ({
   getDistributionResponsibles: async () => (m.eligibleInDept ? [{ eligible: true }] : [{ eligible: false }]),
 }));
 vi.mock("@/services/organization-widgets", () => ({ hasOrganizationWidget: async () => m.motorOn }));
+vi.mock("@/services/ai-v2/leads-handoff", () => ({ eligibleUserIdsForScope: m.eligibleScope }));
 vi.mock("@/services/post-close-return", () => ({ resolvePostCloseInbound: m.resolvePostClose }));
 
 import { applyWebchatRouting } from "@/lib/webchat/routing";
@@ -132,6 +134,7 @@ beforeEach(() => {
     priorityAt: null,
     routedAt: null,
     departmentId: null,
+    routeMode: null,
     assignedTo: null,
   };
   m.updates = [];
@@ -224,11 +227,53 @@ describe("destino departamento", () => {
     expect(m.executeDistribution).not.toHaveBeenCalled();
   });
 
-  it("departamento por leads usa o rodízio de leads", async () => {
+  it("departamento por leads: sorteia só entre quem é dele", async () => {
     m.departments.set("d-1", { id: "d-1", distributionMode: "leads" });
     await run({ destination: DEPT });
-    expect(m.executeLeads).toHaveBeenCalled();
+    expect(m.executeLeads).toHaveBeenCalledWith(
+      expect.objectContaining({ onlyUserIds: ["u-1"], pendingScope: expect.objectContaining({ departmentId: "d-1" }) }),
+    );
     expect(m.executeDistribution).not.toHaveBeenCalled();
+    expect(merged()).toMatchObject({ departmentId: "d-1" });
+  });
+
+  it("departamento por leads sem ninguém com peso: vai para a alternativa", async () => {
+    m.departments.set("d-1", { id: "d-1", distributionMode: "leads" });
+    m.executeLeads.mockResolvedValueOnce({ success: false });
+    await run({ destination: DEPT, fallback: USER });
+    expect(merged()).toMatchObject({ assignedToId: "u-1" });
+    expect(merged().departmentId).toBeUndefined();
+  });
+
+  it("agente que já estava no ticket sai quando vai para pessoas, mesmo sem o motor", async () => {
+    m.motorOn = false;
+    m.conv!.assignedToId = "a-1";
+    m.conv!.assignedTo = { type: "AI", name: "Agente" };
+    await run({ destination: DEPT });
+    expect(m.clearOwnership).toHaveBeenCalled();
+    expect(merged()).toMatchObject({ routeMode: "human", departmentId: "d-1" });
+  });
+
+  it("departamento de uma regra entra antes de distribuir", async () => {
+    m.departments.set("d-2", { id: "d-2", distributionMode: "smart" });
+    await applyWebchatRouting({
+      conversationId: "c-1",
+      contactId: "ct-1",
+      routing: routing({ priority: "high" }),
+      departmentId: "d-2",
+    });
+    expect(merged()).toMatchObject({ departmentId: "d-2" });
+    expect(m.executeDistribution).toHaveBeenCalledWith(expect.objectContaining({ departmentId: "d-2" }));
+  });
+
+  it("departamento apagado de uma regra é ignorado", async () => {
+    await applyWebchatRouting({
+      conversationId: "c-1",
+      contactId: "ct-1",
+      routing: routing({ priority: "high" }),
+      departmentId: "apagado",
+    });
+    expect(merged().departmentId).toBeUndefined();
   });
 });
 
@@ -273,6 +318,14 @@ describe("distribuição e prioridade", () => {
     m.motorOn = false;
     await run({ priority: "high" });
     expect(merged().priorityAt).toBeInstanceOf(Date);
+    expect(m.executeDistribution).not.toHaveBeenCalled();
+  });
+
+  it("prioridade alta na org por leads sem ninguém: não entrega à IA", async () => {
+    m.orgMode = "leads";
+    m.executeLeads.mockResolvedValueOnce({ success: false });
+    await run({ priority: "high" });
+    expect(merged()).toMatchObject({ routeMode: "human" });
     expect(m.executeDistribution).not.toHaveBeenCalled();
   });
 

@@ -60,7 +60,12 @@ describe("normalizeDealIdentityValue", () => {
   });
 
   it("digits sem dígito não identifica", () => {
-    expect(normalizeDealIdentityValue("abc", field("digits"))).toBeNull();
+    expect(normalizeDealIdentityValue("--", field("digits"))).toBeNull();
+  });
+
+  it("digits não funde valores diferentes só nas letras", () => {
+    expect(normalizeDealIdentityValue("A123", field("digits"))).toBe("A123");
+    expect(normalizeDealIdentityValue("B123", field("digits"))).toBe("B123");
   });
 });
 

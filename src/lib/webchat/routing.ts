@@ -40,6 +40,7 @@ import { executeLeadsDistribution } from "@/services/distribution/leads/engine";
 import { getOrgDistributionModeFresh } from "@/services/distribution/mode";
 import { maybeDistributeNewInboundTicket } from "@/services/distribution/pending-inbound";
 import { getDistributionResponsibles } from "@/services/distribution/responsibles";
+import { eligibleUserIdsForScope } from "@/services/ai-v2/leads-handoff";
 import { hasOrganizationWidget } from "@/services/organization-widgets";
 
 const log = getLogger("webchat-routing");
@@ -50,6 +51,8 @@ export type WebchatRoutingInput = {
   routing: WebchatRoutingConfig;
   /** Uma regra do S2S mandou um destino nesta entrada: vale mesmo em ticket já roteado. */
   force?: boolean;
+  /** Departamento de uma regra do S2S: entra antes, para a distribuição respeitá-lo. */
+  departmentId?: string | null;
 };
 
 type ConvRow = {
@@ -61,6 +64,7 @@ type ConvRow = {
   priorityAt: Date | null;
   routedAt: Date | null;
   departmentId: string | null;
+  routeMode: string | null;
   assignedTo: { type: string; name: string | null } | null;
 };
 
@@ -159,32 +163,60 @@ function publish(organizationId: string, conversationId: string, contactId: stri
   }
 }
 
-/** Marca "de pessoa": sem isso a IA assume na próxima mensagem. */
-async function markHumanRoute(conv: ConvRow, departmentId: string | null): Promise<void> {
+/**
+ * Marca "de pessoa": sem isso a IA assume na próxima mensagem. Agente que já
+ * estava no ticket sai: o resolver devolve o responsável antes de olhar a marca.
+ */
+async function markHumanRoute(conv: ConvRow, contactId: string, departmentId: string | null): Promise<void> {
+  if (conv.assignedToId && conv.assignedTo?.type === "AI") {
+    await clearOwnershipForRedistribution({ conversationId: conv.id, contactId });
+    conv.assignedToId = null;
+    conv.assignedVia = null;
+    conv.assignedTo = null;
+  }
   const data = {
     routeMode: HUMAN_ROUTE_MODE,
     ...(departmentId && departmentId !== conv.departmentId ? { departmentId } : {}),
   };
   await prisma.conversation.update({ where: { id: conv.id }, data, select: { id: true } });
+  if (departmentId) conv.departmentId = departmentId;
 }
 
-/** Pede a distribuição de fato; sem ninguém disponível, o motor põe na fila de espera. */
-async function requestDistribution(
+async function isLeadsRouting(leadsDepartment: boolean): Promise<boolean> {
+  return leadsDepartment || (await getOrgDistributionModeFresh()) === "leads";
+}
+
+/**
+ * Rodízio por leads. Sem fila: quem não tem peso fica sem responsável. O motor
+ * grava `routeMode = "leads"` antes de sortear; sem ninguém, a marca volta a
+ * `routeMode`, para a IA e o próximo passo enxergarem o estado certo.
+ */
+async function runLeadsRouting(
   conv: ConvRow,
   contactId: string,
   departmentId: string | null,
-  leadsDepartment: boolean,
-): Promise<void> {
-  const reassign = Boolean(conv.assignedToId);
-  if (leadsDepartment || (await getOrgDistributionModeFresh()) === "leads") {
-    await executeLeadsDistribution({
-      contactId,
-      conversationId: conv.id,
-      triggerSource: "SYSTEM",
-      reassign,
+  routeModeOnFailure: string | null,
+): Promise<boolean> {
+  const scope = departmentId ? { departmentId, roleIds: [], userIds: [] } : null;
+  const result = await executeLeadsDistribution({
+    contactId,
+    conversationId: conv.id,
+    triggerSource: "SYSTEM",
+    reassign: Boolean(conv.assignedToId),
+    ...(scope ? { onlyUserIds: await eligibleUserIdsForScope(scope), pendingScope: scope } : {}),
+  });
+  if (!result.success) {
+    await prisma.conversation.update({
+      where: { id: conv.id },
+      data: { routeMode: routeModeOnFailure },
+      select: { id: true },
     });
-    return;
   }
+  return result.success;
+}
+
+/** Pede a distribuição de fato; sem ninguém disponível, o motor põe na fila de espera. */
+async function requestDistribution(conv: ConvRow, contactId: string, departmentId: string | null): Promise<void> {
   await executeDistribution({
     dealId: null,
     contactId,
@@ -193,12 +225,12 @@ async function requestDistribution(
     triggerSource: "WEBCHAT_ROUTING",
     departmentIds: departmentId ? [departmentId] : null,
     departmentId: departmentId ?? conv.departmentId,
-    reassign,
+    reassign: Boolean(conv.assignedToId),
     allowOrgWideFallback: false,
   });
 }
 
-type TargetResult = { done: boolean; waitDepartmentId?: string; leadsDepartment?: boolean };
+type TargetResult = { done: boolean; waitDepartmentId?: string };
 
 async function tryTarget(
   conv: ConvRow,
@@ -222,18 +254,25 @@ async function tryTarget(
     select: { id: true, distributionMode: true },
   });
   if (!department) return { done: false };
-  const leadsDepartment = department.distributionMode === "leads";
   // Sem motor, o próprio departamento é o destino: a equipe vê a conversa lá.
   if (!(await isMotorOn())) {
-    await markHumanRoute(conv, department.id);
+    await markHumanRoute(conv, contactId, department.id);
     return { done: true };
   }
-  if (!leadsDepartment && (await getOrgDistributionModeFresh()) !== "leads") {
-    const views = await getDistributionResponsibles({ departmentIds: [department.id] });
-    if (!views.some((v) => v.eligible)) return { done: false, waitDepartmentId: department.id };
+  if (await isLeadsRouting(department.distributionMode === "leads")) {
+    const assigned = await runLeadsRouting(conv, contactId, department.id, conv.routeMode);
+    if (!assigned) return { done: false };
+    await prisma.conversation.update({
+      where: { id: conv.id },
+      data: { departmentId: department.id },
+      select: { id: true },
+    });
+    return { done: true };
   }
-  await markHumanRoute(conv, department.id);
-  await requestDistribution(conv, contactId, department.id, leadsDepartment);
+  const views = await getDistributionResponsibles({ departmentIds: [department.id] });
+  if (!views.some((v) => v.eligible)) return { done: false, waitDepartmentId: department.id };
+  await markHumanRoute(conv, contactId, department.id);
+  await requestDistribution(conv, contactId, department.id);
   return { done: true };
 }
 
@@ -252,8 +291,13 @@ async function routeToDistribution(
     });
     return;
   }
-  await markHumanRoute(conv, waitDepartmentId);
-  if (await isMotorOn()) await requestDistribution(conv, input.contactId, waitDepartmentId, false);
+  await markHumanRoute(conv, input.contactId, waitDepartmentId);
+  if (!(await isMotorOn())) return;
+  if (await isLeadsRouting(false)) {
+    await runLeadsRouting(conv, input.contactId, null, HUMAN_ROUTE_MODE);
+    return;
+  }
+  await requestDistribution(conv, input.contactId, waitDepartmentId);
 }
 
 async function route(input: WebchatRoutingInput): Promise<boolean> {
@@ -269,6 +313,7 @@ async function route(input: WebchatRoutingInput): Promise<boolean> {
       priorityAt: true,
       routedAt: true,
       departmentId: true,
+      routeMode: true,
       assignedTo: { select: { type: true, name: true } },
     },
   });
@@ -282,6 +327,21 @@ async function route(input: WebchatRoutingInput): Promise<boolean> {
       data: { priorityAt: new Date() },
     });
     publish(getOrgIdOrThrow(), conversationId, contactId);
+  }
+
+  if (input.departmentId && input.departmentId !== conv.departmentId) {
+    const department = await prisma.department.findFirst({
+      where: { id: input.departmentId },
+      select: { id: true },
+    });
+    if (department) {
+      await prisma.conversation.update({
+        where: { id: conversationId },
+        data: { departmentId: department.id },
+        select: { id: true },
+      });
+      conv.departmentId = department.id;
+    }
   }
 
   if (conv.routedAt && !input.force) {

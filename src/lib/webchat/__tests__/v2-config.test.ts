@@ -240,8 +240,9 @@ describe("identidade por campo de negócio e atendimento (§9.12)", () => {
     expect(resolveS2SRouting(channel, [a, b])).toEqual({
       routing: { ...channel, destination: { type: "user", id: "u1" }, priority: "high" },
       force: true,
+      departmentId: null,
     });
-    expect(resolveS2SRouting(channel, [])).toEqual({ routing: channel, force: false });
+    expect(resolveS2SRouting(channel, [])).toEqual({ routing: channel, force: false, departmentId: null });
     const high = { ...channel, priority: "high" as const };
     expect(resolveS2SRouting(high, [{ priority: "x", tagId: "t" }]).routing.priority).toBe("high");
   });

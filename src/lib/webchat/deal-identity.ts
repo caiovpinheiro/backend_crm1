@@ -31,10 +31,17 @@ export type DealMatchField = Extract<WebchatMatchField, { type: "dealCustomField
 /** Teto de negócios lidos para um valor (ambiguidade é exceção, não regra). */
 const MAX_DEALS_PER_VALUE = 50;
 
-/** Valor comparável. `digits` sem nenhum dígito não identifica ninguém. */
+/**
+ * Valor comparável. `digits` tira pontuação, mas não letras: `A123` e `B123`
+ * são pessoas diferentes e não podem virar `123`. Valor com letra fica como
+ * veio e não casa com nada no modo `digits`. Sem nenhum dígito, não identifica.
+ */
 export function normalizeDealIdentityValue(value: string, field: DealMatchField): string | null {
-  const v = field.normalize === "digits" ? value.replace(/\D/g, "") : value.trim();
-  return v.length > 0 ? v : null;
+  const trimmed = value.trim();
+  if (field.normalize !== "digits") return trimmed.length > 0 ? trimmed : null;
+  if (/\p{L}/u.test(trimmed)) return trimmed;
+  const digits = trimmed.replace(/\D/g, "");
+  return digits.length > 0 ? digits : null;
 }
 
 export type DealIdentityCandidate = {
@@ -77,7 +84,7 @@ export async function findDealsByIdentityValue(
   const orgId = getOrgIdOrThrow();
   const match =
     field.normalize === "digits"
-      ? Prisma.sql`regexp_replace(v."value", '\\D', '', 'g') = ${value}`
+      ? Prisma.sql`v."value" !~ '[[:alpha:]]' AND regexp_replace(v."value", '\\D', '', 'g') = ${value}`
       : Prisma.sql`v."value" = ${value}`;
   const rows = await prisma.$queryRaw<
     { id: string; contactId: string | null; status: string; updatedAt: Date }[]

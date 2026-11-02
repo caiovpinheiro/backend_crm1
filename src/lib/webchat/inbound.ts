@@ -204,7 +204,7 @@ export async function findOrCreateWebchatConversation(
   contactId: string,
   channelId: string,
   opening?: { content?: string | null; messageType?: string | null },
-  routing?: { routing: WebchatRoutingConfig; force?: boolean } | null,
+  routing?: { routing: WebchatRoutingConfig; force?: boolean; departmentId?: string | null } | null,
 ): Promise<{ id: string; assignedToId: string | null; created: boolean }> {
   /** `true` se o atendimento cuidou do ticket. */
   const routed = async (conversationId: string) =>

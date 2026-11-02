@@ -847,7 +847,8 @@ Sem configuração, tudo funciona como antes.
 assinado e no S2S; sem assinatura válida, não roda):
 
 - `identity.matchField = { type: "dealCustomField", customFieldId, normalize }`.
-  `digits` compara só os dígitos (acha `12.345-6` com `123456`).
+  `digits` compara só os dígitos (acha `12.345-6` com `123456`). Valor com
+  letra não casa nesse modo: `A123` e `B123` não podem virar a mesma pessoa.
 - Vários negócios com o valor: o aberto mais recente; sem aberto, o mais
   recente. Negócio com contato vem antes do sem contato. Log de ambiguidade.
 - Negócio sem contato: passa para o contato do visitante, com log.
@@ -886,7 +887,7 @@ A Regra 0 (`resolvePostCloseInbound`) não roda no webchat, então não interfer
 | Destino | Indisponível quando | Efeito |
 |---------|---------------------|--------|
 | `user` | removida; offline ou fora do horário. Fila cheia não conta. Sem distribuição ligada não há presença: só removida conta | responsável na conversa, no contato e nos negócios abertos; `assignedVia = webchat_routing` |
-| `department` | removido; ninguém elegível nele | departamento + pedido de distribuição. Se a alternativa for a distribuição, espera na fila do próprio departamento. Sem distribuição ligada, o departamento já é o destino |
+| `department` | removido; ninguém elegível nele (no modo por leads: ninguém com peso nele) | departamento + pedido de distribuição. Se a alternativa for a distribuição, espera na fila do próprio departamento (por leads não há fila). Sem distribuição ligada, o departamento já é o destino |
 | `ai_agent` | removido, inativo, atendimento por IA desligado, fora da lista de números | responsável; o turno de IA responde pelo widget |
 | `distribution` | nunca | fila normal: as regras de hoje. Fila alta: pede a distribuição de fato e não passa pelo 1º atendimento de IA |
 
@@ -897,14 +898,16 @@ A Regra 0 (`resolvePostCloseInbound`) não roda no webchat, então não interfer
   indisponível antes de responder; aí o ticket segue para a próxima opção.
 - `Conversation.routeMode = "human"` (`lib/conversation-route.ts`): o resolver
   do agente e o 1º atendimento não pegam a conversa enquanto ela espera na fila.
-  Sem isso, a IA assumiria na mensagem seguinte.
+  Sem isso, a IA assumiria na mensagem seguinte. Agente que já estava no ticket sai.
 - `triggerSource = WEBCHAT_ROUTING` conta como pedido, como o bloco de automação.
-  O inbound `SYSTEM` continua sem distribuir. A pendência não é limpa por falta de
-  inbound, porque o S2S abre ticket antes de o cliente escrever.
+  O inbound `SYSTEM` continua sem distribuir. A pendência entra e fica mesmo sem
+  inbound, porque o atendimento roda antes de gravá-lo e o S2S abre ticket antes de
+  o cliente escrever.
 
 **S2S contra o canal** (`resolveS2SRouting`): a primeira regra com `destination`
 define o destino e vale mesmo em ticket já roteado; `queuePriority: "high"` da
-regra ou `routing.priority` do canal deixam a fila alta. O campo `priority` do
+regra ou `routing.priority` do canal deixam a fila alta. O `departmentId` da regra
+entra antes de distribuir, para a distribuição respeitá-lo. O campo `priority` do
 S2S só tem efeito como critério de uma regra. Nada tira a conversa de quem já
 respondeu.
 

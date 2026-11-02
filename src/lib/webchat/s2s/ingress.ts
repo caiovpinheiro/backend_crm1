@@ -237,8 +237,8 @@ export async function processWebchatS2SIngress(
 
   // Atendimento: o do canal, com as regras desta entrada por cima (§9.12).
   const rules = matchWebchatRoutingRules(v2.s2s.rules, { category: req.category, priority: req.priority });
-  const { routing, force } = resolveS2SRouting(v2.routing, rules);
-  const routingInput = hasWebchatRoutingEffect(routing) ? { routing, force } : null;
+  const { routing, force, departmentId } = resolveS2SRouting(v2.routing, rules);
+  const routingInput = hasWebchatRoutingEffect(routing) ? { routing, force, departmentId } : null;
 
   const noteBody = buildWebchatS2SNote(req.text, req.links);
   const dealLabel = noteBody && contact.dealId ? await dealNoteLabel(contact.dealId) : null;
@@ -297,7 +297,10 @@ export async function processWebchatS2SIngress(
 
   for (const rule of rules) {
     if (rule.tagId) await applyTag(contact.id, rule.tagId);
-    if (rule.departmentId) await setDepartment(channel.organizationId, conversation.id, rule.departmentId);
+    // Departamento como destino ganha da ação "departamento" de outra regra.
+    if (rule.departmentId && !(routingInput && routing.destination.type === "department")) {
+      await setDepartment(channel.organizationId, conversation.id, rule.departmentId);
+    }
     if (rule.pinNote && noteId) await pinNote(channel.organizationId, conversation.id, noteId);
   }
 

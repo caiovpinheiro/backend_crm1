@@ -517,7 +517,7 @@ export function hasWebchatRoutingEffect(routing: WebchatRoutingConfig): boolean 
 export function resolveS2SRouting(
   channel: WebchatRoutingConfig,
   rules: WebchatRoutingRule[],
-): { routing: WebchatRoutingConfig; force: boolean } {
+): { routing: WebchatRoutingConfig; force: boolean; departmentId: string | null } {
   const destination = rules.find((r) => r.destination)?.destination;
   const high = rules.some((r) => r.queuePriority === "high");
   return {
@@ -527,5 +527,6 @@ export function resolveS2SRouting(
       ...(high ? { priority: "high" as const } : {}),
     },
     force: Boolean(destination),
+    departmentId: rules.find((r) => r.departmentId)?.departmentId ?? null,
   };
 }
