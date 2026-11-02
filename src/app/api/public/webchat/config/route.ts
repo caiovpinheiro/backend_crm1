@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { resolveWebchatTheme } from "@/lib/webchat/config";
 import { getClientIp, webchatRateLimit } from "@/lib/webchat/http";
+import { publicWebchatAvatarUrl } from "@/lib/webchat/logo";
 import { isWebchatOnline } from "@/lib/webchat/online";
 import {
   checkWebchatOrigin,
@@ -19,6 +20,8 @@ import {
  * `appearance` (modelo e botões do widget, §9.15; o resto do `v2` é privado).
  * `theme` vem resolvido: `primary` ← canal ou `Organization.primaryColor`
  * (fallback `#2563EB`); `avatarUrl` ← canal ou `Organization.logoUrl` (ou null).
+ * Imagem guardada no CRM sai pela rota pública `/api/public/webchat/logo`, porque
+ * `/api/storage` exige sessão e o visitante não tem.
  * `allowedOrigins` é público de propósito: a página do widget (FE) monta o
  * `frame-ancestors` com ele — não é segredo (qualquer um vê onde o widget
  * está embutido). `host` = origem da página que embute o widget; tem de
@@ -40,11 +43,12 @@ export async function GET(request: Request) {
   }
 
   const online = await isWebchatOnline(channel.organizationId, channel.config);
+  const theme = resolveWebchatTheme(channel.config.theme, channel.orgDefaults);
   return NextResponse.json(
     {
       ...channel.config,
       // Tema efetivo: o que o canal não define herda da marca da org.
-      theme: resolveWebchatTheme(channel.config.theme, channel.orgDefaults),
+      theme: { ...theme, avatarUrl: publicWebchatAvatarUrl(theme.avatarUrl, channel) },
       online,
       appearance: channel.v2.appearance,
       channel: { name: channel.name },

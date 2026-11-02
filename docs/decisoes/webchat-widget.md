@@ -943,6 +943,88 @@ direto faria a gravação de um valor longo falhar em qualquer organização. A 
 **Migration** `20261102120000_webchat_identity_routing`: aditiva. Os comandos
 `CONCURRENTLY` para rodar antes do deploy estão no cabeçalho.
 
+### 9.13 Aviso de contato no chat
+
+Ao abrir a conversa de outro canal, o agente vê acima do campo de mensagem
+"Este contato está no chat agora (Nº 34111)" e um botão que abre esse ticket.
+Evita responder por um canal em que o contato não está. Só informa: não bloqueia
+o envio e não muda nenhuma conversa.
+
+**Critério de ticket ativo** (`src/lib/webchat/active-conversation.ts`): ticket
+webchat do mesmo contato, com `status` diferente de `RESOLVED` e sem `closedAt`
+(o que o visitante ainda alcança ao escrever), mais uma das duas condições:
+
+| Condição | Janela | Motivo |
+|----------|--------|--------|
+| Visitante online: sessão do widget do contato, no canal do ticket, com `lastSeenAt` recente | 3 min | O widget chama a API a cada 3 s ou 10 s, mas `lastSeenAt` só grava a cada 60 s e aba escondida reduz os timers. Vale com o painel do widget fechado, porque a resposta chega nele |
+| Mensagem recente do visitante (`lastInboundAt`) | 30 min | Quem escreveu e fechou a página ainda recebe a resposta ao voltar |
+
+Online vem antes de mensagem recente; depois, a mensagem mais nova.
+
+**Contrato**: `GET /api/conversations/:id/active-webchat` → `{ active: { id, number,
+reason: "online" | "recent_message" } | null }`. Mesmo acesso da conversa (404 sem
+acesso). `organizationId` explícito nas duas consultas, além do escopo do `prisma`.
+
+**Custo**: a lista do inbox não muda. O frontend consulta só a conversa aberta, fora
+do webchat, a cada 30 s com a aba visível. Contato sem ticket webchat aberto gasta
+uma consulta pelo índice de contato e não lê as sessões.
+
+**Limites**:
+
+- Ticket que o usuário não pode abrir não aparece no aviso, porque o botão daria 404.
+- Contato separado por telefone compartilhado (§9.12) não avisa: é outro contato.
+- Duas contas de webchat do mesmo contato não se avisam entre si.
+- O visitante que chega com a conversa já aberta aparece em até 30 s.
+
+**Notas do webchat em outras conversas** (avaliado em 2026-11-02, sem mudança): o
+histórico unificado só vai em um sentido: o ticket webchat mostra os outros canais
+(§3.2). O `GET` de um ticket de outro canal não traz nota do webchat, nem com
+`history=1`. Em ticket de outro canal, a nota aparece por outro caminho: o
+`new_message` de nota sai sem `card`, o frontend casa o evento só pelo contato e pinta
+uma bolha (`sse:`) no chat aberto. Essa bolha fica até recarregar a página. Não é
+contrato: a recomendação é tirá-la e deixar o aviso acima levar o agente ao ticket
+certo.
+### 9.14 Logo do widget e upload no canal
+
+**Causa da imagem quebrada**: `GET /config` devolvia o caminho de `Organization.logoUrl`
+(`/api/storage/{org}/branding/...`). Essa rota exige sessão em todos os buckets, e o
+visitante não tem sessão. Quem está logado no CRM via a logo, então o erro só aparecia
+fora dele. Um `fetch` com `credentials: 'omit'` pode responder 200 logo depois de a logo
+ter carregado com sessão, mas a resposta vem do cache do navegador (`private,
+max-age=300`). Com `cache: 'no-store'` o resultado é 401.
+
+**Decisão**: `/api/storage` continua privado, inclusive `branding`. A imagem sai por
+`GET /api/public/webchat/logo?key=wc_…`:
+
+- O arquivo vem da config do canal. O cliente só informa a chave, então não escolhe
+  arquivo nem enumera o bucket. Só a imagem em uso fica pública; a trocada deixa de sair.
+- Só serve `branding` da organização do canal, e os bytes precisam ser JPEG, PNG, WEBP
+  ou GIF. Caso contrário, 404.
+- `GET /config` troca o caminho do storage por essa rota, com `v` derivado do nome do
+  arquivo para furar o cache (`public, max-age=3600`). O nome e a organização não
+  aparecem. Outro caminho do storage vira `null`.
+- Não confere a origem: `<img>` não a envia, e a chave já é pública.
+
+Assinar a URL (como `?t=` em `inbound-media`) foi descartado: o link continuaria valendo
+para um arquivo fora de uso e dependeria de quem o gerou.
+
+**Upload**: `POST /api/channels/:id/webchat-logo` (multipart, campo `file`, exige `manage`
+no canal, até 2 MB) grava no `branding` da organização do canal e devolve `{ url }`.
+Validação por magic bytes, em `lib/branding-image-upload.ts`, a mesma de
+`POST /api/organization/logo`, que continua com o limite de 4 MB. O arquivo só vale, e só
+fica público, quando o painel salva `theme.avatarUrl = url`. Uma imagem substituída fica
+no storage, privada, como acontece com a logo da organização.
+
+**`theme.avatarUrl`** aceita: URL `https` (fluxo manual, mantido e servido do próprio
+endereço), caminho de imagem enviada (`/api/storage/{org}/branding/...`, só da própria
+organização, conferido ao gravar) ou `null` (herda a logo da organização).
+
+**Limites**:
+
+- Logo trocada na organização leva até 60 s para aparecer (cache do canal). Salvar o
+  canal invalida esse cache na hora.
+- Sem o fallback de storage legado (`STORAGE_FALLBACK_URL`). Arquivo só no host legado
+  dá 404, e o widget mostra a inicial do título.
 ### 9.15 Modelos do widget e botões por canal
 
 O canal escolhe como o widget abre e quais botões o visitante vê. Fica em

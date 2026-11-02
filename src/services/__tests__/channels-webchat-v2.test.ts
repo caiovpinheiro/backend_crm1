@@ -122,6 +122,18 @@ describe("updateChannel (WEBCHAT) com v2", () => {
     expect(again.v2.context.labels).toEqual({ etapa: "Etapa" });
   });
 
+  it("logo enviada: aceita a da própria organização e recusa a de outra", async () => {
+    const org = String(h.row?.organizationId);
+    const path = `/api/storage/${org}/branding/webchat_logo_1.png`;
+    await updateChannel("ch-1", { config: { theme: { avatarUrl: path } } });
+    expect((h.updates[0]?.config as { theme: { avatarUrl: string } }).theme.avatarUrl).toBe(path);
+    await expect(
+      updateChannel("ch-1", {
+        config: { theme: { avatarUrl: "/api/storage/outra_org/branding/webchat_logo_1.png" } },
+      }),
+    ).rejects.toThrow(/outra organização/);
+  });
+
   it("v2 inválido → erro de validação", async () => {
     await expect(
       updateChannel("ch-1", { config: { v2: { events: { retentionDays: 0 } } } }),

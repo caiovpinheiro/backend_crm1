@@ -19,7 +19,7 @@
 import { NextResponse } from "next/server";
 
 import { requireManager } from "@/lib/auth-helpers";
-import { extForMime, sniffImageMime } from "@/lib/file-sniff";
+import { readBrandingImageUpload } from "@/lib/branding-image-upload";
 import { generateFileName, saveFile } from "@/lib/storage/local";
 import { setOrganizationLogo } from "@/services/onboarding";
 import { getLogger } from "@/lib/logger";
@@ -40,45 +40,12 @@ export async function POST(request: Request) {
   }
 
   try {
-    let form: FormData;
-    try {
-      form = await request.formData();
-    } catch {
-      return NextResponse.json(
-        { message: "Erro ao processar upload." },
-        { status: 400 },
-      );
+    const upload = await readBrandingImageUpload(request, MAX_LOGO_SIZE);
+    if (!upload.ok) {
+      return NextResponse.json({ message: upload.message }, { status: upload.status });
     }
+    const { buffer, mimeType: sniffed, ext } = upload;
 
-    const raw = form.get("file");
-    if (!raw || !(raw instanceof Blob)) {
-      return NextResponse.json(
-        { message: 'Envie a imagem no campo "file".' },
-        { status: 400 },
-      );
-    }
-
-    const file = raw as Blob;
-    if (file.size > MAX_LOGO_SIZE) {
-      return NextResponse.json(
-        { message: `Imagem excede o limite de ${MAX_LOGO_SIZE / 1024 / 1024} MB.` },
-        { status: 413 },
-      );
-    }
-
-    const buffer = Buffer.from(await file.arrayBuffer());
-
-    // Valida via magic bytes (não confia no Content-Type). Rejeita SVG
-    // (vetor XSS) e qualquer coisa que não seja JPEG/PNG/WEBP/GIF.
-    const sniffed = sniffImageMime(buffer);
-    if (!sniffed) {
-      return NextResponse.json(
-        { message: "Envie uma imagem JPG, PNG, WEBP ou GIF." },
-        { status: 415 },
-      );
-    }
-
-    const ext = extForMime(sniffed);
     const fileName = generateFileName({ prefix: "logo", ext });
     const saved = await saveFile({ orgId, bucket: "branding", fileName, buffer });
     await setOrganizationLogo(orgId, saved.url);
