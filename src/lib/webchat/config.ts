@@ -66,6 +66,13 @@ const HHMM_RE = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
 const KEY_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
 /** Erro de validação do config — as rotas devolvem 400 com `message`. */
+/**
+ * Logo enviada pelo painel (`POST /api/channels/:id/webchat-logo`). Quem grava
+ * confere se o caminho é da própria organização (`assertWebchatLogoOfOrg`).
+ */
+export const WEBCHAT_STORED_LOGO_PATH =
+  /^\/api\/storage\/[A-Za-z0-9_-]+\/branding\/[A-Za-z0-9._-]+\.(?:jpe?g|png|webp|gif)$/i;
+
 export class WebchatConfigError extends Error {
   constructor(message: string) {
     super(message);
@@ -176,8 +183,12 @@ function parseTheme(v: unknown, fallback: WebchatTheme): WebchatTheme {
   if (typeof primary === "string" && primary) out.primary = primary;
   const avatar = t.avatarUrl === undefined ? fallback.avatarUrl : t.avatarUrl;
   if (avatar !== undefined && avatar !== null && avatar !== "") {
-    if (typeof avatar !== "string" || !/^https:\/\//i.test(avatar) || avatar.length > 2000) {
-      throw new WebchatConfigError("theme.avatarUrl deve ser uma URL https.");
+    if (
+      typeof avatar !== "string" ||
+      !(/^https:\/\//i.test(avatar) || WEBCHAT_STORED_LOGO_PATH.test(avatar)) ||
+      avatar.length > 2000
+    ) {
+      throw new WebchatConfigError("theme.avatarUrl deve ser uma URL https ou uma imagem enviada.");
     }
     out.avatarUrl = avatar;
   }

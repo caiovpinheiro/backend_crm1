@@ -13,6 +13,8 @@ import {
 import { applySessionResetOnIdentityChange } from "@/lib/channel-session";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { getOrgIdOrThrow } from "@/lib/request-context";
+import { assertWebchatLogoOfOrg } from "@/lib/webchat/logo";
 import { logAudit } from "@/lib/audit/log";
 import { pickFields } from "@/lib/audit/redact";
 import { cache } from "@/lib/cache";
@@ -373,8 +375,10 @@ async function createWebchatChannel(data: CreateChannelData): Promise<Channel> {
   await assertWebchatDealMatchField(v2);
   for (let attempt = 0; ; attempt++) {
     const publicKey = generateWebchatPublicKey();
+    const normalized = normalizeWebchatConfig(data.config, defaultWebchatConfig(publicKey));
+    assertWebchatLogoOfOrg(normalized.theme.avatarUrl, getOrgIdOrThrow());
     const config = {
-      ...normalizeWebchatConfig(data.config, defaultWebchatConfig(publicKey)),
+      ...normalized,
       // v2 (§9.7): defaults seguros; segredos só pela rota de geração.
       v2,
     };
@@ -454,8 +458,10 @@ export async function updateChannel(id: string, data: UpdateChannelData): Promis
       const previousV2 = readWebchatV2Config(before.config);
       const v2 = normalizeWebchatV2Config(incoming?.v2, previousV2);
       await assertWebchatDealMatchField(v2, previousV2);
+      const normalized = normalizeWebchatConfig(data.config, current);
+      assertWebchatLogoOfOrg(normalized.theme.avatarUrl, before.organizationId);
       patch.config = {
-        ...normalizeWebchatConfig(data.config, current),
+        ...normalized,
         v2,
         ...pickWebchatSecretFields(before.config),
       } as unknown as Prisma.InputJsonValue;
