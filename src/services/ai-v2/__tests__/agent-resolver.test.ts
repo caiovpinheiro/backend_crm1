@@ -69,6 +69,12 @@ describe("resolveV2AgentForConversation — atribuição automática", () => {
     mocks.attendanceEnabled.mockResolvedValue(true);
   });
 
+  it("atendimento do canal mandou para pessoas: a IA não assume a conversa na fila", async () => {
+    mocks.conversationFindUnique.mockResolvedValue({ ...UNASSIGNED, routeMode: "human" });
+    expect(await resolveV2AgentForConversation("conv-1")).toBeNull();
+    expect(mocks.conversationUpdateMany).not.toHaveBeenCalled();
+  });
+
   it("conversa atribuída a agente de IA desligado é solta e vai para o agente ativo", async () => {
     mocks.conversationFindUnique.mockResolvedValue({
       ...UNASSIGNED,

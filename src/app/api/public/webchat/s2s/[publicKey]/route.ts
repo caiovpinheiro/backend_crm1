@@ -18,7 +18,11 @@ import {
   maybePurgeExpiredIngressKeys,
   type S2SResponseBody,
 } from "@/lib/webchat/s2s/idempotency";
-import { processWebchatS2SIngress, webchatConversationUrl } from "@/lib/webchat/s2s/ingress";
+import {
+  processWebchatS2SIngress,
+  webchatConversationUrl,
+  webchatDealUrl,
+} from "@/lib/webchat/s2s/ingress";
 import { readWebchatSecret } from "@/lib/webchat/secrets";
 import { loadWebchatChannelByKey, webchatError } from "@/lib/webchat/session";
 import { verifyWebchatS2S } from "@/lib/webchat/signatures";
@@ -36,7 +40,7 @@ type Ctx = { params: Promise<{ publicKey: string }> };
  * Headers: `X-Timestamp` (s Unix, ±300 s), `X-Signature: sha256=<hex>` =
  * HMAC-SHA256(segredo S2S, `${X-Timestamp}.${corpoCru}`), `Idempotency-Key`.
  * Corpo (≤ 32 KB): `{ external_id, ref?, category?, priority?, text?, fields?, links? }`.
- * 200 `{ conversation_id, url }` (repetição: o mesmo corpo + `Idempotent-Replayed: true`).
+ * 200 `{ conversation_id, url, deal_id?, deal_url? }` (repetição: o mesmo corpo + `Idempotent-Replayed: true`).
  * Erros `{ message, code }`: 429 (IP), 404 CHANNEL_NOT_FOUND, 413, 403 S2S_NOT_CONFIGURED,
  * 401 TIMESTAMP_EXPIRED | SIGNATURE_INVALID, 429 (`webchat.s2s` por canal, só pedido
  * assinado), 400 IDEMPOTENCY_KEY_INVALID |
@@ -131,6 +135,9 @@ export async function POST(request: Request, ctx: Ctx) {
         const body: S2SResponseBody = {
           conversation_id: res.conversationId,
           url: await webchatConversationUrl(channel.organizationId, res.conversationNumber),
+          ...(res.dealId
+            ? { deal_id: res.dealId, deal_url: await webchatDealUrl(channel.organizationId, res.dealId) }
+            : {}),
         };
         await completeIdempotencyKey(claim.id, body);
         log.info(

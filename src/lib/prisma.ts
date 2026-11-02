@@ -140,6 +140,7 @@ const SCOPED_MODELS = new Set<Prisma.ModelName>([
   "WebchatEvent",
   "WebchatIngressKey",
   "WebchatConversationRef",
+  "WebchatIdentityLink",
   "QuickReply",
   "MessageTemplate",
   "WhatsAppTemplateConfig",

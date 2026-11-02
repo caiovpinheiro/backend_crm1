@@ -21,9 +21,31 @@ export function normalizeWebchatExternalId(raw: unknown): string | null {
   return v;
 }
 
+/** Modos em que a identidade fica no contato (o de negócio tem `deal-identity.ts`). */
+type ContactMatchField = Exclude<WebchatMatchField, { type: "dealCustomField" }>;
+
+/**
+ * Campo de match que vale agora: campo personalizado apagado (ou de outra
+ * entidade) volta ao `externalId`, para o fluxo não quebrar.
+ */
+export async function effectiveWebchatMatchField(
+  configured: WebchatMatchField,
+  db: ScopedTx = prisma,
+): Promise<WebchatMatchField> {
+  if (configured.type === "externalId") return configured;
+  const field = await db.customField.findFirst({
+    where: {
+      id: configured.customFieldId,
+      entity: configured.type === "dealCustomField" ? "deal" : "contact",
+    },
+    select: { id: true },
+  });
+  return field ? configured : { type: "externalId" };
+}
+
 /** Contato da org com esse `externalId` no campo de match (ou `null`). */
 export async function findContactByWebchatIdentity(
-  matchField: WebchatMatchField,
+  matchField: ContactMatchField,
   externalId: string,
   db: ScopedTx = prisma,
 ): Promise<{ id: string } | null> {
@@ -47,7 +69,7 @@ export type SetWebchatIdentityResult = "ok" | "taken" | "field_missing";
  */
 export async function setContactWebchatIdentity(
   contactId: string,
-  matchField: WebchatMatchField,
+  matchField: ContactMatchField,
   externalId: string,
   db: ScopedTx = prisma,
 ): Promise<SetWebchatIdentityResult> {

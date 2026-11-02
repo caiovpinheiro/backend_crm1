@@ -2,10 +2,12 @@ import { describe, expect, it } from "vitest";
 
 import {
   defaultWebchatV2Config,
+  hasWebchatRoutingEffect,
   isImportantWebchatEvent,
   matchWebchatRoutingRules,
   normalizeWebchatV2Config,
   readWebchatV2Config,
+  resolveS2SRouting,
   WebchatV2ConfigError,
 } from "@/lib/webchat/v2-config";
 
@@ -147,3 +149,102 @@ describe("regras e eventos importantes", () => {
     expect(isImportantWebchatEvent("clique", undefined, cfg)).toBe(false);
   });
 });
+
+describe("identidade por campo de negócio e atendimento (§9.12)", () => {
+  const base = () => defaultWebchatV2Config();
+
+  it("padrão não muda nada", () => {
+    expect(hasWebchatRoutingEffect(base().routing)).toBe(false);
+    expect(base().routing).toEqual({
+      priority: "standard",
+      destination: { type: "distribution" },
+      keepCurrentOwner: true,
+      fallback: { type: "distribution" },
+    });
+  });
+
+  it("aceita campo de negócio; normalização padrão é none", () => {
+    const res = normalizeWebchatV2Config(
+      { identity: { matchField: { type: "dealCustomField", customFieldId: "f1" } } },
+      base(),
+    );
+    expect(res.identity.matchField).toEqual({ type: "dealCustomField", customFieldId: "f1", normalize: "none" });
+  });
+
+  it("recusa normalização ou tipo inválidos", () => {
+    const bad = { identity: { matchField: { type: "dealCustomField", customFieldId: "f1", normalize: "x" } } };
+    expect(() => normalizeWebchatV2Config(bad, base())).toThrow(WebchatV2ConfigError);
+    expect(() =>
+      normalizeWebchatV2Config({ identity: { matchField: { type: "outro" } } }, base()),
+    ).toThrow(WebchatV2ConfigError);
+  });
+
+  it("routing parcial mescla sobre o gravado", () => {
+    const first = normalizeWebchatV2Config(
+      { routing: { priority: "high", destination: { type: "user", id: "u1" } } },
+      base(),
+    );
+    const second = normalizeWebchatV2Config({ routing: { keepCurrentOwner: false } }, first);
+    expect(second.routing).toMatchObject({
+      priority: "high",
+      destination: { type: "user", id: "u1" },
+      keepCurrentOwner: false,
+    });
+    expect(hasWebchatRoutingEffect(second.routing)).toBe(true);
+  });
+
+  it.each([
+    [{ priority: "urgente" }],
+    [{ destination: { type: "fila" } }],
+    [{ destination: { type: "user" } }],
+    [{ fallback: { type: "department", id: "com espaço" } }],
+    [{ keepCurrentOwner: "sim" }],
+  ])("routing inválido é recusado: %j", (routing) => {
+    expect(() => normalizeWebchatV2Config({ routing }, base())).toThrow(WebchatV2ConfigError);
+  });
+
+  it("leitura tolerante: routing ruim volta ao padrão e o resto fica", () => {
+    const res = readWebchatV2Config({
+      v2: { routing: { priority: "urgente" }, context: { anonymous: true } },
+    });
+    expect(res.routing).toEqual(base().routing);
+    expect(res.context.anonymous).toBe(true);
+  });
+
+  it("regra aceita destino e prioridade como ação", () => {
+    const res = normalizeWebchatV2Config(
+      {
+        s2s: {
+          rules: [{ priority: "high", destination: { type: "ai_agent", id: "a1" }, queuePriority: "high" }],
+        },
+      },
+      base(),
+    );
+    expect(res.s2s.rules[0]).toEqual({
+      priority: "high",
+      destination: { type: "ai_agent", id: "a1" },
+      queuePriority: "high",
+    });
+    expect(() =>
+      normalizeWebchatV2Config({ s2s: { rules: [{ priority: "high", queuePriority: "baixa" }] } }, base()),
+    ).toThrow(WebchatV2ConfigError);
+  });
+
+  it("S2S: primeira regra com destino vence; alta vale se canal ou regra pedir", () => {
+    const channel = {
+      ...base().routing,
+      destination: { type: "department", id: "d" } as const,
+    };
+    const a = { priority: "high", destination: { type: "user", id: "u1" } as const };
+    const b = { priority: "high", destination: { type: "user", id: "u2" } as const, queuePriority: "high" as const };
+    expect(resolveS2SRouting(channel, [a, b])).toEqual({
+      routing: { ...channel, destination: { type: "user", id: "u1" }, priority: "high" },
+      force: true,
+      departmentId: null,
+    });
+    expect(resolveS2SRouting(channel, [])).toEqual({ routing: channel, force: false, departmentId: null });
+    const high = { ...channel, priority: "high" as const };
+    expect(resolveS2SRouting(high, [{ priority: "x", tagId: "t" }]).routing.priority).toBe("high");
+  });
+});
+

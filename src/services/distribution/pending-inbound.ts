@@ -23,6 +23,7 @@ import { getLogger } from "@/lib/logger";
 
 import { executeDistribution } from "./engine";
 import { isDistributionEnabled } from "./enabled";
+import { WEBCHAT_ROUTING_VIA } from "@/lib/conversation-route";
 import { ASSIGN_OWNER_VIA, getOrgDistributionModeFresh } from "./mode";
 import {
   ensureConversationInWaitingQueue,
@@ -37,7 +38,8 @@ function pendingWasRequested(triggerSource: string | null | undefined): boolean 
   return (
     src.includes("AUTOMATION") ||
     src.includes("MANUAL") ||
-    src.includes("AI_AGENT")
+    src.includes("AI_AGENT") ||
+    src.includes("WEBCHAT_ROUTING")
   );
 }
 
@@ -155,11 +157,15 @@ export async function purgeUnansweredFromPendingQueue(): Promise<number> {
     .filter((id): id is string => Boolean(id));
 
   // Não purga redistribuição MANUAL — operador mandou p/ fila de propósito.
+  // O atendimento do webchat também: o S2S abre ticket antes de o cliente escrever.
   const res = await prisma.distributionPending.updateMany({
     where: {
       organizationId: orgId,
       status: "PENDING",
-      NOT: { triggerSource: "MANUAL" },
+      NOT: [
+        { triggerSource: "MANUAL" },
+        { triggerSource: { contains: "WEBCHAT_ROUTING" } },
+      ],
       OR: [
         { conversationId: { in: convIds } },
         ...(contactIds.length > 0
@@ -260,7 +266,9 @@ export async function maybeDistributeNewInboundTicket(input: {
     });
     const assignedVia = (convRoute as { assignedVia?: string | null } | null)?.assignedVia;
     if (
-      (assignedVia === "leads" || assignedVia === ASSIGN_OWNER_VIA) &&
+      (assignedVia === "leads" ||
+        assignedVia === ASSIGN_OWNER_VIA ||
+        assignedVia === WEBCHAT_ROUTING_VIA) &&
       input.assignedToId &&
       convRoute?.assignedTo?.type === "HUMAN"
     ) {

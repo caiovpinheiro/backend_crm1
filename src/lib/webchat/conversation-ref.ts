@@ -35,6 +35,8 @@ export async function recordWebchatConversationRef(
     priority?: string | null;
     /** `config.v2.refDealCustomFieldId` do canal. */
     refDealCustomFieldId: string | null;
+    /** Negócio já identificado; sem ele, o aberto mais recente do contato. */
+    dealId?: string | null;
   },
   db: ScopedTx = prisma,
 ): Promise<{ id: string; created: boolean }> {
@@ -56,7 +58,7 @@ export async function recordWebchatConversationRef(
     select: { id: true },
   });
   if (input.refDealCustomFieldId) {
-    await copyRefToDeal(db, input.contactId, input.refDealCustomFieldId, input.ref);
+    await copyRefToDeal(db, input.contactId, input.refDealCustomFieldId, input.ref, input.dealId ?? null);
   }
   return { id: row.id, created: !existing };
 }
@@ -66,17 +68,20 @@ async function copyRefToDeal(
   contactId: string,
   customFieldId: string,
   ref: string,
+  dealId: string | null,
 ): Promise<void> {
   const field = await db.customField.findFirst({
     where: { id: customFieldId, entity: "deal" },
     select: { id: true },
   });
   if (!field) return;
-  const deal = await db.deal.findFirst({
-    where: { contactId, status: "OPEN" },
-    select: { id: true },
-    orderBy: { updatedAt: "desc" },
-  });
+  const deal = dealId
+    ? await db.deal.findFirst({ where: { id: dealId }, select: { id: true } })
+    : await db.deal.findFirst({
+        where: { contactId, status: "OPEN" },
+        select: { id: true },
+        orderBy: { updatedAt: "desc" },
+      });
   if (!deal) return;
   await db.dealCustomFieldValue.upsert({
     where: { dealId_customFieldId: { dealId: deal.id, customFieldId: field.id } },

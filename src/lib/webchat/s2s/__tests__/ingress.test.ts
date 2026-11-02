@@ -14,6 +14,7 @@ const m = vi.hoisted(() => ({
     tag: { findFirst: vi.fn() },
     tagOnContact: { findFirst: vi.fn(async (_a?: unknown): Promise<unknown> => null) },
     department: { findFirst: vi.fn() },
+    deal: { findFirst: vi.fn(async (_a?: unknown): Promise<unknown> => null) },
   },
   prismaBase: { organization: { findUnique: vi.fn(async () => ({ slug: "acme" })) } },
   insertContact: vi.fn(),
@@ -22,6 +23,7 @@ const m = vi.hoisted(() => ({
   findActive: vi.fn(),
   createNote: vi.fn(async () => "note-1"),
   findOrCreateConv: vi.fn(),
+  applyRouting: vi.fn(async (_a: unknown) => true),
   writeLiveContext: vi.fn(async (_a: unknown) => ({
     state: { etapa: "2" } as Record<string, string | number | boolean>,
     updatedAt: new Date("2026-10-28T12:00:00Z"),
@@ -50,6 +52,7 @@ vi.mock("@/lib/webchat/conversation-notes", () => ({
 }));
 vi.mock("@/lib/webchat/tracking/realtime", () => ({ publishWebchatContextChange: m.publishContext }));
 vi.mock("@/lib/webchat/inbound", () => ({ findOrCreateWebchatConversation: m.findOrCreateConv }));
+vi.mock("@/lib/webchat/routing", () => ({ applyWebchatRouting: m.applyRouting }));
 vi.mock("@/lib/webchat/live-context", async (orig) => ({
   ...(await orig<typeof import("@/lib/webchat/live-context")>()),
   writeLiveContext: m.writeLiveContext,
@@ -202,10 +205,12 @@ describe("entrada S2S — efeito", () => {
     m.findOrCreateConv.mockResolvedValue({ id: "conv-nova", assignedToId: null, created: true });
     m.prisma.conversation.findFirst.mockResolvedValue({ id: "conv-nova", number: 99 });
     const res = await processWebchatS2SIngress(channel({ s2s: { queueTagId: "tag-fila" } }), request());
-    expect(m.findOrCreateConv).toHaveBeenCalledWith("ct-1", "ch-1", {
-      content: "Precisa de ajuda",
-      messageType: "note",
-    });
+    expect(m.findOrCreateConv).toHaveBeenCalledWith(
+      "ct-1",
+      "ch-1",
+      { content: "Precisa de ajuda", messageType: "note" },
+      null,
+    );
     expect(res).toMatchObject({ conversationId: "conv-nova", conversationNumber: 99, conversationCreated: true });
     expect(m.addTag).toHaveBeenCalledWith("ct-1", "tag-fila");
     expect(m.createNote).toHaveBeenCalledWith(expect.objectContaining({ conversationId: "conv-nova" }));
@@ -235,6 +240,7 @@ describe("entrada S2S — efeito", () => {
       category: "suporte",
       priority: "alta",
       refDealCustomFieldId: "cf-deal",
+      dealId: null,
     });
   });
 
@@ -285,5 +291,69 @@ describe("entrada S2S — efeito", () => {
     } finally {
       vi.unstubAllEnvs();
     }
+  });
+
+  describe("atendimento nas regras (§9.12)", () => {
+    const rule = { priority: "high", destination: { type: "user", id: "u-1" }, queuePriority: "high" };
+
+    it("sem regra nem configuração: nada de atendimento, como hoje", async () => {
+      await processWebchatS2SIngress(channel(), request({ priority: "high" }));
+      expect(m.applyRouting).not.toHaveBeenCalled();
+    });
+
+    it("priority high casa a regra: destino e prioridade da regra, em ticket aberto", async () => {
+      await processWebchatS2SIngress(channel({ s2s: { rules: [rule] } }), request({ priority: "HIGH" }));
+      expect(m.applyRouting).toHaveBeenCalledWith(
+        expect.objectContaining({
+          conversationId: "conv-1",
+          contactId: "ct-1",
+          force: true,
+          routing: expect.objectContaining({ priority: "high", destination: { type: "user", id: "u-1" } }),
+        }),
+      );
+    });
+
+    it("regra vale sobre o canal; o canal fica quando nenhuma casa", async () => {
+      const v2 = {
+        routing: { destination: { type: "department", id: "d-1" }, fallback: { type: "ai_agent", id: "a-1" } },
+        s2s: { rules: [rule] },
+      };
+      await processWebchatS2SIngress(channel(v2), request({ priority: "high" }));
+      expect(m.applyRouting).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          routing: expect.objectContaining({
+            destination: { type: "user", id: "u-1" },
+            fallback: { type: "ai_agent", id: "a-1" },
+          }),
+        }),
+      );
+      await processWebchatS2SIngress(channel(v2), request({ priority: "normal" }));
+      expect(m.applyRouting).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          force: false,
+          routing: expect.objectContaining({ priority: "standard", destination: { type: "department", id: "d-1" } }),
+        }),
+      );
+    });
+
+    it("sem conversa: a regra chega na abertura do ticket", async () => {
+      m.findActive.mockResolvedValue(null);
+      m.findOrCreateConv.mockResolvedValue({ id: "conv-nova", assignedToId: null, created: true });
+      m.prisma.conversation.findFirst.mockResolvedValue({ id: "conv-nova", number: 99 });
+      await processWebchatS2SIngress(channel({ s2s: { rules: [rule] } }), request({ priority: "high" }));
+      expect(m.findOrCreateConv).toHaveBeenCalledWith(
+        "ct-1",
+        "ch-1",
+        expect.anything(),
+        expect.objectContaining({ force: true }),
+      );
+      expect(m.applyRouting).not.toHaveBeenCalled();
+    });
+
+    it("devolve o negócio aberto do contato quando o campo de match é outro", async () => {
+      m.prisma.deal.findFirst.mockResolvedValueOnce({ id: "deal-1" });
+      const res = await processWebchatS2SIngress(channel(), request());
+      expect(res.dealId).toBe("deal-1");
+    });
   });
 });

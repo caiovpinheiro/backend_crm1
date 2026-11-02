@@ -12,6 +12,7 @@
  */
 
 import { isRetiredWhatsAppChannel } from "@/lib/channels/retired-whatsapp";
+import { HUMAN_ROUTE_MODE } from "@/lib/conversation-route";
 import { getLogger } from "@/lib/logger";
 import { getOrgSetting } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
@@ -101,6 +102,7 @@ export async function tryAssignFirstAttendanceAi(args: {
       hasHumanReply: true,
       closedAt: true,
       channelId: true,
+      routeMode: true,
       contact: { select: { phone: true } },
       channelRef: { select: { status: true, name: true, phoneNumber: true, config: true } },
       assignedTo: { select: { type: true } },
@@ -109,6 +111,12 @@ export async function tryAssignFirstAttendanceAi(args: {
   if (!conv) return null;
   const contactId = conv.contactId ?? args.contactId;
   if (!contactId) return null;
+
+  // O atendimento do canal mandou para pessoas.
+  if (conv.routeMode === HUMAN_ROUTE_MODE) {
+    logAi("first_attendance_skip_human_route", { conversationId: conv.id, contactId });
+    return null;
+  }
 
   if (isRetiredWhatsAppChannel(conv.channelRef)) {
     logAi("first_attendance_skip_retired_channel", { conversationId: conv.id, channel: conv.channelRef?.name });

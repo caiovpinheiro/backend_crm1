@@ -195,6 +195,7 @@ model Organization {
   whatsAppGroups           WhatsAppGroup[]
   webchatSessions          WebchatSession[]
   webchatLiveContexts      WebchatLiveContext[]
+  webchatIdentityLinks     WebchatIdentityLink[]
   webchatEvents            WebchatEvent[]
   webchatIngressKeys       WebchatIngressKey[]
   webchatConversationRefs  WebchatConversationRef[]
@@ -1254,6 +1255,7 @@ model Contact {
   calls                  Call[]
   webchatSessions        WebchatSession[]
   webchatLiveContexts    WebchatLiveContext[]
+  webchatIdentityLinks   WebchatIdentityLink[]
   webchatEvents          WebchatEvent[]
 
   /// Última mensagem de CHAT do contato em qualquer conversa (mesmo recorte de
@@ -1660,6 +1662,7 @@ model Deal {
 
   contactId String?
   contact   Contact? @relation(fields: [contactId], references: [id])
+  webchatIdentityLinks WebchatIdentityLink[]
   stageId   String
   stage     Stage    @relation(fields: [stageId], references: [id])
   ownerId   String?
@@ -3180,10 +3183,22 @@ model Conversation {
   /// Rota de distribuição destinada a esta conversa ("leads"; null = rota normal).
   /// Conversas com routeMode="leads" ficam fora da fila de espera e da
   /// distribuição automática smart até uma atribuição explícita.
+  /// "human": o atendimento do canal mandou para pessoas; a IA não assume
+  /// enquanto a conversa espera na fila. A atribuição seguinte limpa.
   routeMode    String?
 
   departmentId String?
   department   Department? @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+
+  /// Quando a conversa entrou como prioritária (atendimento do webchat, §9.12).
+  /// Só vale com `status = OPEN` e `hasHumanReply = false`: a prioridade termina
+  /// sozinha na primeira resposta humana ou ao encerrar. O índice parcial
+  /// `conversations_active_priority_idx` vive só na migration
+  /// `20261102120000_webchat_identity_routing` (o Prisma não descreve parcial).
+  priorityAt   DateTime?
+  /// Quando o atendimento configurado no canal já foi aplicado neste ticket.
+  /// Evita reaplicar a cada mensagem (por cima de transferência ou handoff).
+  routedAt     DateTime?
 
   messages               Message[]
   pinnedMessages         PinnedMessage[]
@@ -3686,6 +3701,7 @@ model Channel {
   whatsAppGroups    WhatsAppGroup[]
   webchatSessions   WebchatSession[]
   webchatContexts   WebchatLiveContext[]
+  webchatIdentityLinks WebchatIdentityLink[]
   webchatEvents     WebchatEvent[]
   webchatIngress    WebchatIngressKey[]
 
@@ -7156,6 +7172,34 @@ model WebchatIngressKey {
 /// Webchat v2 — `ref` da conversa: identificador do lado do site (vem do
 /// `open({ ref })` do widget ou do servidor a servidor). Uma conversa pode ter
 /// vários. Guarda também o último status de callback enviado por ref.
+/// Valor verificado (identify assinado ou S2S) de um contato num canal, quando
+/// o canal identifica por campo de negócio. Um contato tem um valor por canal:
+/// é o que impede dois identificadores no mesmo telefone de lerem as mensagens
+/// um do outro no widget (§9.12). Os dois uniques fazem a disputa ser atômica.
+model WebchatIdentityLink {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  channelId      String
+  channel        Channel      @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  contactId      String
+  contact        Contact      @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  /// Valor já normalizado conforme `identity.matchField.normalize`.
+  value          String
+  /// Negócio desse valor. Pode ser de outro contato quando o telefone é compartilhado.
+  dealId         String?
+  deal           Deal?        @relation(fields: [dealId], references: [id], onDelete: SetNull)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@unique([channelId, value])
+  @@unique([channelId, contactId])
+  @@index([organizationId])
+  @@index([contactId])
+  @@index([dealId])
+  @@map("webchat_identity_links")
+}
+
 model WebchatConversationRef {
   id                 String       @id @default(cuid())
   organizationId     String

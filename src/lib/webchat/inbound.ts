@@ -27,6 +27,13 @@ import { publishNewMessage } from "@/lib/realtime-events";
 import { notifyInboundMessage } from "@/lib/web-push";
 import { notePossibleDuplicatesInConversation } from "@/lib/webchat/duplicate-notice";
 import { recordWebchatConversationRef } from "@/lib/webchat/conversation-ref";
+import {
+  attachIdentityValueToContactDeal,
+  findDealIdentityLink,
+  noteSeparatedIdentity,
+} from "@/lib/webchat/deal-identity";
+import { applyWebchatRouting } from "@/lib/webchat/routing";
+import { hasWebchatRoutingEffect, type WebchatRoutingConfig, type WebchatV2Config } from "@/lib/webchat/v2-config";
 import { contactTrackingFromSession, type WebchatSessionRow } from "@/lib/webchat/session";
 import { inheritContactAssigneeForNewTicket } from "@/services/ai/attendance-gate";
 import { ensureOpenDealForContact } from "@/services/auto-deals";
@@ -189,12 +196,28 @@ export async function ensureVisitorContact(
 
 // ── Ticket ──────────────────────────────────────────────────────────
 
-/** Mesma regra de `findOrCreateConversation` do Messenger/Instagram. */
+/**
+ * Mesma regra de `findOrCreateConversation` do Messenger/Instagram. `routing`
+ * (visitante verificado, §9.12) vem antes da distribuição de sempre.
+ */
 export async function findOrCreateWebchatConversation(
   contactId: string,
   channelId: string,
   opening?: { content?: string | null; messageType?: string | null },
+  routing?: { routing: WebchatRoutingConfig; force?: boolean; departmentId?: string | null } | null,
 ): Promise<{ id: string; assignedToId: string | null; created: boolean }> {
+  /** `true` se o atendimento cuidou do ticket. */
+  const routed = async (conversationId: string) =>
+    routing ? applyWebchatRouting({ conversationId, contactId, ...routing }) : false;
+  const assigneeOf = async (conversationId: string, known: string | null) => {
+    if (!routing) return known;
+    const row = await prisma.conversation.findUnique({
+      where: { id: conversationId },
+      select: { assignedToId: true },
+    });
+    return row?.assignedToId ?? null;
+  };
+
   const findOnAccount = (accountId: string | null) =>
     prisma.conversation.findFirst({
       where: activeConversationOnAccountWhere({
@@ -208,23 +231,36 @@ export async function findOrCreateWebchatConversation(
 
   const existing = await findOnAccount(channelId);
   if (existing) {
-    await maybeDistributeNewInboundTicket({
-      conversationId: existing.id,
-      contactId,
-      assignedToId: existing.assignedToId ?? null,
-    });
-    return { id: existing.id, assignedToId: existing.assignedToId ?? null, created: false };
+    if (!(await routed(existing.id))) {
+      const current = await assigneeOf(existing.id, existing.assignedToId ?? null);
+      await maybeDistributeNewInboundTicket({
+        conversationId: existing.id,
+        contactId,
+        assignedToId: current,
+      });
+    }
+    return {
+      id: existing.id,
+      assignedToId: await assigneeOf(existing.id, existing.assignedToId ?? null),
+      created: false,
+    };
   }
 
   const orphan = await findOnAccount(null);
   if (orphan) {
     await prisma.conversation.update({ where: { id: orphan.id }, data: { channelId } });
-    await maybeDistributeNewInboundTicket({
-      conversationId: orphan.id,
-      contactId,
-      assignedToId: orphan.assignedToId ?? null,
-    });
-    return { id: orphan.id, assignedToId: orphan.assignedToId ?? null, created: false };
+    if (!(await routed(orphan.id))) {
+      await maybeDistributeNewInboundTicket({
+        conversationId: orphan.id,
+        contactId,
+        assignedToId: await assigneeOf(orphan.id, orphan.assignedToId ?? null),
+      });
+    }
+    return {
+      id: orphan.id,
+      assignedToId: await assigneeOf(orphan.id, orphan.assignedToId ?? null),
+      created: false,
+    };
   }
 
   const inheritAssignee = await inheritContactAssigneeForNewTicket(contactId);
@@ -242,11 +278,13 @@ export async function findOrCreateWebchatConversation(
         select: { id: true, assignedToId: true },
       }),
     );
-    await maybeDistributeNewInboundTicket({
-      conversationId: created.id,
-      contactId,
-      assignedToId: inheritAssignee,
-    });
+    if (!(await routed(created.id))) {
+      await maybeDistributeNewInboundTicket({
+        conversationId: created.id,
+        contactId,
+        assignedToId: inheritAssignee,
+      });
+    }
     emitConversationCreated({
       contactId,
       channel: WEBCHAT_CONVERSATION_CHANNEL,
@@ -260,7 +298,9 @@ export async function findOrCreateWebchatConversation(
     });
     return {
       id: created.id,
-      assignedToId: created.assignedToId ?? inheritAssignee,
+      assignedToId: routing
+        ? await assigneeOf(created.id, null)
+        : created.assignedToId ?? inheritAssignee,
       created: true,
     };
   } catch (err) {
@@ -284,6 +324,8 @@ export async function processWebchatInbound(args: {
   ref?: string | null;
   /** `config.v2.refDealCustomFieldId` do canal. */
   refDealCustomFieldId?: string | null;
+  /** Config v2 do canal: vínculo por campo de negócio e atendimento (§9.12). */
+  v2?: WebchatV2Config | null;
   now?: Date;
 }): Promise<WebchatInboundResult> {
   const { organizationId, channelId, session, clientMessageId, content } = args;
@@ -306,19 +348,58 @@ export async function processWebchatInbound(args: {
 
   const contact = await ensureVisitorContact(session);
 
-  ensureOpenDealForContact({
-    contactId: contact.id,
-    contactName: contact.name,
-    source: "auto_webchat",
-    logTag: "webchat-inbound",
-    channelId,
-  }).catch((err) => log.warn({ err }, "Falha ao garantir deal aberto"));
+  const dealField =
+    args.v2?.identity.matchField.type === "dealCustomField" ? args.v2.identity.matchField : null;
+  const identityLink = dealField ? await findDealIdentityLink(channelId, contact.id) : null;
 
-  const conversation = await findOrCreateWebchatConversation(contact.id, channelId, {
-    content,
-    messageType: "text",
-  });
+  // Valor ligado a um negócio de outro contato (telefone compartilhado): o
+  // card já existe e não se cria outro para este contato.
+  const dealOfOtherContact =
+    identityLink?.dealId != null
+      ? (await prisma.deal.findFirst({
+          where: { id: identityLink.dealId, NOT: { contactId: contact.id } },
+          select: { id: true },
+        })) !== null
+      : false;
+  if (!dealOfOtherContact) {
+    ensureOpenDealForContact({
+      contactId: contact.id,
+      contactName: contact.name,
+      source: "auto_webchat",
+      logTag: "webchat-inbound",
+      channelId,
+    })
+      .then((res) => {
+        // Valor ainda sem negócio: o automático recebe o valor, para reconhecê-lo depois.
+        if (!dealField || !identityLink || identityLink.dealId || res.status === "skipped") return;
+        return attachIdentityValueToContactDeal({
+          channelId,
+          contactId: contact.id,
+          field: dealField,
+          value: identityLink.value,
+          dealId: res.dealId,
+        });
+      })
+      .catch((err) => log.warn({ err }, "Falha ao garantir deal aberto"));
+  }
+
+  const routingActive = args.v2 ? hasWebchatRoutingEffect(args.v2.routing) : false;
+  const verified = routingActive || dealField ? await isVerifiedSessionContact(session) : false;
+  const conversation = await findOrCreateWebchatConversation(
+    contact.id,
+    channelId,
+    { content, messageType: "text" },
+    routingActive && verified && args.v2 ? { routing: args.v2.routing } : null,
+  );
   if (conversation.created) {
+    if (identityLink) {
+      void noteSeparatedIdentity({
+        organizationId,
+        channelId,
+        conversationId: conversation.id,
+        contactId: contact.id,
+      });
+    }
     // Visitante que se identificou antes de escrever: o aviso de possível
     // duplicado entra no ticket que acabou de nascer.
     void prisma.contact
@@ -419,6 +500,7 @@ export async function processWebchatInbound(args: {
         ref: args.ref,
         source: "widget",
         refDealCustomFieldId: args.refDealCustomFieldId ?? null,
+        ...(verified && identityLink?.dealId ? { dealId: identityLink.dealId } : {}),
       });
     } catch (err) {
       log.warn({ err, conversationId: conversation.id }, "ref da conversa não gravado");

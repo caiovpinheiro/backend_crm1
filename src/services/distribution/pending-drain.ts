@@ -10,6 +10,8 @@ import {
 } from "@/lib/distribution-drain-queue";
 import { metrics } from "@/lib/metrics";
 import { debugInfo, debugWarn } from "@/lib/debug-log";
+import { ACTIVE_PRIORITY_WHERE } from "@/lib/conversation-priority";
+import { HUMAN_ROUTE_MODE } from "@/lib/conversation-route";
 import { activeInboxQueueGuardWhere } from "@/lib/inbox-queue-membership";
 import { prisma } from "@/lib/prisma";
 import {
@@ -328,7 +330,18 @@ export async function processPendingDistributionQueue(opts: {
     // um `findMany` (take 500) por departamento dentro de `drainBucket`.
     const pendingAiConvIds = await loadPendingAiConversationIds(orgId);
 
-    const drainBucket = async (departmentId: string | null) => {
+    // Prioritárias: uma passada antes das demais, em todos os departamentos,
+    // porque a mesma pessoa pode ter vaga em mais de um (§9.12 do webchat).
+    const priorityRows =
+      requestedPendingIds.length > 0
+        ? await prisma.conversation.findMany({
+            where: { id: { in: requestedPendingIds }, ...ACTIVE_PRIORITY_WHERE },
+            select: { id: true },
+          })
+        : [];
+    const priorityIds = new Set((priorityRows ?? []).map((r) => r.id));
+
+    const drainBucket = async (departmentId: string | null, onlyPriority = false) => {
       const inDept = eligibleInDeptScope(eligible, departmentId);
       const capDeptId = inDept.length > 0 ? departmentId : null;
 
@@ -352,11 +365,12 @@ export async function processPendingDistributionQueue(opts: {
 
       const items = await prisma.conversation.findMany({
         where: {
-          lastInboundAt: { not: null },
           ...activeInboxQueueGuardWhere(),
-          ...(requestedPendingIds
-            ? { id: { in: requestedPendingIds } }
-            : {}),
+          ...(onlyPriority
+            ? { id: { in: [...priorityIds] } }
+            : requestedPendingIds
+              ? { id: { in: requestedPendingIds } }
+              : {}),
           departmentId: departmentId === null ? null : departmentId,
           OR: [
             { assignedToId: null },
@@ -372,11 +386,13 @@ export async function processPendingDistributionQueue(opts: {
           // Modo leads nunca é drenado pelo smart: nem os marcados pelo step
           // (routeMode) nem os roteados a departamento leads.
           AND: [
+            // O atendimento do webchat pode abrir ticket antes de o cliente escrever.
+            { OR: [{ lastInboundAt: { not: null } }, { routeMode: HUMAN_ROUTE_MODE }] },
             { OR: [{ routeMode: null }, { routeMode: { not: "leads" } }] },
             { NOT: { department: { distributionMode: "leads" } } },
           ],
         },
-        orderBy: { createdAt: "asc" },
+        orderBy: onlyPriority ? { priorityAt: "asc" } : { createdAt: "asc" },
         select: { id: true, contactId: true, departmentId: true },
         take,
       });
@@ -402,6 +418,9 @@ export async function processPendingDistributionQueue(opts: {
           );
           break;
         }
+
+        // A passada das prioritárias já tentou esta.
+        if (!onlyPriority && priorityIds.has(it.id)) continue;
 
         try {
           const requested = requestedSources.get(it.id);
@@ -469,6 +488,14 @@ export async function processPendingDistributionQueue(opts: {
       }
     };
 
+    if (priorityIds.size > 0) {
+      for (const deptId of targetDeptIds) {
+        await drainBucket(deptId, true);
+      }
+      if (includeOrgWide) {
+        await drainBucket(null, true);
+      }
+    }
     for (const deptId of targetDeptIds) {
       await drainBucket(deptId);
     }

@@ -66,6 +66,19 @@ export async function mergeContactVisitorData(
   removeId: string,
 ): Promise<void> {
   await tx.webchatEvent.updateMany({ where: { contactId: removeId }, data: { contactId: keepId } });
+  // Valor verificado por canal: o contato que fica mantém o dele, se já tiver.
+  const links = await tx.webchatIdentityLink.findMany({
+    where: { contactId: removeId },
+    select: { id: true, channelId: true },
+  });
+  for (const link of links) {
+    const kept = await tx.webchatIdentityLink.findFirst({
+      where: { channelId: link.channelId, contactId: keepId },
+      select: { id: true },
+    });
+    if (kept) await tx.webchatIdentityLink.delete({ where: { id: link.id } });
+    else await tx.webchatIdentityLink.update({ where: { id: link.id }, data: { contactId: keepId } });
+  }
   const rows = await tx.webchatLiveContext.findMany({
     where: { contactId: removeId },
     select: ROW_SELECT,

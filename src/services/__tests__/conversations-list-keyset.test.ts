@@ -389,12 +389,13 @@ describe("SQL da página (keyset)", () => {
 
     const second = await count({ tab: "entrada", cursor: first.page.nextCursor! });
     expect(second.listPages).toBe(1);
-    expect(second.raw).toBe(first.raw);
+    // A 1ª página lê também as prioritárias; a principal é a mesma consulta.
+    expect(second.raw).toBe(first.raw - 1);
     expect(second.findMany).toBe(first.findMany);
 
     // A chave nova custa exatamente as consultas da ordem antiga (`updatedAt`).
     const oldKey = await count({ tab: "entrada", sortBy: "updatedAt" });
-    expect(oldKey.raw).toBe(first.raw);
+    expect(oldKey.raw).toBe(first.raw - 1);
     expect(oldKey.findMany).toBe(first.findMany);
 
     // total/page em modo cursor: nunca perPage+1 nem `page: 1` inventado.

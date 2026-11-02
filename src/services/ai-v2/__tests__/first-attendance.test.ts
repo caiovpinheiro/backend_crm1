@@ -100,6 +100,12 @@ describe("1º atendimento por agente v2", () => {
     expect(mocks.pickAgent).toHaveBeenCalledWith(expect.any(Array), "ch-1", "5511988887777");
   });
 
+  it("atendimento do canal mandou para pessoas: não assume", async () => {
+    mocks.convFindUnique.mockResolvedValue(conv({ routeMode: "human" }));
+    expect(await tryAssignFirstAttendanceAi({ conversationId: "conv-1", contactId: "contact-1" })).toBeNull();
+    expect(mocks.tx.conversation.update).not.toHaveBeenCalled();
+  });
+
   it("transferida por um agente para pessoa e aberta: fica de pessoa, em qualquer horário", async () => {
     mocks.handedOff.mockResolvedValue(true);
     expect(await tryAssignFirstAttendanceAi({ conversationId: "conv-1", contactId: "ct-1" })).toBeNull();

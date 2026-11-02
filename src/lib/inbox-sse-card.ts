@@ -13,6 +13,7 @@
  * be missing; org is taken from the envelope.
  */
 
+import { activePriorityAt } from "@/lib/conversation-priority";
 import { automationQueueDelayAgo } from "@/lib/inbox-automation-queue";
 import { prismaBase } from "@/lib/prisma-base";
 
@@ -26,6 +27,7 @@ const INBOX_SSE_CARD_SELECT = {
   hasError: true,
   hasHumanReply: true,
   hasAgentReply: true,
+  priorityAt: true,
   lastInboundAt: true,
   lastMessageDirection: true,
   closedAt: true,
@@ -69,6 +71,8 @@ export type InboxSseCard = {
   unreadCount: number;
   hasError: boolean;
   hasHumanReply: boolean;
+  /** Prioritária (§9.12 do webchat). Null quando a prioridade não vale mais. */
+  priorityAt: string | null;
   hasAgentReply: boolean;
   lastInboundAt: string | null;
   lastMessageDirection: string | null;
@@ -217,6 +221,7 @@ function rowToCard(
     unreadCount: row.unreadCount,
     hasError: row.hasError,
     hasHumanReply,
+    priorityAt: iso(activePriorityAt({ priorityAt: row.priorityAt, status: row.status, hasHumanReply })),
     hasAgentReply,
     lastInboundAt,
     lastMessageDirection,
