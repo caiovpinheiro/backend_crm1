@@ -79,7 +79,7 @@ async function isPersonAvailable(userId: string): Promise<boolean> {
 /** User não é tenant-scoped na extensão do Prisma: a org é explícita. */
 async function findPerson(userId: string): Promise<{ id: string; name: string | null } | null> {
   return prisma.user.findFirst({
-    where: { id: userId, organizationId: getOrgIdOrThrow(), type: "HUMAN" },
+    where: { id: userId, organizationId: getOrgIdOrThrow(), type: "HUMAN", isErased: false },
     select: { id: true, name: true },
   });
 }
