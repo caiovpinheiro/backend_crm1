@@ -27,7 +27,7 @@ const h = vi.hoisted(() => {
     existing,
     metaClientFromConfig: vi.fn(() => client),
     ensureConv: vi.fn(),
-    messageCreate: vi.fn(async ({ data }: { data: { channelId?: string } }) => {
+    messageCreate: vi.fn(async ({ data }: { data: { channelId?: string; externalId?: string; sendStatus?: string } }) => {
       fkCheck(data);
       return { id: "msg-1", organizationId: "org-1", conversationId: "conv-1", externalId: "wamid.1", createdAt: new Date(), ...data };
     }),
