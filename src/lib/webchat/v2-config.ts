@@ -2,8 +2,8 @@
  * Webchat v2 — configuração do canal (docs/decisoes/webchat-widget.md §9.7).
  *
  * Vive em `Channel.config.v2` (JSON). NÃO entra no `GET /api/public/webchat/config`
- * (o público continua sendo só o `WebchatChannelConfig` da v1): mapeamentos,
- * URL de callback e regras são do painel. Os segredos ficam fora daqui
+ * (o público é o `WebchatChannelConfig` da v1 mais `appearance`, §9.15):
+ * mapeamentos, URL de callback e regras são do painel. Os segredos ficam fora daqui
  * (`lib/webchat/secrets.ts`, encriptados no config). Funções puras, sem banco.
  *
  * Nada fixo de cliente/segmento: chaves, rótulos, campos e regras são dados
@@ -47,6 +47,15 @@ const MAX_IMPORTANT_EVENTS = 50;
 const MAX_RULES = 20;
 const MAX_RULE_VALUE_CHARS = 64;
 const MAX_CALLBACK_URL_CHARS = 2000;
+const MAX_ACTION_URL_CHARS = 2000;
+const MAX_ACTION_TEXT_CHARS = 500;
+const MAX_BUTTON_LABEL_CHARS = 40;
+const MAX_START_TITLE_CHARS = 80;
+const MAX_START_SUBTITLE_CHARS = 160;
+const MAX_TOPICS = 6;
+const MAX_FOLLOW_UP_QUESTION_CHARS = 200;
+const MAX_FOLLOW_UP_HINT_CHARS = 160;
+const MAX_FOLLOW_UP_OPTIONS = 6;
 
 /** Como o valor é comparado no campo de negócio. `digits`: só os dígitos. */
 export type WebchatMatchNormalize = "none" | "digits";
@@ -106,6 +115,43 @@ export type WebchatRoutingRule = {
   queuePriority?: "high";
 };
 
+/** Ação de um botão do widget (§9.15). Tudo é texto; nada de HTML. */
+export type WebchatAction =
+  /** Vira mensagem normal do visitante. */
+  | { type: "send_text"; text: string }
+  /** Só https. */
+  | { type: "open_url"; url: string; label?: string }
+  /** Só foca o campo de mensagem. */
+  | { type: "write" };
+
+export type WebchatOption = { id: string; label: string; action: WebchatAction };
+
+export const WEBCHAT_TOPIC_ICONS = ["lock", "card", "file", "chat", "help", "book", "calendar", "phone"] as const;
+export type WebchatTopicIcon = (typeof WEBCHAT_TOPIC_ICONS)[number];
+
+export type WebchatTopic = {
+  id: string;
+  label: string;
+  icon: WebchatTopicIcon;
+  action: WebchatAction;
+  /** Um nível só: opção não tem `followUp`. */
+  followUp?: { question: string; hint?: string; options: WebchatOption[] };
+};
+
+export const WEBCHAT_APPEARANCE_MODELS = ["compact", "assisted", "guided"] as const;
+export type WebchatAppearanceModel = (typeof WEBCHAT_APPEARANCE_MODELS)[number];
+
+/** Modelo do widget e botões do canal. Único bloco do `v2` que é público (§9.15). */
+export type WebchatAppearance = {
+  model: WebchatAppearanceModel;
+  allowExpand: boolean;
+  start: { title?: string; subtitle?: string; writeLabel?: string; topics: WebchatTopic[] };
+  /** Chaves do `setContext` que dão título e subtítulo da faixa. */
+  contextBanner: { enabled: boolean; titleKey?: string; subtitleKey?: string };
+  /** Os botões só enviam o texto do rótulo; não encerram ticket. */
+  closing: { enabled: boolean; resolvedLabel?: string; needHelpLabel?: string };
+};
+
 export type WebchatV2Config = {
   identity: {
     /** Onde o `externalId` do site é procurado/gravado no contato. */
@@ -139,6 +185,7 @@ export type WebchatV2Config = {
   /** CustomField (entity=deal) que recebe o `ref` no negócio aberto do contato. */
   refDealCustomFieldId: string | null;
   routing: WebchatRoutingConfig;
+  appearance: WebchatAppearance;
 };
 
 /** Subclasse do erro da v1: as rotas de canal já respondem 400 com `message`. */
@@ -155,6 +202,16 @@ export function defaultWebchatRoutingConfig(): WebchatRoutingConfig {
     destination: { type: "distribution" },
     keepCurrentOwner: true,
     fallback: { type: "distribution" },
+  };
+}
+
+export function defaultWebchatAppearance(): WebchatAppearance {
+  return {
+    model: "compact",
+    allowExpand: false,
+    start: { topics: [] },
+    contextBanner: { enabled: false },
+    closing: { enabled: false },
   };
 }
 
@@ -177,6 +234,7 @@ export function defaultWebchatV2Config(): WebchatV2Config {
     s2s: { queueTagId: null, callbackUrl: null, rules: [] },
     refDealCustomFieldId: null,
     routing: defaultWebchatRoutingConfig(),
+    appearance: defaultWebchatAppearance(),
   };
 }
 
@@ -404,6 +462,212 @@ function parseRules(v: unknown, fallback: WebchatRoutingRule[]): WebchatRoutingR
   });
 }
 
+/** Apara e valida. NUL e surrogate solto o `jsonb` recusa: viraria 500 ao gravar. */
+function cleanText(v: unknown, field: string, max: number): string {
+  if (typeof v !== "string") throw new WebchatV2ConfigError(`${field} deve ser texto.`);
+  const t = v.trim();
+  if (t.includes("\u0000") || /\p{Cs}/u.test(t)) {
+    throw new WebchatV2ConfigError(`${field} tem caracteres inválidos.`);
+  }
+  if (t.length > max) throw new WebchatV2ConfigError(`${field} passa de ${max} caracteres.`);
+  return t;
+}
+
+function requiredText(v: unknown, field: string, max: number): string {
+  const t = cleanText(v, field, max);
+  if (!t) throw new WebchatV2ConfigError(`${field} não pode ficar vazio.`);
+  return t;
+}
+
+/** `null`/"" = sem valor; ausente = mantém. */
+function optionalText(v: unknown, field: string, fallback: string | undefined, max: number): string | undefined {
+  if (v === undefined) return fallback;
+  if (v === null) return undefined;
+  return cleanText(v, field, max) || undefined;
+}
+
+/** `null`/"" = sem chave; ausente = mantém. */
+function optionalContextKey(v: unknown, field: string, fallback: string | undefined): string | undefined {
+  if (v === undefined) return fallback;
+  if (v === null || v === "") return undefined;
+  if (typeof v !== "string" || !WEBCHAT_CONTEXT_KEY_RE.test(v.trim())) {
+    throw new WebchatV2ConfigError(`${field} inválida.`);
+  }
+  return v.trim();
+}
+
+/** Copia só os valores presentes: chave sem valor não vai para o JSON. */
+function withPresent<T extends object>(target: T, extras: Record<string, string | undefined>): T {
+  for (const [key, value] of Object.entries(extras)) {
+    if (value !== undefined) (target as Record<string, unknown>)[key] = value;
+  }
+  return target;
+}
+
+function parseActionUrl(v: unknown, field: string): string {
+  const raw = typeof v === "string" ? v.trim() : "";
+  const invalid = () => new WebchatV2ConfigError(`${field} deve ser uma URL https (sem usuário/senha).`);
+  if (!raw) throw invalid();
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw invalid();
+  }
+  if (url.protocol !== "https:" || url.username || url.password) throw invalid();
+  const out = url.toString();
+  if (out.length > MAX_ACTION_URL_CHARS) {
+    throw new WebchatV2ConfigError(`${field} passa de ${MAX_ACTION_URL_CHARS} caracteres.`);
+  }
+  return out;
+}
+
+function parseAction(v: unknown, field: string): WebchatAction {
+  if (!isObj(v)) throw new WebchatV2ConfigError(`${field} deve ser um objeto.`);
+  if (v.type === "write") return { type: "write" };
+  if (v.type === "send_text") {
+    return { type: "send_text", text: requiredText(v.text, `${field}.text`, MAX_ACTION_TEXT_CHARS) };
+  }
+  if (v.type === "open_url") {
+    return withPresent<WebchatAction>(
+      { type: "open_url", url: parseActionUrl(v.url, `${field}.url`) },
+      { label: optionalText(v.label, `${field}.label`, undefined, MAX_BUTTON_LABEL_CHARS) },
+    );
+  }
+  throw new WebchatV2ConfigError(`${field}.type deve ser "send_text", "open_url" ou "write".`);
+}
+
+/** Id de item de lista: mesmo formato dos ids do CRM, sem repetir na lista. */
+function uniqueItemId(v: unknown, field: string, seen: Set<string>): string {
+  const itemId = id(v, field);
+  if (seen.has(itemId)) throw new WebchatV2ConfigError(`${field}: id repetido "${itemId}".`);
+  seen.add(itemId);
+  return itemId;
+}
+
+function parseOptions(v: unknown, field: string): WebchatOption[] {
+  if (!Array.isArray(v) || v.length < 1 || v.length > MAX_FOLLOW_UP_OPTIONS) {
+    throw new WebchatV2ConfigError(`${field} deve ter de 1 a ${MAX_FOLLOW_UP_OPTIONS} opções.`);
+  }
+  const seen = new Set<string>();
+  return v.map((raw, i) => {
+    const at = `${field}[${i}]`;
+    if (!isObj(raw)) throw new WebchatV2ConfigError(`${at} deve ser um objeto.`);
+    if (raw.followUp !== undefined && raw.followUp !== null) {
+      throw new WebchatV2ConfigError(`${at}: opção não tem followUp (um nível só).`);
+    }
+    return {
+      id: uniqueItemId(raw.id, `${at}.id`, seen),
+      label: requiredText(raw.label, `${at}.label`, MAX_BUTTON_LABEL_CHARS),
+      action: parseAction(raw.action, `${at}.action`),
+    };
+  });
+}
+
+function parseFollowUp(v: unknown, field: string): NonNullable<WebchatTopic["followUp"]> {
+  if (!isObj(v)) throw new WebchatV2ConfigError(`${field} deve ser um objeto.`);
+  return withPresent<NonNullable<WebchatTopic["followUp"]>>(
+    {
+      question: requiredText(v.question, `${field}.question`, MAX_FOLLOW_UP_QUESTION_CHARS),
+      options: parseOptions(v.options, `${field}.options`),
+    },
+    { hint: optionalText(v.hint, `${field}.hint`, undefined, MAX_FOLLOW_UP_HINT_CHARS) },
+  );
+}
+
+function parseTopics(v: unknown, fallback: WebchatTopic[]): WebchatTopic[] {
+  if (v === undefined) return fallback;
+  if (!Array.isArray(v)) throw new WebchatV2ConfigError("appearance.start.topics deve ser uma lista.");
+  if (v.length > MAX_TOPICS) {
+    throw new WebchatV2ConfigError(`appearance.start.topics: no máximo ${MAX_TOPICS} tópicos.`);
+  }
+  const seen = new Set<string>();
+  return v.map((raw, i) => {
+    const at = `appearance.start.topics[${i}]`;
+    if (!isObj(raw)) throw new WebchatV2ConfigError(`${at} deve ser um objeto.`);
+    if (!(WEBCHAT_TOPIC_ICONS as readonly unknown[]).includes(raw.icon)) {
+      throw new WebchatV2ConfigError(`${at}.icon deve ser um de: ${WEBCHAT_TOPIC_ICONS.join(", ")}.`);
+    }
+    const topic: WebchatTopic = {
+      id: uniqueItemId(raw.id, `${at}.id`, seen),
+      label: requiredText(raw.label, `${at}.label`, MAX_BUTTON_LABEL_CHARS),
+      icon: raw.icon as WebchatTopicIcon,
+      action: parseAction(raw.action, `${at}.action`),
+    };
+    if (raw.followUp !== undefined && raw.followUp !== null) {
+      topic.followUp = parseFollowUp(raw.followUp, `${at}.followUp`);
+    }
+    return topic;
+  });
+}
+
+/** Parcial em cada bloco, como o resto do `v2`; `topics` troca a lista inteira. */
+function parseAppearance(v: unknown, base: WebchatAppearance): WebchatAppearance {
+  const o = obj(v, "appearance");
+  if (!o) return base;
+  const start = obj(o.start, "appearance.start") ?? {};
+  const banner = obj(o.contextBanner, "appearance.contextBanner") ?? {};
+  const closing = obj(o.closing, "appearance.closing") ?? {};
+  const model = o.model ?? base.model;
+  if (!(WEBCHAT_APPEARANCE_MODELS as readonly unknown[]).includes(model)) {
+    throw new WebchatV2ConfigError(`appearance.model deve ser um de: ${WEBCHAT_APPEARANCE_MODELS.join(", ")}.`);
+  }
+  return {
+    model: model as WebchatAppearanceModel,
+    allowExpand: bool(o.allowExpand, "appearance.allowExpand", base.allowExpand),
+    start: withPresent<WebchatAppearance["start"]>(
+      { topics: parseTopics(start.topics, base.start.topics) },
+      {
+        title: optionalText(start.title, "appearance.start.title", base.start.title, MAX_START_TITLE_CHARS),
+        subtitle: optionalText(
+          start.subtitle,
+          "appearance.start.subtitle",
+          base.start.subtitle,
+          MAX_START_SUBTITLE_CHARS,
+        ),
+        writeLabel: optionalText(
+          start.writeLabel,
+          "appearance.start.writeLabel",
+          base.start.writeLabel,
+          MAX_BUTTON_LABEL_CHARS,
+        ),
+      },
+    ),
+    contextBanner: withPresent<WebchatAppearance["contextBanner"]>(
+      { enabled: bool(banner.enabled, "appearance.contextBanner.enabled", base.contextBanner.enabled) },
+      {
+        titleKey: optionalContextKey(
+          banner.titleKey,
+          "appearance.contextBanner.titleKey",
+          base.contextBanner.titleKey,
+        ),
+        subtitleKey: optionalContextKey(
+          banner.subtitleKey,
+          "appearance.contextBanner.subtitleKey",
+          base.contextBanner.subtitleKey,
+        ),
+      },
+    ),
+    closing: withPresent<WebchatAppearance["closing"]>(
+      { enabled: bool(closing.enabled, "appearance.closing.enabled", base.closing.enabled) },
+      {
+        resolvedLabel: optionalText(
+          closing.resolvedLabel,
+          "appearance.closing.resolvedLabel",
+          base.closing.resolvedLabel,
+          MAX_BUTTON_LABEL_CHARS,
+        ),
+        needHelpLabel: optionalText(
+          closing.needHelpLabel,
+          "appearance.closing.needHelpLabel",
+          base.closing.needHelpLabel,
+          MAX_BUTTON_LABEL_CHARS,
+        ),
+      },
+    ),
+  };
+}
+
 /**
  * Valida e completa o `v2` do config. `patch` é parcial em qualquer nível
  * (o painel pode mandar só `context.labels`); o resto vem de `base`.
@@ -454,19 +718,21 @@ export function normalizeWebchatV2Config(patch: unknown, base: WebchatV2Config):
     },
     refDealCustomFieldId: optionalId(p.refDealCustomFieldId, "refDealCustomFieldId", base.refDealCustomFieldId),
     routing: parseRouting(p.routing, base.routing),
+    appearance: parseAppearance(p.appearance, base.appearance),
   };
 }
 
 /**
  * Lê o `v2` gravado (o `Channel.config` inteiro) sem lançar: cada bloco
- * inválido volta ao default. Caminho público / workers usam esta.
+ * inválido volta ao default. Caminho público / workers usam esta. `appearance`
+ * volta inteiro: `guided` sem os tópicos seria uma tela vazia para o visitante.
  */
 export function readWebchatV2Config(rawConfig: unknown): WebchatV2Config {
   const base = defaultWebchatV2Config();
   const raw = isObj(rawConfig) && isObj(rawConfig.v2) ? rawConfig.v2 : null;
   if (!raw) return base;
   const out = { ...base };
-  const blocks = ["identity", "context", "events", "s2s", "refDealCustomFieldId", "routing"] as const;
+  const blocks = ["identity", "context", "events", "s2s", "refDealCustomFieldId", "routing", "appearance"] as const;
   for (const key of blocks) {
     try {
       const parsed = normalizeWebchatV2Config({ [key]: raw[key] }, base);

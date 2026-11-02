@@ -22,6 +22,7 @@ async function themeOf(own: string | undefined, org: string | null) {
     publicKey: "wc_chave",
     name: "Canal",
     config: { theme: { position: "right", title: "x", ...(own ? { avatarUrl: own } : {}) } },
+    v2: { appearance: { model: "compact" } },
     orgDefaults: { primary: "#000000", avatarUrl: org },
   };
   const res = await GET(new Request("http://crm.test/api/public/webchat/config?key=wc_chave"));

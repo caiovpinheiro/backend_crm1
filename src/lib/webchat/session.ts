@@ -85,7 +85,7 @@ export type WebchatChannel = {
   defaultPipelineId: string | null;
   config: WebchatChannelConfig;
   /**
-   * Config v2 (privado: nunca vai no `GET /config`). Sem segredos — esses
+   * Config v2 (privado: só `appearance` vai no `GET /config`). Sem segredos — esses
    * se leem do banco na hora (`readWebchatSecret`). §9.7.
    */
   v2: WebchatV2Config;
@@ -182,11 +182,11 @@ function toWebchatChannel(row: ChannelRow | null): WebchatChannel | null {
   };
 }
 
-// Chaves `webchat:s2:*`: o shape ganhou `v2` (entradas antigas sem ele
-// expiram sozinhas no TTL, ninguém as lê).
+// Chaves `webchat:s3:*`: o `v2` ganhou `appearance`, que o `GET /config` entrega
+// (entradas antigas sem ele expiram sozinhas no TTL, ninguém as lê).
 export async function loadWebchatChannelByKey(publicKey: string): Promise<WebchatChannel | null> {
   if (!isWebchatPublicKey(publicKey)) return null;
-  return wrapChannelLookup(`webchat:s2:key:${publicKey}`, CHANNEL_CACHE_TTL_SEC, async () =>
+  return wrapChannelLookup(`webchat:s3:key:${publicKey}`, CHANNEL_CACHE_TTL_SEC, async () =>
     toWebchatChannel(
       (await prismaBase.channel.findUnique({
         where: { publicKey },
@@ -197,7 +197,7 @@ export async function loadWebchatChannelByKey(publicKey: string): Promise<Webcha
 }
 
 export async function loadWebchatChannelById(id: string): Promise<WebchatChannel | null> {
-  return wrapChannelLookup(`webchat:s2:id:${id}`, CHANNEL_CACHE_TTL_SEC, async () =>
+  return wrapChannelLookup(`webchat:s3:id:${id}`, CHANNEL_CACHE_TTL_SEC, async () =>
     toWebchatChannel(
       (await prismaBase.channel.findUnique({
         where: { id },

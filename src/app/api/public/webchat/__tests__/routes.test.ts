@@ -167,6 +167,65 @@ describe("GET /api/public/webchat/config", () => {
     });
   });
 
+  it("sem configuração: appearance é o padrão e o resto do v2 não sai", async () => {
+    const res = await getConfig(
+      req(`/api/public/webchat/config?key=${KEY}&host=https://www.cliente.com.br`, {
+        headers: { origin: "https://bwipo.com" },
+      }),
+    );
+    const body = await res.json();
+    expect(body.appearance).toEqual({
+      model: "compact",
+      allowExpand: false,
+      start: { topics: [] },
+      contextBanner: { enabled: false },
+      closing: { enabled: false },
+    });
+    expect(body.v2).toBeUndefined();
+  });
+
+  it("entrega appearance do canal na raiz, sem vazar o v2 nem segredo", async () => {
+    const topic = { id: "t1", label: "Acesso", icon: "lock", action: { type: "write" } };
+    mocks.prismaBase.channel.findUnique.mockResolvedValue({
+      ...CHANNEL_ROW,
+      config: {
+        ...CHANNEL_ROW.config,
+        identitySecret: "enc:v1:segredo",
+        v2: {
+          s2s: { callbackUrl: "https://interno.test/retorno" },
+          appearance: { model: "guided", start: { topics: [topic] } },
+        },
+      },
+    });
+    const res = await getConfig(
+      req(`/api/public/webchat/config?key=${KEY}&host=https://www.cliente.com.br`, {
+        headers: { origin: "https://bwipo.com" },
+      }),
+    );
+    const body = await res.json();
+    expect(body.appearance.model).toBe("guided");
+    expect(body.appearance.start.topics).toEqual([topic]);
+    const raw = JSON.stringify(body);
+    expect(raw).not.toContain("interno.test");
+    expect(raw).not.toContain("enc:v1");
+  });
+
+  it("appearance gravado quebrado não derruba o widget: volta ao padrão", async () => {
+    mocks.prismaBase.channel.findUnique.mockResolvedValue({
+      ...CHANNEL_ROW,
+      config: { ...CHANNEL_ROW.config, v2: { appearance: { model: "antigo", start: "x" } } },
+    });
+    const res = await getConfig(
+      req(`/api/public/webchat/config?key=${KEY}&host=https://www.cliente.com.br`, {
+        headers: { origin: "https://bwipo.com" },
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.appearance.model).toBe("compact");
+    expect(body.greeting).toBe("Oi!");
+  });
+
   it("host fora de allowedOrigins → 403", async () => {
     const res = await getConfig(
       req(`/api/public/webchat/config?key=${KEY}&host=https://evil.example`, {

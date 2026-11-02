@@ -141,6 +141,71 @@ describe("updateChannel (WEBCHAT) com v2", () => {
   });
 });
 
+describe("updateChannel (WEBCHAT) com appearance", () => {
+  const topic = {
+    id: "t1",
+    label: "Acesso",
+    icon: "lock",
+    action: { type: "open_url", url: "https://exemplo.test/ajuda" },
+  };
+  const savedConfig = () => h.updates.at(-1)!.config as Record<string, unknown> & {
+    v2: { appearance: Record<string, unknown>; context: { anonymous: boolean } };
+  };
+
+  it("grava appearance sem tocar no resto do config nem nos segredos", async () => {
+    const rotated = await rotateWebchatChannelSecret("ch-1", "identity");
+    await updateChannel("ch-1", {
+      config: { greeting: "Oi", v2: { context: { anonymous: true } } },
+    });
+    await updateChannel("ch-1", {
+      config: { v2: { appearance: { model: "guided", start: { topics: [topic] } } } },
+    });
+    const saved = savedConfig();
+    expect(saved.greeting).toBe("Oi");
+    expect(saved.publicKey).toBe(PUBLIC_KEY);
+    expect(saved.v2.context.anonymous).toBe(true);
+    expect(saved.v2.appearance.model).toBe("guided");
+    expect(saved.v2.appearance.start).toEqual({ topics: [topic] });
+    expect(readWebchatSecret(saved, "identity")).toBe(rotated?.secret);
+  });
+
+  it("PUT parcial mescla sobre o gravado, e PUT sem appearance o mantém", async () => {
+    await updateChannel("ch-1", {
+      config: { v2: { appearance: { model: "assisted", start: { title: "Oi", topics: [topic] } } } },
+    });
+    await updateChannel("ch-1", { config: { v2: { appearance: { allowExpand: true } } } });
+    expect(savedConfig().v2.appearance).toMatchObject({
+      model: "assisted",
+      allowExpand: true,
+      start: { title: "Oi", topics: [topic] },
+    });
+
+    await updateChannel("ch-1", { config: { greeting: "Olá", v2: { context: { anonymous: true } } } });
+    expect(savedConfig().v2.appearance).toMatchObject({ model: "assisted", allowExpand: true });
+  });
+
+  it("valor inválido é erro de validação e não grava", async () => {
+    const { WebchatConfigError } = await import("@/lib/webchat/config");
+    const err = await updateChannel("ch-1", {
+      config: {
+        v2: {
+          appearance: {
+            start: { topics: [{ ...topic, action: { type: "open_url", url: "http://exemplo.test" } }] },
+          },
+        },
+      },
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(WebchatConfigError);
+    expect(h.updates).toHaveLength(0);
+  });
+
+  it("appearance gravado quebrado não trava outro ajuste do painel: volta ao padrão", async () => {
+    h.row = { ...h.row!, config: { ...(h.row!.config as object), v2: { appearance: { model: "antigo" } } } };
+    await updateChannel("ch-1", { config: { greeting: "Oi" } });
+    expect(savedConfig().v2.appearance).toMatchObject({ model: "compact", start: { topics: [] } });
+  });
+});
+
 describe("respostas ao painel", () => {
   it("redact tira os segredos do config e devolve só o status", async () => {
     await rotateWebchatChannelSecret("ch-1", "s2s");
