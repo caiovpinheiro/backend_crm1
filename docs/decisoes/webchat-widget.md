@@ -205,7 +205,7 @@ rotas com Bearer só checam `Origin` (o `host` foi validado ao abrir a sessão).
 
 | Rota | Request | Response |
 |------|---------|----------|
-| `GET /config?key=wc_…&host=` | — | 200 `{ ...WebchatChannelConfig (achatado: publicKey, allowedOrigins, identification, greeting, offlineMessage, theme, businessHours?, collectTranscriptEmail), online: boolean, channel: { name } }` — `allowedOrigins` é público de propósito (o FE monta `frame-ancestors`). `theme` vem **resolvido**: `{ primary: string, avatarUrl: string \| null, position, title }` (herança abaixo) |
+| `GET /config?key=wc_…&host=` | — | 200 `{ ...WebchatChannelConfig (achatado: publicKey, allowedOrigins, identification, greeting, offlineMessage, theme, businessHours?, collectTranscriptEmail), online: boolean, channel: { name }, appearance: WebchatAppearance (§9.15) }` — `allowedOrigins` é público de propósito (o FE monta `frame-ancestors`). `theme` vem **resolvido**: `{ primary: string, avatarUrl: string \| null, position, title }` (herança abaixo) |
 | `POST /session` | `{ key, name?, email?, phone?, page?, referrer?, utm?: { utm_source…, gclid, fbclid }, host? }` + Bearer opcional (renova) | 200 `{ token, expiresAt, visitorId, contactId: string \| null, conversation: { id, number, status } \| null, contact: { name, email, phone, identified } \| null, renewed: boolean, merged?: boolean }` |
 | `POST /session/identify` | Bearer + `{ name?, email?, phone? }` (≥ 1) | 200 `{ contactId, merged: false, contact: { name, email, phone, identified }, token, expiresAt }` — só dados do próprio visitante; **trocar o token salvo** (o anterior vale 60 s) |
 | `POST /messages` | Bearer + `{ clientMessageId: /[A-Za-z0-9_-]{1,64}/, content ≤ 4000 }` | 201 nova / 200 repetida `{ message: VisitorMessageDto, conversationId, contactId, duplicate: boolean }` |
@@ -730,7 +730,7 @@ Helpers em `src/lib/webchat/signatures.ts` (tempo constante).
 Tipo e validação em `src/lib/webchat/v2-config.ts`
 (`normalizeWebchatV2Config` para o `PUT`, `readWebchatV2Config` tolerante
 para leitura; `WebchatChannel.v2` já vem lido no caminho público). Não sai
-no `GET /api/public/webchat/config`. `PUT /api/channels/:id` aceita
+no `GET /api/public/webchat/config`, exceto `appearance` (§9.15). `PUT /api/channels/:id` aceita
 `config.v2` **parcial em qualquer nível** (mesclado sobre o gravado);
 inválido → 400 `{ message }`.
 
@@ -754,6 +754,7 @@ inválido → 400 `{ message }`.
 | `routing.destination` | `{ type: "distribution" }` \| `{ type: "user" \| "department" \| "ai_agent", id }` | distribution | id `[A-Za-z0-9_-]{1,64}` |
 | `routing.keepCurrentOwner` | bool | `true` | |
 | `routing.fallback` | igual a `destination` | distribution | |
+| `appearance` | `WebchatAppearance` (§9.15) | `compact`, sem tópicos | público; inválido no `PUT` → 400, na leitura volta inteiro ao padrão |
 
 Ids inexistentes na org são ignorados em tempo de uso (não quebram o fluxo).
 
@@ -941,6 +942,89 @@ direto faria a gravação de um valor longo falhar em qualquer organização. A 
 
 **Migration** `20261102120000_webchat_identity_routing`: aditiva. Os comandos
 `CONCURRENTLY` para rodar antes do deploy estão no cabeçalho.
+
+### 9.15 Modelos do widget e botões por canal
+
+O canal escolhe como o widget abre e quais botões o visitante vê. Fica em
+`Channel.config.v2.appearance`, sem migration. Tipo e validação em
+`src/lib/webchat/v2-config.ts`. É o único bloco do `v2` que sai no
+`GET /api/public/webchat/config`, na raiz, como `appearance`. Nada aqui tem regra
+de cliente: textos, tópicos e chaves são dados da org.
+
+```ts
+type WebchatAction =
+  | { type: "send_text"; text: string }               // até 500; vira mensagem normal do visitante
+  | { type: "open_url"; url: string; label?: string } // só https, até 2000; label até 40
+  | { type: "write" };                                // só foca o campo de mensagem
+
+type WebchatOption = { id: string; label: string; action: WebchatAction }; // label até 40
+
+type WebchatTopic = {
+  id: string;
+  label: string; // até 40
+  icon: "lock" | "card" | "file" | "chat" | "help" | "book" | "calendar" | "phone";
+  action: WebchatAction;
+  followUp?: { question: string; hint?: string; options: WebchatOption[] }; // 200, 160, 1 a 6 opções
+};
+
+type WebchatAppearance = {
+  model: "compact" | "assisted" | "guided"; // padrão "compact"
+  allowExpand: boolean;                     // padrão false
+  start: { title?: string; subtitle?: string; writeLabel?: string; topics: WebchatTopic[] }; // 80, 160, 40; até 6
+  contextBanner: { enabled: boolean; titleKey?: string; subtitleKey?: string };
+  closing: { enabled: boolean; resolvedLabel?: string; needHelpLabel?: string };             // até 40
+};
+```
+
+**Sem configuração**: `compact`, sem expandir, sem tópicos, faixa e fechamento
+desligados. O `GET /config` só ganha um campo a mais.
+
+**`PUT /api/channels/:id`** (e `POST` na criação): mesmo merge do `v2`.
+
+- Parcial em cada bloco. `start.topics` troca a lista inteira, sem merge por item.
+- Texto opcional e chave: ausente mantém, `null` ou `""` limpa e a chave sai do JSON.
+- Campo desconhecido é descartado: só o que está no tipo chega ao público.
+- O restante do config e os segredos ficam como estavam.
+- Inválido → 400 `{ message }` (`WebchatV2ConfigError`).
+
+**Validação**:
+
+- Ids `[A-Za-z0-9_-]{1,64}`, únicos dentro da própria lista. Um tópico e uma opção
+  podem ter o mesmo id.
+- `label`, `text` e `question` não podem ficar vazios. Textos são aparados antes de
+  medir o tamanho.
+- `open_url` só `https`, sem usuário ou senha. A URL volta normalizada.
+- `followUp` tem um nível só: opção com `followUp` é erro.
+- `titleKey` e `subtitleKey` seguem o formato das chaves de `setContext`.
+- NUL e surrogate solto são erro, porque o `jsonb` recusa e o `PUT` daria 500.
+
+**Leitura**: `appearance` inválido volta **inteiro** ao padrão, e o resto do `v2`
+não muda. Por bloco interno, `guided` poderia sobrar sem os tópicos e mostrar uma
+tela vazia. O próximo `PUT` do canal grava o padrão por cima do valor quebrado.
+
+**Nada de HTML**: não há campo de HTML e o backend não filtra nem converte
+marcação. `<b>` fica como texto, e o widget mostra tudo como texto.
+
+**Cache**: a chave do canal passou a `webchat:s3:*`. Sem isso, uma entrada de até
+60 s gravada antes do deploy sairia sem `appearance`.
+
+**O que o backend não decide**:
+
+- Os botões usam as rotas de sempre: `send_text` e `closing` mandam mensagem pelo
+  `POST /messages`, e nada encerra ticket.
+- `GET /api/channels/:id` devolve o JSON gravado. Em canal antigo não há
+  `config.v2.appearance`, então o painel assume o padrão.
+- `contextBanner.enabled` sem chaves, `closing.enabled` sem rótulos e `guided` sem
+  tópicos são aceitos. O widget trata esses casos.
+
+**Fora daqui, e o que exigiria**:
+
+- Botões enviados pelo agente na conversa: campo novo em `Message` (com migration,
+  como `sharedContacts`), `VisitorMessageDto` com os botões, composer no inbox e
+  regra de clique repetido.
+- Anexo do visitante: `POST /messages` hoje só aceita texto. Precisa de rota de
+  upload com o token da sessão, teto de tipo e tamanho, perfil de rate limit e
+  acesso à mídia sem sessão do CRM (`/api/storage` exige sessão).
 
 ### 9.11 Mapa de arquivos por frente
 

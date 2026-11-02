@@ -15,7 +15,8 @@ import {
  *
  * Público (sem sessão). Config do canal achatado na raiz (`publicKey`,
  * `allowedOrigins`, `identification`, `greeting`, `offlineMessage`, `theme`,
- * `businessHours?`, `collectTranscriptEmail`) + `online` + `channel.name`.
+ * `businessHours?`, `collectTranscriptEmail`) + `online` + `channel.name` +
+ * `appearance` (modelo e botões do widget, §9.15; o resto do `v2` é privado).
  * `theme` vem resolvido: `primary` ← canal ou `Organization.primaryColor`
  * (fallback `#2563EB`); `avatarUrl` ← canal ou `Organization.logoUrl` (ou null).
  * `allowedOrigins` é público de propósito: a página do widget (FE) monta o
@@ -45,6 +46,7 @@ export async function GET(request: Request) {
       // Tema efetivo: o que o canal não define herda da marca da org.
       theme: resolveWebchatTheme(channel.config.theme, channel.orgDefaults),
       online,
+      appearance: channel.v2.appearance,
       channel: { name: channel.name },
     },
     { headers: { ...rl.headers, "Cache-Control": "no-store" } },

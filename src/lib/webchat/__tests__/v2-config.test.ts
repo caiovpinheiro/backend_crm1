@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  defaultWebchatAppearance,
   defaultWebchatV2Config,
   hasWebchatRoutingEffect,
   isImportantWebchatEvent,
@@ -248,3 +249,279 @@ describe("identidade por campo de negócio e atendimento (§9.12)", () => {
   });
 });
 
+describe("appearance (§9.15)", () => {
+  const topic = (over: Record<string, unknown> = {}) => ({
+    id: "t1",
+    label: "Acesso",
+    icon: "lock",
+    action: { type: "write" },
+    ...over,
+  });
+  const option = (over: Record<string, unknown> = {}) => ({
+    id: "o1",
+    label: "Senha",
+    action: { type: "send_text", text: "Travei na senha" },
+    ...over,
+  });
+  const appearance = (patch: unknown) => normalizeWebchatV2Config({ appearance: patch }, base).appearance;
+  const withTopics = (...topics: unknown[]) => ({ start: { topics } });
+
+  it("padrão: compact, sem expandir, sem tópicos, faixa e fechamento desligados", () => {
+    expect(base.appearance).toEqual({
+      model: "compact",
+      allowExpand: false,
+      start: { topics: [] },
+      contextBanner: { enabled: false },
+      closing: { enabled: false },
+    });
+  });
+
+  it("aceita o contrato inteiro, com as três ações e followUp", () => {
+    const full = {
+      model: "guided",
+      allowExpand: true,
+      start: {
+        title: "Em que podemos ajudar?",
+        subtitle: "Escolha um assunto",
+        writeLabel: "Escrever",
+        topics: [
+          topic({
+            action: { type: "send_text", text: "Quero falar sobre acesso" },
+            followUp: {
+              question: "Em qual etapa?",
+              hint: "Se preferir, descreva",
+              options: [
+                option(),
+                option({ id: "o2", action: { type: "open_url", url: "https://exemplo.test/ajuda", label: "Ver" } }),
+                option({ id: "o3", action: { type: "write" } }),
+              ],
+            },
+          }),
+          topic({ id: "t2", icon: "help" }),
+        ],
+      },
+      contextBanner: { enabled: true, titleKey: "curso.nome", subtitleKey: "etapa_atual" },
+      closing: { enabled: true, resolvedLabel: "Resolvido", needHelpLabel: "Preciso de ajuda" },
+    };
+    expect(appearance(full)).toEqual(full);
+  });
+
+  it("patch parcial mantém o resto; topics troca a lista inteira", () => {
+    const saved = normalizeWebchatV2Config(
+      {
+        appearance: {
+          model: "assisted",
+          start: { title: "Oi", topics: [topic()] },
+          closing: { enabled: true, resolvedLabel: "Ok" },
+        },
+      },
+      base,
+    );
+
+    const partial = normalizeWebchatV2Config({ appearance: { start: { subtitle: "Sub" } } }, saved).appearance;
+    expect(partial.model).toBe("assisted");
+    expect(partial.start).toEqual({ title: "Oi", subtitle: "Sub", topics: saved.appearance.start.topics });
+    expect(partial.closing).toEqual({ enabled: true, resolvedLabel: "Ok" });
+
+    const replaced = normalizeWebchatV2Config(
+      { appearance: { start: { topics: [topic({ id: "t9" })] } } },
+      saved,
+    ).appearance;
+    expect(replaced.start.topics.map((t) => t.id)).toEqual(["t9"]);
+
+    const other = normalizeWebchatV2Config({ context: { anonymous: true } }, saved);
+    expect(other.appearance).toEqual(saved.appearance);
+  });
+
+  it("null ou vazio limpa o texto opcional, sem deixar a chave no JSON", () => {
+    const saved = normalizeWebchatV2Config(
+      {
+        appearance: {
+          start: { title: "Oi", subtitle: "Sub" },
+          contextBanner: { titleKey: "curso" },
+        },
+      },
+      base,
+    );
+    const out = normalizeWebchatV2Config(
+      { appearance: { start: { title: null, subtitle: "   " }, contextBanner: { titleKey: "" } } },
+      saved,
+    ).appearance;
+    expect(Object.keys(out.start)).toEqual(["topics"]);
+    expect(Object.keys(out.contextBanner)).toEqual(["enabled"]);
+  });
+
+  it("apara os textos, descarta campo desconhecido e tira o followUp null", () => {
+    const out = appearance(
+      withTopics({
+        ...topic({ label: "  Acesso  ", followUp: null, html: "<b>x</b>" }),
+        action: { type: "write", text: "ignorado", extra: 1 },
+      }),
+    );
+    expect(out.start.topics).toEqual([
+      { id: "t1", label: "Acesso", icon: "lock", action: { type: "write" } },
+    ]);
+  });
+
+  it("texto com marcação fica como texto, sem filtro nem conversão", () => {
+    const out = appearance(withTopics(topic({ label: "<b>Oi</b> & tchau" })));
+    expect(out.start.topics[0].label).toBe("<b>Oi</b> & tchau");
+  });
+
+  it("aceita os limites exatos", () => {
+    const topics = Array.from({ length: 6 }, (_, i) =>
+      topic({ id: `t${i}`, label: "x".repeat(40), action: { type: "send_text", text: "y".repeat(500) } }),
+    );
+    const options = Array.from({ length: 6 }, (_, i) => option({ id: `o${i}` }));
+    topics[0] = topic({ id: "t0", followUp: { question: "q".repeat(200), hint: "h".repeat(160), options } });
+    const out = appearance({
+      start: { title: "t".repeat(80), subtitle: "s".repeat(160), writeLabel: "w".repeat(40), topics },
+      closing: { resolvedLabel: "r".repeat(40), needHelpLabel: "n".repeat(40) },
+    });
+    expect(out.start.topics).toHaveLength(6);
+    expect(out.start.topics[0].followUp?.options).toHaveLength(6);
+  });
+
+  it("normaliza a URL de open_url", () => {
+    const out = appearance(
+      withTopics(topic({ action: { type: "open_url", url: "  HTTPS://Exemplo.test/a b  ", label: "Abrir" } })),
+    );
+    expect(out.start.topics[0].action).toEqual({
+      type: "open_url",
+      url: "https://exemplo.test/a%20b",
+      label: "Abrir",
+    });
+  });
+
+  it.each([
+    ["appearance não objeto", "guided", /appearance/],
+    ["modelo desconhecido", { model: "outro" }, /appearance\.model/],
+    ["allowExpand não booleano", { allowExpand: "sim" }, /allowExpand/],
+    ["start não objeto", { start: [] }, /appearance\.start/],
+    ["título longo", { start: { title: "x".repeat(81) } }, /title/],
+    ["subtítulo longo", { start: { subtitle: "x".repeat(161) } }, /subtitle/],
+    ["rótulo de escrever longo", { start: { writeLabel: "x".repeat(41) } }, /writeLabel/],
+    ["tópicos não lista", { start: { topics: {} } }, /topics/],
+    [
+      "sete tópicos",
+      withTopics(...Array.from({ length: 7 }, (_, i) => topic({ id: `t${i}` }))),
+      /no máximo 6/,
+    ],
+    ["tópico não objeto", withTopics("t1"), /topics\[0\]/],
+    ["id ruim", withTopics(topic({ id: "com espaço" })), /\.id/],
+    ["id repetido", withTopics(topic(), topic({ label: "Outro" })), /repetido/],
+    ["rótulo vazio", withTopics(topic({ label: "   " })), /label/],
+    ["rótulo longo", withTopics(topic({ label: "x".repeat(41) })), /label/],
+    ["rótulo com NUL", withTopics(topic({ label: "a\u0000b" })), /caracteres inválidos/],
+    ["rótulo com surrogate solto", withTopics(topic({ label: "a\ud83db" })), /caracteres inválidos/],
+    ["ícone desconhecido", withTopics(topic({ icon: "star" })), /icon/],
+    ["sem ação", withTopics(topic({ action: undefined })), /action/],
+    ["ação desconhecida", withTopics(topic({ action: { type: "close_ticket" } })), /action\.type/],
+    ["texto vazio", withTopics(topic({ action: { type: "send_text", text: " " } })), /action\.text/],
+    ["texto longo", withTopics(topic({ action: { type: "send_text", text: "x".repeat(501) } })), /action\.text/],
+    ["url sem https", withTopics(topic({ action: { type: "open_url", url: "http://exemplo.test" } })), /https/],
+    ["url javascript", withTopics(topic({ action: { type: "open_url", url: "javascript:alert(1)" } })), /https/],
+    ["url relativa", withTopics(topic({ action: { type: "open_url", url: "/ajuda" } })), /https/],
+    ["url vazia", withTopics(topic({ action: { type: "open_url" } })), /https/],
+    ["url com senha", withTopics(topic({ action: { type: "open_url", url: "https://a:b@exemplo.test" } })), /https/],
+    [
+      "url longa",
+      withTopics(topic({ action: { type: "open_url", url: `https://exemplo.test/${"x".repeat(2000)}` } })),
+      /url passa/,
+    ],
+    [
+      "rótulo da url longo",
+      withTopics(topic({ action: { type: "open_url", url: "https://exemplo.test", label: "x".repeat(41) } })),
+      /action\.label/,
+    ],
+    ["followUp sem pergunta", withTopics(topic({ followUp: { options: [option()] } })), /question/],
+    [
+      "pergunta longa",
+      withTopics(topic({ followUp: { question: "x".repeat(201), options: [option()] } })),
+      /question/,
+    ],
+    [
+      "dica longa",
+      withTopics(topic({ followUp: { question: "q", hint: "x".repeat(161), options: [option()] } })),
+      /hint/,
+    ],
+    ["followUp sem opções", withTopics(topic({ followUp: { question: "q", options: [] } })), /de 1 a 6/],
+    [
+      "sete opções",
+      withTopics(
+        topic({
+          followUp: {
+            question: "q",
+            options: Array.from({ length: 7 }, (_, i) => option({ id: `o${i}` })),
+          },
+        }),
+      ),
+      /de 1 a 6/,
+    ],
+    [
+      "opção repetida",
+      withTopics(topic({ followUp: { question: "q", options: [option(), option()] } })),
+      /repetido/,
+    ],
+    [
+      "segundo nível",
+      withTopics(
+        topic({
+          followUp: {
+            question: "q",
+            options: [option({ followUp: { question: "q2", options: [option()] } })],
+          },
+        }),
+      ),
+      /um nível só/,
+    ],
+    ["chave da faixa inválida", { contextBanner: { titleKey: "com espaço" } }, /titleKey/],
+    ["subtítulo da faixa não texto", { contextBanner: { subtitleKey: 1 } }, /subtitleKey/],
+    ["faixa sem booleano", { contextBanner: { enabled: "sim" } }, /contextBanner\.enabled/],
+    ["fechamento sem booleano", { closing: { enabled: 1 } }, /closing\.enabled/],
+    ["rótulo de fechamento longo", { closing: { resolvedLabel: "x".repeat(41) } }, /resolvedLabel/],
+    ["rótulo de ajuda longo", { closing: { needHelpLabel: "x".repeat(41) } }, /needHelpLabel/],
+  ])("rejeita: %s", (_name, patch, message) => {
+    let err: unknown;
+    try {
+      appearance(patch);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(WebchatV2ConfigError);
+    expect((err as Error).message).toMatch(message);
+  });
+
+  it("mesmo id entre um tópico e uma opção é permitido: a unicidade é por lista", () => {
+    const out = appearance(withTopics(topic({ followUp: { question: "q", options: [option({ id: "t1" })] } })));
+    expect(out.start.topics[0].followUp?.options[0].id).toBe("t1");
+  });
+
+  describe("leitura tolerante", () => {
+    it("config sem appearance cai no padrão", () => {
+      expect(readWebchatV2Config({ v2: { context: { anonymous: true } } }).appearance).toEqual(
+        defaultWebchatAppearance(),
+      );
+    });
+
+    it.each([
+      ["texto", "guided"],
+      ["null", null],
+      ["lista", []],
+      ["modelo que não existe", { model: "antigo" }],
+      ["tópico quebrado", { model: "guided", start: { topics: [{ id: "t1" }] } }],
+    ])("appearance inválido (%s) volta inteiro ao padrão, e o resto do v2 fica", (_name, stored) => {
+      const out = readWebchatV2Config({ v2: { appearance: stored, context: { anonymous: true } } });
+      expect(out.appearance).toEqual(defaultWebchatAppearance());
+      expect(out.context.anonymous).toBe(true);
+    });
+
+    it("appearance válido é lido como foi gravado", () => {
+      const stored = { model: "assisted", allowExpand: true, start: { topics: [topic()] } };
+      const out = readWebchatV2Config({ v2: { appearance: stored } });
+      expect(out.appearance.model).toBe("assisted");
+      expect(out.appearance.allowExpand).toBe(true);
+      expect(out.appearance.start.topics).toHaveLength(1);
+    });
+  });
+});
