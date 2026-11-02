@@ -421,7 +421,8 @@ async function emitDistributionEvent(
         where: {
           type: "LEAD_DISTRIBUTION_FAILED",
           conversationId,
-          createdAt: { gte: new Date(Date.now() - LOG_COALESCE_WINDOW_MS) },
+          meta: { path: ["reason"], equals: reason },
+          occurredAt: { gte: new Date(Date.now() - LOG_COALESCE_WINDOW_MS) },
         },
         select: { id: true },
       });
