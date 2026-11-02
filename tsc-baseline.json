@@ -64,7 +64,6 @@
   "src/services/distribution/__tests__/leads-smart-guards.test.ts|TS2493|Tuple type '[]' of length '0' has no element at index '0'.": 5,
   "src/services/distribution/__tests__/leads-smart-guards.test.ts|TS2532|Object is possibly 'undefined'.": 5,
   "src/services/distribution/engine.ts|TS2345|Argument of type 'string' is not assignable to parameter of type 'DistributionTriggerSource'.": 1,
-  "src/services/distribution/engine.ts|TS2353|Object literal may only specify known properties, and 'createdAt' does not exist in type 'ActivityEventWhereInput'.": 1,
   "src/services/distribution/pending-drain.ts|TS2339|Property 'catch' does not exist on type 'RetryResult | Promise<RetryResult>'.": 1,
   "src/services/distribution/pending-drain.ts|TS2345|Argument of type 'string | null | undefined' is not assignable to parameter of type 'string'.": 1,
   "src/services/distribution/pending-drain.ts|TS7006|Parameter 'e' implicitly has an 'any' type.": 1,
