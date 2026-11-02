@@ -250,14 +250,16 @@ async function resolveDealIdentifiedContact(
     if (res.kind === "not_found") {
       // O visitante já tinha card aberto (escreveu antes de entrar): recebe o valor.
       const openDeal = await findOpenDealOfContact(target);
-      if (openDeal) {
-        await attachIdentityValueToContactDeal({
+      if (
+        openDeal &&
+        (await attachIdentityValueToContactDeal({
           channelId,
           contactId: target,
           field,
           value,
           dealId: openDeal.id,
-        });
+        }))
+      ) {
         return { contactId: target, mergeFrom: null, dealId: openDeal.id };
       }
     }

@@ -463,6 +463,44 @@ describe.skipIf(!LOCAL)("tenant isolation integration (Postgres local)", () => {
     expect(systemic?.organizationId).toBe(orgBId);
   });
 
+  it("11b. webchat_identity_links: A não lê nem altera o vínculo de B", async () => {
+    const { prisma } = await import("@/lib/prisma");
+    const { prismaBase } = await import("@/lib/prisma-base");
+    const { runWithContext } = await import("@/lib/request-context");
+    const ctxA = { organizationId: orgAId, userId: userAId, isSuperAdmin: false };
+    const channelB = await prismaBase.channel.create({
+      data: {
+        organizationId: orgBId,
+        name: `Webchat vinculo B ${suffix}`,
+        number: 9_001,
+        type: "WEBCHAT",
+        provider: "WEBCHAT",
+        status: "CONNECTED",
+        publicKey: `wc_lnk${suffix}${"y".repeat(13)}`,
+      },
+      select: { id: true },
+    });
+    const contactB = await prismaBase.contact.create({
+      data: { organizationId: orgBId, name: `Vinculo B ${suffix}`, number: 9_001 },
+      select: { id: true },
+    });
+    const linkB = await prismaBase.webchatIdentityLink.create({
+      data: { organizationId: orgBId, channelId: channelB.id, contactId: contactB.id, value: `v-${suffix}` },
+      select: { id: true },
+    });
+    const seen = await runWithContext(ctxA, async () =>
+      prisma.webchatIdentityLink.findFirst({ where: { channelId: channelB.id }, select: { id: true } }),
+    );
+    expect(seen).toBeNull();
+    const updated = await runWithContext(ctxA, async () =>
+      prisma.webchatIdentityLink.updateMany({ where: { id: linkB.id }, data: { value: "x" } }),
+    );
+    expect(updated.count).toBe(0);
+    await prismaBase.webchatIdentityLink.delete({ where: { id: linkB.id } });
+    await prismaBase.contact.delete({ where: { id: contactB.id } });
+    await prismaBase.channel.delete({ where: { id: channelB.id } });
+  });
+
   it("11. webchat_sessions: A não lê, altera nem cria sessão de visitante de B", async () => {
     const { prisma } = await import("@/lib/prisma");
     const { prismaBase } = await import("@/lib/prisma-base");

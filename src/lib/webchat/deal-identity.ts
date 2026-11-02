@@ -178,7 +178,8 @@ export async function setDealIdentityLinkDeal(
   dealId: string,
 ): Promise<void> {
   await prisma.webchatIdentityLink.updateMany({
-    where: { channelId, value, NOT: { dealId } },
+    // `OR` explícito: `NOT { dealId }` sozinho excluiria o vínculo com NULL.
+    where: { channelId, value, OR: [{ dealId: null }, { dealId: { not: dealId } }] },
     data: { dealId },
   });
 }
@@ -226,7 +227,8 @@ export async function writeIdentityValueToDeal(
 
 /**
  * Negócio do contato sem valor reconhecido (o automático, ou o que já estava
- * aberto): recebe o valor, e o vínculo passa a apontar para ele.
+ * aberto): recebe o valor, e o vínculo passa a apontar para ele. `false`: o
+ * negócio não é desse contato ou já tem outro valor; fica como está.
  */
 export async function attachIdentityValueToContactDeal(args: {
   channelId: string;
@@ -234,15 +236,15 @@ export async function attachIdentityValueToContactDeal(args: {
   field: DealMatchField;
   value: string;
   dealId: string;
-}): Promise<void> {
+}): Promise<boolean> {
   const deal = await prisma.deal.findFirst({
     where: { id: args.dealId, contactId: args.contactId },
     select: { id: true },
   });
-  if (!deal) return;
-  if (await writeIdentityValueToDeal(args.field, deal.id, args.value)) {
-    await setDealIdentityLinkDeal(args.channelId, args.value, deal.id);
-  }
+  if (!deal) return false;
+  if (!(await writeIdentityValueToDeal(args.field, deal.id, args.value))) return false;
+  await setDealIdentityLinkDeal(args.channelId, args.value, deal.id);
+  return true;
 }
 
 /** O aberto mais recente do contato, para receber o valor ainda não reconhecido. */

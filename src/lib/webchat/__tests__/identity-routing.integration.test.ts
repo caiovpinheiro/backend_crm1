@@ -385,6 +385,37 @@ describe.skipIf(!LOCAL)("vínculo por campo de negócio e atendimento (Postgres 
     const again = await identify(channel, await makeSession(channel.id), value);
     expect(again.contactId).toBe(res.contactId);
     expect(again.dealId).toBe(row?.deal.id);
+    const link = await base.webchatIdentityLink.findFirst({ where: { channelId: channel.id, value } });
+    expect(link?.dealId).toBe(row?.deal.id);
+  });
+
+  it("visitante escreve antes de entrar: o card aberto dele recebe o valor", async () => {
+    const channel = await makeChannel({ identity: { matchField: dealMatch() } });
+    const session = await makeSession(channel.id);
+    await sendMessage(channel, session, "antes de entrar");
+    await new Promise((r) => setTimeout(r, 300));
+    const value = uid("val");
+    const res = await identify(channel, session, value);
+    expect(res.dealId).toBeTruthy();
+    const row = await base.dealCustomFieldValue.findFirst({ where: { customFieldId: fieldId, value } });
+    expect(row?.dealId).toBe(res.dealId);
+  });
+
+  it("valor novo sobre negócio com outro valor: nada é sobrescrito", async () => {
+    const channel = await makeChannel({ identity: { matchField: dealMatch() } });
+    const session = await makeSession(channel.id);
+    await sendMessage(channel, session, "antes");
+    await new Promise((r) => setTimeout(r, 300));
+    const contactId = (await base.webchatSession.findUnique({ where: { id: session.id } }))!.contactId!;
+    const deal = await base.deal.findFirst({ where: { contactId }, select: { id: true } });
+    const first = uid("val");
+    await base.dealCustomFieldValue.create({
+      data: { organizationId: orgId, dealId: deal!.id, customFieldId: fieldId, value: first },
+    });
+    const res = await identify(channel, session, uid("val"));
+    expect(res.dealId).toBeNull();
+    const row = await base.dealCustomFieldValue.findFirst({ where: { dealId: deal!.id, customFieldId: fieldId } });
+    expect(row?.value).toBe(first);
   });
 
   it("negócio sem contato: não quebra e passa para o contato do visitante", async () => {
