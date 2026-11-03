@@ -10,7 +10,10 @@ import {
 
 import { conversationHasRealAttendance } from "@/lib/ai-agents/tabulation-classify-policy";
 import { rewriteStorageUrlsForWebhook } from "@/lib/public-media-url";
-import { normalizeConditionConfig } from "@/lib/automation-condition";
+import {
+  evaluateChannelNumberRule,
+  normalizeConditionConfig,
+} from "@/lib/automation-condition";
 import { createSiteConditionReader, evaluateSiteRule, isSiteRule } from "@/lib/webchat/automation-conditions";
 import {
   runWithAutomationOrigin,
@@ -4760,6 +4763,15 @@ export async function executeStep(
             const isOpen = evaluateBusinessHoursValue(right);
             return rule.op === "in_business_hours" ? isOpen : !isOpen;
           }
+
+          // Canal com número escolhido: tipo + conexão da conversa.
+          const channelNumber = evaluateChannelNumberRule(
+            rule,
+            evalCondition(left, "eq", right),
+            rt.conversation?.channelId ??
+              (typeof rt.data.channelId === "string" ? rt.data.channelId : null),
+          );
+          if (channelNumber !== null) return channelNumber;
 
           return evalCondition(left, rule.op, right);
         });

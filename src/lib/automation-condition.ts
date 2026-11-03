@@ -62,6 +62,13 @@ export type ConditionRule = {
   field: string;
   op: ConditionOp;
   value: unknown;
+  /**
+   * Só em `conversation.channel`: conexão específica (Channel.id) daquele
+   * tipo, quando a org tem mais de um número. Ausente = qualquer número.
+   */
+  channelId?: string;
+  /** Nome da conexão no momento da escolha (só exibição). */
+  channelLabel?: string;
 };
 
 export type ConditionBranch = {
@@ -117,11 +124,35 @@ function normalizeRule(raw: unknown): ConditionRule | null {
   const r = asRecord(raw);
   const field = String(r.field ?? r.path ?? r.left ?? "").trim();
   if (!field) return null;
-  return {
+  const rule: ConditionRule = {
     field,
     op: normalizeOp(r.op ?? r.operator),
     value: r.value ?? r.right ?? "",
   };
+  if (field === "conversation.channel" && typeof r.channelId === "string" && r.channelId.trim()) {
+    rule.channelId = r.channelId.trim();
+    if (typeof r.channelLabel === "string" && r.channelLabel.trim()) {
+      rule.channelLabel = r.channelLabel.trim();
+    }
+  }
+  return rule;
+}
+
+/**
+ * Regra `conversation.channel` com número escolhido: bate quando o tipo é o
+ * da regra E a conversa está nessa conexão. `eq` exige os dois; `ne` é o
+ * contrário. Outros operadores ignoram o número. `null` = regra sem número
+ * (o avaliador segue a comparação normal).
+ */
+export function evaluateChannelNumberRule(
+  rule: Pick<ConditionRule, "field" | "op" | "channelId">,
+  typeMatches: boolean,
+  conversationChannelId: string | null | undefined,
+): boolean | null {
+  if (rule.field !== "conversation.channel" || !rule.channelId) return null;
+  if (rule.op !== "eq" && rule.op !== "ne") return null;
+  const match = typeMatches && conversationChannelId === rule.channelId;
+  return rule.op === "eq" ? match : !match;
 }
 
 function normalizeBranch(raw: unknown): ConditionBranch | null {
