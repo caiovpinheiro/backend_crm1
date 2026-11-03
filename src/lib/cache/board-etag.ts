@@ -94,6 +94,7 @@ const CARD_FILTER_KEYS: ReadonlySet<string> = new Set([
   "ownerIds",
   "withoutOwner",
   "withoutContact",
+  "intentionalDuplicate",
   "lostReasons",
   "tagIds",
   "tagMode",

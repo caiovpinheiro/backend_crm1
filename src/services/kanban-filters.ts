@@ -863,6 +863,11 @@ export type AdvancedDealFilters = {
   withoutOwner?: boolean;
   /** true = só leads sem contato. */
   withoutContact?: boolean;
+  /**
+   * true = só os negócios criados por "Duplicar" (`Deal.intentionalDuplicate`).
+   * Repetidos de outra origem (mesmo contato, unificação) ficam de fora.
+   */
+  intentionalDuplicate?: boolean;
 
   /** Filtros por origem (Contact.source). Pode incluir `SOURCE_NONE`. */
   sources?: string[];
@@ -1300,6 +1305,10 @@ export async function buildDealWhereFromFilters(
     conditions.push({ contactId: null });
   }
 
+  if (filters.intentionalDuplicate) {
+    conditions.push({ intentionalDuplicate: true });
+  }
+
   const sourceCond = buildDealSourceCondition(filters.sources, filters.withoutSource);
   if (sourceCond) conditions.push(sourceCond);
 
@@ -1631,6 +1640,8 @@ export function parseAdvancedDealFilters(input: unknown): AdvancedDealFilters {
   if (wo) out.withoutOwner = wo;
   const wc = asBool(o.withoutContact);
   if (wc) out.withoutContact = wc;
+  const dup = asBool(o.intentionalDuplicate);
+  if (dup) out.intentionalDuplicate = dup;
 
   const sources = asStringArray(o.sources);
   if (sources) out.sources = sources;
