@@ -1,6 +1,7 @@
 import { type NextRequest, NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
+import { statsPeriodWhere } from "@/lib/automation-stats-period";
 import { requirePermission } from "@/lib/authz";
 import { getAutomationById, getAutomationLogs } from "@/services/automations";
 import { getLogger } from "@/lib/logger";
@@ -48,7 +49,9 @@ export async function GET(request: NextRequest, context: RouteContext) {
       const stepId = searchParams.get("stepId") ?? undefined;
       const statuses = parseLogStatuses(searchParams);
 
-      const result = await getAutomationLogs(id, { page, perPage, stepId, statuses });
+      const { executedAt } = statsPeriodWhere(searchParams.get("period"));
+
+      const result = await getAutomationLogs(id, { page, perPage, stepId, statuses, executedAt });
       return NextResponse.json(result, {
         headers: { "Cache-Control": "no-store, max-age=0" },
       });
