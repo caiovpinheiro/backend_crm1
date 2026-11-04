@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
+import { ROUTED_LOG_STATUS } from "@/lib/automation-route-log";
 import { requirePermission } from "@/lib/authz";
 import { prisma } from "@/lib/prisma";
 import { getLogger } from "@/lib/logger";
@@ -58,6 +59,25 @@ export async function GET(_request: Request, context: RouteContext) {
         else if (row.status === "SKIPPED") steps[sid].skipped += row._count.id;
       }
 
+      // Saída tomada por passo (`ROUTED`, chave do handle em `message`) +
+      // "erro no envio" = FAILED_HANDLED. Base do % por saída no canvas.
+      const routeStats = await prisma.automationLog.groupBy({
+        by: ["stepId", "message"],
+        where: { automationId: id, stepId: { not: null }, status: ROUTED_LOG_STATUS },
+        _count: { id: true },
+      });
+      const routes: Record<string, Record<string, number>> = {};
+      for (const row of routeStats) {
+        if (!row.stepId || !row.message) continue;
+        const bucket = (routes[row.stepId] ??= {});
+        bucket[row.message] = (bucket[row.message] ?? 0) + row._count.id;
+      }
+      for (const row of stepStats) {
+        if (row.status !== "FAILED_HANDLED" || !row.stepId) continue;
+        const bucket = (routes[row.stepId] ??= {});
+        bucket.failure = (bucket.failure ?? 0) + row._count.id;
+      }
+
       // Recent errors for quick diagnosis (inclui falhas com fallback conectado)
       const recentErrors = await prisma.automationLog.findMany({
         where: { automationId: id, status: { in: ["FAILED", "FAILED_HANDLED"] } },
@@ -74,7 +94,7 @@ export async function GET(_request: Request, context: RouteContext) {
         },
       });
 
-      return NextResponse.json({ trigger, steps, recentErrors });
+      return NextResponse.json({ trigger, steps, routes, recentErrors });
     } catch (e) {
       log.error({ err: e }, "Error fetching automation stats");
       return NextResponse.json({ message: "Erro ao buscar estatísticas." }, { status: 500 });

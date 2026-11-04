@@ -5,6 +5,7 @@ import { toPublicMediaUrl } from "@/lib/public-media-url";
 import { messageHasMedia } from "@/lib/ai-agents/tabulation-classify-policy";
 import { getLogger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
+import { logAutomationRoute } from "@/lib/automation-route-log";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 // prismaBase + withSystemContext usados apenas em sweepExpiredTimeouts
 // (cross-tenant). Os outros helpers deste arquivo sao chamados de
@@ -1333,6 +1334,8 @@ export async function processIncomingMessage(
 
     const config = currentStep.config as Record<string, unknown>;
     let nextStepId: string | null = null;
+    // Saída tomada (chave do handle no canvas) — alimenta o % por saída.
+    let routeKey: string | null = null;
     let variables = { ...(ctx.variables as Record<string, unknown>) };
     const inboundChannelId = opts?.channelId?.trim();
     const inboundConversationId = opts?.conversationId?.trim();
@@ -1396,6 +1399,7 @@ export async function processIncomingMessage(
       const varName = replyVariableName(config);
       variables = { ...variables, [varName]: messageContent };
       const receivedGoto = readStepRef(config, "receivedGotoStepId");
+      routeKey = "received";
       if (receivedGoto) {
         nextStepId = receivedGoto;
         log.info(
@@ -1521,6 +1525,7 @@ export async function processIncomingMessage(
           variables = { ...variables, [varName]: messageContent, lastResponse: messageContent };
         }
         const storedGoto = (awaiting?.gotoStepId ?? "").trim();
+        routeKey = "next";
         nextStepId =
           storedGoto ||
           readStepRef(config, "nextStepId") ||
@@ -1562,7 +1567,15 @@ export async function processIncomingMessage(
           }),
         });
 
+        // Índice no MESMO array que o canvas usa para `btn_<i>`: lista lê
+        // `rows`, o resto lê `buttons`. Fora dele → -1 (não grava saída).
+        const keyArray =
+          currentStep.type === "send_whatsapp_list" ? buttonsFromRows : buttonsFromButtons;
+        const buttonKeyIndex = (btn: InteractiveOption) => keyArray.indexOf(btn);
+
         const gotoFromButton = (matchedBtn: InteractiveOption, label: string) => {
+          const btnIdx = buttonKeyIndex(matchedBtn);
+          routeKey = btnIdx >= 0 ? `btn_${btnIdx}` : null;
           const btnGoto = readStepRef(matchedBtn, "gotoStepId");
           nextStepId = btnGoto ?? defaultOut ?? elseGoto;
           if (nextStepId) {
@@ -1594,6 +1607,8 @@ export async function processIncomingMessage(
           const storedGoto = (awaiting?.gotoStepId ?? "").trim();
           if (storedGoto) {
             nextStepId = storedGoto;
+            const doneIdx = doneBtn ? buttonKeyIndex(doneBtn) : -1;
+            routeKey = doneIdx >= 0 ? `btn_${doneIdx}` : "next";
             log.info(
               `Flow concluído — auto=${ctx.automation.name} → step=${nextStepId} (goto gravado no envio)`,
             );
@@ -1601,6 +1616,7 @@ export async function processIncomingMessage(
             gotoFromButton(doneBtn, doneBtn.title || doneBtn.text || decision.buttonId);
           } else {
             nextStepId = defaultOut ?? elseGoto;
+            routeKey = defaultOut ? "next" : elseGoto ? "else" : null;
             log.info(
               `Flow concluído sem botão ${decision.buttonId} — auto=${ctx.automation.name} → step=${nextStepId ?? "(fim)"}`,
             );
@@ -1661,6 +1677,7 @@ export async function processIncomingMessage(
               };
             }
             nextStepId = elseGoto;
+            routeKey = "else";
             log.info(
               `nenhum botão matched ("${messageContent}") — auto=${ctx.automation.name} → fallback elseGotoStepId step=${nextStepId}`,
             );
@@ -1692,12 +1709,24 @@ export async function processIncomingMessage(
         // `question` de resposta aberta: a saída é única, então a aresta
         // desenhada (`nextStepId`) manda. Array só em fluxos legados.
         const openNext = readStepRef(config, "nextStepId");
+        routeKey = "next";
         nextStepId =
           openNext ?? linearFallbackStepId(ctx.automation.steps, ctx.currentStepId);
         log.info(
           `question sem botões — auto=${ctx.automation.name} → step=${nextStepId ?? "(fim)"}${openNext ? " (via nextStepId)" : ""}`,
         );
       }
+    }
+
+    if (routeKey) {
+      await logAutomationRoute({
+        organizationId: ctx.organizationId,
+        automationId: ctx.automationId,
+        contactId,
+        stepId: currentStep.id,
+        stepType: currentStep.type,
+        route: routeKey,
+      });
     }
 
     if (nextStepId) {
@@ -1747,6 +1776,14 @@ export async function processIncomingMessage(
           log.info(
             `wait_for_reply resolvido em cascata — auto=${ctx.automation.name} contato=${contactId} step=${targetStep.id} → step=${receivedGoto}`,
           );
+          await logAutomationRoute({
+            organizationId: ctx.organizationId,
+            automationId: ctx.automationId,
+            contactId,
+            stepId: targetStep.id,
+            stepType: targetStep.type,
+            route: "received",
+          });
           currentTargetId = receivedGoto;
           continue;
         }
@@ -2253,6 +2290,14 @@ export async function processTimeout(contextId: string) {
     log.info(
       `wait_for_reply timeout — auto=${ctx.automation.name} contato=${ctx.contactId} → step=${timeoutGoto}`,
     );
+    await logAutomationRoute({
+      organizationId: ctx.organizationId,
+      automationId: ctx.automationId,
+      contactId: ctx.contactId,
+      stepId: step.id,
+      stepType: step.type,
+      route: "timeout",
+    });
     await dispatchToNextStep(
       ctxForDispatch,
       timeoutGoto,
@@ -2417,6 +2462,14 @@ export async function processTimeout(contextId: string) {
   log.info(
     `question/interactive timeout — auto=${ctx.automation.name} action=${action} → step=${nextStepId ?? "(fim)"}`,
   );
+  await logAutomationRoute({
+    organizationId: ctx.organizationId,
+    automationId: ctx.automationId,
+    contactId: ctx.contactId,
+    stepId: step.id,
+    stepType: step.type,
+    route: "timeout",
+  });
   await dispatchToNextStep(
     ctxForDispatch,
     nextStepId,

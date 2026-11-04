@@ -9,6 +9,7 @@ import {
 } from "@prisma/client";
 
 import { conversationHasRealAttendance } from "@/lib/ai-agents/tabulation-classify-policy";
+import { logAutomationRoute } from "@/lib/automation-route-log";
 import { rewriteStorageUrlsForWebhook } from "@/lib/public-media-url";
 import {
   evaluateChannelNumberRule,
@@ -1588,6 +1589,39 @@ function inboundEventPayload(
     ...(channelId ? { channelId } : {}),
     ...extra,
   };
+}
+
+/**
+ * Passos com mais de uma saída no canvas. Só neles vale gravar a saída
+ * tomada (`ROUTED`) — passo de saída única é 100% "Próximo passo" e só
+ * engordaria `automation_logs`.
+ */
+const ROUTE_TRACKED_STEP_TYPES = new Set([
+  "condition",
+  "business_hours",
+  "check_agent_status",
+  "execute_distribution",
+  "round_robin",
+  "webhook",
+  "send_whatsapp_message",
+  "send_whatsapp_template",
+  "send_whatsapp_media",
+  "send_whatsapp_flow",
+  "send_whatsapp_interactive",
+  "send_whatsapp_list",
+  "send_email",
+  "question",
+]);
+
+/**
+ * Saída tomada por um passo que terminou sem pausar. Pausa (`skipRemaining`
+ * sem goto) não conta: a retomada (`automation-context`) grava a saída real
+ * quando o contato responde ou o tempo esgota.
+ */
+function routeKeyAfterStep(stepType: string, result: StepResult): string | null {
+  if (!ROUTE_TRACKED_STEP_TYPES.has(stepType)) return null;
+  if (result.skipRemaining && !result.gotoStepId) return null;
+  return result.gotoStepId ? `to:${result.gotoStepId}` : "next";
 }
 
 async function logStep(args: {
@@ -5888,6 +5922,14 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
         message: `${stepLabel} — ${result.note ?? "OK"}`,
         payload: cleanConfig,
       });
+      await logAutomationRoute({
+        automationId,
+        contactId: rt.contactId,
+        dealId: rt.dealId,
+        stepId: step.id,
+        stepType: step.type,
+        route: routeKeyAfterStep(step.type, result),
+      });
       if (result.skipRemaining && !result.gotoStepId) {
         pausedAtEnd = true;
         break;
@@ -6271,6 +6313,14 @@ export async function continueFromStep(
         stepType: step.type,
         status: "SUCCESS",
         message: `${stepLabel} — ${result.note ?? "OK"}`,
+      });
+      await logAutomationRoute({
+        automationId,
+        contactId,
+        dealId: deal?.id,
+        stepId: step.id,
+        stepType: step.type,
+        route: routeKeyAfterStep(step.type, result),
       });
       if (result.skipRemaining && !result.gotoStepId) {
         break;

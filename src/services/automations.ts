@@ -1072,9 +1072,10 @@ export async function getAutomationLogs(automationId: string, params: GetAutomat
     where.status = statuses ? { in: statuses } : { not: "STARTED" };
   } else if (params.stepId) {
     where.stepId = params.stepId;
-    if (statuses) where.status = { in: statuses };
-  } else if (statuses) {
-    where.status = { in: statuses };
+    // `ROUTED` é telemetria da saída tomada (% no canvas), não linha de log.
+    where.status = statuses ? { in: statuses } : { not: "ROUTED" };
+  } else {
+    where.status = statuses ? { in: statuses } : { not: "ROUTED" };
   }
 
   const [items, total] = await Promise.all([
