@@ -16,6 +16,12 @@
  * durável reencontra o resultado gravado — sem consumir slot nem duplicar
  * histórico.
  *
+ * Regras de horário por departamento (`department-rules.ts`): com a setting
+ * `distribution.leads.departmentRules.enabled` ligada, o sorteio fica restrito
+ * aos membros de departamento com regra ativa no instante da seleção (dentro
+ * da mesma transação). `onlyUserIds` continua valendo junto (interseção).
+ * Desligada, nada muda. O smart não lê essas regras.
+ *
  * Se o deal/conversa passa no bloco, redistribui — inclusive quando já tem
  * dono humano. `DONO_PRESERVADO` fica só para corrida (CAS perdeu). Sem
  * elegível: NO_ELIGIBLE_PARTICIPANT — o alvo fica marcado (routeMode="leads")
@@ -39,6 +45,10 @@ import {
   claimConversationAssignmentTx,
   claimDealAssignmentTx,
 } from "../claim";
+import {
+  eligibleUserIdsByDepartmentRulesTx,
+  isLeadsDepartmentRulesEnabled,
+} from "./department-rules";
 import { isLeadsDistributionEnabled } from "./enabled";
 import { getLogger } from "@/lib/logger";
 
@@ -284,13 +294,24 @@ interface SelectedSlot {
   userName: string | null;
 }
 
-/** Sorteio: cada slot ativo (slotIndex < weight) é um bilhete. */
+/**
+ * Sorteio: cada slot ativo (slotIndex < weight) é um bilhete.
+ *
+ * `onlyUserIds` = recorte explícito do chamador (troca o filtro MEMBER pelo
+ * recorte). `departmentUserIds` = regras de horário por departamento: só
+ * restringe (AND), nunca tira o filtro MEMBER do rodízio da org.
+ */
 async function selectNextSlotTx(
   tx: ScopedTx,
   orgId: string,
   onlyUserIds?: string[],
+  departmentUserIds?: string[],
 ): Promise<SelectedSlot | null> {
   if (onlyUserIds && onlyUserIds.length === 0) return null;
+  if (departmentUserIds && departmentUserIds.length === 0) return null;
+  const departmentFilter = departmentUserIds
+    ? Prisma.sql`AND p."userId" IN (${Prisma.join(departmentUserIds)})`
+    : Prisma.empty;
   const rows = onlyUserIds
     ? await tx.$queryRaw<
         {
@@ -312,6 +333,7 @@ async function selectNextSlotTx(
           AND u.type = 'HUMAN'
           AND u."isErased" = false
           AND p."userId" IN (${Prisma.join(onlyUserIds)})
+          ${departmentFilter}
         ORDER BY random()
         LIMIT 1
       `
@@ -335,6 +357,7 @@ async function selectNextSlotTx(
           AND u.type = 'HUMAN'
           AND u.role = 'MEMBER'
           AND u."isErased" = false
+          ${departmentFilter}
         ORDER BY random()
         LIMIT 1
       `;
@@ -406,6 +429,8 @@ export async function executeLeadsDistribution(
       .catch(() => {});
   }
 
+  const departmentRulesOn = await isLeadsDepartmentRulesEnabled();
+
   let txOutcome:
     | {
         kind: "ASSIGNED";
@@ -424,7 +449,14 @@ export async function executeLeadsDistribution(
         SELECT pg_advisory_xact_lock(hashtextextended(${orgId + ":leads-rotation"}, 0))
       `;
 
-      const slot = await selectNextSlotTx(tx, orgId, input.onlyUserIds);
+      // Regras por departamento: recorte avaliado AGORA, na transação, para
+      // a janela de horário valer no instante do sorteio. Só restringe — o
+      // recorte explícito do chamador (`onlyUserIds`) e o filtro MEMBER do
+      // rodízio da org continuam valendo (interseção).
+      const departmentUserIds = departmentRulesOn
+        ? await eligibleUserIdsByDepartmentRulesTx(tx, orgId)
+        : undefined;
+      const slot = await selectNextSlotTx(tx, orgId, input.onlyUserIds, departmentUserIds);
       if (!slot) {
         const result: LeadsDistributionResult = {
           success: false,
@@ -600,6 +632,7 @@ export async function executeLeadsDistribution(
         mode: "leads",
         triggerSource: input.triggerSource,
         queued: false,
+        departmentRules: departmentRulesOn,
       },
       actor: { type: "AUTOMATION", label: "Distribuição por Leads" },
     }).catch((e) => log.error({ err: e }, "[leads] logEvent sem elegível falhou"));

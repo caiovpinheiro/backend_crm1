@@ -97,6 +97,7 @@ model Organization {
   distributionLeadsAssignments  DistributionLeadsAssignment[]
   distributionLeadsExecutions   DistributionLeadsExecution[]
   distributionLeadsPending      DistributionLeadsPending[]
+  distributionLeadsDepartmentRules DistributionLeadsDepartmentRule[]
   segments                 Segment[]
   campaigns                Campaign[]
   campaignRecipients       CampaignRecipient[]
@@ -3843,6 +3844,7 @@ model Department {
   conversations    Conversation[]
   tabulations      Tabulation[]
   members          DepartmentMember[]
+  leadsDepartmentRules DistributionLeadsDepartmentRule[]
   activities       Activity[]
   supportTickets   SupportTicket[]
   distributionLogs DistributionLog[]
@@ -4412,6 +4414,31 @@ model DistributionLeadsSlot {
   @@unique([participantId, slotIndex])
   @@index([organizationId, lastAssignedAt])
   @@map("distribution_leads_slots")
+}
+
+/// Regra de horário por departamento do modo "leads" (Distribuição por Leads).
+/// Só vale com a setting `distribution.leads.departmentRules.enabled` ligada:
+/// aí só membros (`DepartmentMember`) de departamento com regra habilitada e
+/// ativa agora entram no sorteio. Minutos do dia em America/Sao_Paulo;
+/// `startMinute > endMinute` = intervalo que cruza a meia-noite (o dia da
+/// semana é o do início). Não é lida pela Distribuição Inteligente.
+model DistributionLeadsDepartmentRule {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  departmentId   String
+  department     Department   @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  /// Minuto do dia (0..1439) em America/Sao_Paulo.
+  startMinute    Int
+  endMinute      Int
+  /// Dias da semana do INÍCIO do intervalo: 0 = domingo … 6 = sábado.
+  weekdays       Int[]
+  enabled        Boolean      @default(true)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@index([organizationId, departmentId])
+  @@map("distribution_leads_department_rules")
 }
 
 /// Histórico oficial do modo leads (indicadores/ranking). Gravado SOMENTE na

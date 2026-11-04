@@ -49,6 +49,15 @@ vi.mock("@/lib/request-context", () => ({
   getOrgIdOrThrow: () => "org1",
 }));
 
+// Regras de horário por departamento: setting + recorte calculado na tx.
+// Desligadas por padrão (comportamento anterior do motor).
+const departmentRulesEnabled = vi.fn(async () => false);
+const departmentEligibleUserIds = vi.fn(async (): Promise<string[]> => []);
+vi.mock("@/services/distribution/leads/department-rules", () => ({
+  isLeadsDepartmentRulesEnabled: () => departmentRulesEnabled(),
+  eligibleUserIdsByDepartmentRulesTx: () => departmentEligibleUserIds(),
+}));
+
 // ── Fake de banco em memória ──────────────────────────────────────────
 type Participant = { id: string; userId: string; status: string; weight: number };
 type Slot = {
@@ -125,12 +134,17 @@ function addConversation(id: string, contactId: string, assignee: string | null,
   });
 }
 
-/** Replica da seleção do SQL: 1 bilhete por slot ativo, sorteio uniforme. */
-function selectSlotFake() {
+/**
+ * Replica da seleção do SQL: 1 bilhete por slot ativo, sorteio uniforme.
+ * `allowedSets` = cada `IN (...)` da query (recorte explícito e/ou regras
+ * por departamento) — o usuário precisa estar em todos (interseção).
+ */
+function selectSlotFake(allowedSets: Set<string>[] = []) {
   const eligible = slots.filter((s) => {
     const p = participants.find((pp) => pp.id === s.participantId);
     if (!p || p.status !== "ACTIVE" || p.weight <= 0) return false;
     if (s.slotIndex >= p.weight) return false;
+    if (!allowedSets.every((set) => set.has(p.userId))) return false;
     return users.get(p.userId)?.type === "HUMAN";
   });
   if (eligible.length === 0) return [];
@@ -231,7 +245,17 @@ vi.mock("@/lib/prisma", () => {
           .filter((t): t is number => t !== null);
         return [{ max: used.length ? new Date(Math.max(...used)) : null }];
       }
-      return selectSlotFake();
+      // Fragmentos `IN (...)` chegam como Prisma.Sql (strings + values).
+      const allowedSets = args
+        .slice(1)
+        .filter(
+          (v): v is { values: unknown[] } =>
+            !!v && typeof v === "object" && Array.isArray((v as { values?: unknown }).values),
+        )
+        .map((v) => new Set(v.values.filter((x): x is string => typeof x === "string")))
+        // `Prisma.empty` (sem recorte) também é um Sql, sem valores.
+        .filter((set) => set.size > 0);
+      return selectSlotFake(allowedSets);
     }),
     conversation: conversationApi,
     contact: {
@@ -403,6 +427,8 @@ describe("executeLeadsDistribution — sorteio por peso", () => {
     vi.clearAllMocks();
     hasOrganizationWidget.mockResolvedValue(true);
     isDistributionEnabled.mockResolvedValue(true);
+    departmentRulesEnabled.mockResolvedValue(false);
+    departmentEligibleUserIds.mockResolvedValue([]);
   });
 
   it("peso 0 não recebe; INACTIVE não recebe; sem elegível → NO_ELIGIBLE_PARTICIPANT mantendo routeMode", async () => {
@@ -684,5 +710,157 @@ describe("executeLeadsDistribution — sorteio por peso", () => {
     expect(conversations.get("c1")?.assignedToId).toBeNull();
     expect(conversations.get("c1")?.routeMode).toBeNull();
     expect(assignments).toHaveLength(0);
+  });
+});
+
+describe("executeLeadsDistribution — regras de horário por departamento", () => {
+  beforeEach(() => {
+    resetDb();
+    vi.clearAllMocks();
+    hasOrganizationWidget.mockResolvedValue(true);
+    isDistributionEnabled.mockResolvedValue(true);
+    departmentRulesEnabled.mockResolvedValue(false);
+    departmentEligibleUserIds.mockResolvedValue([]);
+  });
+
+  async function run(convId: string) {
+    return executeLeadsDistribution({
+      conversationId: convId,
+      contactId: `ct_${convId}`,
+      triggerSource: "AUTOMATION",
+    });
+  }
+
+  it("setting desligada: o recorte por departamento nem é consultado (comportamento anterior)", async () => {
+    addParticipant("A", 3);
+    addConversation("c1", "ct_c1", null);
+    departmentEligibleUserIds.mockResolvedValue([]); // seria "ninguém" se valesse
+    const r = await run("c1");
+    expect(r.reason).toBe("ASSIGNED");
+    expect(r.selectedUserId).toBe("A");
+    expect(departmentEligibleUserIds).not.toHaveBeenCalled();
+  });
+
+  it("setting ligada: só quem está em departamento com regra ativa recebe", async () => {
+    addParticipant("DIA", 5);
+    addParticipant("NOITE", 5);
+    addParticipant("TRES", 5); // departamento sem regra
+    departmentRulesEnabled.mockResolvedValue(true);
+    departmentEligibleUserIds.mockResolvedValue(["DIA"]); // 10h: só DIA ativo
+    const got = new Set<string>();
+    for (let i = 0; i < 30; i++) {
+      addConversation(`c${i}`, `ct_c${i}`, null);
+      const r = await run(`c${i}`);
+      expect(r.reason).toBe("ASSIGNED");
+      got.add(r.selectedUserId!);
+    }
+    expect([...got]).toEqual(["DIA"]);
+    expect(departmentEligibleUserIds).toHaveBeenCalled();
+  });
+
+  it("sobreposição (15h–18h): DIA e NOITE recebem; membro dos dois entra uma vez e com o próprio peso", async () => {
+    addParticipant("DIA", 1);
+    addParticipant("AMBOS", 1);
+    addParticipant("TRES", 5);
+    departmentRulesEnabled.mockResolvedValue(true);
+    // Conjunto já deduplicado pelo módulo de regras (AMBOS aparece uma vez).
+    departmentEligibleUserIds.mockResolvedValue(["DIA", "AMBOS"]);
+    const counts: Record<string, number> = {};
+    for (let i = 0; i < 200; i++) {
+      addConversation(`c${i}`, `ct_c${i}`, null);
+      const r = await run(`c${i}`);
+      counts[r.selectedUserId!] = (counts[r.selectedUserId!] ?? 0) + 1;
+    }
+    expect(counts.TRES).toBeUndefined();
+    // Peso 1 vs 1: proporção ~1:1 — estar em dois departamentos não dobra os bilhetes.
+    const ratio = counts.AMBOS! / counts.DIA!;
+    expect(ratio).toBeGreaterThan(0.5);
+    expect(ratio).toBeLessThan(2);
+  });
+
+  it("consultor do departamento ativo mas INACTIVE ou peso 0 não recebe → NO_ELIGIBLE_PARTICIPANT", async () => {
+    addParticipant("DIA_INATIVO", 3, "INACTIVE");
+    addParticipant("DIA_PESO0", 0);
+    addParticipant("TRES", 5);
+    addConversation("c1", "ct_c1", null);
+    departmentRulesEnabled.mockResolvedValue(true);
+    departmentEligibleUserIds.mockResolvedValue(["DIA_INATIVO", "DIA_PESO0"]);
+    const r = await run("c1");
+    expect(r.reason).toBe("NO_ELIGIBLE_PARTICIPANT");
+    expect(conversations.get("c1")?.assignedToId).toBeNull();
+    expect(conversations.get("c1")?.routeMode).toBe("leads");
+    expect(pendingRows).toHaveLength(0);
+  });
+
+  it("nenhuma regra ativa agora: ninguém recebe, mesmo com participantes com peso", async () => {
+    addParticipant("A", 5);
+    addConversation("c1", "ct_c1", null);
+    departmentRulesEnabled.mockResolvedValue(true);
+    departmentEligibleUserIds.mockResolvedValue([]);
+    const r = await run("c1");
+    expect(r.reason).toBe("NO_ELIGIBLE_PARTICIPANT");
+    expect(assignments).toHaveLength(0);
+    expect(logEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "LEAD_DISTRIBUTION_FAILED",
+        meta: expect.objectContaining({ departmentRules: true }),
+      }),
+    );
+  });
+
+  it("onlyUserIds continua valendo junto: interseção com o recorte por departamento", async () => {
+    addParticipant("A", 5);
+    addParticipant("B", 5);
+    addParticipant("C", 5);
+    departmentRulesEnabled.mockResolvedValue(true);
+    departmentEligibleUserIds.mockResolvedValue(["A", "B"]);
+    const got = new Set<string>();
+    for (let i = 0; i < 20; i++) {
+      addConversation(`c${i}`, `ct_c${i}`, null);
+      const r = await executeLeadsDistribution({
+        conversationId: `c${i}`,
+        contactId: `ct_c${i}`,
+        triggerSource: "AUTOMATION",
+        onlyUserIds: ["B", "C"],
+      });
+      expect(r.reason).toBe("ASSIGNED");
+      got.add(r.selectedUserId!);
+    }
+    expect([...got]).toEqual(["B"]);
+
+    // Recorte explícito fora do horário de todos: ninguém, não cai no C.
+    addConversation("cx", "ct_cx", null);
+    departmentEligibleUserIds.mockResolvedValue([]);
+    const r = await executeLeadsDistribution({
+      conversationId: "cx",
+      contactId: "ct_cx",
+      triggerSource: "AUTOMATION",
+      onlyUserIds: ["C"],
+    });
+    expect(r.reason).toBe("NO_ELIGIBLE_PARTICIPANT");
+  });
+
+  it("idempotência preservada: retry fora do horário reencontra o ASSIGNED gravado", async () => {
+    addParticipant("A", 5);
+    addConversation("c1", "ct_c1", null);
+    departmentRulesEnabled.mockResolvedValue(true);
+    departmentEligibleUserIds.mockResolvedValue(["A"]);
+    const id = { automationContextId: "ctx1", stepId: "s1", occurrence: 1 };
+    const first = await executeLeadsDistribution({
+      conversationId: "c1",
+      contactId: "ct_c1",
+      triggerSource: "AUTOMATION",
+      ...id,
+    });
+    expect(first.reason).toBe("ASSIGNED");
+    departmentEligibleUserIds.mockResolvedValue([]); // janela fechou
+    const retry = await executeLeadsDistribution({
+      conversationId: "c1",
+      contactId: "ct_c1",
+      triggerSource: "AUTOMATION",
+      ...id,
+    });
+    expect(retry).toEqual(first);
+    expect(assignments).toHaveLength(1);
   });
 });
