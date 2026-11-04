@@ -1035,6 +1035,8 @@ export type GetAutomationLogsParams = {
   perPage?: number;
   stepId?: string | null;
   statuses?: string[] | null;
+  /** Período da modal de logs (mesmo filtro do card; ver `automation-stats-period`). */
+  executedAt?: { gte: Date; lt: Date };
 };
 
 const ALLOWED_LOG_STATUSES = new Set([
@@ -1065,7 +1067,10 @@ export async function getAutomationLogs(automationId: string, params: GetAutomat
   const skip = (page - 1) * perPage;
   const statuses = normalizeLogStatuses(params.statuses);
 
-  const where: Prisma.AutomationLogWhereInput = { automationId };
+  const where: Prisma.AutomationLogWhereInput = {
+    automationId,
+    ...(params.executedAt ? { executedAt: params.executedAt } : {}),
+  };
   if (params.stepId === "trigger") {
     // STARTED é o eco do disparo; a linha útil do card é o desfecho.
     where.stepId = null;
