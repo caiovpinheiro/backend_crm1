@@ -98,6 +98,7 @@ let advisoryLocks: string[];
 let slotUpdates: string[];
 
 function resetDb() {
+  overrideRows = [];
   participants = [];
   slots = [];
   conversations = new Map();
@@ -139,12 +140,16 @@ function addConversation(id: string, contactId: string, assignee: string | null,
  * `allowedSets` = cada `IN (...)` da query (recorte explícito e/ou regras
  * por departamento) — o usuário precisa estar em todos (interseção).
  */
-function selectSlotFake(allowedSets: Set<string>[] = []) {
+/** Liberação/pausa manual vigente (tabela distribution_leads_eligibility_overrides). */
+let overrideRows: { userId: string; eligible: boolean; startsAt: Date; endsAt: Date }[] = [];
+
+function selectSlotFake(allowedSets: Set<string>[] = [], excludedSets: Set<string>[] = []) {
   const eligible = slots.filter((s) => {
     const p = participants.find((pp) => pp.id === s.participantId);
     if (!p || p.status !== "ACTIVE" || p.weight <= 0) return false;
     if (s.slotIndex >= p.weight) return false;
     if (!allowedSets.every((set) => set.has(p.userId))) return false;
+    if (excludedSets.some((set) => set.has(p.userId))) return false;
     return users.get(p.userId)?.type === "HUMAN";
   });
   if (eligible.length === 0) return [];
@@ -245,17 +250,23 @@ vi.mock("@/lib/prisma", () => {
           .filter((t): t is number => t !== null);
         return [{ max: used.length ? new Date(Math.max(...used)) : null }];
       }
-      // Fragmentos `IN (...)` chegam como Prisma.Sql (strings + values).
-      const allowedSets = args
+      // Fragmentos `IN (...)` / `NOT IN (...)` chegam como Prisma.Sql
+      // (strings + values). `Prisma.empty` (sem recorte) não tem valores.
+      const fragments = args
         .slice(1)
         .filter(
-          (v): v is { values: unknown[] } =>
+          (v): v is { values: unknown[]; strings: string[] } =>
             !!v && typeof v === "object" && Array.isArray((v as { values?: unknown }).values),
         )
-        .map((v) => new Set(v.values.filter((x): x is string => typeof x === "string")))
-        // `Prisma.empty` (sem recorte) também é um Sql, sem valores.
-        .filter((set) => set.size > 0);
-      return selectSlotFake(allowedSets);
+        .map((v) => ({
+          not: (v.strings ?? []).join(" ").includes("NOT IN"),
+          set: new Set(v.values.filter((x): x is string => typeof x === "string")),
+        }))
+        .filter((f) => f.set.size > 0);
+      return selectSlotFake(
+        fragments.filter((f) => !f.not).map((f) => f.set),
+        fragments.filter((f) => f.not).map((f) => f.set),
+      );
     }),
     conversation: conversationApi,
     contact: {
@@ -266,6 +277,13 @@ vi.mock("@/lib/prisma", () => {
       findUnique: vi.fn(async () => null),
       findFirst: vi.fn(async () => null),
       updateMany: vi.fn(async () => ({ count: 0 })),
+    },
+    distributionLeadsEligibilityOverride: {
+      findMany: vi.fn(async ({ where }: { where: { startsAt: { lte: Date }; endsAt: { gt: Date } } }) =>
+        overrideRows.filter(
+          (o) => o.startsAt <= where.startsAt.lte && o.endsAt > where.endsAt.gt,
+        ),
+      ),
     },
     distributionLeadsSlot: {
       update: vi.fn(
@@ -862,5 +880,85 @@ describe("executeLeadsDistribution — regras de horário por departamento", () 
     });
     expect(retry).toEqual(first);
     expect(assignments).toHaveLength(1);
+  });
+});
+
+describe("executeLeadsDistribution — liberação/pausa manual temporária", () => {
+  const hour = 3_600_000;
+  beforeEach(() => {
+    resetDb();
+    vi.clearAllMocks();
+    hasOrganizationWidget.mockResolvedValue(true);
+    isDistributionEnabled.mockResolvedValue(true);
+    departmentRulesEnabled.mockResolvedValue(true);
+    departmentEligibleUserIds.mockResolvedValue([]);
+  });
+
+  function override(userId: string, eligible: boolean, fromMs: number, toMs: number) {
+    const now = Date.now();
+    overrideRows.push({
+      userId,
+      eligible,
+      startsAt: new Date(now + fromMs),
+      endsAt: new Date(now + toMs),
+    });
+  }
+
+  async function run(convId: string) {
+    addConversation(convId, `ct_${convId}`, null);
+    return executeLeadsDistribution({
+      conversationId: convId,
+      contactId: `ct_${convId}`,
+      triggerSource: "AUTOMATION",
+    });
+  }
+
+  it("fora do horário do departamento, quem foi liberado até mais tarde recebe (hora extra)", async () => {
+    addParticipant("MANHA", 3);
+    addParticipant("OUTRA", 3);
+    override("MANHA", true, -hour, 4 * hour);
+    for (let i = 0; i < 10; i++) {
+      const r = await run(`c${i}`);
+      expect(r.reason).toBe("ASSIGNED");
+      expect(r.selectedUserId).toBe("MANHA");
+    }
+  });
+
+  it("liberação vencida não vale mais: volta à regra do departamento (ninguém no horário)", async () => {
+    addParticipant("MANHA", 3);
+    override("MANHA", true, -5 * hour, -hour);
+    const r = await run("c1");
+    expect(r.reason).toBe("NO_ELIGIBLE_PARTICIPANT");
+  });
+
+  it("pausado no horário do departamento não recebe; os outros do departamento sim", async () => {
+    addParticipant("DIA1", 3);
+    addParticipant("DIA2", 3);
+    departmentEligibleUserIds.mockResolvedValue(["DIA1", "DIA2"]);
+    override("DIA1", false, -hour, hour);
+    for (let i = 0; i < 10; i++) {
+      const r = await run(`c${i}`);
+      expect(r.selectedUserId).toBe("DIA2");
+    }
+  });
+
+  it("pausa vale mesmo com as regras por departamento desligadas", async () => {
+    departmentRulesEnabled.mockResolvedValue(false);
+    addParticipant("A", 3);
+    addParticipant("B", 3);
+    override("A", false, -hour, hour);
+    for (let i = 0; i < 10; i++) {
+      const r = await run(`c${i}`);
+      expect(r.selectedUserId).toBe("B");
+    }
+  });
+
+  it("liberado mas INATIVO ou peso 0 continua sem receber", async () => {
+    addParticipant("INATIVO", 3, "INACTIVE");
+    addParticipant("PESO0", 0);
+    override("INATIVO", true, -hour, hour);
+    override("PESO0", true, -hour, hour);
+    const r = await run("c1");
+    expect(r.reason).toBe("NO_ELIGIBLE_PARTICIPANT");
   });
 });

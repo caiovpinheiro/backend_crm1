@@ -46,6 +46,10 @@ import {
   claimDealAssignmentTx,
 } from "../claim";
 import {
+  activeEligibilityOverridesTx,
+  applyEligibilityOverrides,
+} from "./eligibility-overrides";
+import {
   eligibleUserIdsByDepartmentRulesTx,
   isLeadsDepartmentRulesEnabled,
 } from "./department-rules";
@@ -306,12 +310,15 @@ async function selectNextSlotTx(
   orgId: string,
   onlyUserIds?: string[],
   departmentUserIds?: string[],
+  excludeUserIds?: string[],
 ): Promise<SelectedSlot | null> {
   if (onlyUserIds && onlyUserIds.length === 0) return null;
   if (departmentUserIds && departmentUserIds.length === 0) return null;
   const departmentFilter = departmentUserIds
     ? Prisma.sql`AND p."userId" IN (${Prisma.join(departmentUserIds)})`
-    : Prisma.empty;
+    : excludeUserIds && excludeUserIds.length > 0
+      ? Prisma.sql`AND p."userId" NOT IN (${Prisma.join(excludeUserIds)})`
+      : Prisma.empty;
   const rows = onlyUserIds
     ? await tx.$queryRaw<
         {
@@ -456,7 +463,20 @@ export async function executeLeadsDistribution(
       const departmentUserIds = departmentRulesOn
         ? await eligibleUserIdsByDepartmentRulesTx(tx, orgId)
         : undefined;
-      const slot = await selectNextSlotTx(tx, orgId, input.onlyUserIds, departmentUserIds);
+      // Liberação/pausa manual e temporária do consultor (tela de leads):
+      // liberado entra mesmo fora do horário; pausado sai mesmo no horário.
+      const overrides = await activeEligibilityOverridesTx(tx, orgId);
+      const { allowUserIds, excludeUserIds } = applyEligibilityOverrides({
+        departmentUserIds,
+        overrides,
+      });
+      const slot = await selectNextSlotTx(
+        tx,
+        orgId,
+        input.onlyUserIds,
+        allowUserIds,
+        excludeUserIds,
+      );
       if (!slot) {
         const result: LeadsDistributionResult = {
           success: false,
