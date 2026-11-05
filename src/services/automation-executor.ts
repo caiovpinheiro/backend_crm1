@@ -14,7 +14,7 @@ import {
   webhookUsesDealProducts,
 } from "@/services/automation-deal-products";
 import { logAutomationRoute } from "@/lib/automation-route-log";
-import { rewriteStorageUrlsForWebhook } from "@/lib/public-media-url";
+import { rewriteStorageUrlsForWebhook, toPublicMediaUrl } from "@/lib/public-media-url";
 import {
   evaluateChannelNumberRule,
   normalizeConditionConfig,
@@ -108,6 +108,10 @@ import {
   pausedStepTimeoutMs,
   shouldPersistDelay,
   AWAITING_FLOW_VAR,
+  DOCUMENT_USED_AT_VAR,
+  documentSearchSince,
+  findReceivedDocument,
+  replyVariableName,
   menuHandsWaitToNextStep,
   nextStepOwnsReplyWait,
   flowTemplateRowHasFlowButton,
@@ -2341,6 +2345,8 @@ type StepResult = {
   skipRemaining?: boolean;
   gotoStepId?: string;
   setVariable?: { name: string; value: unknown };
+  /** Várias variáveis de uma vez (aguardar documento com arquivo já recebido). */
+  setVariables?: Record<string, unknown>;
   /** Quando presente, substitui o "OK" na mensagem de SUCCESS do log. */
   note?: string;
 };
@@ -5024,6 +5030,48 @@ export async function executeStep(
     case "wait_for_document": {
       if (!rt.contactId) throw new Error("wait_for_document: contactId ausente");
       const wfdStepId = (cfg as Record<string, unknown>).__stepId as string | undefined;
+
+      // Currículo mandado antes do passo (ex.: como resposta ao template):
+      // segue Documento recebido com o link, sem pedir de novo.
+      const documentGoto = readStepRef(cfg, "documentGotoStepId");
+      if (documentGoto) {
+        const ctxNow = await getActiveContext(rt.automationId, rt.contactId);
+        const ctxVars = (ctxNow?.variables as Record<string, unknown> | null) ?? {};
+        const received = await findReceivedDocument(
+          rt.contactId,
+          documentSearchSince({
+            contextCreatedAt: ctxNow?.createdAt,
+            usedAt: ctxVars[DOCUMENT_USED_AT_VAR],
+            now: new Date(),
+          }),
+        );
+        if (received?.mediaUrl) {
+          const mediaUrl = toPublicMediaUrl(received.mediaUrl) ?? received.mediaUrl;
+          const usedAt = received.createdAt.toISOString();
+          if (ctxNow) {
+            await prisma.automationContext.update({
+              where: { id: ctxNow.id },
+              data: {
+                variables: { ...ctxVars, [DOCUMENT_USED_AT_VAR]: usedAt } as Prisma.InputJsonValue,
+              },
+            });
+          }
+          const varName = replyVariableName(cfg);
+          return {
+            skipRemaining: true,
+            gotoStepId: documentGoto,
+            setVariables: {
+              [varName]: varName === "lastResponse" ? mediaUrl : received.content ?? "",
+              lastResponse: mediaUrl,
+              documentMessageType: received.messageType ?? "",
+              documentMediaUrl: mediaUrl,
+              documentReceived: "sim",
+            },
+            note: "documento já recebido",
+          };
+        }
+      }
+
       if (wfdStepId) {
         const configured = readNumber(cfg, "timeoutMs");
         // Sem cronômetro o contexto ficava RUNNING até o TTL de segurança
@@ -5887,6 +5935,10 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
         flowVariables = { ...flowVariables, [result.setVariable.name]: result.setVariable.value };
         rt.data = { ...rt.data, ...flowVariables };
       }
+      if (result.setVariables) {
+        flowVariables = { ...flowVariables, ...result.setVariables };
+        rt.data = { ...rt.data, ...flowVariables };
+      }
       // 27/mai/26 — Refresh das tags no `rt` após add_tag/remove_tag pra
       // que conditions subsequentes (no MESMO fluxo, sem wait_for_reply
       // no meio) enxerguem o estado atualizado. Antes o snapshot vinha
@@ -6293,6 +6345,10 @@ export async function continueFromStep(
       );
       if (result.setVariable) {
         flowVariables = { ...flowVariables, [result.setVariable.name]: result.setVariable.value };
+        rt.data = { ...rt.data, ...flowVariables };
+      }
+      if (result.setVariables) {
+        flowVariables = { ...flowVariables, ...result.setVariables };
         rt.data = { ...rt.data, ...flowVariables };
       }
       if (step.type === "add_tag" || step.type === "remove_tag") {
