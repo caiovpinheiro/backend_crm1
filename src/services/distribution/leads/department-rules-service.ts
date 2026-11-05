@@ -15,6 +15,7 @@ import {
   nextTransition,
   type LeadsDepartmentRuleInput,
 } from "./department-rules";
+import { getActiveEligibilityOverrides } from "./eligibility-overrides";
 
 export interface LeadsDepartmentRuleView {
   id: string;
@@ -39,7 +40,10 @@ export interface LeadsDepartmentSummaryView {
   activeMembers: number;
   /** `totalMembers - activeMembers`. */
   inactiveMembers: number;
-  /** `activeMembers` quando o departamento está disponível agora; senão 0. */
+  /**
+   * Ativos que recebem agora: no horário do departamento, ou liberados
+   * manualmente; pausados manualmente ficam de fora.
+   */
   eligibleMembers: number;
   /** Tem ao menos uma regra habilitada. */
   hasEnabledRule: boolean;
@@ -174,7 +178,7 @@ export async function getLeadsDepartmentRulesSummary(
   now: Date = new Date(),
 ): Promise<LeadsDepartmentRulesSummary> {
   const orgId = getOrgIdOrThrow();
-  const [rulesEnabled, departments, rules, members, participants] = await Promise.all([
+  const [rulesEnabled, departments, rules, members, participants, overrides] = await Promise.all([
     isLeadsDepartmentRulesEnabled(),
     prisma.department.findMany({
       where: { organizationId: orgId },
@@ -193,6 +197,7 @@ export async function getLeadsDepartmentRulesSummary(
       where: { status: "ACTIVE", weight: { gt: 0 } },
       select: { userId: true },
     }),
+    getActiveEligibilityOverrides(now),
   ]);
   const activeUsers = new Set(participants.map((p) => p.userId));
   const membersByDept = new Map<string, string[]>();
@@ -215,8 +220,13 @@ export async function getLeadsDepartmentRulesSummary(
     departments: departments.map((d) => {
       const deptRules = rulesByDept.get(d.id) ?? [];
       const deptMembers = [...new Set(membersByDept.get(d.id) ?? [])];
-      const activeMembers = deptMembers.filter((u) => activeUsers.has(u)).length;
+      const activeList = deptMembers.filter((u) => activeUsers.has(u));
+      const activeMembers = activeList.length;
       const availableNow = isAnyRuleActiveAt(deptRules, clock);
+      const eligibleMembers = activeList.filter((u) => {
+        const o = overrides.get(u);
+        return o ? o.eligible : availableNow;
+      }).length;
       const transition = nextTransition(deptRules, now);
       return {
         departmentId: d.id,
@@ -226,7 +236,7 @@ export async function getLeadsDepartmentRulesSummary(
         totalMembers: deptMembers.length,
         activeMembers,
         inactiveMembers: deptMembers.length - activeMembers,
-        eligibleMembers: availableNow ? activeMembers : 0,
+        eligibleMembers,
         hasEnabledRule: deptRules.some((r) => r.enabled),
         availableNow,
         nextChangeAt: transition ? transition.at.toISOString() : null,

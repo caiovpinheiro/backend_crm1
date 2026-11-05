@@ -43,6 +43,12 @@ vi.mock("@/lib/prisma", () => ({
     distributionLeadsParticipant: {
       findMany: vi.fn(async () => []),
     },
+    distributionLeadsDepartmentRule: {
+      findMany: vi.fn(async () => []),
+    },
+    distributionLeadsEligibilityOverride: {
+      findMany: vi.fn(async () => []),
+    },
     $transaction: vi.fn(async (cb: (tx: unknown) => Promise<unknown>) =>
       cb({
         distributionLeadsParticipant: {

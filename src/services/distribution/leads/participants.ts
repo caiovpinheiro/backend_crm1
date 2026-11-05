@@ -15,6 +15,13 @@ import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { parseDay } from "@/services/painel-period";
 
+import { isAnyRuleActiveAt, isLeadsDepartmentRulesEnabled, localClock } from "./department-rules";
+import {
+  describeEligibility,
+  getActiveEligibilityOverrides,
+  type LeadsEligibilityView,
+} from "./eligibility-overrides";
+
 const log = getLogger("distribution.leads.participants");
 
 export const LEADS_SLOT_COUNT = 5;
@@ -33,6 +40,8 @@ export interface LeadsParticipantView {
   totalReceived: number;
   /** Departamentos dos quais é membro (`DepartmentMember`). */
   departments: { id: string; name: string }[];
+  /** Recebe lead agora? Considera status, peso, regras por departamento e liberação/pausa manual. */
+  eligibility: LeadsEligibilityView;
   createdAt: string;
   updatedAt: string;
 }
@@ -60,8 +69,28 @@ function emptySlots(): LeadsParticipantView["slots"] {
   }));
 }
 
-export async function getLeadsParticipants(): Promise<LeadsParticipantView[]> {
+export async function getLeadsParticipants(now: Date = new Date()): Promise<LeadsParticipantView[]> {
   const orgId = getOrgIdOrThrow();
+  const [rulesEnabled, rules, overrides] = await Promise.all([
+    isLeadsDepartmentRulesEnabled(),
+    prisma.distributionLeadsDepartmentRule.findMany({
+      where: { enabled: true },
+      select: { departmentId: true, startMinute: true, endMinute: true, weekdays: true, enabled: true },
+    }),
+    getActiveEligibilityOverrides(now),
+  ]);
+  const clock = localClock(now);
+  const activeDepartmentIds = new Set(
+    rules.filter((r) => isAnyRuleActiveAt([r], clock)).map((r) => r.departmentId),
+  );
+  const eligibilityOf = (userId: string, status: string, weight: number) =>
+    describeEligibility({
+      status,
+      weight,
+      rulesEnabled,
+      departmentActiveNow: (deptsByUser.get(userId) ?? []).some((d) => activeDepartmentIds.has(d.id)),
+      override: overrides.get(userId),
+    });
 
   // User NÃO é org-scoped na Prisma Extension — filtro manual, igual ao smart.
   const [users, participants, received, memberships] = await Promise.all([
@@ -131,6 +160,7 @@ export async function getLeadsParticipants(): Promise<LeadsParticipantView[]> {
         slots: emptySlots(),
         totalReceived: receivedByUser.get(u.id) ?? 0,
         departments: deptsByUser.get(u.id) ?? [],
+        eligibility: eligibilityOf(u.id, "INACTIVE", 0),
         createdAt: "",
         updatedAt: "",
       };
@@ -150,6 +180,7 @@ export async function getLeadsParticipants(): Promise<LeadsParticipantView[]> {
       })),
       totalReceived: receivedByUser.get(u.id) ?? 0,
       departments: deptsByUser.get(u.id) ?? [],
+      eligibility: eligibilityOf(u.id, p.status, p.weight),
       createdAt: p.createdAt.toISOString(),
       updatedAt: p.updatedAt.toISOString(),
     };

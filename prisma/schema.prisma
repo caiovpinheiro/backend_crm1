@@ -98,6 +98,7 @@ model Organization {
   distributionLeadsExecutions   DistributionLeadsExecution[]
   distributionLeadsPending      DistributionLeadsPending[]
   distributionLeadsDepartmentRules DistributionLeadsDepartmentRule[]
+  distributionLeadsEligibilityOverrides DistributionLeadsEligibilityOverride[]
   segments                 Segment[]
   campaigns                Campaign[]
   campaignRecipients       CampaignRecipient[]
@@ -588,6 +589,7 @@ model User {
   distributionMembers            DistributionMember[]
   distributionResponsibles       DistributionResponsible[]
   distributionLeadsParticipants  DistributionLeadsParticipant[]
+  distributionLeadsEligibilityOverrides DistributionLeadsEligibilityOverride[]
   schedule                       AgentSchedule?
   agentStatus                    AgentStatus?
   presenceLogs                   AgentPresenceLog[]
@@ -4399,6 +4401,28 @@ model DistributionLeadsParticipant {
   @@unique([organizationId, userId])
   @@index([organizationId, status])
   @@map("distribution_leads_participants")
+}
+
+/// Liberação ou pausa MANUAL e TEMPORÁRIA de um consultor no modo leads.
+/// `eligible=true`: recebe lead mesmo fora do horário do departamento.
+/// `eligible=false`: não recebe, mesmo no horário. Vale de `startsAt` até
+/// `endsAt` (exclusivo); depois volta a valer a regra do departamento.
+/// Encerrar antes = gravar `endsAt` = agora (a linha fica como histórico).
+model DistributionLeadsEligibilityOverride {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  userId         String
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  eligible       Boolean
+  startsAt       DateTime
+  endsAt         DateTime
+  createdById    String?
+  createdAt      DateTime     @default(now())
+
+  @@index([organizationId, endsAt])
+  @@index([organizationId, userId])
+  @@map("distribution_leads_eligibility_overrides")
 }
 
 /// Slot de frequência do rodízio (nunca capacidade). Cada participante tem 5;
