@@ -439,6 +439,7 @@ const automationListSelect = {
   triggerConfig: true,
   active: true,
   allowManualRun: true,
+  keepRunningOnAgentReply: true,
   createdAt: true,
   updatedAt: true,
   _count: { select: { steps: true } },
@@ -797,6 +798,7 @@ export type CreateAutomationInput = {
   triggerConfig: Prisma.InputJsonValue;
   active?: boolean;
   allowManualRun?: boolean;
+  keepRunningOnAgentReply?: boolean;
   steps?: CreateAutomationStepInput[];
 };
 
@@ -830,6 +832,7 @@ export async function createAutomation(
       triggerConfig: data.triggerConfig,
       active: data.active ?? false,
       allowManualRun: data.allowManualRun ?? false,
+      keepRunningOnAgentReply: data.keepRunningOnAgentReply ?? false,
       steps: {
         create: (data.steps ?? []).map((s, index) => ({
           ...(s.id ? { id: s.id } : {}),
@@ -896,6 +899,7 @@ export type UpdateAutomationInput = {
   triggerConfig?: Prisma.InputJsonValue;
   active?: boolean;
   allowManualRun?: boolean;
+  keepRunningOnAgentReply?: boolean;
   steps?: CreateAutomationStepInput[];
 };
 
@@ -949,6 +953,9 @@ export async function updateAutomation(id: string, data: UpdateAutomationInput) 
     }
     if (data.allowManualRun !== undefined) {
       updateData.allowManualRun = data.allowManualRun;
+    }
+    if (data.keepRunningOnAgentReply !== undefined) {
+      updateData.keepRunningOnAgentReply = data.keepRunningOnAgentReply;
     }
 
     if (Object.keys(updateData).length > 0) {
