@@ -107,6 +107,8 @@ export async function POST(request: Request) {
           active: typeof b.active === "boolean" ? b.active : undefined,
           allowManualRun:
             typeof b.allowManualRun === "boolean" ? b.allowManualRun : undefined,
+          keepRunningOnAgentReply:
+            typeof b.keepRunningOnAgentReply === "boolean" ? b.keepRunningOnAgentReply : undefined,
           // BUG 27/abr: o `id` de cada step NAO estava sendo propagado pro
           // service. Resultado: o canvas envia `[{ id: "uuid_a", type, config }]`
           // onde o `config` interno referencia outros steps por esses uuids

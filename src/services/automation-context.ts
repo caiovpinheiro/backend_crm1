@@ -667,6 +667,19 @@ export function humanReplyDuringPauseCancels(input: {
 }
 
 /**
+ * Encerrar o contexto porque o consultor falou durante a espera?
+ * Automação com "continuar mesmo se o consultor responder" nunca encerra
+ * por isso: segue do passo onde parou.
+ */
+export function humanReplyEndsContext(
+  keepRunningOnAgentReply: boolean,
+  input: Parameters<typeof humanReplyDuringPauseCancels>[0],
+): boolean {
+  if (keepRunningOnAgentReply) return false;
+  return humanReplyDuringPauseCancels(input);
+}
+
+/**
  * Ticket já RESOLVED quando a espera começou (template de reativação
  * gravado no ticket encerrado). O timeout do canvas ainda deve seguir
  * — marcar perdido / mover etapa. Abortar só se o encerramento
@@ -1059,14 +1072,16 @@ export async function hasActiveContextsForContact(
 }
 
 /**
- * Igual a `cancelActiveContextsForContact`, mas só dispara o caminho
- * completo se o probe barato achar contexto vivo.
+ * Mensagem do consultor (texto, anexo, template, produto): encerra os
+ * contextos vivos do contato — "o humano assumiu". Automação com
+ * `keepRunningOnAgentReply` fica de fora e segue do passo onde parou.
+ * Só dispara o caminho completo se o probe barato achar contexto vivo.
  */
 export async function cancelActiveContextsForContactIfAny(
   contactId: string,
 ): Promise<number> {
   if (!(await hasActiveContextsForContact(contactId))) return 0;
-  return cancelActiveContextsForContact(contactId);
+  return cancelActiveContextsForContact(contactId, { keepAgentReplyProof: true });
 }
 
 /**
@@ -1077,12 +1092,22 @@ export async function cancelActiveContextsForContactIfAny(
  */
 export async function cancelActiveContextsForContact(
   contactId: string,
-  opts?: { keepArmedTimers?: boolean },
+  opts?: {
+    keepArmedTimers?: boolean;
+    /** Não encerra automações com `keepRunningOnAgentReply` (envio do consultor). */
+    keepAgentReplyProof?: boolean;
+  },
 ): Promise<number> {
   const active = await getContactActiveContexts(contactId);
   const now = Date.now();
   let n = 0;
   for (const ctx of active) {
+    if (opts?.keepAgentReplyProof && ctx.automation?.keepRunningOnAgentReply) {
+      log.info(
+        `mensagem do consultor não encerra — auto=${ctx.automation.name} ctx=${ctx.id} (continuar mesmo se o consultor responder)`,
+      );
+      continue;
+    }
     if (
       opts?.keepArmedTimers &&
       ctx.timeoutAt &&
@@ -1114,7 +1139,14 @@ export async function getContactActiveContexts(contactId: string) {
   return prisma.automationContext.findMany({
     where: { contactId, status: { in: ["RUNNING", "PAUSED"] } },
     include: {
-      automation: { select: { id: true, name: true, steps: { orderBy: { position: "asc" } } } },
+      automation: {
+        select: {
+          id: true,
+          name: true,
+          keepRunningOnAgentReply: true,
+          steps: { orderBy: { position: "asc" } },
+        },
+      },
     },
     orderBy: { updatedAt: "desc" },
   });
@@ -1259,7 +1291,7 @@ export async function processIncomingMessage(
     }
 
     if (
-      humanReplyDuringPauseCancels({
+      humanReplyEndsContext(ctx.automation.keepRunningOnAgentReply, {
         humanAttending,
         hasHumanReply: hasHumanReplyFlag,
         interactiveId: opts?.interactiveId,

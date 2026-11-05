@@ -3507,6 +3507,10 @@ model Automation {
   /// automático. Independe de `triggerType` — permite que uma automação
   /// reativa também seja disparável sob demanda pelo operador.
   allowManualRun Boolean             @default(false)
+  /// Quando true, mensagem do consultor na conversa NÃO encerra os
+  /// contextos desta automação (nem a resposta do cliente que vem depois):
+  /// o fluxo segue do passo onde parou. Ex.: espera de formulário FLOW.
+  keepRunningOnAgentReply Boolean    @default(false)
   steps          AutomationStep[]
   contexts       AutomationContext[]
   sessionExpiryClaims AutomationSessionExpiryClaim[]
