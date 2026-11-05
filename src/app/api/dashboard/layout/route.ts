@@ -4,6 +4,11 @@ import { z } from "zod";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { mergeDashboardLayoutData } from "@/lib/dashboard-layout-merge";
+import {
+  DASHBOARD_DEFAULT_LAYOUT_NAME,
+  dashboardLayoutPayloadSchema,
+  MAX_DASHBOARD_LAYOUT_JSON_CHARS,
+} from "@/lib/dashboard-layout-schema";
 import { getLogger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
 import { prismaBase } from "@/lib/prisma-base";
@@ -14,34 +19,7 @@ export const runtime = "nodejs";
 
 const log = getLogger("api/dashboard/layout");
 
-/**
- * Schema do payload de layout. Mantém validação solta pra permitir evoluir
- * o catálogo de widgets sem migration — widgets desconhecidos no backend
- * são aceitos (o client faz o filtro final). Apenas garante tipos básicos
- * e limita tamanhos pra evitar abuso (payload máximo ~16KB serializado).
- */
-const gridItemSchema = z.object({
-  i: z.string().min(1).max(64),
-  x: z.number().int().min(0).max(50),
-  y: z.number().int().min(0).max(500),
-  w: z.number().int().min(1).max(12),
-  h: z.number().int().min(1).max(50),
-  minW: z.number().int().min(1).max(12).optional(),
-  minH: z.number().int().min(1).max(50).optional(),
-  maxW: z.number().int().min(1).max(12).optional(),
-  maxH: z.number().int().min(1).max(50).optional(),
-});
-
-const payloadSchema = z.object({
-  name: z.string().min(1).max(64).optional(),
-  preset: z
-    .enum(["default", "comercial", "atendimento", "equipe", "monitor", "custom"])
-    .optional(),
-  visibleWidgets: z.array(z.string().min(1).max(64)).max(50),
-  layout: z.record(z.string().min(1).max(64), gridItemSchema),
-  /** Flags extras do layout (tema, densidade, etc.). */
-  meta: z.record(z.string(), z.unknown()).optional(),
-});
+const payloadSchema = dashboardLayoutPayloadSchema;
 
 type LayoutData = z.infer<typeof payloadSchema>;
 
@@ -58,8 +36,8 @@ const patchSchema = payloadSchema
     { message: "Payload vazio." },
   );
 
-const DEFAULT_NAME = "Padrão";
-const MAX_LAYOUT_JSON_CHARS = 128_000;
+const DEFAULT_NAME = DASHBOARD_DEFAULT_LAYOUT_NAME;
+const MAX_LAYOUT_JSON_CHARS = MAX_DASHBOARD_LAYOUT_JSON_CHARS;
 
 function isRetryableWrite(err: unknown): boolean {
   const code = (err as { code?: string }).code;
