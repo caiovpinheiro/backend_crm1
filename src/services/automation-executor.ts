@@ -9,6 +9,10 @@ import {
 } from "@prisma/client";
 
 import { conversationHasRealAttendance } from "@/lib/ai-agents/tabulation-classify-policy";
+import {
+  loadDealProductsForWebhook,
+  webhookUsesDealProducts,
+} from "@/services/automation-deal-products";
 import { logAutomationRoute } from "@/lib/automation-route-log";
 import { rewriteStorageUrlsForWebhook } from "@/lib/public-media-url";
 import {
@@ -4587,7 +4591,12 @@ export async function executeStep(
       const headers = asRecord(cfg["headers"]) ?? {};
 
       // Root pra resolver os tokens {{...}} do body/headers/params custom.
-      const root = buildWebhookRoot(rt);
+      // Produtos do negócio (`{{dealProduct.*}}`) só são lidos quando algum
+      // template do passo cita — lidos agora, não no disparo do fluxo.
+      const root: Record<string, unknown> = {
+        ...buildWebhookRoot(rt),
+        ...(webhookUsesDealProducts(cfg) ? await loadDealProductsForWebhook(rt.dealId) : {}),
+      };
 
       const h = new Headers({ "Content-Type": "application/json" });
       for (const [k, v] of Object.entries(headers)) {
