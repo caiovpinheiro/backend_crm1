@@ -387,6 +387,22 @@ export function inboundIsAudio(input: {
 }
 
 /**
+ * O aguardar documento continua esperando com áudio e com o aviso
+ * `unsupported` sem arquivo (álbum de fotos: a Meta manda o aviso e as
+ * fotos em seguida). Com o aviso, o texto "Tipo de mensagem não suportado"
+ * ia para o campo no lugar do arquivo.
+ */
+export function waitForDocumentStays(input: {
+  messageContent: string;
+  messageType?: string | null;
+  mediaUrl?: string | null;
+}): boolean {
+  if (inboundIsAudio(input)) return true;
+  const type = (input.messageType ?? "").trim().toLowerCase();
+  return type === "unsupported" && !(input.mediaUrl ?? "").trim();
+}
+
+/**
  * Arquivo do contato na saída "Documento recebido": foto, PDF, Word,
  * vídeo, figurinha ou outra mídia. Áudio não conta. Texto, clique de
  * botão, localização e contato compartilhado também não.
@@ -1180,6 +1196,111 @@ export type SalesbotProcessResult = {
   contextId?: string;
 };
 
+/** Janela da rajada: arquivo e legenda chegam como mensagens separadas no mesmo instante. */
+const INBOUND_FILE_BURST_MS = 60_000;
+
+type InboundFileRow = {
+  mediaUrl: string | null;
+  messageType: string | null;
+  createdAt: Date;
+};
+
+/**
+ * Arquivo do aguardar documento entre as últimas mensagens recebidas (mais
+ * nova primeiro). PDF e "Segue o meu currículo" chegam juntos e a última
+ * podia ser o texto: sem arquivo, o nome do PDF ia para o campo. Vale o
+ * arquivo mais novo da mesma rajada; sem ele, a última mensagem.
+ */
+export function pickInboundFile(rows: readonly InboundFileRow[]): {
+  mediaUrl: string | null;
+  messageType: string | null;
+} {
+  const newest = rows[0];
+  if (!newest) return { mediaUrl: null, messageType: null };
+  const withFile = rows.find(
+    (r) =>
+      (r.mediaUrl ?? "").trim() &&
+      newest.createdAt.getTime() - r.createdAt.getTime() <= INBOUND_FILE_BURST_MS,
+  );
+  const row = withFile ?? newest;
+  return { mediaUrl: row.mediaUrl ?? null, messageType: row.messageType ?? null };
+}
+
+/** Momento do último arquivo usado por um aguardar documento deste atendimento. */
+export const DOCUMENT_USED_AT_VAR = "__documentUsedAt";
+
+/** Sem atendimento pausado, só vale o arquivo que acabou de chegar. */
+const RECEIVED_DOCUMENT_FRESH_MS = 2 * 60_000;
+
+/**
+ * Desde quando o aguardar documento aceita arquivo já recebido: o início do
+ * atendimento (contexto), ou o último arquivo já usado, o que for mais novo.
+ */
+export function documentSearchSince(input: {
+  contextCreatedAt: Date | null | undefined;
+  usedAt: unknown;
+  now: Date;
+}): Date {
+  const start = input.contextCreatedAt ?? new Date(input.now.getTime() - RECEIVED_DOCUMENT_FRESH_MS);
+  const used = typeof input.usedAt === "string" ? new Date(input.usedAt) : null;
+  if (used && !Number.isNaN(used.getTime()) && used.getTime() > start.getTime()) return used;
+  return start;
+}
+
+export type ReceivedDocumentRow = {
+  mediaUrl: string | null;
+  messageType: string | null;
+  content: string | null;
+  createdAt: Date;
+};
+
+/**
+ * Arquivo que o contato já mandou (mais novo primeiro) e que o aguardar
+ * documento pode usar na entrada. O candidato manda o currículo como
+ * resposta ao template; o fluxo passa pelas condições e só depois chega ao
+ * passo, que antes pedia o currículo de novo.
+ */
+export function pickReceivedDocument(
+  rows: readonly ReceivedDocumentRow[],
+  since: Date,
+): ReceivedDocumentRow | null {
+  for (const row of rows) {
+    if (row.createdAt.getTime() <= since.getTime()) continue;
+    if (!(row.mediaUrl ?? "").trim()) continue;
+    const media = {
+      messageContent: row.content ?? "",
+      messageType: row.messageType,
+      mediaUrl: row.mediaUrl,
+    };
+    if (waitForDocumentStays(media) || !inboundIsDocument(media)) continue;
+    return row;
+  }
+  return null;
+}
+
+/** Arquivo recebido do contato desde `since`, ainda não usado. */
+export async function findReceivedDocument(
+  contactId: string,
+  since: Date,
+): Promise<ReceivedDocumentRow | null> {
+  try {
+    const rows = await prisma.message.findMany({
+      where: {
+        direction: "in",
+        createdAt: { gt: since },
+        mediaUrl: { not: null },
+        conversation: { contactId },
+      },
+      orderBy: { createdAt: "desc" },
+      take: 10,
+      select: { mediaUrl: true, messageType: true, content: true, createdAt: true },
+    });
+    return pickReceivedDocument(rows, since);
+  } catch {
+    return null;
+  }
+}
+
 async function latestInboundFile(conversationId: string | null | undefined): Promise<{
   mediaUrl: string | null;
   messageType: string | null;
@@ -1187,12 +1308,13 @@ async function latestInboundFile(conversationId: string | null | undefined): Pro
   const id = conversationId?.trim();
   if (!id) return { mediaUrl: null, messageType: null };
   try {
-    const row = await prisma.message.findFirst({
+    const rows = await prisma.message.findMany({
       where: { conversationId: id, direction: "in" },
       orderBy: { createdAt: "desc" },
-      select: { mediaUrl: true, messageType: true },
+      take: 5,
+      select: { mediaUrl: true, messageType: true, createdAt: true },
     });
-    return { mediaUrl: row?.mediaUrl ?? null, messageType: row?.messageType ?? null };
+    return pickInboundFile(rows);
   } catch {
     return { mediaUrl: null, messageType: null };
   }
@@ -1457,9 +1579,9 @@ export async function processIncomingMessage(
         messageType,
         mediaUrl: file.mediaUrl,
       };
-      if (inboundIsAudio(inboundMedia)) {
+      if (waitForDocumentStays(inboundMedia)) {
         log.info(
-          `wait_for_document ignorou áudio — auto=${ctx.automation.name} contato=${contactId} type=${messageType || "-"} — permanece no passo`,
+          `wait_for_document ignorou áudio/aviso sem arquivo — auto=${ctx.automation.name} contato=${contactId} type=${messageType || "-"} — permanece no passo`,
         );
         return {
           handled: true,
@@ -1484,6 +1606,7 @@ export async function processIncomingMessage(
         documentMessageType: messageType,
         documentMediaUrl: mediaUrl,
         documentReceived: isDocument ? "sim" : "nao",
+        ...(isDocument ? { [DOCUMENT_USED_AT_VAR]: new Date().toISOString() } : {}),
       };
       const gotoKey = isDocument ? "documentGotoStepId" : "textGotoStepId";
       nextStepId = readStepRef(config, gotoKey);

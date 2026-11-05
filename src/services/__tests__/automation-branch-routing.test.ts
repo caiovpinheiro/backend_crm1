@@ -33,6 +33,10 @@ import {
   nextStepOwnsReplyWait,
   menuHandsWaitToNextStep,
   isInFlightPlainSend,
+  pickInboundFile,
+  waitForDocumentStays,
+  documentSearchSince,
+  pickReceivedDocument,
 } from "@/services/automation-context";
 
 /** Recorte fiel da automação "inicio - pipe" que expôs o bug. */
@@ -1072,5 +1076,113 @@ describe("isInFlightPlainSend — inicio-pipe não consome o inbound que o dispa
         timeoutAt: null,
       }),
     ).toBe(false);
+  });
+});
+
+// DNAWORK "Ativação Infojobs" (04/nov/26): o PDF e "Segue o meu currículo"
+// chegaram no mesmo segundo. O passo lia a última mensagem (o texto), não
+// achava arquivo e gravava o nome do PDF no campo — o n8n quebrava no download.
+describe("pickInboundFile — arquivo do aguardar documento", () => {
+  const at = (s: number) => new Date(Date.UTC(2026, 10, 4, 19, 29, s));
+  const pdf = "/api/storage/org_x/inbound-media/in_1_a.pdf";
+
+  it("texto no mesmo instante não esconde o arquivo", () => {
+    expect(
+      pickInboundFile([
+        { mediaUrl: null, messageType: "text", createdAt: at(37) },
+        { mediaUrl: pdf, messageType: "document", createdAt: at(37) },
+      ]),
+    ).toEqual({ mediaUrl: pdf, messageType: "document" });
+  });
+
+  it("arquivo antigo de outra conversa não entra", () => {
+    expect(
+      pickInboundFile([
+        { mediaUrl: null, messageType: "text", createdAt: at(37) },
+        { mediaUrl: pdf, messageType: "document", createdAt: new Date(at(37).getTime() - 5 * 60_000) },
+      ]),
+    ).toEqual({ mediaUrl: null, messageType: "text" });
+  });
+
+  it("sem mensagens, nada", () => {
+    expect(pickInboundFile([])).toEqual({ mediaUrl: null, messageType: null });
+  });
+});
+
+// Álbum de fotos: a Meta manda "unsupported" sem arquivo e as fotos em
+// seguida. O passo seguia com o aviso e gravava "Tipo de mensagem não
+// suportado pela API da Meta" no campo.
+describe("waitForDocumentStays — o que não avança o aguardar documento", () => {
+  it("aviso unsupported sem arquivo espera as fotos", () => {
+    expect(
+      waitForDocumentStays({
+        messageContent: "Tipo de mensagem não suportado pela API da Meta",
+        messageType: "unsupported",
+        mediaUrl: null,
+      }),
+    ).toBe(true);
+  });
+
+  it("áudio continua esperando", () => {
+    expect(waitForDocumentStays({ messageContent: "[Áudio]", messageType: "audio" })).toBe(true);
+  });
+
+  it("PDF e foto seguem", () => {
+    expect(
+      waitForDocumentStays({ messageContent: "cv.pdf", messageType: "document", mediaUrl: "/x.pdf" }),
+    ).toBe(false);
+    expect(
+      waitForDocumentStays({ messageContent: "[Imagem]", messageType: "image", mediaUrl: "/x.jpg" }),
+    ).toBe(false);
+  });
+});
+
+// DNAWORK "Ativação Infojobs" (05/nov/26): 63 de 132 candidatos mandaram o
+// currículo como resposta ao template. O Aguardar resposta consumiu o PDF e o
+// Aguardar documento, que vem depois das condições, pedia o currículo de novo.
+describe("documento já recebido antes do aguardar documento", () => {
+  const t = (min: number) => new Date(Date.UTC(2026, 10, 5, 19, min, 0));
+  const pdf = (min: number) => ({
+    mediaUrl: `/api/storage/org_x/inbound-media/in_${min}.pdf`,
+    messageType: "document",
+    content: "Curriculum.pdf",
+    createdAt: t(min),
+  });
+
+  it("procura desde o início do atendimento", () => {
+    expect(documentSearchSince({ contextCreatedAt: t(0), usedAt: null, now: t(40) })).toEqual(t(0));
+  });
+
+  it("arquivo já usado por outro aguardar documento não conta de novo", () => {
+    expect(
+      documentSearchSince({ contextCreatedAt: t(0), usedAt: t(23).toISOString(), now: t(40) }),
+    ).toEqual(t(23));
+  });
+
+  it("sem atendimento pausado, só a rajada recente", () => {
+    expect(documentSearchSince({ contextCreatedAt: null, usedAt: null, now: t(40) })).toEqual(
+      new Date(t(40).getTime() - 2 * 60_000),
+    );
+  });
+
+  it("PDF mandado antes vale", () => {
+    expect(pickReceivedDocument([pdf(23)], t(0))).toEqual(pdf(23));
+  });
+
+  it("arquivo anterior ao atendimento não vale", () => {
+    expect(pickReceivedDocument([pdf(23)], t(30))).toBeNull();
+  });
+
+  it("áudio e aviso de álbum sem arquivo não contam", () => {
+    expect(
+      pickReceivedDocument(
+        [
+          { mediaUrl: "/api/storage/org_x/inbound-media/a.ogg", messageType: "audio", content: "[Áudio]", createdAt: t(25) },
+          { mediaUrl: null, messageType: "unsupported", content: "Tipo de mensagem não suportado", createdAt: t(24) },
+          pdf(23),
+        ],
+        t(0),
+      ),
+    ).toEqual(pdf(23));
   });
 });
