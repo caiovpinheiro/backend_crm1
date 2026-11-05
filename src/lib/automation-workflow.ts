@@ -303,7 +303,13 @@ export function validateFirstMessageChannel(
   if (idx < 0) return null;
   const cfg = asRecord(steps[idx].config);
   const channelId = typeof cfg.channelId === "string" ? cfg.channelId.trim() : "";
-  return channelId ? null : "MISSING_CHANNEL_ON_FIRST_MESSAGE_STEP";
+  if (channelId) return null;
+  // Picker de vários canais: "Selecionar tudo" grava `channelScope: "all"`
+  // e 2+ canais gravam `channelIds` com `channelId` vazio. Ambos são uma
+  // escolha explícita — o motor resolve (canal da conversa, se permitido).
+  if (cfg.channelScope === "all") return null;
+  if ((readStepAllowedChannelIds(cfg) ?? []).length > 0) return null;
+  return "MISSING_CHANNEL_ON_FIRST_MESSAGE_STEP";
 }
 
 export function triggerTypeLabel(t: string): string {
