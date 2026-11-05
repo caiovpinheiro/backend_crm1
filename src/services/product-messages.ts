@@ -34,6 +34,16 @@ const MODE_LABEL: Record<string, string> = {
   HYBRID: "Semi-Presencial",
 };
 
+/** Rótulo do nível do curso (Graduação, Pós-Graduação). */
+export function formatCourseLevel(level: string | null | undefined): string {
+  return level && isCourseLevel(level) ? LEVEL_LABEL[level] : "";
+}
+
+/** Rótulo do tipo de produto (Físico, Serviço, Curso, Vaga). */
+export function formatProductKind(kind: string | null | undefined): string {
+  return kind && isProductKind(kind) ? KIND_LABEL[kind] : "";
+}
+
 /** Rótulo da modalidade do curso (EAD, Presencial, Semi-Presencial). */
 export function formatCourseMode(mode: string | null | undefined): string {
   if (!mode) return "";
