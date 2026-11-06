@@ -52,6 +52,14 @@ export function shouldDeliverSseEvent(
     return audience.includes(listener.userId);
   }
 
+  // Presença "quem está no negócio": com audiência, só quem está na sala
+  // (na mesma organização) recebe; o resto da org não precisa.
+  if (event === "entity_viewers" && envelope.audienceUserIds?.length) {
+    if (!listener.userId || !envelope.audienceUserIds.includes(listener.userId)) return false;
+    if (listener.isSuperAdmin) return true;
+    return Boolean(listener.organizationId) && listener.organizationId === envelope.organizationId;
+  }
+
   if (listener.isSuperAdmin) return true;
   if (!listener.organizationId || !envelope.organizationId) return false;
   return listener.organizationId === envelope.organizationId;

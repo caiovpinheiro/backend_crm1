@@ -173,3 +173,25 @@ describe("fio Redis — audiência no envelope, não em data.memberIds", () => {
     ).toBe(false);
   });
 });
+
+describe("entity_viewers com audiência (quem está no negócio)", () => {
+  const env = (audience?: string[]) => ({
+    organizationId: ORG,
+    data: {},
+    ...(audience ? { audienceUserIds: audience } : {}),
+  });
+  it("só quem está na sala recebe; o resto da org não", () => {
+    expect(shouldDeliverSseEvent(MEMBER_L, "entity_viewers", env([MEMBER]))).toBe(true);
+    expect(shouldDeliverSseEvent(OUTSIDER_L, "entity_viewers", env([MEMBER]))).toBe(false);
+  });
+  it("mesmo usuário em outra organização não recebe", () => {
+    const otherOrg = { ...MEMBER_L, organizationId: "org_b" };
+    expect(shouldDeliverSseEvent(otherOrg, "entity_viewers", env([MEMBER]))).toBe(false);
+  });
+  it("sem audiência: regra antiga (org inteira)", () => {
+    expect(shouldDeliverSseEvent(OUTSIDER_L, "entity_viewers", env())).toBe(true);
+  });
+  it("outros eventos ignoram a audiência como antes", () => {
+    expect(shouldDeliverSseEvent(OUTSIDER_L, "new_message", env([MEMBER]))).toBe(true);
+  });
+});
