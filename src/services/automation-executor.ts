@@ -4539,13 +4539,13 @@ export async function executeStep(
       const FLOW_DEFAULT_TIMEOUT_MS = 86_400_000;
       const rawTimeout = readNumber(cfg, "timeoutMs");
       const flowTimeoutMs = rawTimeout && rawTimeout > 0 ? rawTimeout : FLOW_DEFAULT_TIMEOUT_MS;
-      // Aguardar resposta logo depois: segue para ele, que dona o timer e
-      // o "não responde". A resposta do formulário chega como inbound e
-      // retoma esse passo; os dados já vão para o lead no webhook.
-      if (nextStepOwnsReplyWait(rt.nextStepType)) {
-        return {};
-      }
-
+      // O Formulário FLOW sempre espera no próprio passo, mesmo com Aguardar
+      // resposta logo depois: Flow respondido (nfm_reply), Outra resposta
+      // (texto) e Caso o contato não responda (`timeoutMs` deste node) são
+      // decididos aqui (`decideFlowStepInbound` / `processTimeout`). A
+      // resposta do formulário que cai num Aguardar resposta segue a saída
+      // "resposta recebida" dele na mesma hora (cascata em
+      // `processIncomingMessage`).
       if (stepId && rt.contactId) {
         const nextId = readStepRef(cfg, "nextStepId");
         await persistPausedContext(rt, stepId, flowTimeoutMs, {
