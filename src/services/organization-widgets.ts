@@ -325,3 +325,12 @@ export async function assertSmartDistributionEnabled(): Promise<void> {
 export async function assertCallsHistoryEnabled(): Promise<void> {
   await assertWidgetEnabled("calls_history");
 }
+
+/** Slug do widget de Suporte remoto (MeshCentral). */
+export const REMOTE_SUPPORT_WIDGET_SLUG = "remote_support";
+
+/** Gate dedicado do Suporte remoto. Rotas /api/remote-support/* e a
+ *  página pública do cliente só funcionam com o widget instalado na org. */
+export async function assertRemoteSupportEnabled(): Promise<void> {
+  await assertWidgetEnabled(REMOTE_SUPPORT_WIDGET_SLUG);
+}

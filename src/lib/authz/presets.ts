@@ -87,6 +87,7 @@ export const MANAGER_PERMISSIONS: readonly string[] = [
   "team_chat:view", "team_chat:send", "team_chat:create_room",
   "team_chat:work_item", "team_chat:forward",
   "keep:view", "keep:create", "keep:edit", "keep:delete",
+  "remote_support:view", "remote_support:start",
 ];
 
 export const MEMBER_PERMISSIONS: readonly string[] = [

@@ -201,6 +201,7 @@ model Organization {
   webchatEvents            WebchatEvent[]
   webchatIngressKeys       WebchatIngressKey[]
   webchatConversationRefs  WebchatConversationRef[]
+  remoteSupportSessions    RemoteSupportSession[]
   whatsAppGroupMembers     WhatsAppGroupMember[]
   whatsAppGroupMessages    WhatsAppGroupMessage[]
 
@@ -650,6 +651,7 @@ model User {
   teamChatForwardsSent           TeamChatMessageForward[]  @relation("TeamChatForwardFrom")
   teamChatForwardsResponded      TeamChatMessageForward[]  @relation("TeamChatForwardResponder")
   keepNotes                    KeepNote[]
+  remoteSupportSessions        RemoteSupportSession[]
   keepAttachments              KeepAttachment[]
   keepImports                  KeepImport[]
   keepCategories               KeepCategory[]
@@ -1260,6 +1262,7 @@ model Contact {
   webchatLiveContexts    WebchatLiveContext[]
   webchatIdentityLinks   WebchatIdentityLink[]
   webchatEvents          WebchatEvent[]
+  remoteSupportSessions  RemoteSupportSession[]
 
   /// Última mensagem de CHAT do contato em qualquer conversa (mesmo recorte de
   /// `conversations.lastMessageAt` — `isListChatMessage`) e a direção dela
@@ -7276,4 +7279,53 @@ model WebchatConversationRef {
   @@unique([conversationId, ref])
   @@index([organizationId, ref])
   @@map("webchat_conversation_refs")
+}
+
+// ──────────────────────────────────────────────
+// Suporte remoto (MeshCentral)
+// ──────────────────────────────────────────────
+// Acesso assistido ao computador do cliente, sempre com consentimento dele:
+// o cliente roda o MeshCentral Assistant (sem instalar), aceita o pedido e o
+// atendente controla pelo navegador. Cada sessão tem um grupo próprio no
+// MeshCentral; encerrar/expirar apaga o grupo (e o dispositivo do cliente).
+
+enum RemoteSupportStatus {
+  /// Link gerado, aguardando o cliente abrir o Assistant.
+  WAITING
+  /// O Assistant do cliente conectou no grupo da sessão.
+  CONNECTED
+  /// Encerrada pelo atendente.
+  ENDED
+  /// Passou de `expiresAt` sem ser encerrada.
+  EXPIRED
+  /// Falha ao criar o grupo no MeshCentral.
+  FAILED
+}
+
+model RemoteSupportSession {
+  id             String              @id @default(cuid())
+  organizationId String
+  organization   Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  contactId      String
+  contact        Contact             @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  /// Atendente que iniciou a sessão.
+  createdById    String
+  createdBy      User                @relation(fields: [createdById], references: [id], onDelete: Cascade)
+  status         RemoteSupportStatus @default(WAITING)
+  /// Grupo exclusivo da sessão no MeshCentral (`mesh//…`).
+  meshId         String?
+  /// Token aleatório da página pública do cliente (`/suporte/{token}`).
+  clientToken    String?             @unique
+  /// Dispositivo do cliente que conectou (`node//…`).
+  nodeId         String?
+  deviceName     String?
+  expiresAt      DateTime
+  connectedAt    DateTime?
+  endedAt        DateTime?
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+
+  @@index([organizationId, contactId, createdAt])
+  @@index([organizationId, status])
+  @@map("remote_support_sessions")
 }
