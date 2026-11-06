@@ -10,15 +10,16 @@ MeshCentral Assistant já configurado, roda sem instalar e clica em **Permitir**
 quando o atendente pede acesso. Encerrar a sessão apaga o grupo no servidor;
 nada fica instalado.
 
-Escrito para o **DEV** (`suporte-dev.bwipo.com` é só uma sugestão de nome);
+Escrito para o **DEV**, onde o serviço se chama `dev_suporte-remoto` no projeto `crm` do EasyPanel e usa o domínio automático `crm-dev-suporte-remoto.ca31ey.easypanel.host`;
 produção é o mesmo roteiro com outro domínio, outra senha e `title2` diferente.
 
 ## 1. Pré-requisitos
 
-- Um domínio só para o MeshCentral, com DNS apontando para o host do
-  EasyPanel. Precisa de HTTPS válido (o EasyPanel emite): é esse endereço que
-  vai embutido no arquivo que o cliente baixa e que o atendente abre no
-  navegador. Qualquer domínio serve, inclusive um `*.easypanel.host`.
+- Um domínio só para o MeshCentral com HTTPS válido: é esse endereço que vai
+  embutido no arquivo que o cliente baixa e que o atendente abre no navegador.
+  No DEV é o domínio automático do EasyPanel (`*.ca31ey.easypanel.host`, sem
+  DNS para configurar); em produção, um domínio próprio com DNS apontando para
+  o host do EasyPanel.
 - A imagem `ghcr.io/ylianst/meshcentral`. Fixe a versão (`1.3.1` foi a
   validada); `selfUpdate` fica desligado no config.
 
@@ -30,7 +31,7 @@ No projeto do ambiente, crie um serviço **App** a partir de imagem:
 |---|---|
 | Imagem | `ghcr.io/ylianst/meshcentral:1.3.1` |
 | Porta do container | `4430` (HTTP — o TLS termina no proxy do EasyPanel) |
-| Domínio | `suporte-dev.bwipo.com` → porta `4430`, HTTPS ligado |
+| Domínio | o automático `crm-dev-suporte-remoto.ca31ey.easypanel.host` → porta `4430`, HTTPS ligado |
 | Volume | `/opt/meshcentral/meshcentral-data` (**obrigatório** persistir: banco, contas e a identidade que os Assistants verificam) |
 | Volume | `/opt/meshcentral/meshcentral-files` |
 | Volume | `/opt/meshcentral/meshcentral-backups` |
@@ -43,7 +44,7 @@ No projeto do ambiente, crie um serviço **App** a partir de imagem:
 {
   "$schema": "https://raw.githubusercontent.com/Ylianst/MeshCentral/master/meshcentral-config-schema.json",
   "settings": {
-    "cert": "suporte-dev.bwipo.com",
+    "cert": "crm-dev-suporte-remoto.ca31ey.easypanel.host",
     "port": 4430,
     "aliasPort": 443,
     "redirPort": 0,
@@ -56,7 +57,7 @@ No projeto do ambiente, crie um serviço **App** a partir de imagem:
     "": {
       "title": "Suporte EduIT",
       "title2": "DEV",
-      "certUrl": "https://suporte-dev.bwipo.com:443/",
+      "certUrl": "https://crm-dev-suporte-remoto.ca31ey.easypanel.host:443/",
       "newAccounts": true,
       "agentInviteCodes": true
     }
@@ -82,12 +83,12 @@ Por que cada chave:
   porta do config não batem com o que o navegador usa; conserte isso em vez de
   abrir com `"allowedOrigin": true`.
 
-Depois do deploy, `https://suporte-dev.bwipo.com/` tem de mostrar a tela de
+Depois do deploy, `https://crm-dev-suporte-remoto.ca31ey.easypanel.host/` tem de mostrar a tela de
 login do MeshCentral.
 
 ## 3. Contas
 
-1. Abra `https://suporte-dev.bwipo.com/` e crie a **primeira conta**: ela vira
+1. Abra `https://crm-dev-suporte-remoto.ca31ey.easypanel.host/` e crie a **primeira conta**: ela vira
    administradora do site. É a conta humana (ligue o 2FA nela).
 2. Em **Meus Usuários → Novo Usuário**, crie `crm-svc` com uma senha longa
    gerada (guarde no cofre) e marque **Administrador do site**. É a conta que
@@ -101,8 +102,8 @@ login do MeshCentral.
 Variáveis no serviço `api` (só nele; workers e `api-public` não usam):
 
 ```
-MESHCENTRAL_URL=https://suporte-dev.bwipo.com
-MESHCENTRAL_PUBLIC_URL=https://suporte-dev.bwipo.com
+MESHCENTRAL_URL=https://crm-dev-suporte-remoto.ca31ey.easypanel.host
+MESHCENTRAL_PUBLIC_URL=https://crm-dev-suporte-remoto.ca31ey.easypanel.host
 MESHCENTRAL_USER=crm-svc
 MESHCENTRAL_PASSWORD=<senha do crm-svc>
 # REMOTE_SUPPORT_SESSION_MINUTES=60   (opcional: validade do link do cliente)
