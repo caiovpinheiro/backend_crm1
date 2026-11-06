@@ -107,11 +107,11 @@ export async function nextPipelineNumber(
   organizationId: string,
   db?: Prisma.TransactionClient,
 ): Promise<number> {
-  // Sem `db ?? prisma`: a união faz o TS comparar o client estendido com
-  // `TransactionClient` e estourar a profundidade de tipos ("Excessive
-  // stack depth") — o schema cresceu o bastante para isso. Dois ramos, nenhuma comparação.
-  const args = { where: { organizationId }, _max: { number: true as const } };
-  const r = db ? await db.pipeline.aggregate(args) : await prisma.pipeline.aggregate(args);
+  const client = db ?? prisma;
+  const r = await client.pipeline.aggregate({
+    where: { organizationId },
+    _max: { number: true },
+  });
   return (r._max.number ?? 0) + 1;
 }
 
@@ -160,9 +160,11 @@ export async function nextStageNumber(
   pipelineId: string,
   db?: Prisma.TransactionClient,
 ): Promise<number> {
-  // Mesmo motivo de `nextPipelineNumber`: nada de `db ?? prisma`.
-  const args = { where: { pipelineId }, _max: { number: true as const } };
-  const r = db ? await db.stage.aggregate(args) : await prisma.stage.aggregate(args);
+  const client = db ?? prisma;
+  const r = await client.stage.aggregate({
+    where: { pipelineId },
+    _max: { number: true },
+  });
   return (r._max.number ?? 0) + 1;
 }
 
