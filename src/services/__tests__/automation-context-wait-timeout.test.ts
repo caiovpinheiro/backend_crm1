@@ -934,3 +934,110 @@ describe("send_whatsapp_flow — uma saída por espera", () => {
     expect(h.continueFromStep).toHaveBeenCalledTimes(1);
   });
 });
+
+// DNAWORK "Perdido" (06/nov/26, negócio #67210): Formulário FLOW →
+// (Flow respondido) Aguardar resposta 1h → condição do currículo;
+// (Outra resposta) "é necessário preencher o formulário". A candidata
+// respondeu em texto e seguiu o caminho de quem preencheu.
+describe("send_whatsapp_flow seguido de Aguardar resposta — as quatro saídas do node", () => {
+  const DNA_STEPS: Step[] = [
+    {
+      id: "flow",
+      type: "send_whatsapp_flow",
+      position: 0,
+      config: {
+        __hasExplicitEdges: true,
+        nextStepId: "wait",
+        elseGotoStepId: "pede-form",
+        timeoutGotoStepId: "sem-resposta",
+        timeoutAction: "goto",
+        timeoutMs: 900_000,
+      },
+    },
+    {
+      id: "wait",
+      type: "wait_for_reply",
+      position: 1,
+      config: {
+        __hasExplicitEdges: true,
+        timeoutMs: 3_600_000,
+        receivedGotoStepId: "checa-curriculo",
+        timeoutGotoStepId: "encerrada",
+      },
+    },
+    { id: "checa-curriculo", type: "condition", position: 2, config: { __hasExplicitEdges: true } },
+    { id: "pede-form", type: "send_whatsapp_message", position: 3, config: { __hasExplicitEdges: true } },
+    { id: "sem-resposta", type: "send_whatsapp_message", position: 4, config: { __hasExplicitEdges: true } },
+    { id: "encerrada", type: "send_whatsapp_message", position: 5, config: { __hasExplicitEdges: true } },
+  ];
+
+  function dnaCtx(configPatch: Record<string, unknown> = {}) {
+    const steps = DNA_STEPS.map((s) =>
+      s.id === "flow" ? { ...s, config: { ...s.config, ...configPatch } } : s,
+    );
+    return ctxRow(
+      {
+        currentStepId: "flow",
+        variables: {
+          conversationId: "conv-1",
+          __awaitingFlow: {
+            stepId: "flow",
+            buttonId: "flow",
+            flowToken: "tok-form",
+            gotoStepId: "wait",
+            metaFlowId: "111",
+            flowName: "Estágio definitivo",
+            conversationId: "conv-1",
+          },
+        },
+      },
+      steps,
+    );
+  }
+
+  it("texto no lugar do formulário segue Outra resposta, não o Aguardar resposta", async () => {
+    h.ctx.findMany.mockResolvedValueOnce([dnaCtx()]);
+    await withOrg(ORG, () =>
+      processIncomingMessage("contact-1", "Não quero passar meus dados por WhatsApp", {
+        conversationId: "conv-1",
+      }),
+    );
+    expect(h.continueFromStep).toHaveBeenCalledTimes(1);
+    expect(h.continueFromStep).toHaveBeenCalledWith("auto-1", "contact-1", "pede-form", expect.anything());
+  });
+
+  it("formulário respondido passa pelo Aguardar resposta e segue Quando responder", async () => {
+    h.ctx.findMany.mockResolvedValueOnce([dnaCtx()]);
+    await withOrg(ORG, () =>
+      processIncomingMessage("contact-1", "Resposta do formulário", {
+        flowReply: true,
+        flowToken: "tok-form",
+        flowPayload: { curriculo: "" },
+        conversationId: "conv-1",
+      }),
+    );
+    expect(h.continueFromStep).toHaveBeenCalledTimes(1);
+    expect(h.continueFromStep).toHaveBeenCalledWith(
+      "auto-1",
+      "contact-1",
+      "checa-curriculo",
+      expect.objectContaining({ flowResponse: { curriculo: "" } }),
+    );
+  });
+
+  it("sem Outra resposta ligada, texto não avança: continua esperando o formulário", async () => {
+    h.ctx.findMany.mockResolvedValueOnce([dnaCtx({ elseGotoStepId: "" })]);
+    const out = await withOrg(ORG, () =>
+      processIncomingMessage("contact-1", "oi", { conversationId: "conv-1" }),
+    );
+    expect(out.handled).toBe(true);
+    expect(h.ctx.updateMany).not.toHaveBeenCalled();
+    expect(h.continueFromStep).not.toHaveBeenCalled();
+  });
+
+  it("sem resposta no prazo do node segue Caso o contato não responda do formulário", async () => {
+    h.ctx.findUnique.mockResolvedValueOnce(dnaCtx());
+    await withOrg(ORG, () => processTimeout("ctx-1"));
+    expect(h.continueFromStep).toHaveBeenCalledWith("auto-1", "contact-1", "sem-resposta", expect.anything());
+  });
+});

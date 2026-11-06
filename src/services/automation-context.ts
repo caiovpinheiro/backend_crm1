@@ -611,9 +611,12 @@ const REPLY_WAIT_STEP_TYPES = new Set(["wait_for_reply", "wait_for_document", "c
 
 /**
  * Envio seguido de Aguardar resposta, Aguardar documento ou protocolo de
- * encerramento: a espera e o "não responde" são desse passo. O Formulário
- * FLOW pausava 24h sem aresta de timeout e o contexto terminava sem chegar
- * ao Aguardar resposta (DNAWORK "Perdido").
+ * encerramento: a espera e o "não responde" são desse passo. Vale para
+ * mensagem, template e (via `menuHandsWaitToNextStep`) Botões e Lista sem
+ * aresta. O Formulário FLOW NÃO usa: ele tem quatro saídas próprias (Flow
+ * respondido, Outra resposta, Caso o contato não responda e erro no envio) e
+ * sempre espera no próprio passo (DNAWORK "Perdido", 06/nov/26: texto no lugar
+ * do formulário seguia o caminho de quem preencheu).
  */
 export function nextStepOwnsReplyWait(nextStepType: string | null | undefined): boolean {
   return REPLY_WAIT_STEP_TYPES.has(nextStepType ?? "");
