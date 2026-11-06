@@ -143,12 +143,17 @@ function liveFromHash(reply: unknown, now: number): EntityViewer[] {
 }
 
 function broadcastList(meta: RoomMeta, viewers: EntityViewer[]): void {
-  publishEntityViewers({
-    organizationId: meta.orgId,
-    entityType: meta.entityType,
-    entityId: meta.entityId,
-    viewers,
-  });
+  // Sala vazia: não há quem avisar.
+  if (viewers.length === 0) return;
+  publishEntityViewers(
+    {
+      organizationId: meta.orgId,
+      entityType: meta.entityType,
+      entityId: meta.entityId,
+      viewers,
+    },
+    { audienceUserIds: [...new Set(viewers.map((v) => v.userId))] },
+  );
 }
 
 function execReplies(replies: Array<[Error | null, unknown]> | null): unknown[] {

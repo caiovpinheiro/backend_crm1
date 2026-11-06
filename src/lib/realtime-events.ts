@@ -682,8 +682,15 @@ export function publishSystemPresenceUpdate(
   publish("system_presence_update", payload);
 }
 
-export function publishEntityViewers(payload: EntityViewersPayload): void {
-  publish("entity_viewers", payload);
+/**
+ * Só para quem está na sala (os próprios viewers): ninguém mais na
+ * organização precisa saber quem está em cada negócio.
+ */
+export function publishEntityViewers(
+  payload: EntityViewersPayload,
+  opts?: { audienceUserIds?: string[] },
+): void {
+  publish("entity_viewers", payload, opts);
 }
 
 // ── Publishers: suporte interno e chat da equipe ────────────────────────

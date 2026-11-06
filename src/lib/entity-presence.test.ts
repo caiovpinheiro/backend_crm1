@@ -211,8 +211,9 @@ describe("TTL e batida em lote", () => {
     expect(ids(out["deal:d1"]!)).toEqual(["u1"]);
     expect(fakeRedisRaw(h.redis, "presence:viewers:org1:deal:d2")).toBeNull();
     expect(fakeRedisRaw(h.redis, "lista")).toBe("[]");
-    // Entrada em d1 e c1 + saída de d2 = 3 broadcasts.
-    expect(h.published.map((p) => p.entityId).sort()).toEqual(["c1", "d1", "d2"]);
+    // Entrada em d1 e c1 = 2 broadcasts. A saída de d2 deixou a sala vazia:
+    // não há quem avisar, então não publica.
+    expect(h.published.map((p) => p.entityId).sort()).toEqual(["c1", "d1"]);
 
     // Renovação de quem já está: sem broadcast.
     h.published.length = 0;
