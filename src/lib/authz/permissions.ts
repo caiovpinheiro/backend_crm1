@@ -388,6 +388,20 @@ export const PERMISSION_CATALOG: ResourceDef[] = [
       { action: "delete", label: "Excluir nota", destructive: true },
     ],
   },
+  {
+    resource: "remote_support",
+    label: "Suporte remoto",
+    description:
+      "Acesso assistido ao computador do cliente, sempre com consentimento dele (MeshCentral).",
+    actions: [
+      { action: "view", label: "Ver sessões de suporte remoto" },
+      {
+        action: "start",
+        label: "Iniciar, controlar e encerrar suporte remoto",
+        destructive: true,
+      },
+    ],
+  },
 ];
 
 /**

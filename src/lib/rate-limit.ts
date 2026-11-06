@@ -154,6 +154,8 @@ export const RATE_LIMIT_PROFILES = {
   "webchat.track.ip": { points: 600, durationSec: 60 },
   /** `POST /api/public/webchat/s2s/{publicKey}` — por canal. */
   "webchat.s2s": { points: 300, durationSec: 60 },
+  /** `GET /api/public/remote-support/:token` — página do cliente, por IP. */
+  "remote-support.client": { points: 30, durationSec: 60 },
   // Sessão cookie (NextAuth) NÃO tem perfil aqui: o antigo `api.session`
   // (600 pontos/60 s por usuário) bloqueava o usuário inteiro até a janela
   // virar. Agora é por classe de custo da rota — `api-cost-limit.ts`

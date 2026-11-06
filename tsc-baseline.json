@@ -67,6 +67,7 @@
   "src/services/distribution/pending-drain.ts|TS2339|Property 'catch' does not exist on type 'RetryResult | Promise<RetryResult>'.": 1,
   "src/services/distribution/pending-drain.ts|TS2345|Argument of type 'string | null | undefined' is not assignable to parameter of type 'string'.": 1,
   "src/services/distribution/pending-drain.ts|TS7006|Parameter 'e' implicitly has an 'any' type.": 1,
+  "src/services/pipelines.ts|TS2321|Excessive stack depth comparing types 'DynamicClientExtensionThis<TypeMap<InternalArgs & { result: {}; model: {}; query: {}; client: {}; }, {}>, TypeMapCb<PrismaClientOptions>, { result: {}; model: {}; query: {}; client: {}; }>' and 'TransactionClient'.": 1,
   "src/services/pipelines.ts|TS2321|Excessive stack depth comparing types 'StageFindFirstArgs<InternalArgs & { result: {}; model: {}; query: {}; client: {}; }>' and 'StageFindFirstArgs<DefaultArgs>'.": 1,
   "src/services/pipelines.ts|TS2345|Argument of type 'Omit<DynamicClientExtensionThis<TypeMap<InternalArgs & { result: {}; model: {}; query: {}; client: {}; }, {}>, TypeMapCb<PrismaClientOptions>, { result: {}; model: {}; query: {}; client: {}; }>, \"$connect\" | ... 3 more ... | \"$extends\">' is not assignable to parameter of type 'TransactionClient'.": 2,
   "src/services/pipelines.ts|TS2349|This expression is not callable.": 1,

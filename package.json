@@ -108,6 +108,7 @@
     "tsx": "^4.21.0",
     "typescript": "^6.0.3",
     "web-push": "^3.6.7",
+    "ws": "^8.22.1",
     "xlsx": "file:vendor/xlsx-0.20.3.tgz",
     "zod": "^4.3.6",
     "zustand": "^5.0.12"
@@ -117,6 +118,7 @@
     "@types/nodemailer": "^8.0.1",
     "@types/pg": "^8.20.0",
     "@types/web-push": "^3.6.4",
+    "@types/ws": "^8.18.2",
     "@vitest/coverage-v8": "^4.1.11",
     "concurrently": "^9.2.1",
     "esbuild": "^0.25.12",
