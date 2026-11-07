@@ -34,6 +34,17 @@ const SHARE_DESKTOP = 2;
 const SHARE_CONSENT = CONSENT_DESKTOP_PROMPT | CONSENT_DESKTOP_TOOLBAR;
 /** Tipo "MeshCentral Assistant (Windows)" em `/meshagents` — roda sem instalar. */
 const ASSISTANT_WINDOWS_AGENT_ID = 10006;
+/**
+ * Flags `AutoConnect` que o MeshCentral grava no `.msh` do Assistant (`&ac=`):
+ * bit 1 = conecta sozinho ao abrir; bit 2 = janela normal em vez de ícone na
+ * bandeja. Sem elas o Assistant abre escondido na bandeja e fica esperando o
+ * cliente mandar conectar — para quem clicou no `.exe`, "nada acontece".
+ * `ac=2` (só a janela; o cliente conecta em "Solicite ajuda") foi testado no
+ * DEV: o dispositivo entra no grupo, mas o MeshCentral não o marca online e o
+ * Controlar fica bloqueado. Custo do `ac=3`: o Assistant deixado aberto
+ * depois de Encerrar reconecta, e o MeshCentral restaura o grupo apagado.
+ */
+const ASSISTANT_AUTOCONNECT_FLAGS = 3;
 
 export type MeshCentralErrorCode = "NOT_CONFIGURED" | "UNAVAILABLE" | "REJECTED";
 
@@ -69,8 +80,15 @@ function readConfig(): MeshConfig {
 }
 
 type MeshMessage = Record<string, unknown> & { action?: unknown; responseid?: unknown; result?: unknown };
-type Send = (cmd: Record<string, unknown>) => Promise<MeshMessage>;
-type Pending = { resolve: (m: MeshMessage) => void; reject: (e: Error) => void; timer: NodeJS.Timeout };
+/** Para comandos cuja resposta de sucesso vem sem `responseid` (ex.: `deviceShares`): casa pela ação. */
+type Expect = { action: string; match: (m: MeshMessage) => boolean };
+type Send = (cmd: Record<string, unknown>, expect?: Expect) => Promise<MeshMessage>;
+type Pending = {
+  resolve: (m: MeshMessage) => void;
+  reject: (e: Error) => void;
+  timer: NodeJS.Timeout;
+  expect?: Expect;
+};
 
 /** Abre uma conexão de controle, executa `fn` e fecha. Uma conexão por operação. */
 async function withControl<T>(fn: (send: Send) => Promise<T>): Promise<T> {
@@ -109,10 +127,19 @@ async function withControl<T>(fn: (send: Send) => Promise<T>): Promise<T> {
       return;
     }
     const id = typeof msg.responseid === "string" ? msg.responseid : null;
-    const p = id ? pending.get(id) : undefined;
-    if (id && p) {
+    let key = id && pending.has(id) ? id : null;
+    if (!key && !id) {
+      for (const [k, w] of pending) {
+        if (w.expect && msg.action === w.expect.action && w.expect.match(msg)) {
+          key = k;
+          break;
+        }
+      }
+    }
+    const p = key ? pending.get(key) : undefined;
+    if (key && p) {
       clearTimeout(p.timer);
-      pending.delete(id);
+      pending.delete(key);
       p.resolve(msg);
     }
   });
@@ -130,7 +157,7 @@ async function withControl<T>(fn: (send: Send) => Promise<T>): Promise<T> {
     );
   });
 
-  const send: Send = (cmd) =>
+  const send: Send = (cmd, expect) =>
     new Promise<MeshMessage>((resolve, reject) => {
       if (failure) {
         reject(failure);
@@ -141,7 +168,7 @@ async function withControl<T>(fn: (send: Send) => Promise<T>): Promise<T> {
         pending.delete(responseid);
         reject(new MeshCentralError("MeshCentral não respondeu a tempo.", "UNAVAILABLE"));
       }, COMMAND_TIMEOUT_MS);
-      pending.set(responseid, { resolve, reject, timer });
+      pending.set(responseid, { resolve, reject, timer, expect });
       ws.send(JSON.stringify({ ...cmd, responseid }));
     });
 
@@ -172,11 +199,63 @@ export async function createSessionGroup(name: string, desc: string): Promise<st
   });
 }
 
-/** Apaga o grupo — remove junto o dispositivo do cliente. Nada da sessão fica no servidor. */
-export async function deleteSessionGroup(meshId: string): Promise<void> {
+/**
+ * Encerra a sessão no MeshCentral: corta o acesso na hora e apaga o grupo.
+ *
+ * `deletemesh` sozinho não corta nada: o MeshCentral só marca o grupo como
+ * apagado, o Assistant segue conectado e o console já aberto continua vendo a
+ * tela (o link de controle guarda o grupo em `xmeshid`, fora da limpeza do
+ * grupo). Por isso, nesta ordem:
+ * 1. revoga os links de controle (`removeDeviceShare`) — o relay fecha o console aberto;
+ * 2. remove os dispositivos (`removedevices`) — o servidor fecha a conexão do
+ *    Assistant, que derruba os túneis de tela;
+ * 3. apaga o grupo (`deletemesh`).
+ * Um passo que falha não impede os seguintes; a primeira falha sobe no fim.
+ */
+export async function teardownSessionGroup(meshId: string): Promise<void> {
   await withControl(async (send) => {
-    const res = await send({ action: "deletemesh", meshid: meshId });
-    ensureOk(res, "Falha ao apagar o grupo no MeshCentral");
+    let firstError: unknown = null;
+    const step = async (fn: () => Promise<void>) => {
+      try {
+        await fn();
+      } catch (err) {
+        firstError ??= err;
+      }
+    };
+
+    let nodeIds: string[] = [];
+    await step(async () => {
+      nodeIds = (await queryGroupNodes(send, meshId)).map((n) => n.nodeId);
+    });
+    for (const nodeId of nodeIds) {
+      await step(async () => {
+        // A lista de links volta sem `responseid` quando dá certo.
+        const res = await send(
+          { action: "deviceShares", nodeid: nodeId },
+          { action: "deviceShares", match: (m) => m.nodeid === nodeId },
+        );
+        ensureOk(res, "Falha ao listar os links de controle no MeshCentral");
+        const shares = Array.isArray(res.deviceShares) ? (res.deviceShares as Array<{ publicid?: unknown }>) : [];
+        for (const share of shares) {
+          if (typeof share.publicid !== "string") continue;
+          const removed = await send({ action: "removeDeviceShare", nodeid: nodeId, publicid: share.publicid });
+          ensureOk(removed, "Falha ao revogar o link de controle no MeshCentral");
+        }
+      });
+    }
+    // Um dispositivo por vez: a resposta só sai depois que a conexão dele caiu,
+    // então o `deletemesh` não corre na frente de uma remoção ainda pendente.
+    for (const nodeId of nodeIds) {
+      await step(async () => {
+        const res = await send({ action: "removedevices", nodeids: [nodeId] });
+        ensureOk(res, "Falha ao desconectar o dispositivo no MeshCentral");
+      });
+    }
+    await step(async () => {
+      const res = await send({ action: "deletemesh", meshid: meshId });
+      ensureOk(res, "Falha ao apagar o grupo no MeshCentral");
+    });
+    if (firstError) throw firstError;
   });
 }
 
@@ -184,20 +263,22 @@ export type MeshNode = { nodeId: string; name: string; online: boolean };
 
 /** Dispositivos do grupo. `online` = agente/Assistant conectado agora (`conn & 1`). */
 export async function listGroupNodes(meshId: string): Promise<MeshNode[]> {
-  return withControl(async (send) => {
-    const res = await send({ action: "nodes", meshid: meshId });
-    ensureOk(res, "Falha ao listar dispositivos no MeshCentral");
-    const byMesh = (res.nodes ?? {}) as Record<string, Array<{ _id?: unknown; name?: unknown; conn?: unknown }>>;
-    // Pedimos um único grupo: tudo que voltar pertence a ele.
-    return Object.values(byMesh)
-      .flat()
-      .filter((n): n is { _id: string; name?: unknown; conn?: unknown } => typeof n._id === "string")
-      .map((n) => ({
-        nodeId: n._id,
-        name: typeof n.name === "string" && n.name.trim() ? n.name : "Dispositivo do cliente",
-        online: ((typeof n.conn === "number" ? n.conn : 0) & 1) !== 0,
-      }));
-  });
+  return withControl((send) => queryGroupNodes(send, meshId));
+}
+
+async function queryGroupNodes(send: Send, meshId: string): Promise<MeshNode[]> {
+  const res = await send({ action: "nodes", meshid: meshId });
+  ensureOk(res, "Falha ao listar dispositivos no MeshCentral");
+  const byMesh = (res.nodes ?? {}) as Record<string, Array<{ _id?: unknown; name?: unknown; conn?: unknown }>>;
+  // Pedimos um único grupo: tudo que voltar pertence a ele.
+  return Object.values(byMesh)
+    .flat()
+    .filter((n): n is { _id: string; name?: unknown; conn?: unknown } => typeof n._id === "string")
+    .map((n) => ({
+      nodeId: n._id,
+      name: typeof n.name === "string" && n.name.trim() ? n.name : "Dispositivo do cliente",
+      online: ((typeof n.conn === "number" ? n.conn : 0) & 1) !== 0,
+    }));
 }
 
 /**
@@ -226,10 +307,10 @@ export async function createControlLink(nodeId: string, guestName: string, minut
   });
 }
 
-/** Link direto do Assistant (Windows) já configurado p/ o grupo: 1 arquivo, sem instalar. */
+/** Link direto do Assistant (Windows) já configurado p/ o grupo: 1 arquivo, sem instalar, conecta ao abrir. */
 export function assistantDownloadUrl(meshId: string): string {
   const { publicUrl } = readConfig();
   // `mesh//<id>` → `<id>` (ids do MeshCentral usam @ e $ no lugar de + e /).
   const shortId = meshId.split("/").pop() ?? meshId;
-  return `${publicUrl}/meshagents?id=${ASSISTANT_WINDOWS_AGENT_ID}&meshid=${encodeURIComponent(shortId)}`;
+  return `${publicUrl}/meshagents?id=${ASSISTANT_WINDOWS_AGENT_ID}&meshid=${encodeURIComponent(shortId)}&ac=${ASSISTANT_AUTOCONNECT_FLAGS}`;
 }
