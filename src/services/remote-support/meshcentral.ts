@@ -34,6 +34,13 @@ const SHARE_DESKTOP = 2;
 const SHARE_CONSENT = CONSENT_DESKTOP_PROMPT | CONSENT_DESKTOP_TOOLBAR;
 /** Tipo "MeshCentral Assistant (Windows)" em `/meshagents` — roda sem instalar. */
 const ASSISTANT_WINDOWS_AGENT_ID = 10006;
+/**
+ * Flags `AutoConnect` que o MeshCentral grava no `.msh` do Assistant (`&ac=`):
+ * bit 1 = conecta sozinho ao abrir; bit 2 = janela normal em vez de ícone na
+ * bandeja. Sem elas o Assistant abre escondido na bandeja e fica esperando o
+ * cliente mandar conectar — para quem clicou no `.exe`, "nada acontece".
+ */
+const ASSISTANT_AUTOCONNECT_FLAGS = 3;
 
 export type MeshCentralErrorCode = "NOT_CONFIGURED" | "UNAVAILABLE" | "REJECTED";
 
@@ -226,10 +233,10 @@ export async function createControlLink(nodeId: string, guestName: string, minut
   });
 }
 
-/** Link direto do Assistant (Windows) já configurado p/ o grupo: 1 arquivo, sem instalar. */
+/** Link direto do Assistant (Windows) já configurado p/ o grupo: 1 arquivo, sem instalar, conecta ao abrir. */
 export function assistantDownloadUrl(meshId: string): string {
   const { publicUrl } = readConfig();
   // `mesh//<id>` → `<id>` (ids do MeshCentral usam @ e $ no lugar de + e /).
   const shortId = meshId.split("/").pop() ?? meshId;
-  return `${publicUrl}/meshagents?id=${ASSISTANT_WINDOWS_AGENT_ID}&meshid=${encodeURIComponent(shortId)}`;
+  return `${publicUrl}/meshagents?id=${ASSISTANT_WINDOWS_AGENT_ID}&meshid=${encodeURIComponent(shortId)}&ac=${ASSISTANT_AUTOCONNECT_FLAGS}`;
 }

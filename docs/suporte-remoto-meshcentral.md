@@ -138,8 +138,13 @@ Confira no log do boot. Manualmente, é o comando de sempre do `deploy-seguro.md
 2. Ficha de um contato → card **Suporte remoto** → **Iniciar suporte** →
    **Copiar** o link.
 3. Num **Windows**, abra o link: a página mostra o passo a passo e o botão
-   **Baixar o suporte**. Abra o `MeshCentralAssistant-….exe` (não instala). O
+   **Baixar o suporte**. Abra o `MeshCentralAssistant-….exe` (não instala): a
+   janela do Assistant aparece e conecta sozinha — o link leva `ac=3`
+   (`AutoConnect` do `.msh`: conectar ao abrir + janela em vez de bandeja). O
    card do CRM muda para **Cliente conectado** e a página do cliente também.
+   Se nada aparecer ao abrir o `.exe`, o link foi gerado sem `ac`: o Assistant
+   está escondido na bandeja (seta `^` ao lado do relógio), sem conectar, e
+   cliques seguintes no arquivo saem na hora (só roda uma instância).
 4. **Controlar** abre o console do MeshCentral numa aba; o cliente vê o pedido
    e clica **Permitir**. Sem o clique dele, o console fica em "Negado".
 5. **Encerrar** apaga o grupo no servidor e o Assistant perde a conexão; o
