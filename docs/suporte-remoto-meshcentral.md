@@ -139,24 +139,25 @@ Confira no log do boot. Manualmente, é o comando de sempre do `deploy-seguro.md
    **Copiar** o link.
 3. Num **Windows**, abra o link: a página mostra o passo a passo e o botão
    **Baixar o suporte**. Abra o `MeshCentralAssistant-….exe` (não instala): a
-   janela do Assistant aparece com o botão **Solicite ajuda**; o cliente clica
-   nele e em **OK** (a descrição é opcional). O link leva `ac=2` (`AutoConnect`
-   do `.msh`: janela em vez de bandeja, sem conectar sozinho). O card do CRM
-   muda para **Cliente conectado** e a página do cliente também.
-   Se nada aparecer ao abrir o `.exe`, ou o Assistant está escondido na bandeja
-   (link sem `ac`; seta `^` ao lado do relógio) ou já há outro aberto: só roda
-   uma instância, e as seguintes saem na hora, em silêncio.
+   janela do Assistant aparece e conecta sozinha — o link leva `ac=3`
+   (`AutoConnect` do `.msh`: conectar ao abrir + janela em vez de bandeja). O
+   card do CRM muda para **Cliente conectado** e a página do cliente também.
+   Se nada aparecer ao abrir o `.exe`, o link foi gerado sem `ac`: o Assistant
+   está escondido na bandeja (seta `^` ao lado do relógio), sem conectar, e
+   cliques seguintes no arquivo saem na hora (só roda uma instância).
+   `ac=2` (janela sem conectar sozinho, cliente clica em **Solicite ajuda**)
+   foi testado: o dispositivo entra no grupo, mas não fica online e o
+   **Controlar** não abre.
 4. **Controlar** abre o console do MeshCentral numa aba; o cliente vê o pedido
    e clica **Permitir**. Sem o clique dele, o console fica em "Negado".
 5. **Encerrar** corta o acesso na hora e apaga o grupo (expirar faz o mesmo):
    revoga o link de controle (o console aberto fecha), remove o dispositivo (o
    servidor derruba a conexão do Assistant, que larga a tela) e só então apaga
    o grupo. `deletemesh` sozinho não corta nada: o MeshCentral só marca o grupo
-   como apagado, e o console seguia vendo a tela depois de encerrar. No
-   Windows o Assistant fica em **Desconectado** e não volta sozinho (`ac=2`); o
-   cliente fecha o programa e apaga o arquivo. Se ele clicar em **Solicite
-   ajuda** de novo, o MeshCentral restaura o grupo apagado — sem link de
-   controle e com o pedido de permissão valendo; o CRM não usa mais esse grupo.
+   como apagado, e o console seguia vendo a tela depois de encerrar. O
+   Assistant que fica aberto reconecta sozinho (`ac=3`) e, ao voltar, o
+   MeshCentral restaura o grupo apagado — sem link de controle e com o pedido
+   de permissão valendo, mas o cliente deve fechar o programa e apagar o arquivo.
 
 Fora do Windows a página orienta a abrir o link num computador com Windows
 (macOS e Linux exigiriam instalar o agente e liberar permissões do sistema, o
@@ -181,9 +182,9 @@ estiver em `meshcentral-data`; com o OV em mãos é lá que ele entra (ver
 - **Atualizar**: troque a tag da imagem e reinicie; `selfUpdate` está desligado.
 - **Grupos órfãos**: cada sessão cria um grupo `Bwipo <id>`; encerrar ou
   expirar apaga. Se a API cair no meio, pode sobrar grupo vazio; apague pela
-  tela do MeshCentral (não há dados do cliente nele). Cliente que clica em
-  **Solicite ajuda** num Assistant de sessão já encerrada traz o grupo dela de
-  volta com o dispositivo; apague pela tela também.
+  tela do MeshCentral (não há dados do cliente nele). Assistant deixado aberto
+  depois de encerrar reconecta e restaura o grupo dele: o dispositivo aparece
+  de novo até o cliente fechar o programa; apague pela tela também.
 - **Logs**: MeshCentral em *Meu Servidor → Rastreamento*; na API, o logger
   `remote-support`.
 - **Local do desenvolvedor**: o compose usado para validar fica fora do repo,
