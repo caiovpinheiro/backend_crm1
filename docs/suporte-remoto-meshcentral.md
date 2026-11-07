@@ -7,8 +7,8 @@ servidor uma vez e informa as variáveis à API.
 
 O que o cliente final vê: abre o link `/suporte/{token}` (frontend), baixa o
 MeshCentral Assistant já configurado, roda sem instalar e clica em **Permitir**
-quando o atendente pede acesso. Encerrar a sessão apaga o grupo no servidor;
-nada fica instalado.
+quando o atendente pede acesso. Encerrar a sessão corta o acesso e apaga o
+grupo no servidor; nada fica instalado.
 
 Escrito para o **DEV**, onde o serviço se chama `dev_suporte-remoto` no projeto `crm` do EasyPanel e usa o domínio automático `crm-dev-suporte-remoto.ca31ey.easypanel.host`;
 produção é o mesmo roteiro com outro domínio, outra senha e `title2` diferente.
@@ -138,12 +138,25 @@ Confira no log do boot. Manualmente, é o comando de sempre do `deploy-seguro.md
 2. Ficha de um contato → card **Suporte remoto** → **Iniciar suporte** →
    **Copiar** o link.
 3. Num **Windows**, abra o link: a página mostra o passo a passo e o botão
-   **Baixar o suporte**. Abra o `MeshCentralAssistant-….exe` (não instala). O
-   card do CRM muda para **Cliente conectado** e a página do cliente também.
+   **Baixar o suporte**. Abra o `MeshCentralAssistant-….exe` (não instala): a
+   janela do Assistant aparece com o botão **Solicite ajuda**; o cliente clica
+   nele e em **OK** (a descrição é opcional). O link leva `ac=2` (`AutoConnect`
+   do `.msh`: janela em vez de bandeja, sem conectar sozinho). O card do CRM
+   muda para **Cliente conectado** e a página do cliente também.
+   Se nada aparecer ao abrir o `.exe`, ou o Assistant está escondido na bandeja
+   (link sem `ac`; seta `^` ao lado do relógio) ou já há outro aberto: só roda
+   uma instância, e as seguintes saem na hora, em silêncio.
 4. **Controlar** abre o console do MeshCentral numa aba; o cliente vê o pedido
    e clica **Permitir**. Sem o clique dele, o console fica em "Negado".
-5. **Encerrar** apaga o grupo no servidor e o Assistant perde a conexão; o
-   cliente fecha e apaga o arquivo.
+5. **Encerrar** corta o acesso na hora e apaga o grupo (expirar faz o mesmo):
+   revoga o link de controle (o console aberto fecha), remove o dispositivo (o
+   servidor derruba a conexão do Assistant, que larga a tela) e só então apaga
+   o grupo. `deletemesh` sozinho não corta nada: o MeshCentral só marca o grupo
+   como apagado, e o console seguia vendo a tela depois de encerrar. No
+   Windows o Assistant fica em **Desconectado** e não volta sozinho (`ac=2`); o
+   cliente fecha o programa e apaga o arquivo. Se ele clicar em **Solicite
+   ajuda** de novo, o MeshCentral restaura o grupo apagado — sem link de
+   controle e com o pedido de permissão valendo; o CRM não usa mais esse grupo.
 
 Fora do Windows a página orienta a abrir o link num computador com Windows
 (macOS e Linux exigiriam instalar o agente e liberar permissões do sistema, o
@@ -168,7 +181,9 @@ estiver em `meshcentral-data`; com o OV em mãos é lá que ele entra (ver
 - **Atualizar**: troque a tag da imagem e reinicie; `selfUpdate` está desligado.
 - **Grupos órfãos**: cada sessão cria um grupo `Bwipo <id>`; encerrar ou
   expirar apaga. Se a API cair no meio, pode sobrar grupo vazio; apague pela
-  tela do MeshCentral (não há dados do cliente nele).
+  tela do MeshCentral (não há dados do cliente nele). Cliente que clica em
+  **Solicite ajuda** num Assistant de sessão já encerrada traz o grupo dela de
+  volta com o dispositivo; apague pela tela também.
 - **Logs**: MeshCentral em *Meu Servidor → Rastreamento*; na API, o logger
   `remote-support`.
 - **Local do desenvolvedor**: o compose usado para validar fica fora do repo,

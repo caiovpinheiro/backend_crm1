@@ -20,10 +20,10 @@ import {
   assistantDownloadUrl,
   createControlLink,
   createSessionGroup,
-  deleteSessionGroup,
   listGroupNodes,
   MeshCentralError,
   type MeshNode,
+  teardownSessionGroup,
 } from "./meshcentral";
 
 const log = getLogger("remote-support");
@@ -110,13 +110,16 @@ async function resolveContact(contactIdOrNumber: string): Promise<{ id: string; 
   return contact;
 }
 
-/** Apaga o grupo sem derrubar a operação: o status no banco é a fonte da verdade. */
+/**
+ * Corta o acesso e apaga o grupo sem derrubar a operação: o status no banco é a
+ * fonte da verdade. Falha aqui pode deixar o Assistant conectado — vai como erro.
+ */
 async function dropGroup(meshId: string | null): Promise<void> {
   if (!meshId) return;
   try {
-    await deleteSessionGroup(meshId);
+    await teardownSessionGroup(meshId);
   } catch (err) {
-    log.warn(`Falha ao apagar o grupo ${meshId} no MeshCentral:`, err);
+    log.error(`Falha ao encerrar o grupo ${meshId} no MeshCentral:`, err);
   }
 }
 
