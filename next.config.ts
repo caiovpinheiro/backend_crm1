@@ -83,6 +83,11 @@ const nextConfig: NextConfig = {
     // arquivo: empacotado, o caminho quebra. Fica em node_modules.
     "pdf-parse",
     "pdfjs-dist",
+    // `ws` (cliente WebSocket do suporte remoto → MeshCentral) faz
+    // `require("bufferutil")` opcional; empacotado pelo webpack esse require
+    // vira módulo vazio e o primeiro `send` quebra com "b.mask is not a
+    // function" (só em produção — o dev resolve node_modules em runtime).
+    "ws",
   ],
   webpack: (config, { isServer, nextRuntime }) => {
     // 1) Bundle do Node server (route handlers, server components).
