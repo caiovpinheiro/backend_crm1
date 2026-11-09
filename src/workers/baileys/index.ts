@@ -3,7 +3,10 @@ import { drainInFlightTurns } from "@/services/ai/turn-manager";
 import { startAiTurnSweeper, stopAiTurnSweeper } from "@/services/ai/turn-sweeper";
 import { startListenSweeper, stopListenSweeper } from "@/services/ai-v2/listen";
 import { installGracefulShutdown } from "@/workers/graceful-shutdown";
+import IORedis from "ioredis";
+
 import { BaileysManager } from "./baileys-manager";
+import { SessionLock } from "./session-lock";
 import { startOutboundConsumer } from "./outbound-consumer";
 import { startControlConsumer } from "./control-consumer";
 import { getLogger } from "@/lib/logger";
@@ -12,7 +15,10 @@ const log = getLogger("worker.baileys");
 
 const redisUrl = process.env.REDIS_URL ?? "redis://localhost:6379";
 
-const manager = new BaileysManager();
+// Trava por canal: um processo por número (deploy com worker velho e novo vivos juntos).
+const lockRedis = new IORedis(redisUrl, { maxRetriesPerRequest: 2 });
+lockRedis.on("error", (err) => log.warn({ err: err.message }, "[baileys-worker] Redis da trava"));
+const manager = new BaileysManager(new SessionLock(lockRedis));
 
 const outboundWorker = startOutboundConsumer(manager, redisUrl);
 const controlWorker = startControlConsumer(manager, redisUrl);
@@ -57,6 +63,7 @@ installGracefulShutdown({
       run: () => Promise.all([outboundWorker.close(), controlWorker.close()]),
     },
     { name: "sessoes", run: () => manager.shutdownAll() },
+    { name: "redis-trava", run: () => lockRedis.quit().then(() => undefined) },
     { name: "prisma", run: () => prisma.$disconnect() },
   ],
 });
