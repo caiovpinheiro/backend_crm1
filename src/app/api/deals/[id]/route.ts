@@ -4,7 +4,11 @@ import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { canViewStage, loadAuthzContext } from "@/lib/authz";
 import { canEditFieldForUser, requirePermissionForUser, requirePipelineScope, requireStageScope } from "@/lib/authz/resource-policy";
 import { prisma } from "@/lib/prisma";
-import { canSeeDealByOwner, getVisibilityFilter } from "@/lib/visibility";
+import {
+  canSeeDealByOwner,
+  getVisibilityFilter,
+  hasAssignedConversationWithContact,
+} from "@/lib/visibility";
 import { fireTrigger } from "@/services/automation-triggers";
 import { moveDealForUser } from "@/services/deal-move-flow";
 import { createDealEvent, deleteDeal, getDealById, isValidDealStatus, updateDeal } from "@/services/deals";
@@ -85,7 +89,13 @@ export async function GET(request: Request, context: RouteContext) {
 
     // Deal sem dono acompanha o eixo "sem responsável": quem enxerga o pool no
     // board precisa conseguir abrir o card, senão o clique devolve 403.
-    if (!canSeeDealByOwner(visibility, user.id, deal.ownerId ?? null)) {
+    // Exceção de LEITURA: quem atende uma conversa do contato vê o negócio,
+    // mesmo sem ser o dono (distribuição "somente a conversa" /
+    // `Department.keepDealOwner`). Editar segue exigindo `deal:edit`.
+    if (
+      !canSeeDealByOwner(visibility, user.id, deal.ownerId ?? null) &&
+      !(await hasAssignedConversationWithContact(user.id, deal.contactId))
+    ) {
       return NextResponse.json({ message: "Acesso negado." }, { status: 403 });
     }
 
