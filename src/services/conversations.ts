@@ -3539,6 +3539,14 @@ export async function resolveConversationsInline(params: {
   keepDepartment: boolean;
   tabulation?: BulkResolveTabulation | null;
   skipAutomations?: boolean;
+  /**
+   * Quem encerrou, para o gatilho "Conversa encerrada" (`closedBy`).
+   * "ai": só casa com fluxos que aceitam encerramento pela IA
+   * (`includeAiCloses` ou `aiCloseFlowsEnabled`, chave da org).
+   */
+  closedBy?: "user" | "ai";
+  /** Chave da org `automations.runOnAiClose` (vale para todos os fluxos). */
+  aiCloseFlowsEnabled?: boolean;
 }): Promise<{ updated: number; missing: number }> {
   const tab = params.tabulation ?? null;
   const applyTab = Boolean(tab);
@@ -3566,6 +3574,7 @@ export async function resolveConversationsInline(params: {
         organizationId: true,
         externalId: true,
         assignedToId: true,
+        tabulationId: true,
         assignedTo: { select: { name: true } },
         contact: { select: { name: true } },
       },
@@ -3685,14 +3694,33 @@ export async function resolveConversationsInline(params: {
             });
             dealId = deal?.id;
           }
+          // Sem tabulação no encerramento: vale a que já estava gravada (a IA
+          // tabula antes de encerrar). Sem isso o fluxo filtrado por
+          // tabulação nunca casava no encerramento pela IA.
+          let firedTab: { tabulationId: string; ancestorIds: string[] } | null =
+            applyTab && tab ? { tabulationId: tab.tabulationId, ancestorIds: tab.ancestorIds } : null;
+          if (!firedTab && conv.tabulationId && conv.organizationId) {
+            const { resolveTabulationForStep } = await import("@/services/tabulations");
+            const saved = await resolveTabulationForStep({
+              organizationId: conv.organizationId,
+              tabulationId: conv.tabulationId,
+            }).catch(() => null);
+            firedTab = saved
+              ? { tabulationId: saved.tabulationId, ancestorIds: saved.ancestorIds }
+              : { tabulationId: conv.tabulationId, ancestorIds: [] };
+          }
           await fireTrigger("conversation_tabulated", {
             contactId: conv.contactId ?? undefined,
             dealId,
             data: {
-              tabulationId: applyTab && tab ? tab.tabulationId : null,
-              ancestorIds: applyTab && tab ? tab.ancestorIds : [],
+              tabulationId: firedTab?.tabulationId ?? null,
+              ancestorIds: firedTab?.ancestorIds ?? [],
               departmentId: conv.departmentId ?? tab?.departmentId ?? null,
               conversationId: conv.id,
+              closedBy: params.closedBy ?? "user",
+              ...(params.closedBy === "ai"
+                ? { aiCloseFlowsEnabled: params.aiCloseFlowsEnabled === true }
+                : {}),
             },
           });
         })().catch(() => {});

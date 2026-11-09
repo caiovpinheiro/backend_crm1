@@ -1243,7 +1243,10 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
         keepAgent: true,
         keepDepartment: true,
         tabulation: null,
-        skipAutomations: !(await flowsOnAiClose()),
+        // Sempre avisa; cada fluxo "Conversa encerrada" decide pelo filtro
+        // (`includeAiCloses`) ou pela chave da org (`aiCloseFlowsEnabled`).
+        closedBy: "ai",
+        aiCloseFlowsEnabled: await flowsOnAiClose(),
       });
     };
 
@@ -3422,7 +3425,10 @@ export async function closeState(
     keepAgent: true,
     keepDepartment: true,
     tabulation: null,
-    skipAutomations: !(await flowsOnAiClose()),
+    // Sempre avisa; cada fluxo "Conversa encerrada" decide pelo filtro
+    // (`includeAiCloses`) ou pela chave da org (`aiCloseFlowsEnabled`).
+    closedBy: "ai",
+    aiCloseFlowsEnabled: await flowsOnAiClose(),
   });
   await upsertV2ConversationState({
     organizationId: orgId,

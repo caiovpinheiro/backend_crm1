@@ -503,6 +503,10 @@ export async function POST(request: Request, context: RouteContext) {
                 toDepartmentId: newDeptId,
                 fromDepartmentName: prevConv.department?.name ?? null,
                 toDepartmentName: newDept?.name ?? null,
+                // Quem atendia ANTES da transferência (agente + depto no
+                // mesmo pedido: o de antes da troca de agente). Lido pelo
+                // passo "Devolver atendimento" da automação.
+                fromAssigneeId: fromAssigneeId ?? null,
               },
             });
             // Empurra o evento pro chatter em tempo real.
