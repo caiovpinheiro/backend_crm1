@@ -8,6 +8,7 @@ import {
   summarizeRoundRobinConfig,
   type RoundRobinConfig,
 } from "@/lib/automation-round-robin";
+import { summarizeRestoreAttendance } from "@/lib/restore-attendance";
 
 export type AutomationTriggerType =
   | "stage_changed"
@@ -68,6 +69,7 @@ export const ACTION_STEP_TYPES = [
   "mark_deal_lost",
   "assign_owner",
   "transfer_department",
+  "restore_attendance",
   "add_tag",
   "remove_tag",
   "update_field",
@@ -406,6 +408,7 @@ export function stepTypeLabel(t: string): string {
     mark_deal_lost: "Perda",
     assign_owner: "Atribuir responsável",
     transfer_department: "Transferir para departamento",
+    restore_attendance: "Devolver atendimento",
     add_tag: "Adicionar tag",
     remove_tag: "Remover tag",
     update_field: "Atualizar campo",
@@ -610,6 +613,8 @@ export function summarizeStepConfig(stepType: string, config: unknown, lookup?: 
         : c.departmentId
           ? `Depto: ${String(c.departmentId).slice(0, 8)}…`
           : "Selecionar departamento";
+    case "restore_attendance":
+      return summarizeRestoreAttendance(c);
     case "add_tag":
     case "remove_tag":
       return c.tagName ? String(c.tagName) : c.tagId ? `ID: ${String(c.tagId)}` : "Definir tag";
@@ -851,6 +856,10 @@ export function defaultStepConfig(stepType: string): Record<string, unknown> {
       return { userId: "", target: "deal" };
     case "transfer_department":
       return { departmentId: "", departmentName: "" };
+    case "restore_attendance":
+      // Padrão: devolve agente e departamento de antes da transferência;
+      // sem histórico, mantém como está; não reabre conversa encerrada.
+      return { agentMode: "previous", departmentMode: "previous", notFound: "keep", reopen: "no" };
     case "add_tag":
     case "remove_tag":
       return { tagName: "" };
@@ -1236,7 +1245,16 @@ export function defaultTriggerConfig(triggerType: string): Record<string, unknow
       // tabulado); false = qualquer encerramento manual.
       // Matching considera ancestrais (mirar categoria pai vale pra
       // descendentes — ver evaluateTrigger em services/automations.ts).
-      return { departmentId: "", tabulationId: "", tabulationLabel: "", requireTabulation: false };
+      // includeAiCloses / includeAutomationCloses: também casa quando a IA /
+      // uma automação encerra (padrão: só pessoa, como antes).
+      return {
+        departmentId: "",
+        tabulationId: "",
+        tabulationLabel: "",
+        requireTabulation: false,
+        includeAiCloses: false,
+        includeAutomationCloses: false,
+      };
     case "whatsapp_session_expiring":
       return { hoursBeforeExpiry: 1 };
     default:

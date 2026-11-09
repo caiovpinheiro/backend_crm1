@@ -383,6 +383,19 @@ export function evaluateTrigger(
     case "attendance_closing":
       return true;
     case "conversation_tabulated": {
+      // Quem encerrou. Ausente = pessoa (inbox/lote), o comportamento antigo.
+      // IA: só com a opção do fluxo ou a chave da org (`runOnAiClose`).
+      // Automação: só com a opção do fluxo (evita fluxo chamando fluxo).
+      const closedBy = readString(data, "closedBy");
+      if (
+        closedBy === "ai" &&
+        cfg.includeAiCloses !== true &&
+        data.aiCloseFlowsEnabled !== true
+      ) {
+        return false;
+      }
+      if (closedBy === "automation" && cfg.includeAutomationCloses !== true) return false;
+
       // Filtro por departamento (opcional): so casa se o encerramento
       // aconteceu no dept configurado. Sem departmentId => any dept.
       const cfgDept = readString(cfg, "departmentId");
