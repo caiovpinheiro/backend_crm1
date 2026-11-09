@@ -19,7 +19,7 @@ import { maybeDistributeNewInboundTicket } from "@/services/distribution";
 import { inheritContactAssigneeForNewTicket } from "@/services/ai/attendance-gate";
 import { verifyMetaWebhookSignature } from "@/lib/meta-webhook-signature";
 import { decryptSecret, isEncryptedSecret } from "@/lib/crypto/secrets";
-import { generateFileName, saveFile } from "@/lib/storage/local";
+import { generateFileName, inboundFileExt, saveFile } from "@/lib/storage/local";
 import { enqueueMetaWebhookEvent } from "@/lib/queue";
 import { cache } from "@/lib/cache";
 import {
@@ -1219,6 +1219,8 @@ type ParsedMessage = {
   mediaUrl: string | null;
   mediaId: string | null;
   mimeType: string | null;
+  /** Nome original do documento (`document.filename`), para a extensão do arquivo salvo. */
+  mediaFileName: string | null;
   /**
    * Quando o cliente responde uma mensagem específica no WhatsApp, o payload
    * traz `context.id` = wamid da mensagem citada. Usamos para popular
@@ -1515,6 +1517,7 @@ function parseMessage(message: Record<string, unknown>): ParsedMessage | null {
   let mediaUrl: string | null = null;
   let mediaId: string | null = null;
   let mimeType: string | null = null;
+  let mediaFileName: string | null = null;
   let interactiveButtonId: string | null = null;
   let interactiveButtonTitle: string | null = null;
   let interactiveKind: string | null = null;
@@ -1557,6 +1560,7 @@ function parseMessage(message: Record<string, unknown>): ParsedMessage | null {
       text = str(m.caption) || str(m.filename) || "[Documento]";
       mediaId = str(m.id) || null;
       mimeType = str(m.mime_type) || "application/octet-stream";
+      mediaFileName = str(m.filename) || null;
       break;
     }
     case "sticker": {
@@ -1595,6 +1599,7 @@ function parseMessage(message: Record<string, unknown>): ParsedMessage | null {
         mediaUrl: null,
         mediaId: null,
         mimeType: null,
+        mediaFileName: null,
         replyToWaMessageId: null,
         reactionTarget: {
           targetWaMessageId,
@@ -1683,6 +1688,7 @@ function parseMessage(message: Record<string, unknown>): ParsedMessage | null {
     mediaUrl,
     mediaId,
     mimeType,
+    mediaFileName,
     replyToWaMessageId,
     reactionTarget: null,
     interactiveButtonId,
@@ -1699,23 +1705,6 @@ function parseMessage(message: Record<string, unknown>): ParsedMessage | null {
 }
 
 // ── Download media from Meta & save locally ──────
-
-const MIME_EXT: Record<string, string> = {
-  "image/jpeg": "jpg", "image/png": "png", "image/gif": "gif", "image/webp": "webp",
-  "audio/ogg": "ogg", "audio/ogg; codecs=opus": "ogg", "audio/mpeg": "mp3",
-  "audio/mp4": "m4a", "audio/amr": "amr", "audio/aac": "aac",
-  "video/mp4": "mp4", "video/3gpp": "3gp",
-  "application/pdf": "pdf",
-  "application/vnd.ms-powerpoint": "ppt",
-  "application/msword": "doc",
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
-  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
-};
-
-function mimeToExt(mime: string): string {
-  const base = mime.split(";")[0].trim().toLowerCase();
-  return MIME_EXT[base] ?? base.split("/").pop()?.replace(/[^a-z0-9]/g, "") ?? "bin";
-}
 
 async function resolveAccessToken(phoneNumberId?: string): Promise<string | null> {
   if (phoneNumberId) {
@@ -1745,6 +1734,7 @@ async function downloadAndSaveMedia(
   mimeType: string | null,
   organizationId: string,
   phoneNumberId?: string,
+  originalFileName?: string | null,
 ): Promise<string | null> {
   const token = await resolveAccessToken(phoneNumberId);
   if (!token || !mediaId) return null;
@@ -1779,7 +1769,7 @@ async function downloadAndSaveMedia(
     }
     const buffer = Buffer.from(await fileRes.arrayBuffer());
 
-    const ext = mimeToExt(mimeType || "application/octet-stream");
+    const ext = inboundFileExt(mimeType, originalFileName);
     const fileName = generateFileName({ prefix: "in", ext });
     // PR 1.3: storage por org. Antes: `public/uploads/<file>` shared.
     const saved = await saveFile({
@@ -3212,6 +3202,7 @@ export async function processMetaWebhookPayload(
               parsed.mimeType,
               conversation.organizationId,
               phoneNumberId || undefined,
+              parsed.mediaFileName,
             );
           }
 
