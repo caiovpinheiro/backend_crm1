@@ -51,6 +51,7 @@ async function lastResolvedConversation(contactId: string) {
     select: {
       id: true,
       assignedToId: true,
+      departmentId: true,
       assignedTo: { select: { type: true } },
     },
   });
@@ -185,12 +186,31 @@ export async function keepHumanAfterAutomationClose(args: {
     return current.assignedToId;
   }
 
+  // "Manter dono do negócio" do departamento do ticket novo ou do encerrado:
+  // quem volta atende só a conversa; o dono humano do negócio fica.
+  // Import dinâmico: o módulo puxa `deals.ts` (e o barramento SSE).
+  const { resolveKeepDealOwner } = await import(
+    "@/services/distribution/deal-owner-scope"
+  );
+  const keepDealOwner =
+    (await resolveKeepDealOwner({
+      conversationId: args.conversationId,
+      contactId: args.contactId,
+    })) ||
+    (await resolveKeepDealOwner({
+      conversationId: args.conversationId,
+      contactId: args.contactId,
+      departmentId:
+        (await lastResolvedConversation(args.contactId))?.departmentId ?? null,
+    }));
+
   await prisma.$transaction(async (tx) => {
     await tx.conversation.update({
       where: { id: args.conversationId },
       data: { assignedToId: humanId },
       select: { id: true },
     });
+    if (keepDealOwner) return;
     await tx.contact.update({
       where: { id: args.contactId },
       data: { assignedToId: humanId },

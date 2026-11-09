@@ -40,6 +40,8 @@ const bodySchema = z.object({
   departmentId: z.string().min(1).optional(),
   departmentIds: z.array(z.string().min(1)).max(50).optional(),
   reassign: z.boolean().optional(),
+  /** "Manter dono do negócio" (inbox); ausente = regra do departamento. */
+  keepDealOwner: z.boolean().optional(),
 });
 
 export async function POST(request: Request) {
@@ -115,6 +117,7 @@ export async function POST(request: Request) {
       distributionType: parsed.data.distributionType ?? null,
       departmentIds: departmentIds.length > 0 ? departmentIds : null,
       reassign: parsed.data.reassign === true,
+      keepDealOwner: parsed.data.keepDealOwner ?? null,
       triggerSource: "MANUAL" as const,
     };
 
@@ -129,6 +132,7 @@ export async function POST(request: Request) {
           departmentId,
           departmentIds: departmentIds.length > 0 ? departmentIds : null,
           reassign: parsed.data.reassign === true,
+          keepDealOwner: parsed.data.keepDealOwner ?? null,
           distributionType: parsed.data.distributionType ?? null,
           requestedByUserId: session.user.id,
           correlationId: randomUUID(),

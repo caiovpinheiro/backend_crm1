@@ -29,6 +29,20 @@ describe("departmentTransferDistributionInput", () => {
   });
 });
 
+describe("departmentTransferDistributionInput — manter dono do negócio", () => {
+  it("leva o checkbox do modal; ausente = regra do departamento (null)", () => {
+    const base = {
+      conversationId: "c1",
+      contactId: "ct1",
+      departmentId: "d1",
+      explicitAgent: false,
+    };
+    expect(departmentTransferDistributionInput({ ...base, keepDealOwner: true }).keepDealOwner).toBe(true);
+    expect(departmentTransferDistributionInput({ ...base, keepDealOwner: false }).keepDealOwner).toBe(false);
+    expect(departmentTransferDistributionInput(base).keepDealOwner).toBeNull();
+  });
+});
+
 describe("transferDistributionFromQueueOutcome", () => {
   it("QUEUED conta como sucesso (worker ainda vai atribuir)", () => {
     expect(
