@@ -1,5 +1,4 @@
 import makeWASocket, {
-  DisconnectReason,
   fetchLatestBaileysVersion,
   isJidGroup,
   makeCacheableSignalKeyStore,
@@ -21,7 +20,7 @@ import {
   publishMessageStatus,
 } from "@/lib/realtime-events";
 import { withSystemContext } from "@/lib/webhook-context";
-import { usePostgresAuthState } from "./auth-state-postgres";
+import { credsAreRegistered, usePostgresAuthState } from "./auth-state-postgres";
 import { handleBaileysMessage } from "./message-handler";
 import { snapshotFromMeta } from "./sync-groups";
 import {
@@ -33,12 +32,34 @@ import { attachContactTyping, detachContactTyping } from "./contact-typing";
 import { maskPhone } from "@/lib/pii-mask";
 import { getLogger } from "@/lib/logger";
 import { noteMessageChange } from "@/lib/cache/message-versions";
+import { decideReconnect, disconnectReasonName } from "./reconnect-policy";
+import { PROCESS_OWNER } from "./session-lock";
 
 const log = getLogger("worker.baileys.baileys-session");
 
-const RECONNECT_MAX_RETRIES = 8;
-const RECONNECT_BASE_DELAY_MS = 2_000;
 const QR_TIMEOUT_MS = 60_000;
+
+/** Eventos que esta classe escuta — removidos ao trocar de socket. */
+const SOCKET_EVENTS = [
+  "creds.update",
+  "connection.update",
+  "contacts.upsert",
+  "contacts.update",
+  "groups.upsert",
+  "messaging-history.set",
+  "chats.upsert",
+  "groups.update",
+  "group-participants.update",
+  "messages.upsert",
+  "messages.update",
+] as const;
+
+export interface BaileysSessionHooks {
+  /** Este processo ainda é o dono da trava do canal? (`session-lock.ts`) */
+  stillOwner?: () => Promise<boolean>;
+  /** Perdeu a trava: o manager encerra esta sessão e tenta pegar de novo. */
+  onLostOwnership?: () => void;
+}
 
 function snapshotsFromChats(
   chats: Array<{ id?: string | null; name?: string | null }>,
@@ -61,7 +82,15 @@ function snapshotsFromChats(
 export class BaileysSession {
   channelId: string;
   socket: WASocket | null = null;
-  private retryCount = 0;
+  /** Tentativa de reconexão desde a última conexão aberta. */
+  private attempt = 0;
+  private badSessionStreak = 0;
+  private openedAt: number | null = null;
+  /** Cada socket novo ganha um número; evento de socket antigo é ignorado. */
+  private generation = 0;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Credencial em uso (o Baileys atualiza no lugar ao parear pelo QR). */
+  private creds: unknown = null;
   private qrTimer: ReturnType<typeof setTimeout> | null = null;
   private destroyed = false;
   // Cacheado no `connect()` p/ que cada `messages.upsert` rode sob
@@ -77,8 +106,46 @@ export class BaileysSession {
   // lista para não apagar um grupo que o `participating` ainda não devolveu.
   private discoveredGroups = new Map<string, BaileysGroupSnapshot>();
 
-  constructor(channelId: string) {
+  constructor(
+    channelId: string,
+    private readonly hooks: BaileysSessionHooks = {},
+  ) {
     this.channelId = channelId;
+  }
+
+  /** Sessão encerrada de vez (stop/disconnect/logout ou pede QR). */
+  get isDestroyed(): boolean {
+    return this.destroyed;
+  }
+
+  /** Há uma reconexão agendada (socket ainda não reaberto). */
+  get isReconnecting(): boolean {
+    return this.reconnectTimer !== null;
+  }
+
+  /** Reconecta agora, cancelando a espera (ex.: usuário pediu conectar). */
+  async connectNow(): Promise<void> {
+    this.clearReconnectTimer();
+    await this.connect();
+  }
+
+  /** Fecha o socket atual sem mexer no status e sem disparar reconexão. */
+  private teardownSocket(): void {
+    const old = this.socket;
+    this.socket = null;
+    if (!old) return;
+    for (const ev of SOCKET_EVENTS) {
+      try {
+        old.ev.removeAllListeners(ev);
+      } catch {
+        /* best-effort */
+      }
+    }
+    try {
+      old.end(undefined);
+    } catch {
+      /* best-effort */
+    }
   }
 
   async connect(): Promise<void> {
@@ -107,6 +174,8 @@ export class BaileysSession {
     }
 
     const { state, saveCreds } = await usePostgresAuthState(this.channelId);
+    if (this.destroyed) return;
+    this.creds = state.creds;
 
     let version: [number, number, number] | undefined;
     try {
@@ -123,6 +192,11 @@ export class BaileysSession {
         "[baileys] fallback para versão",
       );
     }
+
+    if (this.destroyed) return;
+    // Nunca dois sockets da mesma sessão no mesmo processo.
+    this.teardownSocket();
+    const gen = ++this.generation;
 
     const sock = makeWASocket({
       auth: {
@@ -146,11 +220,18 @@ export class BaileysSession {
     sock.ev.on("creds.update", () => {
       const orgId = this.organizationId;
       if (!orgId) return;
-      void withSystemContext(orgId, saveCreds);
+      // saveCreds já tenta 3× e loga; aqui só não deixa a rejeição solta.
+      withSystemContext(orgId, saveCreds).catch(() => {});
     });
 
     sock.ev.on("connection.update", (update) => {
-      void this.handleConnectionUpdate(update);
+      if (gen !== this.generation) return;
+      void this.handleConnectionUpdate(update).catch((err) => {
+        log.error(
+          { channelId: this.channelId, err: err instanceof Error ? err.message : err },
+          "[baileys] erro tratando connection.update",
+        );
+      });
     });
 
     sock.ev.on("contacts.upsert", (contacts) => {
@@ -369,7 +450,17 @@ export class BaileysSession {
 
     if (connection === "open") {
       this.clearQrTimer();
-      this.retryCount = 0;
+      log.info(
+        {
+          channelId: this.channelId,
+          tentativas: this.attempt,
+          owner: PROCESS_OWNER,
+        },
+        "[baileys] conexão aberta",
+      );
+      this.attempt = 0;
+      this.badSessionStreak = 0;
+      this.openedAt = Date.now();
       const me = this.socket?.user;
       const phone = me?.id?.split(":")[0] ?? me?.id?.split("@")[0] ?? null;
 
@@ -388,60 +479,151 @@ export class BaileysSession {
     }
 
     if (connection === "close") {
-      this.clearQrTimer();
-      const statusCode =
-        lastDisconnect?.error instanceof Boom
-          ? lastDisconnect.error.output.statusCode
-          : undefined;
-
-      const loggedOut = statusCode === DisconnectReason.loggedOut;
-
-      if (loggedOut) {
-        log.info({ channelId: this.channelId }, "[baileys] deslogado — limpando sessão");
-        const orgId = this.organizationId;
-        if (orgId) {
-          await withSystemContext(orgId, async () => {
-            await prisma.baileysAuthKey.deleteMany({ where: { channelId: this.channelId } });
-          });
-        }
-        await this.patchChannel(
-          { status: "DISCONNECTED", qrCode: null, sessionData: Prisma.JsonNull },
-          "DISCONNECTED",
-        );
-        this.socket = null;
-        return;
-      }
-
-      if (this.destroyed) {
-        this.socket = null;
-        return;
-      }
-
-      if (this.retryCount >= RECONNECT_MAX_RETRIES) {
-        log.error({ channelId: this.channelId }, "[baileys] máximo de tentativas atingido — FAILED");
-        await this.patchChannel({ status: "FAILED", qrCode: null }, "FAILED");
-        this.socket = null;
-        return;
-      }
-
-      const delay = RECONNECT_BASE_DELAY_MS * Math.pow(2, this.retryCount);
-      this.retryCount++;
-      log.info(
-        {
-          channelId: this.channelId,
-          status: statusCode,
-          delayMs: delay,
-          tentativa: this.retryCount,
-        },
-        "[baileys] desconectado — reconectando",
-      );
-
-      await this.patchChannel({ status: "CONNECTING" }, "CONNECTING");
-
-      setTimeout(() => {
-        if (!this.destroyed) void this.connect();
-      }, delay);
+      await this.handleClose(lastDisconnect?.error);
     }
+  }
+
+  private async handleClose(error: unknown): Promise<void> {
+    this.clearQrTimer();
+    const statusCode =
+      error instanceof Boom ? error.output.statusCode : undefined;
+    const message = error instanceof Error ? error.message : error ? String(error) : null;
+    const uptimeMs = this.openedAt ? Date.now() - this.openedAt : null;
+    this.openedAt = null;
+    // Socket que caiu não serve mais: tira os listeners e fecha; o próximo
+    // é criado no connect().
+    this.teardownSocket();
+
+    if (this.destroyed) {
+      log.info(
+        { channelId: this.channelId, status: statusCode, motivo: disconnectReasonName(statusCode) },
+        "[baileys] conexão fechada (sessão encerrada)",
+      );
+      return;
+    }
+
+    // Ainda sem parear (QR não lido): não fica gerando QR para sempre.
+    // 515 é o reinício normal logo depois de ler o QR — esse segue.
+    if (!credsAreRegistered(this.creds) && statusCode !== 515) {
+      this.destroyed = true;
+      log.info(
+        { channelId: this.channelId, status: statusCode ?? null, motivo: disconnectReasonName(statusCode) },
+        "[baileys] QR não lido — sessão encerrada até pedirem conectar de novo",
+      );
+      await this.patchChannel({ status: "DISCONNECTED", qrCode: null }, "DISCONNECTED");
+      return;
+    }
+
+    this.badSessionStreak = statusCode === 500 ? this.badSessionStreak + 1 : 0;
+    this.attempt++;
+    const decision = decideReconnect({
+      statusCode,
+      attempt: this.attempt,
+      badSessionStreak: this.badSessionStreak,
+    });
+
+    log.warn(
+      {
+        channelId: this.channelId,
+        status: statusCode ?? null,
+        motivo: decision.reason,
+        erro: message,
+        conectadoPorMs: uptimeMs,
+        tentativa: this.attempt,
+        acao: decision.action,
+        proximaEmMs: decision.action === "retry" ? decision.delayMs : null,
+        owner: PROCESS_OWNER,
+      },
+      "[baileys] conexão fechada",
+    );
+    await this.recordDisconnect({
+      at: new Date().toISOString(),
+      statusCode: statusCode ?? null,
+      reason: decision.reason,
+      message,
+      uptimeMs,
+      attempt: this.attempt,
+      action: decision.action,
+      owner: PROCESS_OWNER,
+    }).catch(() => {});
+
+    if (decision.action === "logout") {
+      this.destroyed = true;
+      log.info({ channelId: this.channelId }, "[baileys] deslogado no aparelho — limpando sessão");
+      const orgId = this.organizationId;
+      if (orgId) {
+        await withSystemContext(orgId, async () => {
+          await prisma.baileysAuthKey.deleteMany({ where: { channelId: this.channelId } });
+        });
+      }
+      await this.patchChannel({ status: "DISCONNECTED", qrCode: null }, "DISCONNECTED");
+      return;
+    }
+
+    if (decision.action === "needs_qr") {
+      this.destroyed = true;
+      log.error(
+        { channelId: this.channelId, motivo: decision.reason },
+        "[baileys] sessão não aceita mais — precisa ler o QR de novo",
+      );
+      await this.patchChannel({ status: "FAILED", qrCode: null }, "FAILED");
+      return;
+    }
+
+    // 440: outra conexão abriu esta sessão. Só volta se este processo
+    // ainda é o dono da trava; senão quem tem a trava fica com o número.
+    if (statusCode === 440 && this.hooks.stillOwner) {
+      const owner = await this.hooks.stillOwner().catch(() => false);
+      if (!owner) {
+        log.warn(
+          { channelId: this.channelId, owner: PROCESS_OWNER },
+          "[baileys] conexão substituída e a trava é de outro processo — não reconecta",
+        );
+        this.hooks.onLostOwnership?.();
+        return;
+      }
+    }
+
+    await this.patchChannel({ status: "CONNECTING" }, "CONNECTING");
+    this.scheduleReconnect(decision.delayMs);
+  }
+
+  private scheduleReconnect(delayMs: number): void {
+    this.clearReconnectTimer();
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (this.destroyed) return;
+      void this.connect().catch((err) => {
+        log.error(
+          { channelId: this.channelId, err: err instanceof Error ? err.message : err },
+          "[baileys] reconexão falhou antes de abrir o socket",
+        );
+        // Banco/rede fora no meio do connect(): tenta de novo pela mesma regra.
+        this.attempt++;
+        const next = decideReconnect({ statusCode: undefined, attempt: this.attempt, badSessionStreak: 0 });
+        if (next.action === "retry" && !this.destroyed) this.scheduleReconnect(next.delayMs);
+      });
+    }, delayMs);
+  }
+
+  /** Último motivo de queda em `Channel.sessionData.lastDisconnect` (diagnóstico). */
+  private async recordDisconnect(info: Record<string, unknown>): Promise<void> {
+    const orgId = this.organizationId;
+    if (!orgId) return;
+    await withSystemContext(orgId, async () => {
+      const row = await prisma.channel.findUnique({
+        where: { id: this.channelId },
+        select: { sessionData: true },
+      });
+      const prev =
+        row?.sessionData && typeof row.sessionData === "object" && !Array.isArray(row.sessionData)
+          ? (row.sessionData as Record<string, unknown>)
+          : {};
+      await prisma.channel.update({
+        where: { id: this.channelId },
+        data: { sessionData: { ...prev, lastDisconnect: info } as Prisma.InputJsonValue },
+      });
+    });
   }
 
   rememberGroup(meta: GroupMetadata): void {
@@ -518,24 +700,37 @@ export class BaileysSession {
     );
   }
 
+  /**
+   * Desligamento do processo (deploy/restart): fecha o socket SEM mudar o
+   * status e sem apagar nada. O próximo worker reabre a mesma sessão com as
+   * credenciais salvas — sem QR. Antes este caminho gravava DISCONNECTED e
+   * o boot só reconectava CONNECTED/CONNECTING: todo deploy derrubava o número.
+   */
+  async stop(): Promise<void> {
+    this.destroyed = true;
+    this.clearQrTimer();
+    this.clearReconnectTimer();
+    detachContactTyping(this.channelId);
+    this.teardownSocket();
+    log.info({ channelId: this.channelId, owner: PROCESS_OWNER }, "[baileys] sessão parada (sem mudar status)");
+  }
+
+  /** Desconexão pedida (ação "disconnect"): fecha e marca DISCONNECTED. */
   async disconnect(): Promise<void> {
     this.destroyed = true;
     this.clearQrTimer();
+    this.clearReconnectTimer();
     this.groupCache.clear();
     this.discoveredGroups.clear();
     clearChannelMap(this.channelId);
     detachContactTyping(this.channelId);
-    try {
-      this.socket?.end(undefined);
-    } catch {
-      /* best-effort */
-    }
-    this.socket = null;
+    this.teardownSocket();
     await this.patchChannel({ status: "DISCONNECTED", qrCode: null }, "DISCONNECTED");
   }
 
   async logout(): Promise<void> {
     this.clearQrTimer();
+    this.clearReconnectTimer();
     this.groupCache.clear();
     this.discoveredGroups.clear();
     clearChannelMap(this.channelId);
@@ -591,6 +786,13 @@ export class BaileysSession {
       };
       sock.ev.on("connection.update", onUp);
     });
+  }
+
+  private clearReconnectTimer() {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
   }
 
   private clearQrTimer() {
