@@ -51,6 +51,8 @@ export type ValidationAutomation = {
   triggerType: string;
   active: boolean;
   steps: Array<{ type: string; config?: Record<string, unknown> }>;
+  /** Opcional (testes antigos não passam): `includeAiCloses` do gatilho. */
+  triggerConfig?: unknown;
 };
 
 export type ConfigValidationData = {
@@ -802,23 +804,34 @@ function validateTabulation(c: V2AgentConfig, data: ConfigValidationData, add: (
 // ─── 6. Fluxos de automação no encerramento ──────────────────────────────
 
 function validateAutomations(data: ConfigValidationData, add: (f: Omit<ValidationFinding, "agentId">) => void): void {
-  const flows = data.automations.filter((f) => f.active && f.triggerType === "conversation_tabulated" && automationTalksToClient(f.steps));
-  if (flows.length === 0) return;
-  const names = flows.map((f) => q(f.name)).join(", ");
-  if (data.runOnAiClose) {
+  const all = data.automations.filter((f) => f.active && f.triggerType === "conversation_tabulated" && automationTalksToClient(f.steps));
+  if (all.length === 0) return;
+  // Roda no encerramento pelo agente: chave da org ou opção do próprio fluxo.
+  const optedIn = (f: ValidationAutomation) => {
+    const cfg = f.triggerConfig;
+    return Boolean(cfg && typeof cfg === "object" && (cfg as Record<string, unknown>).includeAiCloses === true);
+  };
+  const running = all.filter((f) => data.runOnAiClose || optedIn(f));
+  const idle = all.filter((f) => !(data.runOnAiClose || optedIn(f)));
+  if (running.length > 0) {
+    const flows = running;
+    const names = flows.map((f) => q(f.name)).join(", ");
     add({
       code: "fluxo_fala_com_cliente_no_encerramento",
       severity: "avisa",
       path: "closure",
-      message: `Fluxo${flows.length > 1 ? "s" : ""} de automação “Conversa encerrada” que fala${flows.length > 1 ? "m" : ""} com o cliente (${names}) roda${flows.length > 1 ? "m" : ""} quando o agente encerra (chave da organização ligada): mensagem do fluxo em cima do pós-encerramento do agente.`,
+      message: `Fluxo${flows.length > 1 ? "s" : ""} de automação “Conversa encerrada” que fala${flows.length > 1 ? "m" : ""} com o cliente (${names}) roda${flows.length > 1 ? "m" : ""} quando o agente encerra (${data.runOnAiClose ? "chave da organização ligada" : "opção “Também quando a IA encerrar” do fluxo"}): mensagem do fluxo em cima do pós-encerramento do agente.`,
       evidence: flows.map((f) => f.id).join(","),
     });
-  } else {
+  }
+  if (idle.length > 0) {
+    const flows = idle;
+    const names = flows.map((f) => q(f.name)).join(", ");
     add({
       code: "fluxo_encerramento_nao_roda_pelo_agente",
       severity: "avisa",
       path: "closure",
-      message: `Fluxo${flows.length > 1 ? "s" : ""} de automação “Conversa encerrada” que fala${flows.length > 1 ? "m" : ""} com o cliente (${names}) não roda${flows.length > 1 ? "m" : ""} quando o agente encerra: a chave “rodar fluxos no encerramento pelo agente” está desligada na organização. Se o fluxo é pensado para o agente, ligue a chave; se não, nada a fazer.`,
+      message: `Fluxo${flows.length > 1 ? "s" : ""} de automação “Conversa encerrada” que fala${flows.length > 1 ? "m" : ""} com o cliente (${names}) não roda${flows.length > 1 ? "m" : ""} quando o agente encerra: a chave “rodar fluxos no encerramento pelo agente” está desligada na organização e o fluxo não marca “Também quando a IA encerrar”. Se o fluxo é pensado para o agente, marque a opção no gatilho; se não, nada a fazer.`,
       evidence: flows.map((f) => f.id).join(","),
     });
   }
@@ -877,7 +890,7 @@ export async function loadConfigValidationData(organizationId: string, draftAgen
     safe(db.department.findMany({ where: { organizationId }, select: { id: true, name: true, _count: { select: { members: true } } } }), [], "departments"),
     safe(db.user.findMany({ where: { organizationId, type: "HUMAN" }, select: { id: true, name: true } }), [], "users"),
     safe(db.distributionRule.findMany({ where: { organizationId }, select: { id: true, name: true } }), [], "distributionRules"),
-    safe(db.automation.findMany({ where: { organizationId, active: true }, select: { id: true, name: true, triggerType: true, active: true, steps: { select: { type: true, config: true } } } }), [], "automations"),
+    safe(db.automation.findMany({ where: { organizationId, active: true }, select: { id: true, name: true, triggerType: true, triggerConfig: true, active: true, steps: { select: { type: true, config: true } } } }), [], "automations"),
     safe(import("@/services/tabulations").then(({ listActiveTabulationLeaves }) => listActiveTabulationLeaves({ organizationId })), [] as Array<{ id: string; path: string; departmentName: string }>, "tabulations"),
     safe(getOrgSettingBool(RUN_ON_AI_CLOSE_KEY, false), false, "runOnAiClose"),
   ]);

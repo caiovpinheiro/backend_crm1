@@ -200,10 +200,25 @@ async function routeLeadsDepartment(args: HandoffArgs, departmentId: string | nu
     roleIds: args.leads?.roleIds ?? [],
     userIds: args.leads?.userIds ?? [],
   };
+  const before = await prisma.conversation.findUnique({
+    where: { id: args.conversationId },
+    select: { departmentId: true, assignedToId: true, contactId: true, externalId: true },
+  });
   await prisma.conversation.update({
     where: { id: args.conversationId },
     data: { departmentId },
   });
+  if (before) {
+    const { logConversationDepartmentChange } = await import("@/services/conversation-department-event");
+    await logConversationDepartmentChange({
+      conversationId: args.conversationId,
+      contactId: before.contactId,
+      externalId: before.externalId,
+      fromDepartmentId: before.departmentId,
+      toDepartmentId: departmentId,
+      fromAssigneeId: before.assignedToId,
+    });
+  }
   const { eligibleUserIdsForScope } = await import("./leads-handoff");
   const { executeLeadsDistribution } = await import("@/services/distribution/leads/engine");
   const onlyUserIds = await eligibleUserIdsForScope(scope);
