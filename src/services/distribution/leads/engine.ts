@@ -38,7 +38,9 @@ import { logEvent } from "@/services/activity-log";
 import {
   assignOwnerToContactClusterTx,
   invalidateBoardsForPipelines,
+  logConversationAssigneeChanges,
 } from "@/services/deals";
+import { resolveKeepDealOwner } from "../deal-owner-scope";
 import { hasOrganizationWidget } from "@/services/organization-widgets";
 
 import {
@@ -438,6 +440,24 @@ export async function executeLeadsDistribution(
 
   const departmentRulesOn = await isLeadsDepartmentRulesEnabled();
 
+  // "Manter dono do negócio" do departamento da conversa: o sorteado atende
+  // só a conversa; negócio e contato ficam com o dono humano de antes.
+  const keepDealOwner = await resolveKeepDealOwner({
+    conversationId: target.conversationId,
+    contactId: target.contactId,
+  });
+  const convBefore =
+    keepDealOwner && target.conversationId
+      ? await prisma.conversation.findUnique({
+          where: { id: target.conversationId },
+          select: {
+            assignedToId: true,
+            externalId: true,
+            assignedTo: { select: { name: true } },
+          },
+        })
+      : null;
+
   let txOutcome:
     | {
         kind: "ASSIGNED";
@@ -550,15 +570,18 @@ export async function executeLeadsDistribution(
       }
 
       // Cluster inteiro: deals OPEN (+ deal explícito), contato e conversas.
-      const cluster = await assignOwnerToContactClusterTx(tx, {
-        userId: slot.userId,
-        via: "leads",
-        contactId: target.contactId,
-        dealId: target.dealId,
-        conversationId: target.conversationId,
-      });
-      const fromOwnerId = cluster.fromOwnerId;
-      const pipelineId = cluster.pipelineIds.find((id) => id) ?? null;
+      // Com "manter dono do negócio" o claim acima (só a conversa) basta.
+      const cluster = keepDealOwner
+        ? null
+        : await assignOwnerToContactClusterTx(tx, {
+            userId: slot.userId,
+            via: "leads",
+            contactId: target.contactId,
+            dealId: target.dealId,
+            conversationId: target.conversationId,
+          });
+      const fromOwnerId = cluster?.fromOwnerId ?? null;
+      const pipelineId = cluster?.pipelineIds.find((id) => id) ?? null;
 
       // Só o slot escolhido avança. O carimbo é monotônico POR ORG:
       // TIMESTAMP(3) tem resolução de ms e o advisory lock serializa a tx,
@@ -691,7 +714,26 @@ export async function executeLeadsDistribution(
     await invalidateBoardsForPipelines([pipelineId]).catch(() => {});
   }
 
-  if (target.dealId && fromOwnerId !== slot.userId) {
+  if (
+    keepDealOwner &&
+    target.conversationId &&
+    (convBefore?.assignedToId ?? null) !== slot.userId
+  ) {
+    // Sem ASSIGNEE_CHANGED o próximo inbound trata o atendente como herança.
+    await logConversationAssigneeChanges([
+      {
+        conversationId: target.conversationId,
+        contactId: target.contactId,
+        entityLabel: convBefore?.externalId ?? null,
+        fromUserId: convBefore?.assignedToId ?? null,
+        fromName: convBefore?.assignedTo?.name ?? null,
+        toUserId: slot.userId,
+        toName: slot.userName ?? null,
+      },
+    ]).catch((e) => log.warn({ err: e }, "[leads] ASSIGNEE_CHANGED falhou"));
+  }
+
+  if (!keepDealOwner && target.dealId && fromOwnerId !== slot.userId) {
     const { fireTrigger } = await import("@/services/automation-triggers");
     fireTrigger("agent_changed", {
       dealId: target.dealId,

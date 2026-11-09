@@ -52,6 +52,8 @@ export async function processDistributionExecuteJob(
         departmentIds: payload.departmentIds ?? null,
         reassign: payload.reassign === true,
         allowOrgWideFallback: payload.allowOrgWideFallback === true,
+        keepDealOwner:
+          typeof payload.keepDealOwner === "boolean" ? payload.keepDealOwner : null,
         distributionType: payload.distributionType ?? null,
         triggerSource,
       }),

@@ -332,6 +332,8 @@ export type BulkAssignConversationsPayload = LeadsBulkBasePayload & {
   actorRole: "ADMIN" | "MANAGER" | "MEMBER";
   canReassignOthers: boolean;
   canTransfer: boolean;
+  /** "Manter dono do negócio" escolhido no lote; ausente = departamento. */
+  keepDealOwner?: boolean | null;
 };
 
 export type LeadsBulkPayload =

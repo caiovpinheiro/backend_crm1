@@ -61,6 +61,8 @@ export async function processBulkAssignConversations(
     },
     organizationId,
     source: "bulk-async",
+    keepDealOwner:
+      typeof payload.keepDealOwner === "boolean" ? payload.keepDealOwner : null,
   });
 
   await incrementOperationProgress(operationId, organizationId, {

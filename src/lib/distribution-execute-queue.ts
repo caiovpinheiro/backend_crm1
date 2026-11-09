@@ -45,6 +45,8 @@ export type DistributionExecutePayload = {
   departmentIds?: string[] | null;
   reassign?: boolean;
   allowOrgWideFallback?: boolean;
+  /** "Manter dono do negócio" da ação (modal do inbox); ausente = departamento. */
+  keepDealOwner?: boolean | null;
   distributionType?: string | null;
   requestedByUserId?: string | null;
   correlationId?: string;

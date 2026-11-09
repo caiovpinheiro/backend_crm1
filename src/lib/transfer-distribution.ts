@@ -17,6 +17,8 @@ export function departmentTransferDistributionInput(args: {
   contactId: string | null;
   departmentId: string;
   explicitAgent: boolean;
+  /** Checkbox "Manter dono do negócio"; ausente = regra do departamento. */
+  keepDealOwner?: boolean;
 }) {
   return {
     conversationId: args.conversationId,
@@ -24,6 +26,8 @@ export function departmentTransferDistributionInput(args: {
     departmentId: args.departmentId,
     departmentIds: [args.departmentId],
     reassign: !args.explicitAgent,
+    keepDealOwner:
+      typeof args.keepDealOwner === "boolean" ? args.keepDealOwner : null,
     triggerSource: "MANUAL" as const,
   };
 }

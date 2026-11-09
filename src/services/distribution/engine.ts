@@ -42,6 +42,7 @@ import {
   shouldClearOwnershipOnIneligible,
   shouldKeepAssigneeInAttendance,
 } from "./assignee-eligibility";
+import { assignConversationOnly, resolveKeepDealOwner } from "./deal-owner-scope";
 import type { DistributionBlockReason } from "./eligibility";
 import {
   getDistributionResponsibles,
@@ -113,6 +114,12 @@ export interface ExecuteDistributionInput {
    * então este flag não os afeta. Mantido como opção para usos futuros.
    */
   allowOrgWideFallback?: boolean;
+  /**
+   * "Manter dono do negócio" nesta ação (checkbox do modal do inbox).
+   * true/false vence `Department.keepDealOwner`; ausente = vale o
+   * departamento. Ver `deal-owner-scope.ts`.
+   */
+  keepDealOwner?: boolean | null;
   /** Momento de referência (testes). Default: agora. */
   now?: Date;
 }
@@ -732,6 +739,26 @@ export async function executeDistribution(
     }
   }
 
+  // "Manter dono do negócio" (departamento ou modal do inbox): decidido
+  // ANTES de qualquer limpeza — o reassign abaixo apagaria o dono. Com ele,
+  // o motor troca só o responsável da conversa (ver `deal-owner-scope.ts`).
+  const keepDealOwner = await resolveKeepDealOwner({
+    conversationId: input.conversationId,
+    contactId: input.contactId ?? preAssignSnap?.contactId ?? null,
+    departmentId: explicitDeptIds[0] ?? preAssignSnap?.departmentId ?? null,
+    override: input.keepDealOwner,
+  });
+  const clearForRedistribution = async (args: {
+    conversationId: string;
+    contactId: string;
+  }) => {
+    if (keepDealOwner) {
+      await assignConversationOnly({ conversationId: args.conversationId, userId: null });
+      return;
+    }
+    await clearOwnershipForRedistribution(args);
+  };
+
   // Idempotente: se a conversa já tem responsável (ex.: inbound acabou de
   // distribuir e a automação dispara execute_distribution de novo), não
   // reatribui — salvo `reassign` (handoff manual para departamento).
@@ -824,18 +851,20 @@ export async function executeDistribution(
           ));
       // IA nunca conta como distribuição humana bem-sucedida — limpa e segue.
       if (check.isAi && contactId) {
-        await clearOwnershipForRedistribution({
+        await clearForRedistribution({
           conversationId: input.conversationId,
           contactId,
         });
       } else if (!keepHumanAssignee && contactId) {
         // Offline/indisponível herdado: limpa e segue redistribuição.
-        await clearOwnershipForRedistribution({
+        await clearForRedistribution({
           conversationId: input.conversationId,
           contactId,
         });
       } else if (keepHumanAssignee) {
-        if (contactId) {
+        if (keepDealOwner) {
+          // Dono do negócio é outro de propósito: não "cura" para o atendente.
+        } else if (contactId) {
           await syncOwnershipForContact(contactId);
         } else if (input.dealId) {
           const deal = await prisma.deal.findUnique({
@@ -866,7 +895,9 @@ export async function executeDistribution(
 
   // Conversa sem assignee mas deal/contato já tem dono → espelha pro chat
   // antes de tentar redistribuir (evita "já tem owner no pipeline" + inbox vazio).
-  if (!input.reassign) {
+  // Com "manter dono do negócio" a conversa vai para o departamento, não
+  // para o dono do negócio.
+  if (!input.reassign && !keepDealOwner) {
     const contactId =
       input.contactId ??
       (input.conversationId
@@ -900,7 +931,7 @@ export async function executeDistribution(
               healCheck.blockedReasons,
             ));
         if (!healKeep) {
-          await clearOwnershipForRedistribution({
+          await clearForRedistribution({
             conversationId: input.conversationId,
             contactId,
           });
@@ -943,7 +974,8 @@ export async function executeDistribution(
           data: { assignedToId: null },
           select: { id: true },
         });
-        if (contactId) {
+        // "Manter dono do negócio": solta só a conversa.
+        if (contactId && !keepDealOwner) {
           await tx.contact.update({
             where: { id: contactId },
             data: { assignedToId: null },
@@ -954,7 +986,7 @@ export async function executeDistribution(
           });
         }
       });
-    } else if (contactId) {
+    } else if (contactId && !keepDealOwner) {
       // A conversa já chegou sem responsável — o handoff acadêmico limpa
       // `assignedToId` antes de chamar o motor. Nesse caminho contato/deal
       // ainda apontavam para o usuário IA: com fila cheia o lead ia para a
@@ -1082,7 +1114,14 @@ export async function executeDistribution(
   // aparece "Sem responsável" no pipeline. assignDealOwner já propaga para
   // contato e conversas; sem deal aberto, propagamos direto.
   let assignedDealId: string | null = input.dealId ?? null;
-  if (input.dealId) {
+  if (keepDealOwner && input.conversationId) {
+    // "Manter dono do negócio": o escolhido atende só a conversa; negócio
+    // e contato continuam com o dono humano de antes.
+    await assignConversationOnly({
+      conversationId: input.conversationId,
+      userId: selected.userId,
+    });
+  } else if (input.dealId) {
     await assignDealOwner(input.dealId, selected.userId);
   } else if (input.contactId) {
     const contactId = input.contactId;

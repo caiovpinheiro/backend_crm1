@@ -313,6 +313,8 @@ export async function loadDepartments(
         // Necessário no inbox: após "Distribuir p/ departamento", o FE
         // atualiza o sticky com o flag de tabulação do novo depto.
         requireTabulationOnClose: true,
+        // Padrão do "Manter dono do negócio" no modal de transferência.
+        keepDealOwner: true,
       },
       orderBy: { name: "asc" },
     });

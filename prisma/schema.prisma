@@ -3844,6 +3844,10 @@ model Department {
   /// comportamento atual) ou "leads" (fora da distribuição/fila smart; a
   /// distribuição acontece via bloco `execute_distribution` com mode="leads").
   distributionMode         String       @default("smart")
+  /// Se true, a distribuição e a transferência que caem neste departamento
+  /// trocam SÓ o responsável da conversa: o dono humano do negócio (e do
+  /// contato) fica como está. False (padrão) = responsável único, como sempre.
+  keepDealOwner            Boolean      @default(false)
   /// Janela operacional do departamento (cobertura). Null = Seg–Sex 09:00–18:00.
   /// Formato: { start: "09:00", end: "18:00", weekdays: [1,2,3,4,5] }.
   operatingHours           Json?
