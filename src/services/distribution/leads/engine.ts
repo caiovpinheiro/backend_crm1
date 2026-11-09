@@ -98,6 +98,11 @@ export interface ExecuteLeadsDistributionInput {
    * leads não grava fila: sem peso, o card fica sem responsável.
    */
   pendingScope?: { departmentId: string; roleIds: string[]; userIds: string[] } | null;
+  /**
+   * "Manter dono do negócio" nesta execução (passo da automação).
+   * true/false vence `Department.keepDealOwner`; ausente = vale o departamento.
+   */
+  keepDealOwner?: boolean | null;
 }
 
 interface LeadsTarget {
@@ -445,6 +450,8 @@ export async function executeLeadsDistribution(
   const keepDealOwner = await resolveKeepDealOwner({
     conversationId: target.conversationId,
     contactId: target.contactId,
+    dealId: target.dealId,
+    override: input.keepDealOwner,
   });
   const convBefore =
     keepDealOwner && target.conversationId

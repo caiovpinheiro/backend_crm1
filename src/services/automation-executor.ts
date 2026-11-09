@@ -31,6 +31,7 @@ import {
 import {
   readSendEmailAccountIds,
   readStepAllowedChannelIds,
+  readStepKeepDealOwner,
   resolveStepDistributionScope,
   triggerTypeLabel,
   automationOptedIntoAiAttendance,
@@ -2874,6 +2875,8 @@ export async function executeStep(
       // aqui só decidimos qual ramo do fluxo seguir. Não lançamos erro: a
       // ausência de agente é um resultado de negócio esperado, não falha.
       const distributionType = readString(cfg, "distributionType") ?? null;
+      // "O que distribuir": null = segue `Department.keepDealOwner`.
+      const keepDealOwner = readStepKeepDealOwner(cfg);
       const conversationId =
         rt.conversation && typeof rt.conversation === "object"
           ? ((rt.conversation as { id?: string }).id ?? null)
@@ -2918,6 +2921,7 @@ export async function executeStep(
           automationContextId,
           stepId: stepId ?? null,
           occurrence,
+          keepDealOwner,
         });
 
         // Avanço da occurrence: persistido DEPOIS do engine. Morte entre o
@@ -2990,6 +2994,7 @@ export async function executeStep(
         // ninguém elegível, espera na fila — não vaza para outro
         // departamento. Vale para departamento novo também.
         allowOrgWideFallback: false,
+        keepDealOwner,
       });
 
       if (result.success) {

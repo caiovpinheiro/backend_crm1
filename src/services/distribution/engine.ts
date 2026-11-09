@@ -745,6 +745,7 @@ export async function executeDistribution(
   const keepDealOwner = await resolveKeepDealOwner({
     conversationId: input.conversationId,
     contactId: input.contactId ?? preAssignSnap?.contactId ?? null,
+    dealId: input.dealId ?? null,
     departmentId: explicitDeptIds[0] ?? preAssignSnap?.departmentId ?? null,
     override: input.keepDealOwner,
   });

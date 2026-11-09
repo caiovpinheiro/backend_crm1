@@ -413,6 +413,23 @@ export function canSeeDealByOwner(
   return ownerId === null && visibility.includeUnassigned;
 }
 
+/**
+ * O usuário atende (é responsável por) alguma conversa do contato?
+ * Libera a LEITURA do negócio para quem recebeu só a conversa — o dono do
+ * negócio continua outro (ver `deal-owner-scope.ts`).
+ */
+export async function hasAssignedConversationWithContact(
+  userId: string,
+  contactId: string | null | undefined,
+): Promise<boolean> {
+  if (!contactId) return false;
+  const conv = await prisma.conversation.findFirst({
+    where: { contactId, assignedToId: userId },
+    select: { id: true },
+  });
+  return conv !== null;
+}
+
 export function permissionsAllowKey(
   perms: ReadonlySet<string>,
   key: string,

@@ -99,6 +99,36 @@ describe("resolveKeepDealOwner", () => {
     ).toBe(false);
   });
 
+  it("negócio que disparou já GANHO (WON) com dono humano → mantém o dono da venda", async () => {
+    expect(
+      await resolveKeepDealOwner({
+        conversationId: "c1",
+        contactId: "ct1",
+        dealId: "deal_ganho",
+        override: true,
+      }),
+    ).toBe(true);
+    const where = dealFindFirst.mock.calls[0]![0].where as Record<string, unknown>;
+    expect(where.owner).toEqual({ type: "HUMAN" });
+    // O próprio negócio vale em qualquer status; os outros do contato, só abertos.
+    expect(where.OR).toEqual([
+      { id: "deal_ganho" },
+      { contactId: "ct1", status: "OPEN" },
+    ]);
+  });
+
+  it("negócio que disparou sem dono humano segue a regra padrão", async () => {
+    dealFindFirst.mockResolvedValue(null);
+    expect(
+      await resolveKeepDealOwner({
+        conversationId: "c1",
+        contactId: "ct1",
+        dealId: "deal_ia",
+        override: true,
+      }),
+    ).toBe(false);
+  });
+
   it("override do modal vence o departamento nos dois sentidos", async () => {
     departmentFindUnique.mockResolvedValue({ keepDealOwner: false });
     expect(
