@@ -270,6 +270,34 @@ export function readStepKeepDealOwner(cfg: unknown): boolean | null {
 }
 
 /**
+ * Nota do log quando o passo `execute_distribution` não distribuiu. Sem
+ * ela o passo cai no ramo "Se não houver atendente" com "OK" no log e o
+ * motivo real (modo desligado na página Distribuição) se perde.
+ */
+export function distributionSkipNote(
+  mode: "smart" | "leads",
+  reason: string | null | undefined,
+): string | undefined {
+  const modeLabel = mode === "leads" ? "Por Leads" : "inteligente";
+  switch (reason) {
+    case "DISTRIBUTION_DISABLED":
+      return `Distribuição ${modeLabel} desligada na página Distribuição`;
+    case "SMART_DISTRIBUTION_NOT_ENABLED":
+      return "Módulo de distribuição não habilitado na organização";
+    case "NO_ELIGIBLE_PARTICIPANT":
+      return "Sem consultor no rodízio";
+    case "NO_ELIGIBLE_RESPONSIBLE":
+      return "Ninguém elegível no departamento (offline, fora do expediente ou fila cheia)";
+    case "NO_DEPARTMENT":
+      return "Departamento sem distribuição automática";
+    case "RETIRED_WHATSAPP_CHANNEL":
+      return "Canal de WhatsApp desativado";
+    default:
+      return undefined;
+  }
+}
+
+/**
  * Escopo do passo `execute_distribution` COM a origem do departamento.
  *
  * A origem decide o que acontece quando o pool fica sem ninguém elegível:

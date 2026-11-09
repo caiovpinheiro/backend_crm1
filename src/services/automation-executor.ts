@@ -30,6 +30,7 @@ import {
 } from "@/lib/automation-round-robin";
 import {
   readSendEmailAccountIds,
+  distributionSkipNote,
   readStepAllowedChannelIds,
   readStepKeepDealOwner,
   resolveStepDistributionScope,
@@ -2882,10 +2883,7 @@ export async function executeStep(
         // NO_ELIGIBLE_PARTICIPANT → saída NÃO. Sem fila de espera e sem
         // fallback para o smart.
         const elseStepId = readString(cfg, "elseStepId");
-        const note =
-          leadsResult.reason === "NO_ELIGIBLE_PARTICIPANT"
-            ? "Sem consultor no rodízio"
-            : undefined;
+        const note = distributionSkipNote("leads", leadsResult.reason);
         if (elseStepId) {
           return { skipRemaining: true, gotoStepId: elseStepId, note };
         }
@@ -2925,13 +2923,15 @@ export async function executeStep(
       }
 
       // Saída NÃO = sem agente elegível / módulo off. Roteia pro ramo "false".
+      // A nota leva o motivo real para o log (ex.: modo desligado).
       const elseStepId = readString(cfg, "elseStepId");
+      const skipNote = distributionSkipNote("smart", result.reason);
       if (elseStepId) {
-        return { skipRemaining: true, gotoStepId: elseStepId };
+        return { skipRemaining: true, gotoStepId: elseStepId, note: skipNote };
       }
       // Sem ramo "Não" conectado: encerra este ramo (lead já foi enfileirado
       // pelo motor quando o motivo foi NO_ELIGIBLE_RESPONSIBLE).
-      return { skipRemaining: true };
+      return { skipRemaining: true, note: skipNote };
     }
 
     case "transfer_to_ai_agent": {
