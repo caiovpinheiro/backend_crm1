@@ -26,6 +26,8 @@ const UpdateSchema = z.object({
   autoCloseTabulationId: z.string().min(1).nullable().optional(),
   isSupport: z.boolean().optional(),
   distributionEnabled: z.boolean().optional(),
+  /** true = distribuir/transferir para cá troca só a conversa (mantém o dono do negócio). */
+  keepDealOwner: z.boolean().optional(),
   operatingHours: OperatingHoursSchema.nullable().optional(),
 });
 
@@ -101,8 +103,8 @@ export async function PUT(
         entity: "Department",
         entityId: updated.id,
         action: "update",
-        before: { name: dept.name, color: dept.color },
-        after: { name: updated.name, color: updated.color },
+        before: { name: dept.name, color: dept.color, keepDealOwner: dept.keepDealOwner },
+        after: { name: updated.name, color: updated.color, keepDealOwner: updated.keepDealOwner },
       },
     });
     await bumpResponseFamilies(session.user.organizationId, RESPONSE_FAMILIES.departments);

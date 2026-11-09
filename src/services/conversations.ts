@@ -2741,11 +2741,20 @@ export async function assignConversationAssignedTo(
     canReassignOthers?: boolean;
     /** Pode transferir conversa própria/livre para outro agente (RBAC `conversation:transfer`). */
     canTransfer?: boolean;
-  }
+  },
+  opts?: {
+    /**
+     * "Manter dono do negócio": true/false vence o departamento; ausente =
+     * `Department.keepDealOwner` do departamento abaixo.
+     */
+    keepDealOwner?: boolean | null;
+    /** Departamento que decide a regra. Ausente = o da conversa. */
+    departmentId?: string | null;
+  },
 ): Promise<AssignConversationResult> {
   const conv = await prisma.conversation.findUnique({
     where: { id: conversationId },
-    select: { assignedToId: true },
+    select: { assignedToId: true, contactId: true, departmentId: true },
   });
   if (!conv) return { ok: false, code: "NOT_FOUND" };
 
@@ -2814,6 +2823,19 @@ export async function assignConversationAssignedTo(
   // dispare saudação de novo.
   const shouldResetGreeted = (conv.assignedToId ?? null) !== (newAssigneeId ?? null);
 
+  // "Manter dono do negócio" (departamento ou modal): troca só a conversa;
+  // contato e negócios abertos ficam com o dono humano de antes.
+  const { resolveKeepDealOwner } = await import(
+    "@/services/distribution/deal-owner-scope"
+  );
+  const keepDealOwner = await resolveKeepDealOwner({
+    conversationId,
+    contactId: conv.contactId,
+    departmentId:
+      opts?.departmentId !== undefined ? opts.departmentId : conv.departmentId,
+    override: opts?.keepDealOwner,
+  });
+
   // Atribuir/remover pelo inbox SINCRONIZA tudo: conversa + contato +
   // negócios abertos do contato. Sem isso, "Remover responsável" limpava só
   // a conversa e o contato/negócio continuavam atribuídos (inconsistente) —
@@ -2840,7 +2862,7 @@ export async function assignConversationAssignedTo(
       },
       select: ASSIGN_CONVERSATION_SELECT,
     });
-    if (conv.contactId) {
+    if (conv.contactId && !keepDealOwner) {
       await tx.contact.update({
         where: { id: conv.contactId },
         data: { assignedToId: newAssigneeId },
@@ -2969,6 +2991,8 @@ export async function assignConversationsInline(params: {
   };
   organizationId: string;
   source?: string;
+  /** "Manter dono do negócio" escolhido no lote; ausente = departamento. */
+  keepDealOwner?: boolean | null;
 }): Promise<{ updated: number; skipped: string[] }> {
   const skipped: string[] = [];
   let updated = 0;
@@ -2994,6 +3018,7 @@ export async function assignConversationsInline(params: {
         conversationId,
         params.assignedToId,
         params.actor,
+        { keepDealOwner: params.keepDealOwner },
       );
       if (!result.ok) {
         skipped.push(conversationId);

@@ -102,6 +102,8 @@ export async function POST(request: Request) {
         ids?: string[];
         action?: string;
         assignedToId?: string | null;
+        /** `assign`: "Manter dono do negócio"; ausente = regra do departamento. */
+        keepDealOwner?: boolean;
         /** true = encerrar TODAS as conversas do filtro atual (todas as páginas). */
         allInFilter?: boolean;
         /** Aba atual (usada só quando `allInFilter`). */
@@ -486,6 +488,8 @@ export async function POST(request: Request) {
               },
               organizationId: user.organizationId,
               source: "bulk-sync",
+              keepDealOwner:
+                typeof body.keepDealOwner === "boolean" ? body.keepDealOwner : null,
             });
             return NextResponse.json({
               updated,
@@ -516,6 +520,8 @@ export async function POST(request: Request) {
               actorRole: user.role,
               canReassignOthers,
               canTransfer,
+              keepDealOwner:
+                typeof body.keepDealOwner === "boolean" ? body.keepDealOwner : null,
             },
           );
 

@@ -191,6 +191,10 @@ export async function POST(request: Request, context: RouteContext) {
 
       const b = body as Record<string, unknown>;
       const action = typeof b.action === "string" ? b.action : "";
+      // Checkbox "Manter dono do negócio" do modal. Ausente = vale o
+      // `keepDealOwner` do departamento (ver `deal-owner-scope.ts`).
+      const keepDealOwner =
+        typeof b.keepDealOwner === "boolean" ? b.keepDealOwner : undefined;
 
       if (!VALID_ACTIONS.has(action)) {
         return NextResponse.json(
@@ -234,7 +238,9 @@ export async function POST(request: Request, context: RouteContext) {
           where: { id },
           select: { assignedToId: true, assignedTo: { select: { id: true, name: true } } },
         });
-        const result = await assignConversationAssignedTo(id, newAssigneeId, user);
+        const result = await assignConversationAssignedTo(id, newAssigneeId, user, {
+          keepDealOwner,
+        });
         if (!result.ok) {
           const status =
             result.code === "NOT_FOUND" ? 404 : result.code === "USER_NOT_FOUND" ? 400 : 403;
@@ -319,6 +325,12 @@ export async function POST(request: Request, context: RouteContext) {
 
         const hasAgent = "assignedToId" in b;
         const hasDept = "departmentId" in b;
+        // Agente + departamento na mesma ação: a regra de "manter dono" é a
+        // do departamento de DESTINO, não a do atual.
+        const ruleDepartmentId =
+          hasDept && typeof b.departmentId === "string" && b.departmentId.trim() !== ""
+            ? b.departmentId.trim()
+            : undefined;
         if (!hasAgent && !hasDept) {
           return NextResponse.json(
             { message: "Informe assignedToId e/ou departmentId." },
@@ -360,7 +372,10 @@ export async function POST(request: Request, context: RouteContext) {
             },
           });
           fromAssigneeId = prev?.assignedToId ?? null;
-          const result = await assignConversationAssignedTo(id, newAssigneeId, user);
+          const result = await assignConversationAssignedTo(id, newAssigneeId, user, {
+            keepDealOwner,
+            ...(ruleDepartmentId ? { departmentId: ruleDepartmentId } : {}),
+          });
           if (!result.ok) {
             const status =
               result.code === "NOT_FOUND"
@@ -536,6 +551,7 @@ export async function POST(request: Request, context: RouteContext) {
                 contactId: prevConv.contactId ?? null,
                 departmentId: newDeptId,
                 explicitAgent: hasAgent,
+                keepDealOwner,
               });
               const outcome = await runDistributionExecuteOrInline(
                 {
@@ -546,6 +562,7 @@ export async function POST(request: Request, context: RouteContext) {
                   departmentId: newDeptId,
                   departmentIds: [newDeptId],
                   reassign: distInput.reassign,
+                  keepDealOwner: distInput.keepDealOwner,
                   requestedByUserId: sessionUser.id,
                 },
                 () => executeDistribution(distInput),

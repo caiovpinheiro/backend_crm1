@@ -24,6 +24,7 @@ const h = vi.hoisted(() => {
   return {
     tx,
     prisma,
+    resolveKeepDealOwner: vi.fn().mockResolvedValue(false),
     invalidateBoardData: vi.fn().mockResolvedValue(undefined),
     ssePublish: vi.fn(),
   };
@@ -77,6 +78,9 @@ vi.mock("@/services/ai/replay-sandbox", () => ({
   isReplaySandboxActive: () => false,
   recordBlockedEffect: vi.fn(),
 }));
+vi.mock("@/services/distribution/deal-owner-scope", () => ({
+  resolveKeepDealOwner: h.resolveKeepDealOwner,
+}));
 vi.mock("@/lib/contact-avatar-fallback", () => ({
   enrichContactsWithUserAvatarFallback: vi.fn(async (c: unknown[]) => c),
 }));
@@ -127,6 +131,7 @@ function dealMovedEvents() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  h.resolveKeepDealOwner.mockResolvedValue(false);
   h.prisma.conversation.findUnique.mockResolvedValue({ assignedToId: "user-a" });
   h.prisma.user.findUnique.mockResolvedValue({ id: "user-b" });
   h.tx.conversation.update.mockResolvedValue({
@@ -256,5 +261,49 @@ describe("assignConversationAssignedTo — board dos negócios que trocaram de d
     const res = await withOrg(() => assignConversationAssignedTo("conv-1", "user-b", ACTOR));
 
     expect(res.ok).toBe(true);
+  });
+});
+
+describe("assignConversationAssignedTo — manter dono do negócio", () => {
+  it("regra ligada: troca só a conversa; contato e negócios ficam", async () => {
+    h.resolveKeepDealOwner.mockResolvedValue(true);
+    h.prisma.conversation.findUnique.mockResolvedValue({
+      assignedToId: "vendedor",
+      contactId: "c1",
+      departmentId: "dept-fin",
+    });
+
+    const res = await withOrg(() =>
+      assignConversationAssignedTo("conv-1", "user-b", ACTOR, { keepDealOwner: true }),
+    );
+
+    expect(res.ok).toBe(true);
+    expect(h.tx.conversation.update).toHaveBeenCalled();
+    expect(h.tx.contact.update).not.toHaveBeenCalled();
+    expect(h.tx.deal.updateMany).not.toHaveBeenCalled();
+    expect(h.invalidateBoardData).not.toHaveBeenCalled();
+    expect(h.resolveKeepDealOwner).toHaveBeenCalledWith({
+      conversationId: "conv-1",
+      contactId: "c1",
+      departmentId: "dept-fin",
+      override: true,
+    });
+  });
+
+  it("transferência com departamento de destino usa a regra do destino", async () => {
+    h.prisma.conversation.findUnique.mockResolvedValue({
+      assignedToId: "vendedor",
+      contactId: "c1",
+      departmentId: "dept-vendas",
+    });
+    h.tx.deal.findMany.mockResolvedValue([]);
+
+    await withOrg(() =>
+      assignConversationAssignedTo("conv-1", "user-b", ACTOR, { departmentId: "dept-fin" }),
+    );
+
+    expect(h.resolveKeepDealOwner).toHaveBeenCalledWith(
+      expect.objectContaining({ departmentId: "dept-fin", override: undefined }),
+    );
   });
 });

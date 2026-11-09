@@ -217,7 +217,13 @@ export async function executeGenericDepartmentHandoff(
 
   // Alinha `Deal.owner` com o assignee da conversa: header do negócio e
   // automação de saudação (`lead_distributed`) na mesma pessoa.
-  if (selectedIsHuman && selectedUserId && contactId) {
+  // "Manter dono do negócio" no departamento: o motor já trocou só a
+  // conversa — não alinha o negócio com o atendente.
+  const { departmentKeepsDealOwner } = await import(
+    "@/services/distribution/deal-owner-scope"
+  );
+  const keepDealOwner = await departmentKeepsDealOwner(dept?.id ?? null);
+  if (selectedIsHuman && selectedUserId && contactId && !keepDealOwner) {
     try {
       const { assignDealOwner } = await import("@/services/deals");
       let dealId = args.dealId ?? null;
