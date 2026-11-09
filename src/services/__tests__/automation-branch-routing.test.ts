@@ -37,6 +37,9 @@ import {
   waitForDocumentStays,
   documentSearchSince,
   pickReceivedDocument,
+  flowWaitVars,
+  FLOW_TOKENS_SENT_VAR,
+  AWAITING_FLOW_VAR,
 } from "@/services/automation-context";
 
 /** Recorte fiel da automação "inicio - pipe" que expôs o bug. */
@@ -1184,5 +1187,85 @@ describe("documento já recebido antes do aguardar documento", () => {
         t(0),
       ),
     ).toEqual(pdf(23));
+  });
+});
+
+describe("Formulário FLOW reenviado — resposta a um formulário anterior (DNAWORK #80491)", () => {
+  const base = {
+    stepId: "flow-1",
+    buttonId: "flow",
+    flowName: "inicio_clt",
+    metaFlowId: "1743",
+    conversationId: "conv-1",
+  };
+
+  it("1º envio: sem tokens anteriores", () => {
+    const vars = flowWaitVars({}, { ...base, flowToken: "t1" });
+    expect(readAwaitingFlow(vars)?.priorFlowTokens ?? []).toEqual([]);
+    expect(vars[FLOW_TOKENS_SENT_VAR]).toEqual({ "flow-1": ["t1"] });
+  });
+
+  it("reenvio do mesmo passo guarda os tokens anteriores", () => {
+    const v1 = flowWaitVars({}, { ...base, flowToken: "t1" });
+    const afterElse = { ...v1 };
+    delete afterElse[AWAITING_FLOW_VAR];
+    const v2 = flowWaitVars(afterElse, { ...base, flowToken: "t2" });
+    const v3 = flowWaitVars(v2, { ...base, flowToken: "t3" });
+    const awaiting = readAwaitingFlow(v3);
+    expect(awaiting?.flowToken).toBe("t3");
+    expect(awaiting?.priorFlowTokens).toEqual(["t1", "t2"]);
+  });
+
+  it("tokens de outro passo não contam", () => {
+    const other = flowWaitVars({}, { ...base, stepId: "flow-2", flowToken: "x1" });
+    const v = flowWaitVars(other, { ...base, flowToken: "t1" });
+    expect(readAwaitingFlow(v)?.priorFlowTokens ?? []).toEqual([]);
+  });
+
+  it("guarda no máximo 10 tokens por passo", () => {
+    let v: Record<string, unknown> = {};
+    for (let i = 1; i <= 15; i++) v = flowWaitVars(v, { ...base, flowToken: `t${i}` });
+    const awaiting = readAwaitingFlow(v);
+    expect(awaiting?.flowToken).toBe("t15");
+    expect(awaiting?.priorFlowTokens).toHaveLength(9);
+    expect(awaiting?.priorFlowTokens?.[0]).toBe("t6");
+  });
+
+  it("resposta ao 2º formulário conclui quando o passo espera o 3º", () => {
+    let v: Record<string, unknown> = {};
+    for (const t of ["t1", "t2", "t3"]) v = flowWaitVars(v, { ...base, flowToken: t });
+    expect(
+      decideFlowStepInbound({
+        flowReply: true,
+        flowToken: "t2",
+        awaitingFlow: readAwaitingFlow(v),
+        elseConfigured: true,
+        inboundConversationId: "conv-1",
+      }),
+    ).toBe("complete");
+  });
+
+  it("token desconhecido continua no passo", () => {
+    const v = flowWaitVars({}, { ...base, flowToken: "t1" });
+    expect(
+      decideFlowStepInbound({
+        flowReply: true,
+        flowToken: "zz",
+        awaitingFlow: readAwaitingFlow(v),
+        elseConfigured: true,
+      }),
+    ).toBe("stay");
+  });
+
+  it("menu com botão Flow também aceita token anterior", () => {
+    expect(
+      decideInteractiveMenuInbound({
+        buttons: [],
+        messageContent: "",
+        flowReply: true,
+        flowToken: "t1",
+        awaitingFlow: { ...base, flowToken: "t2", priorFlowTokens: ["t1"] },
+      }),
+    ).toEqual({ action: "complete_flow", buttonId: "flow" });
   });
 });

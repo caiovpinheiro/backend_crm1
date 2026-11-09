@@ -108,6 +108,7 @@ import {
   pausedStepTimeoutMs,
   shouldPersistDelay,
   AWAITING_FLOW_VAR,
+  flowWaitVars,
   DOCUMENT_USED_AT_VAR,
   documentSearchSince,
   findReceivedDocument,
@@ -1026,10 +1027,14 @@ async function persistPausedContext(
   rt: ChannelBindSource & { automationId: string; contactId?: string | null },
   stepId: string,
   timeoutMs: number | undefined,
-  extraVars?: Record<string, unknown>,
+  extraVars?:
+    | Record<string, unknown>
+    | ((existing: Record<string, unknown>) => Record<string, unknown>),
 ): Promise<void> {
   if (!rt.contactId) return;
   const existingCtx = await getActiveContext(rt.automationId, rt.contactId);
+  const existingVars = (existingCtx?.variables as Record<string, unknown>) ?? {};
+  const extra = typeof extraVars === "function" ? extraVars(existingVars) : extraVars;
   // Sem `timeoutMs` do canvas o contexto ficava RUNNING pra sempre (o sweeper
   // só varre `timeoutAt` preenchido), travando o re-disparo da automação e o
   // 1º atendimento da IA. `pausedStepTimeoutMs` arma o TTL de segurança e o
@@ -1037,9 +1042,9 @@ async function persistPausedContext(
   const effectiveTimeoutMs = pausedStepTimeoutMs(timeoutMs);
   const vars = markPausedTtl(
     {
-      ...((existingCtx?.variables as Record<string, unknown>) ?? {}),
+      ...existingVars,
       ...channelBindVars(rt),
-      ...(extraVars ?? {}),
+      ...(extra ?? {}),
     },
     stepId,
     timeoutMs,
@@ -4626,8 +4631,10 @@ export async function executeStep(
       // `processIncomingMessage`).
       if (stepId && rt.contactId) {
         const nextId = readStepRef(cfg, "nextStepId");
-        await persistPausedContext(rt, stepId, flowTimeoutMs, {
-          [AWAITING_FLOW_VAR]: {
+        // `flowWaitVars` guarda os tokens dos envios anteriores deste passo:
+        // resposta a um formulário reenviado antes também conclui.
+        await persistPausedContext(rt, stepId, flowTimeoutMs, (existing) =>
+          flowWaitVars(existing, {
             stepId,
             buttonId: "flow",
             flowToken,
@@ -4636,8 +4643,8 @@ export async function executeStep(
             ...(awaitingFlowName ? { flowName: awaitingFlowName } : {}),
             ...(conversationId ? { conversationId } : {}),
             ...(flowChannelId ? { channelId: flowChannelId } : {}),
-          },
-        });
+          }),
+        );
       }
 
       return { skipRemaining: true };

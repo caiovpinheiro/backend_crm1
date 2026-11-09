@@ -305,7 +305,47 @@ export type AwaitingFlowState = {
   flowName?: string;
   conversationId?: string;
   channelId?: string;
+  /**
+   * Tokens de envios anteriores DESTE passo (reenvio por Outra resposta).
+   * A resposta a qualquer um deles conclui o passo.
+   */
+  priorFlowTokens?: string[];
 };
+
+/** Tokens enviados por passo de Formulário FLOW: `{ [stepId]: token[] }`. */
+export const FLOW_TOKENS_SENT_VAR = "__flowTokensSent";
+const MAX_FLOW_TOKENS_PER_STEP = 10;
+
+/**
+ * Variáveis da espera de um Formulário FLOW. Guarda o histórico de tokens do
+ * passo: "Outra resposta" ligada de volta ao Flow reenvia o formulário com
+ * token novo, e o candidato costuma preencher um anterior (DNAWORK #80491 —
+ * texto e PDF antes do formulário; respondeu o 2º envio, o passo esperava o
+ * 3º e ficou parado até o timeout mandar para a perda).
+ */
+export function flowWaitVars(
+  existing: Record<string, unknown>,
+  state: Omit<AwaitingFlowState, "priorFlowTokens">,
+): Record<string, unknown> {
+  const rawMap = existing[FLOW_TOKENS_SENT_VAR];
+  const map: Record<string, string[]> =
+    rawMap && typeof rawMap === "object" && !Array.isArray(rawMap)
+      ? { ...(rawMap as Record<string, string[]>) }
+      : {};
+  const prior = (Array.isArray(map[state.stepId]) ? map[state.stepId] : [])
+    .filter((t): t is string => typeof t === "string" && t.trim().length > 0 && t !== state.flowToken)
+    .slice(-(MAX_FLOW_TOKENS_PER_STEP - 1));
+  map[state.stepId] = [...prior, state.flowToken];
+  return {
+    [AWAITING_FLOW_VAR]: { ...state, ...(prior.length ? { priorFlowTokens: prior } : {}) },
+    [FLOW_TOKENS_SENT_VAR]: map,
+  };
+}
+
+/** Token do nfm_reply é o do envio atual ou de um envio anterior do passo. */
+function flowTokenMatchesAwaiting(awaiting: AwaitingFlowState, token: string): boolean {
+  return token === awaiting.flowToken || (awaiting.priorFlowTokens ?? []).includes(token);
+}
 
 function optStr(v: unknown): string {
   return typeof v === "string" ? v.trim() : "";
@@ -324,6 +364,9 @@ export function readAwaitingFlow(variables: Record<string, unknown>): AwaitingFl
   const flowName = optStr(o.flowName);
   const conversationId = optStr(o.conversationId);
   const channelId = optStr(o.channelId);
+  const priorFlowTokens = Array.isArray(o.priorFlowTokens)
+    ? o.priorFlowTokens.map(optStr).filter(Boolean)
+    : [];
   return {
     stepId,
     buttonId,
@@ -333,6 +376,7 @@ export function readAwaitingFlow(variables: Record<string, unknown>): AwaitingFl
     ...(flowName ? { flowName } : {}),
     ...(conversationId ? { conversationId } : {}),
     ...(channelId ? { channelId } : {}),
+    ...(priorFlowTokens.length ? { priorFlowTokens } : {}),
   };
 }
 
@@ -481,7 +525,7 @@ export function decideInteractiveMenuInbound(input: {
   const awaiting = input.awaitingFlow;
   const inboundToken = (input.flowToken ?? "").trim();
   if (awaiting && input.flowReply) {
-    if (!inboundToken || inboundToken === awaiting.flowToken) {
+    if (!inboundToken || flowTokenMatchesAwaiting(awaiting, inboundToken)) {
       return { action: "complete_flow", buttonId: awaiting.buttonId };
     }
     return { action: "stay", reason: "flow_token" };
@@ -572,7 +616,7 @@ export function decideFlowStepInbound(input: {
     const inboundToken = (input.flowToken ?? "").trim();
     if (!awaiting) return "stay";
     if (inboundToken) {
-      return inboundToken === awaiting.flowToken ? "complete" : "stay";
+      return flowTokenMatchesAwaiting(awaiting, inboundToken) ? "complete" : "stay";
     }
     const meta = flowMetaMatchesAwaiting(
       awaiting,
