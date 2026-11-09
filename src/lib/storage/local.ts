@@ -112,8 +112,21 @@ const MIME_TO_EXT: Record<string, string> = {
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
   "application/vnd.ms-excel": "xls",
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+  "application/vnd.ms-powerpoint": "ppt",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
+  "application/vnd.oasis.opendocument.text": "odt",
+  "application/vnd.oasis.opendocument.spreadsheet": "ods",
+  "application/vnd.oasis.opendocument.presentation": "odp",
+  "application/rtf": "rtf",
+  "text/rtf": "rtf",
   "text/plain": "txt",
   "text/csv": "csv",
+  "text/markdown": "md",
+  "text/x-markdown": "md",
+  "text/html": "html",
+  "application/xml": "xml",
+  "text/xml": "xml",
+  "application/json": "json",
 };
 
 const EXT_TO_MIME: Record<string, string> = (() => {
@@ -130,6 +143,27 @@ const EXT_TO_MIME: Record<string, string> = (() => {
 export function mimeToExt(mime: string): string {
   const base = mime.split(";")[0].trim().toLowerCase();
   return MIME_TO_EXT[base] ?? base.split("/").pop()?.replace(/[^a-z0-9]/g, "") ?? "bin";
+}
+
+const SAFE_EXT = /^[a-z0-9]{1,10}$/;
+const SHORT_SUBTYPE = /^[a-z0-9]{1,5}$/;
+
+/**
+ * Extensão de um arquivo recebido do cliente (WhatsApp). Ordem: tipo
+ * conhecido → extensão do nome original → subtipo curto (heic, tiff, zip)
+ * → `bin`. Antes o subtipo virava extensão sem limite
+ * (`.vndopenxmlformatsofficedocumentpresentationmlpresentation`), o arquivo
+ * era servido como octet-stream e o n8n o baixava como `data.bin`.
+ */
+export function inboundFileExt(mime: string | null, originalName?: string | null): string {
+  const base = (mime ?? "").split(";")[0].trim().toLowerCase();
+  const known = MIME_TO_EXT[base];
+  if (known) return known;
+  const fromName = fileNameExt(originalName?.trim() ?? "");
+  if (SAFE_EXT.test(fromName)) return fromName;
+  const subtype = base.split("/").pop() ?? "";
+  if (subtype !== "octet-stream" && SHORT_SUBTYPE.test(subtype)) return subtype;
+  return "bin";
 }
 
 export function mimeFromFilename(fileName: string): string {
