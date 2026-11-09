@@ -197,26 +197,30 @@ jobs:
             # rollback manual — só deixaram de ser chamadas automaticamente.
             TAG=latest
             EXTRA_TAG=digitalocean
-            WEBHOOKS="$S_WEBHOOK_DO $S_WEBHOOK_DO_PUBLIC $S_WEBHOOK_DO_WA $S_WEBHOOK_DO_LEADS $S_WEBHOOK_DO_CAMPAIGN $S_WEBHOOK_DO_DIST $S_WEBHOOK_DO_ETL $S_WEBHOOK_DO_AUTO $S_WEBHOOK_DO_META $S_WEBHOOK_PROD_BAILEYS"
+            WEBHOOKS="api=$S_WEBHOOK_DO api-public=$S_WEBHOOK_DO_PUBLIC worker-whatsapp=$S_WEBHOOK_DO_WA worker-leads=$S_WEBHOOK_DO_LEADS worker-campaigns=$S_WEBHOOK_DO_CAMPAIGN worker-distribution=$S_WEBHOOK_DO_DIST worker-etl=$S_WEBHOOK_DO_ETL worker-automations=$S_WEBHOOK_DO_AUTO worker-meta-webhook=$S_WEBHOOK_DO_META worker-baileys=$S_WEBHOOK_PROD_BAILEYS"
           elif [ "$BRANCH_REF" = "refs/heads/digitalocean" ]; then
             # Branch de migração DO: publica com a tag da branch e dispara o
             # redeploy dos serviços do EasyPanel da DO (API + workers).
             TAG=digitalocean
-            WEBHOOKS="$S_WEBHOOK_DO $S_WEBHOOK_DO_PUBLIC $S_WEBHOOK_DO_WA $S_WEBHOOK_DO_LEADS $S_WEBHOOK_DO_CAMPAIGN $S_WEBHOOK_DO_DIST $S_WEBHOOK_DO_ETL $S_WEBHOOK_DO_AUTO $S_WEBHOOK_DO_META $S_WEBHOOK_PROD_BAILEYS"
+            WEBHOOKS="api=$S_WEBHOOK_DO api-public=$S_WEBHOOK_DO_PUBLIC worker-whatsapp=$S_WEBHOOK_DO_WA worker-leads=$S_WEBHOOK_DO_LEADS worker-campaigns=$S_WEBHOOK_DO_CAMPAIGN worker-distribution=$S_WEBHOOK_DO_DIST worker-etl=$S_WEBHOOK_DO_ETL worker-automations=$S_WEBHOOK_DO_AUTO worker-meta-webhook=$S_WEBHOOK_DO_META worker-baileys=$S_WEBHOOK_PROD_BAILEYS"
           else
             TAG=dev
-            WEBHOOKS="$S_WEBHOOK_DEV $S_WEBHOOK_DEV_PUBLIC $S_WEBHOOK_DEV_WA $S_WEBHOOK_DEV_LEADS $S_WEBHOOK_DEV_CAMPAIGN $S_WEBHOOK_DEV_DIST $S_WEBHOOK_DEV_ETL $S_WEBHOOK_DEV_AUTO $S_WEBHOOK_DEV_META $S_WEBHOOK_DEV_BAILEYS"
+            WEBHOOKS="api=$S_WEBHOOK_DEV api-public=$S_WEBHOOK_DEV_PUBLIC worker-whatsapp=$S_WEBHOOK_DEV_WA worker-leads=$S_WEBHOOK_DEV_LEADS worker-campaigns=$S_WEBHOOK_DEV_CAMPAIGN worker-distribution=$S_WEBHOOK_DEV_DIST worker-etl=$S_WEBHOOK_DEV_ETL worker-automations=$S_WEBHOOK_DEV_AUTO worker-meta-webhook=$S_WEBHOOK_DEV_META worker-baileys=$S_WEBHOOK_DEV_BAILEYS"
           fi
           TAG=$(printf '%s' "$TAG" | tr -d '\r\n')
           EXTRA_TAG=$(printf '%s' "${EXTRA_TAG:-}" | tr -d '\r\n')
-          # Normaliza: trim de \r\n por webhook e descarta vazios. Saída =
-          # lista separada por espaço, um webhook por serviço configurado.
+          # Normaliza: trim de \r\n por webhook e descarta serviços sem secret.
+          # Saída = lista separada por espaço de `serviço|url`, um item por
+          # serviço configurado (o nome aparece no log e no resumo do run).
           CLEAN=""
           COUNT=0
           for w in $WEBHOOKS; do
             w=$(printf '%s' "$w" | tr -d '\r\n')
-            [ -z "$w" ] && continue
-            CLEAN="$CLEAN $w"
+            case "$w" in *=*) ;; *) continue ;; esac
+            name=${w%%=*}
+            url=${w#*=}
+            [ -z "$url" ] && continue
+            CLEAN="$CLEAN $name|$url"
             COUNT=$((COUNT+1))
           done
           CLEAN=$(printf '%s' "$CLEAN" | sed 's/^ //')
@@ -274,58 +278,99 @@ jobs:
       - name: Trigger Easypanel redeploy
         if: steps.env.outputs.WEBHOOKS != ''
         timeout-minutes: 15
-        # A imagem já foi publicada no GHCR; webhook intermitente não deve
-        # falhar o pipeline inteiro (Easypanel pode demorar ou resetar conexão).
-        continue-on-error: true
-        id: easypanel_webhook
+        # A imagem já está no GHCR. Se algum serviço não receber o redeploy, o
+        # run FICA VERMELHO (antes era `continue-on-error` + aviso amarelo, e em
+        # 07/11 o DEV ficou com código velho sem ninguém perceber: os 7 webhooks
+        # deram "Connection timed out" por ~3 min e o run saiu verde).
+        # Para refazer: "Re-run failed jobs" neste run (o build sai do cache)
+        # ou Deploy manual no painel dos serviços listados no resumo.
+        #
+        # Retry em RODADAS com backoff (0, 15, 30, 60, 90, 120 s): a cada rodada
+        # tenta só os serviços pendentes. Se a conexão nem abre (EasyPanel fora
+        # do ar ou inalcançável), os demais da rodada são adiados sem gastar um
+        # connect-timeout cada — todos estão no mesmo painel.
+        env:
+          SERVICES: ${{ steps.env.outputs.WEBHOOKS }}
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.env.outputs.TAG }}
         run: |
-          echo "Chamando webhooks do Easypanel (API + workers, fire-and-forget)..."
-          WEBHOOKS="${{ steps.env.outputs.WEBHOOKS }}"
-          FAILED=0
-          IDX=0
-          for WEBHOOK in $WEBHOOKS; do
-            IDX=$((IDX+1))
-            [ -z "$WEBHOOK" ] && continue
-            echo "── Serviço #$IDX ──"
-            code=000
-            ok=0
-            for i in 1 2 3 4 5; do
-              # --connect-timeout: falha rapido se o host nao responder.
-              # --max-time: NUNCA pendura — o EasyPanel mantem a conexao aberta
-              #   transmitindo o build, entao limitamos o tempo de leitura.
+          PENDING="$SERVICES"
+          TOTAL=$(echo $SERVICES | wc -w)
+          ROUND=0
+          for WAIT in 0 15 30 60 90 120; do
+            [ -z "$PENDING" ] && break
+            ROUND=$((ROUND+1))
+            if [ "$WAIT" -gt 0 ]; then
+              echo "Aguardando ${WAIT}s antes da rodada $ROUND..."
+              sleep "$WAIT"
+            fi
+            echo "── Rodada $ROUND ──"
+            NEXT=""
+            UNREACHABLE=0
+            for ITEM in $PENDING; do
+              NAME=${ITEM%%|*}
+              URL=${ITEM#*|}
+              if [ "$UNREACHABLE" = "1" ]; then
+                NEXT="$NEXT $ITEM"
+                continue
+              fi
+              # --connect-timeout: falha rápido se o host não responder.
+              # --max-time: NUNCA pendura — o EasyPanel mantém a conexão aberta
+              #   transmitindo o deploy, então limitamos o tempo de leitura.
+              # stderr descartado: a mensagem do curl pode citar o host do
+              #   webhook; o código de saída já diz o que houve.
               out=$(curl -sS -o /dev/null \
                 -w "%{http_code} %{exitcode} %{time_connect}" \
-                --connect-timeout 15 --max-time 45 \
-                -X POST "$WEBHOOK" \
-                -H "User-Agent: github-actions/backend_crm1") || true
+                --connect-timeout 10 --max-time 45 \
+                -X POST "$URL" \
+                -H "User-Agent: github-actions/backend_crm1" 2>/dev/null) || true
               code=$(printf '%s' "$out" | awk '{print $1}')
               ex=$(printf '%s' "$out" | awk '{print $2}')
               tconn=$(printf '%s' "$out" | awk '{print $3}')
-              echo "  Tentativa $i -> HTTP ${code:-000} (curl exit ${ex:-?}, connect ${tconn:-?}s)"
+              connected=1
+              case "${tconn:-0}" in 0|0.0|0.000000) connected=0 ;; esac
               case "$code" in
-                2*) echo "  Webhook aceito (HTTP $code)."; ok=1; break ;;
+                2*)
+                  echo "  $NAME: redeploy aceito (HTTP $code)."
+                  continue ;;
               esac
-              # Timeout de LEITURA apos conectar (exit 28 + conexao estabelecida):
-              # o EasyPanel ja RECEBEU o POST e faz o redeploy de forma assincrona.
-              if [ "$ex" = "28" ] && [ -n "$tconn" ] && [ "$tconn" != "0.000000" ] && [ "$tconn" != "0" ]; then
-                echo "  Timeout de leitura apos envio — redeploy disparado (assincrono). OK."
-                ok=1
-                break
+              # Timeout de LEITURA após conectar: o EasyPanel já RECEBEU o POST
+              # e faz o redeploy de forma assíncrona.
+              if [ "$ex" = "28" ] && [ "$connected" = "1" ]; then
+                echo "  $NAME: timeout de leitura após envio — redeploy disparado (assíncrono)."
+                continue
               fi
-              sleep 5
+              echo "  $NAME: falhou (HTTP ${code:-000}, curl exit ${ex:-?}, connect ${tconn:-?}s)."
+              if [ "$connected" = "0" ]; then
+                echo "  EasyPanel inalcançável — demais serviços adiados para a próxima rodada."
+                UNREACHABLE=1
+                # Vai para o FIM da fila: se o problema for só o host deste
+                # webhook, a próxima rodada começa por outro serviço.
+                LAST="$ITEM"
+              else
+                NEXT="$NEXT $ITEM"
+              fi
             done
-            if [ "$ok" != "1" ]; then
-              echo "  ERRO: webhook falhou apos 5 tentativas (ultimo HTTP ${code:-000})."
-              FAILED=$((FAILED+1))
-            fi
+            PENDING=$(echo $NEXT ${LAST:-})
+            LAST=""
           done
-          if [ "$FAILED" -gt 0 ]; then
-            echo "::warning::$FAILED serviço(s) não dispararam redeploy — faça pull/restart manual no painel."
-            exit 1
-          fi
-          echo "Todos os $IDX serviço(s) dispararam redeploy."
 
-      - name: Webhook Easypanel (aviso)
-        if: steps.env.outputs.WEBHOOKS != '' && steps.easypanel_webhook.outcome == 'failure'
-        run: |
-          echo "::warning::Build OK (ghcr.io/${{ env.IMAGE_NAME }}:${{ steps.env.outputs.TAG }}). Algum webhook Easypanel falhou — faça pull/restart manual no painel se algum serviço não atualizou."
+          if [ -z "$PENDING" ]; then
+            echo "Todos os $TOTAL serviço(s) dispararam redeploy."
+            exit 0
+          fi
+
+          MISSING=""
+          for ITEM in $PENDING; do MISSING="$MISSING ${ITEM%%|*}"; done
+          MISSING=$(echo $MISSING)
+          COUNT=$(echo $MISSING | wc -w)
+          echo "::error title=Redeploy não disparado::$IMAGE foi publicada, mas o EasyPanel não recebeu o redeploy de $COUNT de $TOTAL serviço(s): $MISSING. Use 'Re-run failed jobs' neste run ou faça Deploy manual desses serviços no painel."
+          {
+            echo "### ❌ Redeploy não disparado"
+            echo ""
+            echo "A imagem \`$IMAGE\` foi publicada, mas o EasyPanel não recebeu o redeploy de **$COUNT de $TOTAL** serviço(s) após $ROUND rodada(s):"
+            echo ""
+            for NAME in $MISSING; do echo "- \`$NAME\`"; done
+            echo ""
+            echo "Esses serviços seguem com a imagem anterior. Para corrigir: **Re-run failed jobs** neste run (o build sai do cache) ou **Deploy** manual de cada um no painel."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 1
