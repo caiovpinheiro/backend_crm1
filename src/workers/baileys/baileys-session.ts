@@ -129,6 +129,17 @@ export class BaileysSession {
     await this.connect();
   }
 
+  /**
+   * Pediram "conectar" com a sessão já aberta: a rota grava CONNECTING antes
+   * de enfileirar e nada voltava a CONNECTED — o canal ficava "Conectando"
+   * e o modal do QR esperando para sempre. Regrava o status real.
+   */
+  async reaffirmConnected(): Promise<boolean> {
+    if (!this.socket?.user) return false;
+    await this.patchChannel({ status: "CONNECTED", qrCode: null }, "CONNECTED");
+    return true;
+  }
+
   /** Fecha o socket atual sem mexer no status e sem disparar reconexão. */
   private teardownSocket(): void {
     const old = this.socket;

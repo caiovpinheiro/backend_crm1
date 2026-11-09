@@ -49,6 +49,7 @@ vi.mock("./baileys-session", () => ({
       this.socket = null;
     });
     disconnect = vi.fn(async () => {});
+    reaffirmConnected = vi.fn(async () => Boolean(this.socket));
     logout = vi.fn(async () => {});
     constructor(public channelId: string) {
       h.sessions.push(this as never);
@@ -144,12 +145,13 @@ describe("BaileysManager", () => {
     expect(h.sessions).toHaveLength(1);
   });
 
-  it("conectar de novo o mesmo canal não cria segunda sessão", async () => {
+  it("conectar de novo o mesmo canal não cria segunda sessão e regrava CONNECTED", async () => {
     h.channels = [{ id: "will", organizationId: "o", status: "CONNECTED", sessionData: null }];
     const m = new BaileysManager(fakeLock(new Set(), new Set()));
     await m.connect("will");
     await m.connect("will");
     expect(h.sessions).toHaveLength(1);
+    expect((h.sessions[0] as unknown as { reaffirmConnected: ReturnType<typeof vi.fn> }).reaffirmConnected).toHaveBeenCalled();
   });
 
   it("erro antes de abrir o socket não vira FAILED: tenta de novo", async () => {

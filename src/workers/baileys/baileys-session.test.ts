@@ -228,6 +228,22 @@ describe("BaileysSession — ainda sem parear (QR)", () => {
   });
 });
 
+describe("BaileysSession — pedir conectar com a sessão aberta", () => {
+  it("regrava CONNECTED (a rota tinha gravado CONNECTING)", async () => {
+    const s = new BaileysSession("ch1");
+    await s.connect();
+    h.sockets[0]!.user = { id: "5511944690752:5@s.whatsapp.net" };
+    expect(await s.reaffirmConnected()).toBe(true);
+    expect(statuses().at(-1)).toBe("CONNECTED");
+  });
+
+  it("socket ainda em handshake: não mexe", async () => {
+    const s = new BaileysSession("ch1");
+    await s.connect();
+    expect(await s.reaffirmConnected()).toBe(false);
+  });
+});
+
 describe("BaileysSession — desligamento do processo", () => {
   it("stop() fecha o socket sem mudar o status nem reconectar", async () => {
     const s = new BaileysSession("ch1");

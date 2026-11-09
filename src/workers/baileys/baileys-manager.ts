@@ -92,7 +92,13 @@ export class BaileysManager {
     const existing = this.sessions.get(channelId);
     if (existing && !existing.isDestroyed) {
       if (existing.socket) {
-        log.info({ channelId }, "[baileys-manager] Sessão já existe — ignorando");
+        const open = await existing.reaffirmConnected().catch(() => false);
+        log.info(
+          { channelId, aberta: open },
+          open
+            ? "[baileys-manager] Sessão já aberta — status regravado como CONNECTED"
+            : "[baileys-manager] Sessão já conectando — ignorando",
+        );
         return;
       }
       // Sessão viva esperando reconexão: conecta agora em vez de criar outra.
