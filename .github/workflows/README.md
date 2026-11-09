@@ -98,3 +98,11 @@ a cada deploy — nada muda.
 ## Deploy manual
 
 Actions → **Build & Deploy** → **Run workflow** → escolhe branch.
+
+## Redeploy não disparado (run vermelho no passo "Trigger Easypanel redeploy")
+
+A imagem já está no GHCR, mas algum serviço não recebeu o webhook: o passo
+tenta em rodadas por ~5 min (backoff 15/30/60/90/120 s) e, se ainda faltar
+serviço, falha o run e lista no **resumo** quais ficaram com a imagem anterior.
+Para corrigir: **Re-run failed jobs** no run (o build sai do cache) ou
+**Deploy** manual de cada serviço listado no painel do EasyPanel.
