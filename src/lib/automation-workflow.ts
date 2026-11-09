@@ -247,6 +247,29 @@ export function readStepDistributionDepartmentIds(
 }
 
 /**
+ * "O que distribuir" no passo `execute_distribution` (`cfg.ownershipScope`):
+ *  - `department` (ou ausente): vale `Department.keepDealOwner`;
+ *  - `conversation_and_deal`: quem recebe vira dono da conversa, do negócio
+ *    e do contato (responsável único);
+ *  - `conversation_only`: troca só o responsável da conversa; negócio e
+ *    contato ficam com o dono humano atual.
+ * Devolve o override do motor: `null` = seguir o departamento.
+ */
+export type StepOwnershipScope = "department" | "conversation_and_deal" | "conversation_only";
+
+export function readStepOwnershipScope(cfg: unknown): StepOwnershipScope {
+  const v = asRecord(cfg).ownershipScope;
+  return v === "conversation_and_deal" || v === "conversation_only" ? v : "department";
+}
+
+export function readStepKeepDealOwner(cfg: unknown): boolean | null {
+  const scope = readStepOwnershipScope(cfg);
+  if (scope === "conversation_only") return true;
+  if (scope === "conversation_and_deal") return false;
+  return null;
+}
+
+/**
  * Escopo do passo `execute_distribution` COM a origem do departamento.
  *
  * A origem decide o que acontece quando o pool fica sem ninguém elegível:

@@ -16,6 +16,7 @@ const h = vi.hoisted(() => ({
   doneDepth: 0,
   stageDenied: false,
   canSeeAll: true,
+  assignedConversation: false,
   lastMessageAt: true as boolean,
   results: [] as Array<{ scenario: string; pgCalls: number; pgDepth: number; labels: string[] }>,
 }));
@@ -155,6 +156,10 @@ vi.mock("@/lib/visibility", async (importOriginal) => ({
       dealWhere: {},
     }),
   ),
+  // Exceção de leitura: atende uma conversa do contato sem ser dono.
+  hasAssignedConversationWithContact: vi.fn(() =>
+    pg("conversation.findFirst(atribuída)", h.assignedConversation),
+  ),
 }));
 vi.mock("@/lib/logger", () => ({
   getLogger: () => ({ warn: vi.fn(), info: vi.fn(), debug: vi.fn(), error: vi.fn() }),
@@ -187,6 +192,7 @@ async function call(scenario: string) {
 beforeEach(() => {
   h.stageDenied = false;
   h.canSeeAll = true;
+  h.assignedConversation = false;
   h.lastMessageAt = true;
 });
 
@@ -244,6 +250,13 @@ describe("GET /api/deals/:id", () => {
     h.canSeeAll = false;
     const res = await call("visibilidade negada");
     expect(res.status).toBe(403);
+  });
+
+  it("não é dono, mas atende uma conversa do contato: 200 (só leitura)", async () => {
+    h.canSeeAll = false;
+    h.assignedConversation = true;
+    const res = await call("conversa atribuída");
+    expect(res.status).toBe(200);
   });
 
   it("Server-Timing com as fases", async () => {

@@ -35,18 +35,28 @@ export async function departmentKeepsDealOwner(
   return dept?.keepDealOwner === true;
 }
 
-/** Algum negócio ABERTO do contato tem dono humano? */
+/**
+ * Há dono humano a preservar? Algum negócio ABERTO do contato, ou o próprio
+ * negócio que disparou a atribuição (`dealId`) em QUALQUER status. Sem o
+ * `dealId`, um negócio que acabou de entrar em "Ganho" (WON) não contava e
+ * o motor passava o dono da venda para quem só atende a conversa.
+ */
 export async function contactHasHumanDealOwner(
   contactId: string | null | undefined,
+  dealId?: string | null,
 ): Promise<boolean> {
-  if (!contactId) return false;
+  if (!contactId && !dealId) return false;
+  const humanOwner = { ownerId: { not: null }, owner: { type: "HUMAN" as const } };
   const deal = await prisma.deal.findFirst({
-    where: {
-      contactId,
-      status: "OPEN",
-      ownerId: { not: null },
-      owner: { type: "HUMAN" },
-    },
+    where: dealId
+      ? {
+          ...humanOwner,
+          OR: [
+            { id: dealId },
+            ...(contactId ? [{ contactId, status: "OPEN" as const }] : []),
+          ],
+        }
+      : { contactId: contactId!, status: "OPEN", ...humanOwner },
     select: { id: true },
   });
   return deal !== null;
@@ -61,6 +71,8 @@ export async function contactHasHumanDealOwner(
 export async function resolveKeepDealOwner(args: {
   conversationId: string | null | undefined;
   contactId?: string | null;
+  /** Negócio que disparou a atribuição (ex.: automação de etapa "Ganho"). */
+  dealId?: string | null;
   departmentId?: string | null;
   override?: boolean | null;
 }): Promise<boolean> {
@@ -80,7 +92,7 @@ export async function resolveKeepDealOwner(args: {
     ? args.override === true
     : await departmentKeepsDealOwner(departmentId);
   if (!wants) return false;
-  return contactHasHumanDealOwner(contactId);
+  return contactHasHumanDealOwner(contactId, args.dealId);
 }
 
 /**
