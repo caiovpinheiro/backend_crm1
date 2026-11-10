@@ -170,6 +170,11 @@ export type MetaAttachPayload = {
    * (a conversão é no worker).
    */
   mediaId?: string;
+  /**
+   * Áudio que só serve como mensagem de voz: se a conversão não chegar a
+   * Ogg/Opus de voz, o envio falha em vez de sair como arquivo ou documento.
+   */
+  voiceOnly?: boolean;
 };
 
 /** Campos extras quando o job envia template Meta (mesma fila `meta-outbound`). */

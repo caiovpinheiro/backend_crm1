@@ -101,7 +101,7 @@ export async function sendAgentFollowUpMedia(args: {
   contactId: string;
   agentUserId: string;
   /** `caption`: texto que vai na legenda (imagem e vídeo) e fica como conteúdo da mensagem. */
-  attachments: Array<AgentFaqMedia & { caption?: string }>;
+  attachments: Array<AgentFaqMedia & { caption?: string; voiceOnly?: boolean }>;
   /** Conta repetição só a partir daqui (ex.: último #reset do teste). */
   since?: Date;
   /** Reenvio a pedido do cliente: ignora a trava de repetição. */
@@ -272,6 +272,7 @@ export async function sendAgentFollowUpMedia(args: {
       caption,
       kind,
       ...(mediaId ? { mediaId } : {}),
+      ...(kind === "audio" && att.voiceOnly ? { voiceOnly: true } : {}),
     };
     // No rastro do turno: se mesmo assim a entrega falhar com "Arquivo não
     // encontrado no storage", o worker de WhatsApp está na versão antiga.

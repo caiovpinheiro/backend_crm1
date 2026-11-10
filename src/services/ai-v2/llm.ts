@@ -55,6 +55,8 @@ import { brHolidayName, isBrazilTimezone, nextBrBusinessDay } from "@/lib/br-hol
 import { isMutilated, onlyKeptSentences, prescribedReplyMatching, trimDroppedTheAnswer, trimUnsupportedSentences } from "./reply-trim";
 import { MATERIAL_ATTACHMENT_LIMITS, attachmentsForDocs, attachmentsPromptSection } from "./material-attachments";
 import { humanRequestTerms } from "@/lib/ai-v2/config";
+import { defaultV2Counters } from "./limits";
+import { voicePromptSection } from "./voice";
 import { actionsGuide, allowedActionTypes, allowedFlowIdsFor, allowedMessageModelIdsFor, queryToolRestriction, repairMessageModelId, themeToolRestriction, writableFieldsForGuide } from "./action-policy";
 import { getLogger } from "@/lib/logger";
 
@@ -654,6 +656,8 @@ const v2LLMOutputSchema: z.ZodType<V2LLMOutput> = z.object({
     .unknown()
     .optional()
     .transform((v) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string" && !!x.trim()).map((x) => x.trim()) : undefined)),
+  voice: z.boolean().optional().catch(undefined),
+  voiceConsent: z.boolean().nullable().optional().catch(undefined),
   // Campo fora do formato vira o padrão em vez de invalidar a resposta
   // inteira: antes, um `"nome": null` em collected ou um sentimento fora da
   // lista mandava o turno para o fallback de erro (transferência).
@@ -877,6 +881,8 @@ export async function callV2LLMTest(
       : undefined,
     previousMessages,
     humanRequestWithQuestion: opts.humanRequestWithQuestion === true,
+    // Teste: como numa conversa em que o cliente já aceitou áudio.
+    voiceSection: voicePromptSection({ config, counters: { ...defaultV2Counters(), voiceConsent: "granted" }, clientAudioThisTurn: false, autonomous: true, hasKey: true }),
   });
   return result;
 }
@@ -1065,6 +1071,8 @@ function buildV2SystemPrompt(
   /** Mensagem do cliente: liga um aviso temporário pelos gatilhos dele. */
   userMessageForNotices = "",
   lossReasons: string[] = [],
+  /** Trecho "Resposta por áudio" (vazio = o modelo não fica sabendo de voz). */
+  voiceSection = "",
 ): string {
   const timezone = config.businessHours?.timezone || "America/Sao_Paulo";
   const lines: string[] = [];
@@ -1238,6 +1246,7 @@ function buildV2SystemPrompt(
     fields: writableFieldsForGuide(config),
   });
   if (actions) lines.push(actions);
+  if (voiceSection) lines.push(voiceSection);
 
   lines.push("# Saída");
   lines.push("Responda só com um objeto JSON válido neste formato, sem texto fora dele:");
@@ -1250,6 +1259,7 @@ function buildV2SystemPrompt(
     ...(offerTheme ? { theme: null } : {}),
     messageModel: null,
     ...(flows.length > 0 ? { flow: null } : {}),
+    ...(voiceSection ? { voice: false, voiceConsent: null } : {}),
     handoff: false,
     concluded: false,
     confirmed: null,
@@ -1264,6 +1274,7 @@ function buildV2SystemPrompt(
     "- messageModel: null ou { id: string, adapt?: boolean, variables?: {chave: valor} }. Nunca um objeto vazio.",
     ...(flows.length > 0 ? ["- flow: null ou { id: string } com o id de um formulário da lista. Nunca um objeto vazio."] : []),
     ...(attachmentsSection ? ["- attachments: ids de \"Anexos dos materiais\" para enviar, ou []."] : []),
+    ...(voiceSection ? ["- voice: true quando esta resposta deve ir por áudio (ver \"Resposta por áudio\"); senão false.", "- voiceConsent: true ou false só quando o cliente disse nesta mensagem se aceita áudio; senão null."] : []),
     "- collected: dados que o cliente informou neste turno; vazio se nenhum.",
     "- concluded: true só quando o cliente indicou que terminou (agradeceu, se despediu ou disse que era só isso) e não fez pedido novo nesta mensagem. Se ele perguntou algo, responda e deixe concluded=false.",
     ...(offerTheme ? [`- theme: id do assunto que melhor descreve o pedido (${config.themes.map((t) => t.id).join(", ")}) ou null.`] : []),
@@ -1322,6 +1333,8 @@ export async function callV2LLM(args: {
   priorSummary?: { text: string; at?: Date | null; agent?: string | null; current?: boolean } | null;
   /** Conversa recebida de outro agente de IA em modo transparente: sem se apresentar. */
   transparentTransfer?: boolean;
+  /** Trecho "Resposta por áudio" do prompt, quando o turno pode ir por voz. */
+  voiceSection?: string;
 }): Promise<{
   output: V2LLMOutput;
   inputTokens: number;
@@ -1465,6 +1478,7 @@ export async function callV2LLM(args: {
     args.transparentTransfer === true,
     userMessage,
     lossReasonLabels,
+    args.voiceSection ?? "",
   );
 
   const messages: Array<{ role: "user" | "assistant"; content: string }> = [

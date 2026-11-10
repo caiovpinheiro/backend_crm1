@@ -5168,6 +5168,9 @@ model AIAgentConfig {
   /// Chave Anthropic do agente (modelos Claude), cifrada como a da OpenAI.
   anthropicApiKeyEnc  String?
   anthropicApiKeyHint String?
+  /// Chave do provedor de voz do agente (resposta por áudio), cifrada como as demais.
+  voiceApiKeyEnc  String?
+  voiceApiKeyHint String?
   /// Prompt-template do arquétipo (renderizado em tempo de execução
   /// com variáveis do contato/deal/conversa). Copiado do catálogo
   /// no momento da criação — depois vive por conta própria.
