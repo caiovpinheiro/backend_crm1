@@ -424,6 +424,13 @@ describe("6. fluxos de automação no encerramento", () => {
     expect(find(d, "fluxo_fala_com_cliente_no_encerramento")[0]).toMatchObject({ severity: "avisa", evidence: "f1" });
   });
 
+  it("chave desligada, mas o fluxo marca “Também quando a IA encerrar” → roda pelo agente", () => {
+    const optedIn = { ...talking, id: "f5", triggerConfig: { includeAiCloses: true } };
+    const d = data({ agents: [agent("a", { config: { channelIds: ["ch-1"] } })], automations: [optedIn, talking], runOnAiClose: false });
+    expect(find(d, "fluxo_fala_com_cliente_no_encerramento")[0]).toMatchObject({ evidence: "f5" });
+    expect(find(d, "fluxo_encerramento_nao_roda_pelo_agente")[0]).toMatchObject({ evidence: "f1" });
+  });
+
   it("fluxo só de CRM, desligado ou de outro gatilho não gera aviso", () => {
     const d = data({
       agents: [agent("a", { config: { channelIds: ["ch-1"] } })],

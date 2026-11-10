@@ -2677,7 +2677,7 @@ describe("processV2Turn — correções do motor", () => {
       expect(mocks.logTurn.mock.calls.at(-1)![0].discardedActions).toEqual([{ type: "no_reply", reason: "conversation moved on" }]);
     });
 
-    it("encerramento pelo agente não dispara fluxos \"Conversa encerrada\"", async () => {
+    it("encerramento pelo agente avisa como IA: fluxos \"Conversa encerrada\" só rodam se aceitarem (chave da org desligada)", async () => {
       mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: baseConfig(), active: true });
       mocks.getState.mockResolvedValue(makeState("active", "agente", { pendingOptions: ["Não, obrigado(a)!", "Preciso de ajuda"] }));
       mocks.callLLM.mockResolvedValue(llmOut({ reply: "Combinado! Até mais.", concluded: true }));
@@ -2685,7 +2685,9 @@ describe("processV2Turn — correções do motor", () => {
       const result = await run("Não, obrigado(a)!");
 
       expect(result.closed).toBe(true);
-      expect(mocks.resolveInline).toHaveBeenCalledWith(expect.objectContaining({ skipAutomations: true }));
+      expect(mocks.resolveInline).toHaveBeenCalledWith(
+        expect.objectContaining({ closedBy: "ai", aiCloseFlowsEnabled: false }),
+      );
     });
 
     const PROBING_THEME = {

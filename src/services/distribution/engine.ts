@@ -1064,6 +1064,16 @@ export async function executeDistribution(
         data: { departmentId: explicitDeptIds[0]! },
         select: { id: true },
       });
+      const { logConversationDepartmentChange } = await import(
+        "@/services/conversation-department-event"
+      );
+      await logConversationDepartmentChange({
+        conversationId: input.conversationId,
+        contactId: preAssignSnap?.contactId ?? input.contactId ?? null,
+        fromDepartmentId: preAssignSnap?.departmentId ?? null,
+        toDepartmentId: explicitDeptIds[0]!,
+        fromAssigneeId: preAssignSnap?.assignedToId ?? null,
+      });
     }
     responsibles = await getDistributionResponsibles({
       distributionType: input.distributionType ?? null,

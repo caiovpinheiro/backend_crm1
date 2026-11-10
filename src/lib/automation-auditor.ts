@@ -639,6 +639,7 @@ function categorizeStepType(type: string): ActionCategory {
     case "send_email":
       return "messaging";
     case "assign_owner":
+    case "restore_attendance":
       return "assignment";
     case "move_stage":
       return "stage_move";

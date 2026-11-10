@@ -685,6 +685,9 @@ async function conversationHasRealAttendanceById(
  * depto só entra quando houve atendimento real (demanda inbound + resposta
  * de humano/IA) — ack sozinho não vira Sem Resposta.
  */
+/** Encerramento por automação dispara "Conversa encerrada" até esta profundidade. */
+const MAX_CLOSE_TRIGGER_DEPTH = 3;
+
 async function finishConversationsForContact(
   rt: RuntimeContext,
   chosen?: ResolvedTabulation | null,
@@ -775,6 +778,26 @@ async function finishConversationsForContact(
       newValue: updated.status,
       meta: { from: c.status, to: "RESOLVED", source: "automation" },
     });
+
+    // "Conversa encerrada" também para encerramento por automação — só casa
+    // com fluxos que marcaram `includeAutomationCloses`. A própria automação
+    // não reentra (trava de execução ativa em fireTrigger) e a profundidade
+    // limita cadeias fluxo → fluxo.
+    if (rt.depth < MAX_CLOSE_TRIGGER_DEPTH) {
+      fireTrigger("conversation_tabulated", {
+        contactId: rt.contactId,
+        dealId: rt.dealId,
+        depth: rt.depth + 1,
+        data: {
+          tabulationId: autoTab?.tabulationId ?? null,
+          ancestorIds: autoTab?.ancestorIds ?? [],
+          departmentId: c.departmentId ?? null,
+          conversationId: c.id,
+          closedBy: "automation",
+          closedByAutomationId: rt.automationId,
+        },
+      }).catch(() => {});
+    }
 
     try {
       if (rowOrg) {
@@ -2779,12 +2802,42 @@ export async function executeStep(
           : undefined);
 
       if (!convId) return {};
+      const before = await prisma.conversation.findUnique({
+        where: { id: convId },
+        select: { departmentId: true, assignedToId: true, contactId: true, externalId: true },
+      });
       await prisma.conversation.update({
         where: { id: convId },
         data: { departmentId },
         select: { id: true },
       });
+      if (before) {
+        // Histórico da transferência (antes não havia): o passo
+        // "Devolver atendimento" lê origem e quem atendia daqui.
+        const { logConversationDepartmentChange } = await import(
+          "@/services/conversation-department-event"
+        );
+        await logConversationDepartmentChange({
+          conversationId: convId,
+          contactId: before.contactId,
+          externalId: before.externalId,
+          fromDepartmentId: before.departmentId,
+          toDepartmentId: departmentId,
+          fromAssigneeId: before.assignedToId,
+        });
+      }
       return {};
+    }
+
+    case "restore_attendance": {
+      const { runRestoreAttendance } = await import("@/services/automation-restore-attendance");
+      const res = await runRestoreAttendance({
+        config: cfg,
+        contactId: rt.contactId ?? null,
+        conversationId: rt.conversation?.id ?? readString(rt.data, "conversationId") ?? null,
+        endedDepartmentId: readString(rt.data, "departmentId") ?? null,
+      });
+      return { note: res.note };
     }
 
     case "execute_distribution": {
