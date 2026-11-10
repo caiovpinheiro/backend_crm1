@@ -314,6 +314,11 @@ export interface V2RuleCondition {
   expected?: string;
   /** Se true, a condição é satisfeita quando o valor NÃO casa. */
   negate?: boolean;
+  /**
+   * Palavra solta casa só com a palavra inteira, sem tolerar plural/sufixo.
+   * Não vem da configuração: o motor liga no atalho de pedido de pessoa.
+   */
+  exactWords?: boolean;
 }
 
 export type V2RuleActionType =

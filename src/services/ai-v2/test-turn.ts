@@ -15,6 +15,7 @@ import { defaultV2Counters } from "./limits";
 import { decideVoice, voiceCompanionText, voiceConfigured } from "./voice";
 import { noteV2Fact, peekV2Fact, traceStep } from "./trace";
 import { isGreetingOnlyMessage, keepOpenOnNewRequest } from "./closure";
+import { isShortAckText } from "@/lib/ai-agents/tabulation-classify-policy";
 import { applyBoldPolicy, toWhatsAppText } from "./reply-format";
 import { isConfusionMessage, rephraseAfterConfusion } from "./confusion";
 import { applyNoSourceGuard, conditionalHandoff, handoffExplanation, type V2PrefetchFact } from "./no-source";
@@ -459,6 +460,21 @@ export async function simulateV2Turn(
     stage: "active",
     ...partial,
   });
+
+  // Depois de "me conta em uma frase o que você precisa", igual à produção:
+  // a mensagem seguinte transfere com o assunto. Antes o teste só transferia
+  // se o cliente pedisse pessoa de novo, e seguia atendendo nos outros casos.
+  const humanAskText = renderMessage(systemMessage(config, "humanRequestAsk"), vars, defaultFormatter());
+  const lastAgentTurn = [...history].reverse().find((h) => h.role === "assistant");
+  if (lastAgentTurn?.content.trim() === humanAskText && !isShortAckText(userMessage) && !isGreetingOnlyMessage(userMessage)) {
+    noteV2Fact("handoffCause", "human_request", { keepFirst: true });
+    traceStep("transferência", "Cliente disse o que precisa depois do pedido de atendente → transfere com o assunto");
+    return quickResult({
+      reply: renderMessage(config.handoff.message, vars, defaultFormatter()),
+      reason: "Depois do pedido de atendente sem assunto, a mensagem seguinte transfere.",
+      handoff: true,
+    });
+  }
 
   // Pedido de pessoa, igual à produção: com pergunta junto, responde primeiro;
   // sem assunto, pergunta uma vez (se a última mensagem do agente já foi a
