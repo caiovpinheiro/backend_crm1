@@ -237,11 +237,12 @@ describe("Cenário Acadêmico: lead fechou no comercial → conversa para o acad
     expect(assignConversationOnly).not.toHaveBeenCalled();
   });
 
-  it("negócio ganho com IA como dono: o acadêmico vira dono (não deixa preso na IA)", async () => {
+  it("negócio ganho com IA como dono + 'Somente a conversa': o negócio não vai para o acadêmico", async () => {
     deals = [deal("WON", "AI")];
     await runStep({ ownershipScope: "conversation_only" }, "deal_won");
 
-    expect(assignDealOwner).toHaveBeenCalledWith("deal_won", ACADEMICO);
+    expect(assignConversationOnly).toHaveBeenCalledWith({ conversationId: CONV, userId: ACADEMICO });
+    expect(assignDealOwner).not.toHaveBeenCalled();
   });
 
   describe("aba Distribuição em Por Leads (comercial) e passo em Inteligente", () => {

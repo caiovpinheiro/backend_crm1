@@ -105,7 +105,7 @@ describe("resolveKeepDealOwner", () => {
         conversationId: "c1",
         contactId: "ct1",
         dealId: "deal_ganho",
-        override: true,
+        departmentId: "d1",
       }),
     ).toBe(true);
     const where = dealFindFirst.mock.calls[0]![0].where as Record<string, unknown>;
@@ -117,7 +117,7 @@ describe("resolveKeepDealOwner", () => {
     ]);
   });
 
-  it("negócio que disparou sem dono humano segue a regra padrão", async () => {
+  it("escolha explícita (override) troca só a conversa mesmo sem dono humano", async () => {
     dealFindFirst.mockResolvedValue(null);
     expect(
       await resolveKeepDealOwner({
@@ -126,7 +126,8 @@ describe("resolveKeepDealOwner", () => {
         dealId: "deal_ia",
         override: true,
       }),
-    ).toBe(false);
+    ).toBe(true);
+    expect(dealFindFirst).not.toHaveBeenCalled();
   });
 
   it("override do modal vence o departamento nos dois sentidos", async () => {
