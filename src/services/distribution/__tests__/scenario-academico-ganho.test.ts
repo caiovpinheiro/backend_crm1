@@ -14,7 +14,7 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { readStepKeepDealOwner } from "@/lib/automation-workflow";
+import { readStepKeepDealOwner, readStepReassign } from "@/lib/automation-workflow";
 
 const DEPT = "dept_academico";
 const CONV = "conv_aluno";
@@ -35,6 +35,8 @@ let deptKeepsOwner = false;
 let smartSwitchOn = true;
 let orgMode = "smart";
 let deptMode = "smart";
+// Responsável atual da conversa (ex.: o consultor comercial que vendeu).
+let convAssignee: string | null = null;
 
 /** Avalia o `where` que `contactHasHumanDealOwner` monta. */
 function matches(d: FakeDeal, where: Record<string, unknown>): boolean {
@@ -68,8 +70,8 @@ vi.mock("@/lib/prisma", () => ({
           id: CONV,
           contactId: CONTACT,
           departmentId: DEPT,
-          assignedToId: null,
-          assignedTo: null,
+          assignedToId: convAssignee,
+          assignedTo: convAssignee ? { type: "HUMAN", name: "Comercial" } : null,
           channel: "WHATSAPP",
           channelId: null,
           lastInboundAt: null,
@@ -152,8 +154,11 @@ vi.mock("../deal-owner-scope", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../deal-owner-scope")>()),
   assignConversationOnly: (...a: unknown[]) => assignConversationOnly(...a),
 }));
+// O consultor que vendeu já respondeu o cliente (atendimento humano em curso).
+let consultorReplied = false;
 vi.mock("@/services/attendance-guards", () => ({
-  getHumanAttendanceForConversation: async () => null,
+  getHumanAttendanceForConversation: async () =>
+    consultorReplied ? { hasHumanReply: true } : null,
 }));
 
 const { executeDistribution } = await import("../engine");
@@ -170,6 +175,8 @@ function runStep(stepConfig: Record<string, unknown>, dealId: string) {
     departmentIds: [DEPT],
     allowOrgWideFallback: false,
     keepDealOwner: readStepKeepDealOwner(stepConfig),
+    reassign: readStepReassign(stepConfig),
+    reassignOnlyIfEligible: true,
   });
 }
 
@@ -190,6 +197,8 @@ describe("Cenário Acadêmico: lead fechou no comercial → conversa para o acad
     smartSwitchOn = true;
     orgMode = "smart";
     deptMode = "smart";
+    convAssignee = null;
+    consultorReplied = false;
     getDistributionResponsibles.mockResolvedValue([
       { userId: ACADEMICO, name: "Acadêmico", eligible: true, blockedReasons: [], queueCount: 0, volume: 1 },
     ]);
@@ -264,6 +273,48 @@ describe("Cenário Acadêmico: lead fechou no comercial → conversa para o acad
 
       expect(r.success).toBe(false);
       expect(r.reason).toBe("DISTRIBUTION_DISABLED");
+    });
+  });
+
+  describe("conversa já com o consultor comercial (a venda dele)", () => {
+    const STEP = { mode: "smart", ownershipScope: "conversation_only" };
+
+    beforeEach(() => {
+      deals = [deal("WON")];
+      convAssignee = COMERCIAL;
+      consultorReplied = true;
+    });
+
+    it("'Tirar e redistribuir': sai do consultor e vai para o acadêmico; a venda segue dele", async () => {
+      const r = await runStep({ ...STEP, ifAssigned: "reassign" }, "deal_won");
+
+      expect(r.success).toBe(true);
+      expect(tx.conversation.update).toHaveBeenCalledWith(
+        expect.objectContaining({ data: { assignedToId: null } }),
+      );
+      expect(tx.contact.update).not.toHaveBeenCalled();
+      expect(tx.deal.updateMany).not.toHaveBeenCalled();
+      expect(assignConversationOnly).toHaveBeenCalledWith({ conversationId: CONV, userId: ACADEMICO });
+      expect(assignDealOwner).not.toHaveBeenCalled();
+    });
+
+    it("'Tirar e redistribuir' sem acadêmico disponível: não tira do consultor", async () => {
+      getDistributionResponsibles.mockResolvedValue([
+        { userId: ACADEMICO, name: "Acadêmico", eligible: false, blockedReasons: ["OFFLINE"], queueCount: 0, volume: 1 },
+      ]);
+      const r = await runStep({ ...STEP, ifAssigned: "reassign" }, "deal_won");
+
+      expect(r.success).toBe(false);
+      expect(r.reason).toBe("NO_ELIGIBLE_RESPONSIBLE");
+      expect(tx.conversation.update).not.toHaveBeenCalled();
+      expect(assignConversationOnly).not.toHaveBeenCalled();
+    });
+
+    it("'Manter com quem está atendendo' (padrão): não mexe na conversa do consultor", async () => {
+      await runStep(STEP, "deal_won");
+
+      expect(tx.conversation.update).not.toHaveBeenCalled();
+      expect(assignConversationOnly).not.toHaveBeenCalled();
     });
   });
 });
