@@ -42,6 +42,10 @@ const productPolicySchema = z.object({
   allowedProductIds: z.array(z.string()).optional().default([]),
   filter: z.record(z.string(), z.string()).optional(),
   actions: z.array(z.string()).optional().default([]),
+  /** Libera a ação de enviar o cartão do produto (imagem + texto cadastrados). */
+  sendCard: z.boolean().optional().default(false),
+  /** Opção de preço (canal) do produto que o agente usa. Vazio = preço de tabela. */
+  priceChannel: optionalText,
 });
 
 const fieldConfigSchema = z.object({
@@ -458,6 +462,21 @@ export const v2AgentConfigSchema = z.object({
   /** Flows publicados que o agente pode enviar. Vazio = nenhum. */
   allowedFlowIds: z.array(z.string()).optional().default([]),
   allowedPhoneNumbers: z.array(z.string()).optional().default([]),
+  // Resposta por áudio. Desligada por padrão; a chave do provedor é do agente.
+  voice: z
+    .object({
+      enabled: z.boolean().optional().default(false),
+      provider: z.enum(["elevenlabs"]).optional().default("elevenlabs").catch("elevenlabs"),
+      voiceId: optionalText,
+      mode: z.enum(["mirror", "agent"]).optional().default("mirror").catch("mirror"),
+      guidance: optionalText,
+      permissionQuestion: optionalText,
+      companionText: optionalText,
+      maxChars: z.number().int().min(80).max(1200).optional().default(450).catch(450),
+      maxPerConversation: z.number().int().min(1).max(30).optional().default(4).catch(4),
+      dailyCharCap: z.number().int().min(0).optional().default(20000).catch(20000),
+    })
+    .optional(),
   responseLength: z.enum(["short", "medium", "long"]).optional().default("medium"),
   emojis: z.enum(["none", "light", "moderate"]).optional().default("none"),
   bold: z.enum(["auto", "key", "off"]).optional(),

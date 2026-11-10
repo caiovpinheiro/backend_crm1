@@ -154,11 +154,34 @@ describe("evaluateV2Rules — palavras-chave", () => {
     }
   });
 
-  it("pedido de humano continua disparando (com plural, acento e frase)", () => {
+  it("pedido de humano continua disparando (palavra inteira, acento e frase)", () => {
     expect(match("quero falar com um atendente")).toBe("human_request");
     expect(match("tem algum HUMANO aí?")).toBe("human_request");
-    expect(match("chama os atendentes")).toBe("human_request");
     expect(match("preciso falar com alguém")).toBe("human_request");
+  });
+
+  it("nome que só contém a palavra (plural, derivada) não é pedido de pessoa", () => {
+    for (const m of [
+      "gestão de recursos humanos",
+      "recursos humanos",
+      "gestão de pessoas",
+      "departamento pessoal",
+      "consultoria financeira",
+      "direitos humanos",
+    ]) {
+      expect(match(m), m).toBeNull();
+    }
+  });
+
+  it("o plural só vale como pedido se estiver na lista", () => {
+    expect(match("chama os atendentes")).toBeNull();
+    const withPlural = { rules: [{ ...cfg.rules[0], conditions: [{ type: "keywords", values: ["atendente", "atendentes"] }] }] } as any;
+    expect(evaluateV2Rules(withPlural, { userMessage: "chama os atendentes", isFirstMessage: false, withinBusinessHours: true } as any, {} as any)?.id).toBe("human_request");
+  });
+
+  it("as demais regras seguem tolerando o plural da palavra-chave", () => {
+    const other = { rules: [{ id: "r-boleto", name: "Boleto", order: 0, conditions: [{ type: "keywords", values: ["boleto"] }], actions: [{ type: "set_theme", themeId: "t" }] }] } as any;
+    expect(evaluateV2Rules(other, { userMessage: "meus boletos", isFirstMessage: false, withinBusinessHours: true } as any, {} as any)?.id).toBe("r-boleto");
   });
 });
 

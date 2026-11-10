@@ -15,6 +15,7 @@ import {
 } from "@/lib/ai-v2/config";
 import { anthropicKeyFields, openaiKeyFields } from "@/services/ai-v2/agent-key";
 import { getLogger } from "@/lib/logger";
+import { agentVoiceKeyHint, saveAgentVoiceKey, voiceKeyFields } from "./voice";
 
 const log = getLogger("ai-v2.agents");
 
@@ -162,6 +163,9 @@ export type V2AgentDetail = {
   hasOwnOpenaiKey: boolean;
   openaiApiKeyHint: string | null;
   hasAnthropicKey: boolean;
+  /** Chave do provedor de voz cadastrada (só a dica dos 4 últimos volta). */
+  hasVoiceKey: boolean;
+  voiceApiKeyHint: string | null;
   anthropicApiKeyHint: string | null;
   createdAt: Date;
   updatedAt: Date;
@@ -218,6 +222,7 @@ export async function getV2Agent(id: string, organizationId: string): Promise<V2
   try {
     const publishedConfig = normalizeV2Config(row.simpleConfig);
     const draftConfig = row.draftConfig ? normalizeV2Config(row.draftConfig) : undefined;
+    const voiceKeyHint = await agentVoiceKeyHint(id, organizationId);
     const lastVersion = await (prisma as any).aIAgentConfigVersion.findFirst({
       where: { agentId: id },
       orderBy: { versionNumber: "desc" },
@@ -236,6 +241,8 @@ export async function getV2Agent(id: string, organizationId: string): Promise<V2
       openaiApiKeyHint: row.openaiApiKeyHint ?? null,
       hasAnthropicKey: Boolean(row.anthropicApiKeyEnc),
       anthropicApiKeyHint: row.anthropicApiKeyHint ?? null,
+      hasVoiceKey: voiceKeyHint !== null,
+      voiceApiKeyHint: voiceKeyHint,
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
       draftVersion: await currentDraftVersion(id),
@@ -315,7 +322,20 @@ export async function createV2Agent(organizationId: string, input: {
   });
 }
 
-export async function updateV2Agent(id: string, organizationId: string, input: { name?: string; active?: boolean; config?: unknown; openaiApiKey?: string | null; anthropicApiKey?: string | null }): Promise<{ id: string; config: V2AgentConfig }> {
+/**
+ * Ligar um agente cuja versão publicada não tem número escolhido: ele passa a
+ * atender as conversas novas de qualquer número sem agente próprio. Só liga
+ * com confirmação explícita.
+ */
+export class ActivationNeedsChannelError extends Error {
+  readonly code = "ACTIVATION_NEEDS_CHANNEL";
+  constructor() {
+    super("A versão publicada não tem número de WhatsApp escolhido: ligado assim, o agente atende as conversas novas de qualquer número que não tenha outro agente. Escolha o número e publique, ou confirme que é isso mesmo.");
+    this.name = "ActivationNeedsChannelError";
+  }
+}
+
+export async function updateV2Agent(id: string, organizationId: string, input: { name?: string; active?: boolean; config?: unknown; openaiApiKey?: string | null; anthropicApiKey?: string | null; voiceApiKey?: string | null; confirmAnyChannel?: boolean }): Promise<{ id: string; config: V2AgentConfig }> {
   let config: V2AgentConfig | undefined;
   if (input.config !== undefined) {
     const validated = validateV2Config(input.config);
@@ -325,9 +345,16 @@ export async function updateV2Agent(id: string, organizationId: string, input: {
 
   const agent = await (prisma as any).aIAgentConfig.findFirst({
     where: { id, organizationId, engine: "simple" },
-    select: { userId: true, simpleConfig: true },
+    select: { userId: true, simpleConfig: true, active: true },
   });
   if (!agent) throw new Error("Agente não encontrado.");
+
+  // Só na passagem de desligado para ligado: quem já está ligado segue como está.
+  if (input.active === true && agent.active === false && input.confirmAnyChannel !== true) {
+    const effective = (config ?? agent.simpleConfig) as { channelIds?: unknown } | null;
+    const channels = Array.isArray(effective?.channelIds) ? effective.channelIds.filter((c) => typeof c === "string" && c.length > 0) : [];
+    if (channels.length === 0) throw new ActivationNeedsChannelError();
+  }
 
   const data: Record<string, unknown> = {};
   if (input.active !== undefined) data.active = input.active;
@@ -349,6 +376,9 @@ export async function updateV2Agent(id: string, organizationId: string, input: {
     data.anthropicApiKeyHint = anthropicUpdate.anthropicApiKeyHint;
   }
 
+  // Chave do provedor de voz: validada antes de gravar qualquer coisa.
+  const voiceUpdate = voiceKeyFields(input.voiceApiKey);
+
   const row = await (prisma as any).$transaction(async (tx: any) => {
     if (input.name !== undefined && agent.userId) {
       await tx.user.update({ where: { id: agent.userId }, data: { name: input.name } });
@@ -358,6 +388,7 @@ export async function updateV2Agent(id: string, organizationId: string, input: {
       data,
     });
   });
+  if (voiceUpdate) await saveAgentVoiceKey(id, organizationId, voiceUpdate);
   return {
     id: row.id,
     config: config ?? normalizeV2Config(row.simpleConfig),
@@ -443,9 +474,9 @@ export async function publishV2AgentVersion(
       data: {
         simpleConfig: config as unknown as Record<string, unknown>,
         autonomyMode: mapV2AutonomyToPrisma(config.autonomyMode),
-        // Só a primeira publicação liga o agente. Antes toda publicação
-        // religava um agente que alguém tinha desligado de propósito.
-        ...(nextVersion === 1 ? { active: true } : {}),
+        // Publicar não liga nem desliga: ligar é decisão separada, na tela.
+        // A primeira publicação ligava o agente sozinha — sem número
+        // escolhido, ele assumia as conversas novas de todos os canais.
       },
     });
 

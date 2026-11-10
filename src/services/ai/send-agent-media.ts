@@ -40,11 +40,53 @@ function mimeFromName(name: string | null, fallback: string | null): string {
   return fallback || "application/octet-stream";
 }
 
-/** Anexos que não saíram e por quê. */
-export type MediaSendReport = { otherOrg: string[]; alreadySent: string[] };
+/** Anexos que não saíram e por quê. `blocked`: trava do envio (a mesma do texto). */
+export type MediaSendReport = { otherOrg: string[]; alreadySent: string[]; blocked?: string };
+
+const BLOCKED_REASON: Record<string, string> = {
+  phone_allowlist: "o número do cliente está fora da lista de teste",
+  phone_allowlist_error: "não foi possível conferir a lista de teste",
+  channel_not_connected: "o canal da conversa não está conectado",
+  unassigned: "a conversa não está mais com o agente",
+  assignee_changed: "a conversa passou para outra pessoa",
+  assignee_not_ai: "a conversa passou para uma pessoa",
+};
+
+/**
+ * Travas do envio de texto do agente, aplicadas ao anexo: lista de teste,
+ * canal conectado e a conversa ainda ser do agente. Sem elas o arquivo saía
+ * depois de uma pessoa assumir, ou para um número fora do teste.
+ */
+async function mediaSendBlockedReason(args: { conversationId: string; contactId: string; agentUserId: string }): Promise<string | null> {
+  try {
+    const { isContactAllowedForAi } = await import("@/services/ai/phone-allowlist");
+    if (!(await isContactAllowedForAi(args.contactId))) return "phone_allowlist";
+  } catch {
+    return "phone_allowlist_error";
+  }
+  const { assertAiStillAuthorized } = await import("@/services/ai/send-agent-message");
+  const auth = await assertAiStillAuthorized({ conversationId: args.conversationId, expectedAgentUserId: args.agentUserId });
+  return auth.ok ? null : auth.reason;
+}
+
+/** Espera o worker tirar a mensagem de "pending". `true` = saiu (ou não deu para saber no prazo). */
+async function waitUntilLeftPending(messageId: string, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 400));
+    const row = await prisma.message.findUnique({ where: { id: messageId }, select: { sendStatus: true } }).catch(() => null);
+    const status = (row?.sendStatus ?? "").toLowerCase();
+    if (status === "failed") return false;
+    if (status && status !== "pending") return true;
+  }
+  return true;
+}
 
 /** Linha do rastro para anexos que não saíram, com o motivo real. */
 export function mediaNotSentTrace(what: string, report: MediaSendReport | undefined): string {
+  if (report?.blocked) {
+    return `${what} não enviados: ${BLOCKED_REASON[report.blocked] ?? report.blocked}`;
+  }
   if (report?.otherOrg.length) {
     return `${what} não enviados: o arquivo está guardado em outra organização e não existe aqui (${report.otherOrg.join(", ")}) — anexe o arquivo de novo`;
   }
@@ -58,13 +100,19 @@ export async function sendAgentFollowUpMedia(args: {
   conversationId: string;
   contactId: string;
   agentUserId: string;
-  attachments: AgentFaqMedia[];
+  /** `caption`: texto que vai na legenda (imagem e vídeo) e fica como conteúdo da mensagem. */
+  attachments: Array<AgentFaqMedia & { caption?: string; voiceOnly?: boolean }>;
   /** Conta repetição só a partir daqui (ex.: último #reset do teste). */
   since?: Date;
   /** Reenvio a pedido do cliente: ignora a trava de repetição. */
   ignoreRecent?: boolean;
   /** Por que um anexo não saiu (o rastro do turno mostra o motivo real). */
   report?: (r: MediaSendReport) => void;
+  /**
+   * Espera cada arquivo sair (ou falhar) antes de voltar, até este prazo.
+   * Para quando uma mensagem de texto precisa chegar depois do arquivo.
+   */
+  waitForSendMs?: number;
 }): Promise<number> {
   const orgId = getOrgIdOrThrow();
   const nameOf = (att: AgentFaqMedia) => att.name?.trim() || "arquivo";
@@ -94,6 +142,12 @@ export async function sendAgentFollowUpMedia(args: {
   args.report?.({ otherOrg, alreadySent: allowed.filter((a) => sent.has(a.url)).map(nameOf) });
   if (pending.length === 0) return 0;
 
+  const blocked = await mediaSendBlockedReason(args);
+  if (blocked) {
+    args.report?.({ otherOrg, alreadySent: [], blocked });
+    return 0;
+  }
+
   const conv = await prisma.conversation.findUnique({
     where: { id: args.conversationId },
     select: {
@@ -102,10 +156,14 @@ export async function sendAgentFollowUpMedia(args: {
       channel: true,
       channelId: true,
       waJid: true,
-      channelRef: { select: { id: true, config: true, provider: true } },
+      channelRef: { select: { id: true, config: true, provider: true, status: true } },
     },
   });
   if (!conv) return 0;
+  if (conv.channelRef?.status && conv.channelRef.status !== "CONNECTED") {
+    args.report?.({ otherOrg, alreadySent: [], blocked: "channel_not_connected" });
+    return 0;
+  }
   // Webchat: anexo do agente não sai (nem pela Meta, nem pelo widget) —
   // pela conversa ou pelo canal (ticket sem canal ligado também conta).
   if (isWebchatConversation(conv)) return 0;
@@ -117,7 +175,8 @@ export async function sendAgentFollowUpMedia(args: {
     const mime = mimeFromName(att.name, att.mimeType);
     const kind = kindFromMime(mime);
     const fileName = att.name?.trim() || "tutorial";
-    const displayContent = `📎 ${fileName}`;
+    const caption = att.caption?.trim() ?? "";
+    const displayContent = caption || `📎 ${fileName}`;
 
     const msgRow = await prisma.message.create({
       data: withOrgFromCtx({
@@ -166,7 +225,7 @@ export async function sendAgentFollowUpMedia(args: {
         messageId: msgRow.id,
         mediaUrl: att.url,
         messageType: kind,
-        caption: undefined,
+        caption: caption || undefined,
         waJid: conv.waJid,
         mime,
         originalName: fileName,
@@ -210,9 +269,10 @@ export async function sendAgentFollowUpMedia(args: {
       organizationId: conv.organizationId,
       originalName: fileName,
       mime,
-      caption: "",
+      caption,
       kind,
       ...(mediaId ? { mediaId } : {}),
+      ...(kind === "audio" && att.voiceOnly ? { voiceOnly: true } : {}),
     };
     // No rastro do turno: se mesmo assim a entrega falhar com "Arquivo não
     // encontrado no storage", o worker de WhatsApp está na versão antiga.
@@ -240,6 +300,7 @@ export async function sendAgentFollowUpMedia(args: {
       void noteMessageRowChange(msgRow, "upd");
       continue;
     }
+    if (args.waitForSendMs && args.waitForSendMs > 0 && !(await waitUntilLeftPending(msgRow.id, args.waitForSendMs))) continue;
     sentCount += 1;
   }
 

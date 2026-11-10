@@ -17,6 +17,8 @@ import {
   type RetrievedMessageModel,
 } from "@/services/ai/message-models-retrieval";
 
+import { pickPolicyPrice } from "./product-card";
+
 function normalizeSearch(s: string | null | undefined): string {
   if (!s) return "";
   return s
@@ -51,6 +53,12 @@ export async function searchV2Products(args: {
   type?: "PRODUCT" | "SERVICE";
   allowedIds?: string[];
   limit?: number;
+  /**
+   * Opção de preço (canal) que o agente usa. Com ela, `price` é o valor
+   * dessa opção já com o desconto — o mesmo do cartão do produto — e o de
+   * tabela vai em `listPrice`. Sem ela, nada muda.
+   */
+  priceChannel?: string;
 }): Promise<{
   query: string;
   total: number;
@@ -62,6 +70,9 @@ export async function searchV2Products(args: {
     unit: string | null;
     price: number | null;
     priceFormatted: string | null;
+    listPrice?: number;
+    listPriceFormatted?: string;
+    discountPercent?: number;
     description: string | null;
     customFields: Array<{ name: string; label: string; value: string }>;
   }>;
@@ -78,6 +89,7 @@ export async function searchV2Products(args: {
   if (args.type) where.type = args.type;
   if (allowedIds) where.id = { in: allowedIds };
 
+  const priceChannel = args.priceChannel?.trim() || "";
   const candidates = await prisma.product.findMany({
     where,
     orderBy: { name: "asc" },
@@ -87,6 +99,7 @@ export async function searchV2Products(args: {
           customField: { select: { id: true, name: true, label: true, type: true } },
         },
       },
+      ...(priceChannel ? { courseConfig: { select: { pricingOptions: true } } } : {}),
     },
   });
 
@@ -114,23 +127,32 @@ export async function searchV2Products(args: {
   return {
     query: term,
     total: scored.length,
-    products: scored.map(({ product: p }) => ({
-      id: p.id,
-      name: p.name,
-      sku: p.sku,
-      type: p.type,
-      unit: p.unit,
-      price: p.price ? Number(p.price) : null,
-      priceFormatted: p.price ? fmtBRL.format(Number(p.price)) : null,
-      description: p.description,
-      customFields: p.customValues
-        .filter((v) => v.value && v.value.trim())
-        .map((v) => ({
-          name: v.customField.name,
-          label: v.customField.label,
-          value: v.value,
-        })),
-    })),
+    products: scored.map(({ product: p }) => {
+      const base = p.price ? Number(p.price) : null;
+      const options = (p as { courseConfig?: { pricingOptions?: unknown } | null }).courseConfig?.pricingOptions;
+      const picked = priceChannel && base !== null ? pickPolicyPrice(base, options, priceChannel) : null;
+      const final = picked ? Math.round(picked.unitPrice * (1 - picked.discount / 100) * 100) / 100 : base;
+      return {
+        id: p.id,
+        name: p.name,
+        sku: p.sku,
+        type: p.type,
+        unit: p.unit,
+        price: final,
+        priceFormatted: final !== null ? fmtBRL.format(final) : null,
+        ...(picked && picked.discount > 0
+          ? { listPrice: picked.unitPrice, listPriceFormatted: fmtBRL.format(picked.unitPrice), discountPercent: picked.discount }
+          : {}),
+        description: p.description,
+        customFields: p.customValues
+          .filter((v) => v.value && v.value.trim())
+          .map((v) => ({
+            name: v.customField.name,
+            label: v.customField.label,
+            value: v.value,
+          })),
+      };
+    }),
   };
 }
 

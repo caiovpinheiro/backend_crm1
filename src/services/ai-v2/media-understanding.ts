@@ -43,6 +43,9 @@ export function isBareFileName(text: string | null | undefined): boolean {
   return /^[^\s\\/]{1,160}\.(?:pdf|docx?|xlsx?|csv|tsv|txt|md|jpe?g|png|webp|heic)$/i.test((text ?? "").trim());
 }
 
+/** Marca do áudio do cliente no texto do turno (o motor sabe por ela que o cliente falou). */
+export const CLIENT_AUDIO_MARK = "[Áudio do cliente, transcrito]";
+
 /**
  * Como o conteúdo entra no texto do cliente. O mesmo formato no turno e no
  * histórico: o motor tira do histórico as bolhas que já estão no turno
@@ -50,7 +53,7 @@ export function isBareFileName(text: string | null | undefined): boolean {
  */
 export function mediaTextLine(kind: UnderstoodKind, text: string, caption?: string | null): string {
   const cap = caption && !isMediaPlaceholderText(caption) ? caption.trim() : "";
-  if (kind === "audio") return `[Áudio do cliente, transcrito]: ${text}`;
+  if (kind === "audio") return `${CLIENT_AUDIO_MARK}: ${text}`;
   if (kind === "document") {
     const label = !cap ? "" : isBareFileName(cap) ? ` ("${cap}")` : `, com a legenda "${cap}"`;
     return `[Documento enviado pelo cliente${label}]: ${text}`;

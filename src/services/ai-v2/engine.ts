@@ -19,11 +19,14 @@ import { themeTextForSelection, themeThresholds as themeThresholdsOf, agentAsked
 import { tryGetAgentApiKey } from "@/services/ai/agent-key";
 import { detectV2MediaKinds, evaluateV2Media } from "./media";
 import { enrichTurnWithMedia } from "./media-turn";
+import { CLIENT_AUDIO_MARK } from "./media-understanding";
+import { startOfPeriod } from "./cost-guard";
+import { applyVoiceConsent, decideVoice, deliverVoiceReply, traceVoiceSkipped, tryGetAgentVoiceKey, voiceCharsSince, voiceCompanionText, voiceConfigured, voicePromptSection } from "./voice";
 import { isMediaPlaceholderText } from "@/lib/ai-agents/media-placeholder";
 import { clientWordsOnly, getMediaTexts, isBareFileName, mediaTextLine, understoodKindOf } from "./media-understanding";
 import { callV2LLM } from "./llm";
 import { themePromptText } from "./theme-prompt";
-import { actionValueAllowed, allowedActionTypes, allowedFlowIdsFor, allowedMessageModelIdsFor, humanRequestSubject, mentionsHumanRequest, normalizeAskOptions } from "./action-policy";
+import { actionValueAllowed, allowedActionTypes, allowedFlowIdsFor, allowedMessageModelIdsFor, humanRequestSubject, mentionsHumanRequest, normalizeAskOptions, productAllowedByPolicy } from "./action-policy";
 
 export { mentionsHumanRequest };
 import { guardV2Output } from "./output-guard";
@@ -1431,6 +1434,17 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       return replyAndWait(kindCfg.notUnderstoodMessage || MEDIA_NOT_UNDERSTOOD_DEFAULT[media.kind], "media not understood");
     }
   }
+  // Resposta por áudio: o cliente falou neste turno? (dispensa a permissão)
+  const clientAudioThisTurn = input.userMessage.includes(CLIENT_AUDIO_MARK);
+  if (clientAudioThisTurn) counters.voiceClientAudio = true;
+  const voiceKeyPresent = voiceConfigured(config) ? !!(await tryGetAgentVoiceKey(resolved!.agentConfigId)) : false;
+  const voiceSection = voicePromptSection({
+    config,
+    counters,
+    clientAudioThisTurn,
+    autonomous: config.autonomyMode === "auto",
+    hasKey: voiceKeyPresent,
+  });
   if (media && media.action === "handoff") {
     noteV2Fact("handoffCause", "media", { keepFirst: true });
     const mediaDestinationPlanned = resolveHandoffDestination(config, config.handoff.defaultDestination, counters, resolved!.agentConfigId);
@@ -1989,7 +2003,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     // `onboardingActive` ficava true sem LLM e todo turno virava handoff.
     if (step) {
       onboardingActive = true;
-      const llmForStep = await callLLMWithTheme(config, context, input, resolved, themeId, collectedVariables, rule, owner, stage, false, priorSummary, transparentTransfer);
+      const llmForStep = await callLLMWithTheme(config, context, input, resolved, themeId, collectedVariables, rule, owner, stage, false, priorSummary, transparentTransfer, voiceSection);
       llmOutput = llmForStep.llmOutput;
       prompt = llmForStep.prompt;
       inputTokens = llmForStep.inputTokens;
@@ -2118,7 +2132,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
         actions: [],
       };
     } else {
-      const llmResult = await callLLMWithTheme(config, context, input, resolved, themeId, collectedVariables, rule, owner, stage, humanRequestWithSubject, priorSummary, transparentTransfer);
+      const llmResult = await callLLMWithTheme(config, context, input, resolved, themeId, collectedVariables, rule, owner, stage, humanRequestWithSubject, priorSummary, transparentTransfer, voiceSection);
       llmOutput = llmResult.llmOutput;
       prompt = llmResult.prompt;
       inputTokens = llmResult.inputTokens;
@@ -2227,6 +2241,8 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
 
   // Memória: o que o LLM coletou neste turno fica para os próximos.
   Object.assign(collectedVariables, llmOutput.collected ?? {});
+  // Áudio: o "sim" só vale se a pergunta de permissão foi feita; o "não", sempre.
+  applyVoiceConsent(counters, llmOutput.voiceConsent);
 
   // Ações permitidas. Sem assunto ativo valem as ferramentas habilitadas na
   // config (antes só handoff/close/tema/variável passavam e até o
@@ -2263,6 +2279,11 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       continue;
     }
     if (a.type === "send_whatsapp_flow" && !allowedFlowIds.includes(String((a as { flowId?: unknown }).flowId ?? ""))) {
+      discardedActions.push(a);
+      continue;
+    }
+    // Cartão de produto fora da lista liberada no catálogo do agente.
+    if (a.type === "send_product" && !productAllowedByPolicy(config, String((a as { productId?: unknown }).productId ?? ""))) {
       discardedActions.push(a);
       continue;
     }
@@ -2739,8 +2760,62 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     replyText = intro;
   }
 
+  // Resposta por áudio: outro jeito de entregar a mesma resposta, já
+  // conferida. Qualquer impedimento (permissão, limite, falha do provedor ou
+  // da conversão) deixa a resposta seguir em texto, logo abaixo.
+  let voiceDelivered = false;
+  const wantsVoice = clientAudioThisTurn || llmOutput.voice === true;
+  if (wantsVoice && voiceConfigured(config) && !anyHandoff && !anyClose && replyText.trim() && !humanTookOver && !stopLimits.blocksReply) {
+    const cap = config.voice?.dailyCharCap ?? 0;
+    const charsToday = cap > 0
+      ? await voiceCharsSince(resolved!.agentConfigId, startOfPeriod("day", config.businessHours?.timezone || "America/Sao_Paulo"))
+      : 0;
+    const decision = decideVoice({
+      config,
+      counters,
+      modelWantsVoice: llmOutput.voice === true,
+      clientAudioThisTurn,
+      autonomous: config.autonomyMode === "auto",
+      hasKey: voiceKeyPresent,
+      replyText,
+      hasOptions: replyOptions.length > 0,
+      charsToday,
+    });
+    if (decision.action === "ask") {
+      // A resposta e o material ficam para depois do "sim" do cliente.
+      counters.voiceAsked = true;
+      replyText = decision.question;
+      outboundActions = [];
+      traceStep("voz", "O cliente ainda não autorizou áudio → o agente pergunta antes; a resposta fica para depois do sim");
+    } else if (decision.action === "speak" && (await ownsTurn())) {
+      const voiceRes = await deliverVoiceReply({
+        organizationId: orgId,
+        agentId: resolved!.agentConfigId,
+        agentUserId: resolved!.userId,
+        conversationId: input.conversationId,
+        contactId: contactId!,
+        config,
+        spoken: decision.spoken,
+      });
+      if (voiceRes.sent) {
+        voiceDelivered = true;
+        counters.voiceCount = (counters.voiceCount ?? 0) + 1;
+        // Sempre uma linha escrita junto: o que tem número ou link, ou a linha padrão.
+        const companion = voiceCompanionText(config, replyText);
+        const line = await sendReply(companion, undefined, { bypassDuplicateGuard: true });
+        sentReply = [`[Áudio] ${decision.spoken}`, line.sent ? companion : ""].filter(Boolean).join("\n\n");
+        noteV2Fact("send", { sent: true, reason: null });
+        traceStep("voz", `Resposta enviada por áudio (${decision.spoken.length} caracteres falados)${line.sent ? " + linha escrita" : ""}`);
+      } else {
+        traceVoiceSkipped(voiceRes.reason ?? "o áudio não saiu");
+      }
+    } else if (decision.action === "none") {
+      traceVoiceSkipped(decision.reason);
+    }
+  }
+
   // Envia reply se houver e não for handoff/close
-  if (!anyHandoff && !anyClose && replyText.trim()) {
+  if (!voiceDelivered && !anyHandoff && !anyClose && replyText.trim()) {
     const withOptions = replyOptions.length > 0 ? buildV2Interactive(replyText, replyOptions, optionTexts) : null;
     const outText = withOptions ? withOptions.fallbackText : replyText;
     // A saudação é conferida de novo depois do "digitando…".
@@ -3119,6 +3194,7 @@ async function callLLMWithTheme(
   humanRequestWithQuestion = false,
   priorSummary: Awaited<ReturnType<typeof loadPriorV2Summary>> = null,
   transparentTransfer = false,
+  voiceSection = "",
 ): Promise<{
   llmOutput?: V2LLMOutput;
   prompt: string;
@@ -3198,6 +3274,7 @@ async function callLLMWithTheme(
       previousMessages,
       humanRequestWithQuestion,
       transparentTransfer,
+      voiceSection,
     });
     return {
       llmOutput: result.output,

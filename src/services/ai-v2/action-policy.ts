@@ -66,6 +66,18 @@ export function repairMessageModelId(id: string, allowed: string[]): string {
   return near.length === 1 ? near[0] : id;
 }
 
+/** O agente pode enviar o cartão do produto: catálogo ligado e envio do cartão ligado. */
+export function productCardEnabled(config: V2AgentConfig): boolean {
+  return config.productPolicy?.enabled === true && config.productPolicy.sendCard === true;
+}
+
+/** Produto dentro da lista liberada do catálogo. Lista vazia = todos os ativos. */
+export function productAllowedByPolicy(config: V2AgentConfig, productId: string): boolean {
+  if (!productId) return false;
+  const ids = config.productPolicy?.allowedProductIds ?? [];
+  return ids.length === 0 || ids.includes(productId);
+}
+
 /** Ações que o modelo pode devolver em `actions` (handoff é tratado à parte). */
 export function allowedActionTypes(config: V2AgentConfig, theme: Theme): Set<string> {
   const restriction = themeToolRestriction(theme);
@@ -79,6 +91,8 @@ export function allowedActionTypes(config: V2AgentConfig, theme: Theme): Set<str
   // uma mensagem pronta vale mesmo que o assunto não liste a ação.
   if (allowedMessageModelIdsFor(config, theme).length > 0) allowed.add("send_message_model");
   if (allowedFlowIdsFor(config).length > 0) allowed.add("send_whatsapp_flow");
+  // Cartão de produto: catálogo ligado + envio do cartão ligado.
+  if (productCardEnabled(config)) allowed.add("send_product");
   if (writableFieldsForGuide(config).length > 0) allowed.add("update_field");
   // Anexo de material: só chega aqui o que veio dos materiais liberados e
   // lidos no turno (o motor monta a ação; o modelo não a devolve em actions).
@@ -159,6 +173,9 @@ export function actionsGuide(allowed: Set<string>, options: { tags: string[]; st
   if (allowed.has("update_field") && (options.fields?.length ?? 0) > 0) {
     const list = options.fields!.map((f) => `${f.entity === "deal" ? "negócio" : "contato"} ${f.key} (${f.label})`).join("; ");
     lines.push(`- Gravar um campo: {"type":"update_field","entity":"deal ou contact","field":"<chave>","value":"texto"}. Só estes: ${list}. A chave é o nome do campo, não o rótulo. Use quando as instruções pedirem ou o cliente informar esse dado.`);
+  }
+  if (allowed.has("send_product")) {
+    lines.push('- Enviar o cartão de um produto (a imagem e o texto cadastrados): {"type":"send_product","productId":"<id>"}. O id é o que search_products devolveu neste turno; um produto por vez. O cartão chega depois da sua reply: a reply apresenta em uma frase curta, sem repetir o que o cartão traz. Use quando o cliente pedir para ver o produto ou quando apresentá-lo ajudar a decidir; não reenvie o mesmo cartão sem o cliente pedir.');
   }
   if (allowed.has("add_note")) {
     lines.push('- Anotação interna: {"type":"add_note","content":"resumo do que o cliente informou"}. O cliente não vê.');
