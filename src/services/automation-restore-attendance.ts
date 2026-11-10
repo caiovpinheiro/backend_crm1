@@ -2,11 +2,15 @@
  * Execução do passo "Devolver atendimento" (`restore_attendance`).
  * Regras puras em `lib/restore-attendance.ts`.
  *
- * Agente: dono do contato, dos negócios abertos e das conversas do contato
- * (mesma cascata do "Atribuir responsável" → Contato). Departamento: só a
- * conversa alvo. Conversa encerrada sem `reopen`: grava na conversa
- * encerrada — o próximo ticket herda responsável e departamento dela
- * (`reopenResolvedAsNewTicket`).
+ * Agente devolvido: dono do contato, dos negócios abertos e das conversas do
+ * contato (mesma cascata do "Atribuir responsável" → Contato). Agente
+ * removido: só o responsável da conversa alvo — negócio e contato ficam com
+ * o dono que têm. "Voltar ao anterior" sem humano no histórico (ninguém ou
+ * IA) usa o dono humano do negócio: é o vendedor que "Só a conversa" mantém
+ * no negócio enquanto outro departamento atende.
+ * Departamento: só a conversa alvo. Conversa encerrada sem `reopen`: grava
+ * na conversa encerrada — o próximo ticket herda responsável e departamento
+ * dela (`reopenResolvedAsNewTicket`).
  */
 
 import { prisma } from "@/lib/prisma";
@@ -19,6 +23,7 @@ import {
 } from "@/lib/restore-attendance";
 import { logConversationDepartmentChange } from "@/services/conversation-department-event";
 import { logConversationAssigneeChanges, propagateOwnerToContactAndChat } from "@/services/deals";
+import { assignConversationOnly } from "@/services/distribution/deal-owner-scope";
 import { ASSIGN_OWNER_VIA } from "@/services/distribution/mode";
 import { publishConversationTimelineUpdated } from "@/lib/realtime-events";
 
@@ -54,6 +59,27 @@ async function usableHuman(userId: string | null | undefined): Promise<string | 
   return user.id;
 }
 
+/**
+ * Dono humano do negócio do contato: um aberto primeiro; sem aberto, o mais
+ * recente em qualquer status (o Acadêmico atende negócio já ganho).
+ */
+async function humanDealOwner(contactId: string | null): Promise<string | null> {
+  if (!contactId) return null;
+  const humanOwner = { ownerId: { not: null }, owner: { type: "HUMAN" as const, isErased: false } };
+  const open = await prisma.deal.findFirst({
+    where: { contactId, status: "OPEN", ...humanOwner },
+    orderBy: { updatedAt: "desc" },
+    select: { ownerId: true },
+  });
+  if (open?.ownerId) return open.ownerId;
+  const any = await prisma.deal.findFirst({
+    where: { contactId, ...humanOwner },
+    orderBy: { updatedAt: "desc" },
+    select: { ownerId: true },
+  });
+  return any?.ownerId ?? null;
+}
+
 async function usableDepartment(departmentId: string | null | undefined): Promise<string | null | undefined> {
   if (departmentId === undefined || departmentId === null) return departmentId;
   const dept = await prisma.department.findFirst({ where: { id: departmentId }, select: { id: true } });
@@ -81,7 +107,12 @@ async function setAgent(
   conv: { id: string; contactId: string | null },
   userId: string | null,
 ): Promise<void> {
-  const via = userId ? ASSIGN_OWNER_VIA : null;
+  // Remover: só a conversa. Negócio e contato continuam com o dono que têm.
+  if (userId === null) {
+    await assignConversationOnly({ conversationId: conv.id, userId: null });
+    return;
+  }
+  const via = ASSIGN_OWNER_VIA;
   if (conv.contactId) {
     const contactId = conv.contactId;
     const changes = await prisma.$transaction(async (tx) => {
@@ -139,11 +170,24 @@ export async function runRestoreAttendance(input: RestoreAttendanceInput): Promi
     });
   }
 
-  const agent = resolveRestoreTarget(cfg.agentMode, await usableHuman(previous.userId), cfg.notFound);
+  // Histórico sem humano antes (ninguém, IA ou usuário removido): o anterior é
+  // o dono humano do negócio — o vendedor que "Só a conversa" mantém nele.
+  let previousUser = await usableHuman(previous.userId);
+  let agentFromDealOwner = false;
+  if (cfg.agentMode === "previous" && !previousUser) {
+    const owner = await usableHuman(await humanDealOwner(conv.contactId));
+    if (owner) {
+      previousUser = owner;
+      agentFromDealOwner = true;
+    }
+  }
+
+  const agent = resolveRestoreTarget(cfg.agentMode, previousUser, cfg.notFound);
   const dept = resolveRestoreTarget(cfg.departmentMode, await usableDepartment(previous.departmentId), cfg.notFound);
 
   const notes: string[] = [];
-  if (cfg.agentMode === "previous" && previous.userId === undefined) notes.push("agente anterior não encontrado");
+  if (agentFromDealOwner) notes.push("agente = dono do negócio");
+  else if (cfg.agentMode === "previous" && previous.userId === undefined) notes.push("agente anterior não encontrado");
   if (cfg.departmentMode === "previous" && previous.departmentId === undefined) {
     notes.push("departamento anterior não encontrado");
   }
