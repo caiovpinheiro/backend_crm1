@@ -66,16 +66,19 @@ export async function GET(request: Request) {
       });
     }
 
+    // Árvores exibidas: admin / sem membership vê a org. A exigência vem só
+    // dos departamentos do próprio agente (mesma regra do encerramento).
+    const agentDepartments = await listDepartmentsForUser(userId!);
     let departments =
       isAdmin(session) || isSuperAdmin(session)
         ? await listOrgDepartments()
-        : await listDepartmentsForUser(userId!);
+        : agentDepartments;
     if (departments.length === 0) {
       departments = await listOrgDepartments();
     }
     const groups = await getTreesForDepartments(departments);
-    const requireTabulationOnClose = groups.some(
-      (g) => g.requireTabulationOnClose,
+    const requireTabulationOnClose = agentDepartments.some(
+      (d) => d.requireTabulationOnClose,
     );
     return NextResponse.json({
       departmentId: null,
