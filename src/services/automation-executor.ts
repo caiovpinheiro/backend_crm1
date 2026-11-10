@@ -2923,6 +2923,7 @@ export async function executeStep(
           stepId: stepId ?? null,
           occurrence,
           keepDealOwner,
+          explicitStepMode: blockMode === "leads",
         });
 
         // Avanço da occurrence: persistido DEPOIS do engine. Morte entre o
@@ -2993,6 +2994,8 @@ export async function executeStep(
         // departamento. Vale para departamento novo também.
         allowOrgWideFallback: false,
         keepDealOwner,
+        // Modo escolhido no passo: independente da aba Distribuição.
+        explicitStepMode: blockMode === "smart",
       });
 
       if (result.success) {
