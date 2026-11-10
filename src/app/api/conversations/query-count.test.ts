@@ -752,7 +752,7 @@ describe("GET /api/conversations/:id/messages — autorização negativa", () =>
     await expectDenied(CONV.others);
   });
 
-  it("funil bloqueado: nem o responsável nem o dono do negócio abrem", async () => {
+  it("etapa bloqueada: o responsável abre a própria conversa; o dono do negócio não", async () => {
     setup("member", {
       mutate: (db) => {
         db.insert("roleStageGrant", {
@@ -768,7 +768,8 @@ describe("GET /api/conversations/:id/messages — autorização negativa", () =>
         });
       },
     });
-    await expectDenied(CONV.mine);
+    const res = await openConversation(CONV.mine);
+    expect(res.status).toBe(200);
     await expectDenied(CONV.dealOwner);
   });
 
