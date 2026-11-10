@@ -43,17 +43,41 @@ export function funnelDealWhere(ctx: AuthzContext): Prisma.DealWhereInput | null
 /**
  * Conversa some quando o contato só tem negócios em funil/etapa bloqueados.
  * Contato sem negócio continua visível (não está preso a uma etapa).
+ * Conversa ATRIBUÍDA ao próprio usuário ignora o bloqueio de ETAPA: quem
+ * recebeu a conversa (distribuição, transferência, automação) precisa
+ * atendê-la, seja qual for a etapa do negócio. Funil bloqueado inteiro
+ * continua escondendo — inclusive do responsável. O negócio em si segue sob
+ * o bloqueio de etapa.
  */
 export function conversationFunnelWhere(
   ctx: AuthzContext,
 ): Prisma.ConversationWhereInput | null {
+  const scope = funnelScopeOf(ctx);
   const dealWhere = funnelDealWhere(ctx);
-  if (!dealWhere) return null;
+  if (!scope || !dealWhere) return null;
+  const noDeals: Prisma.ConversationWhereInput = { contact: { deals: { none: {} } } };
+  const assignedToMe: Prisma.ConversationWhereInput =
+    scope.denyPipelineIds.length > 0
+      ? {
+          AND: [
+            { assignedToId: ctx.userId },
+            {
+              OR: [
+                noDeals,
+                {
+                  contact: {
+                    deals: {
+                      some: { stage: { is: { pipelineId: { notIn: scope.denyPipelineIds } } } },
+                    },
+                  },
+                },
+              ],
+            },
+          ],
+        }
+      : { assignedToId: ctx.userId };
   return {
-    OR: [
-      { contact: { deals: { none: {} } } },
-      { contact: { deals: { some: dealWhere } } },
-    ],
+    OR: [assignedToMe, noDeals, { contact: { deals: { some: dealWhere } } }],
   };
 }
 
@@ -97,6 +121,8 @@ export async function filterDealIdsByFunnel(
 
 /**
  * true quando a conversa está presa só a negócios de funil/etapa bloqueados.
+ * Conversa atribuída ao próprio usuário só fica bloqueada por funil inteiro,
+ * não por etapa (mesma regra de `conversationFunnelWhere`).
  * Usa prismaBase: o stream SSE não abre RequestContext.
  */
 export async function conversationBlockedByFunnel(
@@ -108,6 +134,7 @@ export async function conversationBlockedByFunnel(
   const conv = await prismaBase.conversation.findFirst({
     where: { id: conversationId, organizationId },
     select: {
+      assignedToId: true,
       contact: {
         select: {
           deals: {
@@ -119,6 +146,9 @@ export async function conversationBlockedByFunnel(
   });
   const deals = conv?.contact?.deals ?? [];
   if (deals.length === 0) return false;
+  if (conv?.assignedToId && conv.assignedToId === ctx.userId) {
+    return !deals.some((d) => canViewPipeline(ctx, d.stage.pipelineId));
+  }
   return !deals.some(
     (d) => canViewStage(ctx, d.stageId) && canViewPipeline(ctx, d.stage.pipelineId),
   );

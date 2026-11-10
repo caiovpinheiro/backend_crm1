@@ -311,8 +311,9 @@ const ESPERADO: Record<string, Record<FixtureUserKey, string>> = {
     manager: "mine:sim others:sim queue:sim resolved:sim dealOwner:sim foreign:NÃO missing:NÃO",
     admin: "mine:sim others:sim queue:sim resolved:sim dealOwner:sim foreign:NÃO missing:NÃO",
   },
+  // Conversa atribuída a ele ignora o bloqueio de etapa (só funil inteiro esconde).
   "etapa st_1 bloqueada para o papel do operador (conversa própria presa nela)": {
-    member: "mine:NÃO others:NÃO queue:NÃO resolved:NÃO dealOwner:sim foreign:NÃO missing:NÃO",
+    member: "mine:sim others:NÃO queue:NÃO resolved:sim dealOwner:sim foreign:NÃO missing:NÃO",
     other: "mine:NÃO others:sim queue:NÃO resolved:NÃO dealOwner:sim foreign:NÃO missing:NÃO",
     manager: "mine:sim others:sim queue:sim resolved:sim dealOwner:sim foreign:NÃO missing:NÃO",
     admin: "mine:sim others:sim queue:sim resolved:sim dealOwner:sim foreign:NÃO missing:NÃO",
