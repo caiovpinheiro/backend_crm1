@@ -239,7 +239,7 @@ function normalize(s: string): string {
  * artigo disparava a regra "Pedido de humano" — o turno virava handoff sem
  * chamar o LLM e o cliente ficava sem resposta.
  */
-function containsKeywords(text: string, keywords: string[]): boolean {
+function containsKeywords(text: string, keywords: string[], exactWords = false): boolean {
   const words = normalize(text).split(/\s+/).filter(Boolean);
   const joined = ` ${words.join(" ")} `;
   return keywords.some((kw) => {
@@ -247,7 +247,7 @@ function containsKeywords(text: string, keywords: string[]): boolean {
     if (kwWords.length === 0) return false;
     if (kwWords.length > 1) return joined.includes(` ${kwWords.join(" ")} `);
     const nk = kwWords[0];
-    return words.some((w) => w === nk || (w.startsWith(nk) && w.length - nk.length <= 3));
+    return words.some((w) => w === nk || (!exactWords && w.startsWith(nk) && w.length - nk.length <= 3));
   });
 }
 
@@ -286,7 +286,7 @@ function evaluateCondition(
       result = condition.values?.includes(input.messageType ?? "text") ?? false;
       break;
     case "keywords":
-      result = containsKeywords(input.userMessage, condition.values ?? []);
+      result = containsKeywords(input.userMessage, condition.values ?? [], condition.exactWords === true);
       break;
     case "first_message":
       result = input.isFirstMessage;
@@ -351,6 +351,10 @@ export const HUMAN_REQUEST_SHORT_MESSAGE_WORDS = 4;
  * frase ("a atendente disse que o prazo era outro") ela não é pedido: a
  * regra transferia sem chamar o modelo. Ali valem as frases; o resto o
  * modelo decide.
+ *
+ * Aqui a palavra solta casa só inteira. Com a tolerância de plural das
+ * demais regras, um nome que termina numa dessas palavras no plural
+ * (área, produto, serviço) virava pedido de pessoa e transferia sem resposta.
  */
 function withHumanRequestTerms(rule: V2Rule, config: V2AgentConfig, userMessage: string): V2Rule {
   if (!isHumanRequestRule(rule, config)) return rule;
@@ -361,7 +365,7 @@ function withHumanRequestTerms(rule: V2Rule, config: V2AgentConfig, userMessage:
     ...rule,
     conditions: rule.conditions.map((c) =>
       c.type === "keywords"
-        ? { ...c, values: [...new Set([...(c.values ?? []), ...terms])].filter((v) => short || wordCount(v) > 1) }
+        ? { ...c, exactWords: true, values: [...new Set([...(c.values ?? []), ...terms])].filter((v) => short || wordCount(v) > 1) }
         : c,
     ),
   };
