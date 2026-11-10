@@ -272,6 +272,15 @@ export function readStepKeepDealOwner(cfg: unknown): boolean | null {
 }
 
 /**
+ * "Se a conversa já tiver responsável" no passo `execute_distribution`
+ * (`cfg.ifAssigned`): `reassign` tira do responsável atual e redistribui
+ * (ex.: venda do consultor indo para o Acadêmico); ausente/`keep` mantém.
+ */
+export function readStepReassign(cfg: unknown): boolean {
+  return asRecord(cfg).ifAssigned === "reassign";
+}
+
+/**
  * Nota do log quando o passo `execute_distribution` não distribuiu. Sem
  * ela o passo cai no ramo "Se não houver atendente" com "OK" no log e o
  * motivo real (modo desligado na página Distribuição) se perde.
