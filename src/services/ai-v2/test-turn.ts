@@ -10,7 +10,7 @@ import { evaluateV2Rules, isWithinV2BusinessHours, outsideHoursNote } from "./ru
 import { MESSAGE_MODEL_MIN_COVERAGE, announcesSending, introBeforeMaterial, messageModelCoverage, pickPromisedModelId } from "./sent-materials";
 import { getV2ThemeById } from "./themes";
 import { agentAskedQuestion, selectV2ThemeSemantic } from "./theme-semantic";
-import { actionValueAllowed, allowedActionTypes, allowedFlowIdsFor, allowedMessageModelIdsFor, humanRequestSubject, mentionsHumanRequest, normalizeAskOptions } from "./action-policy";
+import { actionValueAllowed, allowedActionTypes, allowedFlowIdsFor, allowedMessageModelIdsFor, humanRequestSubject, mentionsHumanRequest, normalizeAskOptions, productAllowedByPolicy } from "./action-policy";
 import { noteV2Fact, peekV2Fact, traceStep } from "./trace";
 import { isGreetingOnlyMessage, keepOpenOnNewRequest } from "./closure";
 import { applyBoldPolicy, toWhatsAppText } from "./reply-format";
@@ -651,7 +651,8 @@ export async function simulateV2Turn(
     const modelNotAllowed = action.type === "send_message_model" && !allowedModelIds.includes(String((action as { modelId?: unknown }).modelId ?? ""));
     const flowNotAllowed = action.type === "send_whatsapp_flow" && !allowedFlowIds.includes(String((action as { flowId?: unknown }).flowId ?? ""));
     const valueNotAllowed = !actionValueAllowed(config, action);
-    if (allowedTools.has(action.type) && !modelNotAllowed && !flowNotAllowed && !valueNotAllowed) {
+    const productNotAllowed = action.type === "send_product" && !productAllowedByPolicy(config, String((action as { productId?: unknown }).productId ?? ""));
+    if (allowedTools.has(action.type) && !modelNotAllowed && !flowNotAllowed && !valueNotAllowed && !productNotAllowed) {
       executedActions.push({ action, label: actionLabel(action.type) });
     } else {
       discardedActions.push({
@@ -661,7 +662,9 @@ export async function simulateV2Turn(
           ? "Esta mensagem pronta não está liberada para o agente/assunto."
           : flowNotAllowed
             ? "Este flow não está liberado para o agente."
-            : valueNotAllowed
+            : productNotAllowed
+              ? "Este produto não está liberado no catálogo do agente."
+              : valueNotAllowed
               ? "Etiqueta ou etapa fora das escolhidas em “O que ele pode fazer”."
               : "A configuração do agente não libera esta ação.",
       });
@@ -740,6 +743,26 @@ export async function simulateV2Turn(
       }
     } catch {
       // Sem banco (teste unitário): segue com a resposta como está.
+    }
+  }
+
+  // Cartão de produto que sairia depois da resposta: o mesmo texto da
+  // produção, com a marca de imagem quando o produto tem uma cadastrada.
+  const productActions = handoff ? [] : executedActions.filter((e) => e.action.type === "send_product" && typeof e.action.productId === "string");
+  if (productActions.length > 0 && organizationId) {
+    try {
+      const { buildV2ProductCard } = await import("./product-card");
+      for (const e of productActions) {
+        const card = await buildV2ProductCard({ organizationId, productId: e.action.productId as string, priceChannel: config.productPolicy?.priceChannel });
+        if (!card) {
+          traceStep("ações", "Cartão de produto: produto não encontrado ou inativo — em produção a ação falha");
+          continue;
+        }
+        const preview = `${card.image ? "[Imagem do produto]\n" : ""}${card.text}`;
+        materialText = materialText ? `${materialText}\n\n${preview}` : preview;
+      }
+    } catch {
+      // Sem banco (teste unitário): a ação segue listada, sem a prévia.
     }
   }
 

@@ -23,7 +23,7 @@ import { isMediaPlaceholderText } from "@/lib/ai-agents/media-placeholder";
 import { clientWordsOnly, getMediaTexts, isBareFileName, mediaTextLine, understoodKindOf } from "./media-understanding";
 import { callV2LLM } from "./llm";
 import { themePromptText } from "./theme-prompt";
-import { actionValueAllowed, allowedActionTypes, allowedFlowIdsFor, allowedMessageModelIdsFor, humanRequestSubject, mentionsHumanRequest, normalizeAskOptions } from "./action-policy";
+import { actionValueAllowed, allowedActionTypes, allowedFlowIdsFor, allowedMessageModelIdsFor, humanRequestSubject, mentionsHumanRequest, normalizeAskOptions, productAllowedByPolicy } from "./action-policy";
 
 export { mentionsHumanRequest };
 import { guardV2Output } from "./output-guard";
@@ -2263,6 +2263,11 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       continue;
     }
     if (a.type === "send_whatsapp_flow" && !allowedFlowIds.includes(String((a as { flowId?: unknown }).flowId ?? ""))) {
+      discardedActions.push(a);
+      continue;
+    }
+    // Cartão de produto fora da lista liberada no catálogo do agente.
+    if (a.type === "send_product" && !productAllowedByPolicy(config, String((a as { productId?: unknown }).productId ?? ""))) {
       discardedActions.push(a);
       continue;
     }

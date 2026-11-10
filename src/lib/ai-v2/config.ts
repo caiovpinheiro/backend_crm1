@@ -42,6 +42,10 @@ const productPolicySchema = z.object({
   allowedProductIds: z.array(z.string()).optional().default([]),
   filter: z.record(z.string(), z.string()).optional(),
   actions: z.array(z.string()).optional().default([]),
+  /** Libera a ação de enviar o cartão do produto (imagem + texto cadastrados). */
+  sendCard: z.boolean().optional().default(false),
+  /** Opção de preço (canal) do produto que o agente usa. Vazio = preço de tabela. */
+  priceChannel: optionalText,
 });
 
 const fieldConfigSchema = z.object({

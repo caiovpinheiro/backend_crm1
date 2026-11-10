@@ -527,6 +527,7 @@ export function buildV2ToolSet(args: {
         allowedIds: args.config.productPolicy?.enabled
           ? args.config.productPolicy.allowedProductIds
           : undefined,
+        priceChannel: args.config.productPolicy?.enabled ? args.config.productPolicy.priceChannel : undefined,
       }),
   );
   if (searchProducts) tools.search_products = searchProducts;
