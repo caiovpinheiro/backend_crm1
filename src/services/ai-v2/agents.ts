@@ -15,6 +15,7 @@ import {
 } from "@/lib/ai-v2/config";
 import { anthropicKeyFields, openaiKeyFields } from "@/services/ai-v2/agent-key";
 import { getLogger } from "@/lib/logger";
+import { agentVoiceKeyHint, saveAgentVoiceKey, voiceKeyFields } from "./voice";
 
 const log = getLogger("ai-v2.agents");
 
@@ -162,6 +163,9 @@ export type V2AgentDetail = {
   hasOwnOpenaiKey: boolean;
   openaiApiKeyHint: string | null;
   hasAnthropicKey: boolean;
+  /** Chave do provedor de voz cadastrada (só a dica dos 4 últimos volta). */
+  hasVoiceKey: boolean;
+  voiceApiKeyHint: string | null;
   anthropicApiKeyHint: string | null;
   createdAt: Date;
   updatedAt: Date;
@@ -218,6 +222,7 @@ export async function getV2Agent(id: string, organizationId: string): Promise<V2
   try {
     const publishedConfig = normalizeV2Config(row.simpleConfig);
     const draftConfig = row.draftConfig ? normalizeV2Config(row.draftConfig) : undefined;
+    const voiceKeyHint = await agentVoiceKeyHint(id, organizationId);
     const lastVersion = await (prisma as any).aIAgentConfigVersion.findFirst({
       where: { agentId: id },
       orderBy: { versionNumber: "desc" },
@@ -236,6 +241,8 @@ export async function getV2Agent(id: string, organizationId: string): Promise<V2
       openaiApiKeyHint: row.openaiApiKeyHint ?? null,
       hasAnthropicKey: Boolean(row.anthropicApiKeyEnc),
       anthropicApiKeyHint: row.anthropicApiKeyHint ?? null,
+      hasVoiceKey: voiceKeyHint !== null,
+      voiceApiKeyHint: voiceKeyHint,
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
       draftVersion: await currentDraftVersion(id),
@@ -328,7 +335,7 @@ export class ActivationNeedsChannelError extends Error {
   }
 }
 
-export async function updateV2Agent(id: string, organizationId: string, input: { name?: string; active?: boolean; config?: unknown; openaiApiKey?: string | null; anthropicApiKey?: string | null; confirmAnyChannel?: boolean }): Promise<{ id: string; config: V2AgentConfig }> {
+export async function updateV2Agent(id: string, organizationId: string, input: { name?: string; active?: boolean; config?: unknown; openaiApiKey?: string | null; anthropicApiKey?: string | null; voiceApiKey?: string | null; confirmAnyChannel?: boolean }): Promise<{ id: string; config: V2AgentConfig }> {
   let config: V2AgentConfig | undefined;
   if (input.config !== undefined) {
     const validated = validateV2Config(input.config);
@@ -369,6 +376,9 @@ export async function updateV2Agent(id: string, organizationId: string, input: {
     data.anthropicApiKeyHint = anthropicUpdate.anthropicApiKeyHint;
   }
 
+  // Chave do provedor de voz: validada antes de gravar qualquer coisa.
+  const voiceUpdate = voiceKeyFields(input.voiceApiKey);
+
   const row = await (prisma as any).$transaction(async (tx: any) => {
     if (input.name !== undefined && agent.userId) {
       await tx.user.update({ where: { id: agent.userId }, data: { name: input.name } });
@@ -378,6 +388,7 @@ export async function updateV2Agent(id: string, organizationId: string, input: {
       data,
     });
   });
+  if (voiceUpdate) await saveAgentVoiceKey(id, organizationId, voiceUpdate);
   return {
     id: row.id,
     config: config ?? normalizeV2Config(row.simpleConfig),

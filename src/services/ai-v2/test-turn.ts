@@ -11,6 +11,8 @@ import { MESSAGE_MODEL_MIN_COVERAGE, announcesSending, introBeforeMaterial, mess
 import { getV2ThemeById } from "./themes";
 import { agentAskedQuestion, selectV2ThemeSemantic } from "./theme-semantic";
 import { actionValueAllowed, allowedActionTypes, allowedFlowIdsFor, allowedMessageModelIdsFor, humanRequestSubject, mentionsHumanRequest, normalizeAskOptions, productAllowedByPolicy } from "./action-policy";
+import { defaultV2Counters } from "./limits";
+import { decideVoice, voiceCompanionText, voiceConfigured } from "./voice";
 import { noteV2Fact, peekV2Fact, traceStep } from "./trace";
 import { isGreetingOnlyMessage, keepOpenOnNewRequest } from "./closure";
 import { applyBoldPolicy, toWhatsAppText } from "./reply-format";
@@ -73,6 +75,8 @@ export type V2TestTurnResult = {
   handoffDestination?: V2Destination | null;
   /** Texto da mensagem pronta que sairia depois da resposta (o cliente recebe os dois). */
   materialText?: string;
+  /** Texto que seria falado: a resposta iria por áudio e `reply` é a linha escrita que acompanha. */
+  voiceText?: string;
 };
 
 const ACTION_LABELS: Record<string, string> = {
@@ -819,6 +823,30 @@ export async function simulateV2Turn(
     nextStage = "identifying";
   }
 
+  // Resposta por áudio: como numa conversa em que o cliente já aceitou áudio.
+  // O teste só recebe texto, então o caso "cliente mandou áudio" não aparece aqui.
+  let voiceText: string | undefined;
+  if (!handoff && !closed && nextStage === "active" && voiceConfigured(config) && output.voice === true) {
+    const decision = decideVoice({
+      config,
+      counters: { ...defaultV2Counters(), voiceConsent: "granted" },
+      modelWantsVoice: true,
+      clientAudioThisTurn: false,
+      autonomous: true,
+      hasKey: true,
+      replyText: reply,
+      hasOptions: !!interactive,
+      charsToday: 0,
+    });
+    if (decision.action === "speak") {
+      voiceText = decision.spoken;
+      reply = voiceCompanionText(config, reply);
+      traceStep("voz", `Iria por áudio (${decision.spoken.length} caracteres falados) + linha escrita. Em produção: só com a chave do provedor, com o agente respondendo sozinho e depois de o cliente aceitar áudio ou mandar um`);
+    } else if (decision.action === "none") {
+      traceStep("voz", `Resposta em texto: ${decision.reason}`);
+    }
+  }
+
   const requestedDest = (output.actions.find((a) => a.type === "handoff") as { destination?: V2Destination } | undefined)?.destination;
   const handoffDestination: V2Destination | null = handoff
     ? requestedDest && typeof requestedDest === "object" && typeof requestedDest.type === "string"
@@ -872,6 +900,7 @@ export async function simulateV2Turn(
     chosenOption,
     handoffDestination,
     ...(materialText ? { materialText } : {}),
+    ...(voiceText ? { voiceText } : {}),
   };
 }
 

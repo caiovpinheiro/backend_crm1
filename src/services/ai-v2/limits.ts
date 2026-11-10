@@ -34,6 +34,14 @@ export interface V2Counters {
   humanRequestPending?: boolean;
   /** Agente de IA que passou esta conversa para o atual — não devolver para ele (ping-pong). */
   receivedFromAgentId?: string;
+  /** Áudio: o cliente aceitou ou recusou receber resposta por voz. */
+  voiceConsent?: "granted" | "denied";
+  /** Áudio: a pergunta de permissão já foi feita nesta conversa. */
+  voiceAsked?: boolean;
+  /** Áudio: o cliente já mandou áudio nesta conversa (dispensa a permissão). */
+  voiceClientAudio?: boolean;
+  /** Áudio: quantos o agente já mandou nesta conversa. */
+  voiceCount?: number;
   /**
    * Lembretes de inatividade já mandados desde a última mensagem do agente:
    * `anchorAt` é essa mensagem, `lastAt` o último lembrete (para saber que a
@@ -75,6 +83,10 @@ export function parseV2Counters(raw: unknown): V2Counters {
     ...(Array.isArray(r.noticesShown) ? { noticesShown: r.noticesShown.filter((x): x is string => typeof x === "string") } : {}),
     ...(r.humanRequestPending === true ? { humanRequestPending: true } : {}),
     ...(typeof r.receivedFromAgentId === "string" && r.receivedFromAgentId ? { receivedFromAgentId: r.receivedFromAgentId } : {}),
+    ...(r.voiceConsent === "granted" || r.voiceConsent === "denied" ? { voiceConsent: r.voiceConsent } : {}),
+    ...(r.voiceAsked === true ? { voiceAsked: true } : {}),
+    ...(r.voiceClientAudio === true ? { voiceClientAudio: true } : {}),
+    ...(Number(r.voiceCount) > 0 ? { voiceCount: Number(r.voiceCount) } : {}),
     ...(Array.isArray(r.pendingOptions) && r.pendingOptions.length > 0
       ? { pendingOptions: r.pendingOptions.filter((o): o is string => typeof o === "string").slice(0, 10) }
       : {}),

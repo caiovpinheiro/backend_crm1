@@ -213,6 +213,32 @@ export interface V2ProductPolicy {
   priceChannel?: string;
 }
 
+/** Resposta por áudio (voz gerada). O texto falado é a própria resposta do turno. */
+export interface V2VoiceConfig {
+  enabled: boolean;
+  /** Provedor de voz. A chave fica por agente, fora da configuração. */
+  provider: "elevenlabs";
+  /** Voz escolhida no provedor. Sem ela, não há áudio. */
+  voiceId?: string;
+  /**
+   * "mirror": só responde por áudio a quem mandou áudio.
+   * "agent": além disso, o agente decide pelas orientações escritas.
+   */
+  mode: "mirror" | "agent";
+  /** Quando usar áudio (modo "agent"). Vai para o prompt. */
+  guidance?: string;
+  /** Pergunta de permissão antes do primeiro áudio a quem não mandou áudio. */
+  permissionQuestion?: string;
+  /** Linha escrita que acompanha o áudio quando ele não traz valor, data nem link. */
+  companionText?: string;
+  /** Teto de caracteres falados por áudio (cerca de 15 por segundo). */
+  maxChars: number;
+  /** Teto de áudios por conversa. */
+  maxPerConversation: number;
+  /** Teto diário de caracteres falados pelo agente (0 = sem teto). */
+  dailyCharCap: number;
+}
+
 export interface V2ReplyEndingRule {
   enabled: boolean;
   phrases: string[];
@@ -685,6 +711,8 @@ export interface V2AgentConfig {
   allowedFlowIds?: string[];
   /** Telefones permitidos para resposta em modo de teste. Vazio = responde qualquer número. */
   allowedPhoneNumbers?: string[];
+  /** Resposta por áudio. */
+  voice?: V2VoiceConfig;
   /** Tamanho preferido das respostas. */
   responseLength?: "short" | "medium" | "long";
   /** Quanto emoji o agente usa nas respostas. */
@@ -773,6 +801,10 @@ export interface V2LLMOutput {
   flow?: { id: string };
   /** Ids de anexos dos materiais lidos no turno, para enviar depois da reply. */
   attachments?: string[];
+  /** A resposta deste turno deve ir por áudio (o motor confere se pode). */
+  voice?: boolean;
+  /** O cliente aceitou (true) ou recusou (false) receber áudio nesta mensagem. */
+  voiceConsent?: boolean | null;
   handoff: boolean;
   concluded: boolean;
   confirmed: boolean | null;

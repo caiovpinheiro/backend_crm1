@@ -49,6 +49,7 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
       config?: unknown;
       openaiApiKey?: string | null;
       anthropicApiKey?: string | null;
+      voiceApiKey?: string | null;
       confirmAnyChannel?: boolean;
     };
     const agent = await updateV2Agent(id, r.session.user.organizationId!, body);
