@@ -123,6 +123,11 @@ export interface ExecuteDistributionInput {
    * da aba Distribuição: ignora o interruptor e o modo dos departamentos.
    */
   explicitStepMode?: boolean;
+  /**
+   * Com `reassign`: só solta o responsável atual se houver alguém elegível
+   * no departamento do passo (`departmentIds`). Sem ninguém, não mexe.
+   */
+  reassignOnlyIfEligible?: boolean;
   /** Momento de referência (testes). Default: agora. */
   now?: Date;
 }
@@ -764,6 +769,34 @@ export async function executeDistribution(
     }
     await clearOwnershipForRedistribution(args);
   };
+
+  // Passo "Tirar e redistribuir": só solta o responsável atual (ex.: o
+  // consultor que vendeu) se houver alguém elegível no departamento do passo.
+  // Sem ninguém, a conversa fica com quem está — não vira órfã nem vai para
+  // uma fila que talvez não drene — e o passo segue pelo ramo "Não".
+  if (
+    input.reassign &&
+    input.reassignOnlyIfEligible &&
+    input.conversationId &&
+    explicitDeptIds.length > 0
+  ) {
+    const pool = await getDistributionResponsibles({
+      distributionType: input.distributionType ?? null,
+      now: input.now,
+      departmentIds: explicitDeptIds,
+    });
+    if (!pool.some((r) => r.eligible)) {
+      const evaluatedPool = toSummary(pool);
+      await writeLog(input, false, "NO_ELIGIBLE_RESPONSIBLE", null, evaluatedPool);
+      return {
+        success: false,
+        reason: "NO_ELIGIBLE_RESPONSIBLE",
+        selectedUserId: null,
+        selectedUserName: null,
+        evaluated: evaluatedPool,
+      };
+    }
+  }
 
   // Idempotente: se a conversa já tem responsável (ex.: inbound acabou de
   // distribuir e a automação dispara execute_distribution de novo), não

@@ -33,6 +33,7 @@ import {
   distributionSkipNote,
   readStepAllowedChannelIds,
   readStepKeepDealOwner,
+  readStepReassign,
   resolveStepDistributionScope,
   triggerTypeLabel,
   automationOptedIntoAiAttendance,
@@ -2918,6 +2919,10 @@ export async function executeStep(
         keepDealOwner,
         // Modo escolhido no passo: independente da aba Distribuição.
         explicitStepMode: blockMode === "smart",
+        // "Tirar e redistribuir": tira do responsável atual, mas só se houver
+        // alguém elegível no departamento do passo.
+        reassign: readStepReassign(cfg),
+        reassignOnlyIfEligible: true,
       });
 
       if (result.success) {
