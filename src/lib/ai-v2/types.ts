@@ -207,6 +207,10 @@ export interface V2ProductPolicy {
   filter?: Record<string, string>;
   /** IDs de ações ligadas ao produto permitidas no tema. */
   actions?: string[];
+  /** Libera a ação de enviar o cartão do produto (imagem + texto cadastrados). */
+  sendCard?: boolean;
+  /** Opção de preço (canal) do produto que o agente usa. Vazio = preço de tabela. */
+  priceChannel?: string;
 }
 
 export interface V2ReplyEndingRule {

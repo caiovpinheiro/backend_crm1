@@ -33,6 +33,7 @@ import { leadsHandoffOption, simpleHandoff } from "./handoff";
 import type { V2LoadedContext } from "./context";
 import { traceStep } from "./trace";
 import { noteMessageChange } from "@/lib/cache/message-versions";
+import { PRODUCT_CARD_CAPTION_MAX, buildV2ProductCard } from "./product-card";
 
 export type V2ActionResult = {
   action: V2Action;
@@ -704,36 +705,79 @@ async function executeSendWhatsappFlow(action: V2Action, ctx: V2ActionContext): 
   }
 }
 
+/** Quanto o texto espera a imagem do cartão sair, quando não cabe na legenda. */
+const PRODUCT_CARD_IMAGE_WAIT_MS = 20_000;
+
+/** Motivo de falha quando o cartão não saiu por repetir uma mensagem recente. */
+export const PRODUCT_CARD_REPEATED = "cartão já enviado há pouco";
+
+/**
+ * Cartão do produto: imagem cadastrada com o texto na legenda (o texto do
+ * modelo de mensagem de produto da organização). Sem imagem, ou quando ela
+ * não pode sair, vai só o texto; legenda acima do limite vira imagem + texto.
+ */
 async function executeSendProduct(action: V2Action, ctx: V2ActionContext): Promise<V2ActionResult> {
   const productId = typeof action.productId === "string" ? action.productId : "";
   if (!productId) return { action, ok: false, error: "Missing productId" };
   if (!ctx.contactId || !ctx.conversationId) return { action, ok: false, error: "No contact/conversation" };
+  const allowedIds = ctx.config.productPolicy?.allowedProductIds ?? [];
+  if (allowedIds.length > 0 && !allowedIds.includes(productId)) {
+    return { action, ok: false, productId, error: "Produto não liberado para este agente." };
+  }
   try {
     const orgId = getOrgIdOrNull() ?? ctx.organizationId;
-    const product = await prisma.product.findFirst({
-      where: { id: productId, organizationId: orgId, isActive: true },
-      select: { id: true, name: true, price: true, description: true, sku: true, unit: true, customValues: { include: { customField: { select: { label: true, name: true } } } } },
-    });
-    if (!product) return { action, ok: false, error: "Product not found" };
-    const fmtBRL = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" });
-    const priceText = product.price ? fmtBRL.format(Number(product.price)) : "";
-    const cfText = product.customValues
-      .filter((v) => v.value && v.value.trim())
-      .map((v) => `${v.customField.label ?? v.customField.name}: ${v.value}`)
-      .join("\n");
-    const lines = [product.name, priceText, product.description ?? ""].filter(Boolean);
-    if (cfText) lines.push(cfText);
-    const text = lines.join("\n");
-    await sendV2TextMessage({
-      conversationId: ctx.conversationId,
-      contactId: ctx.contactId,
-      agentUserId: ctx.agentUserId,
-      text,
-      channel: ctx.channel,
-      autonomyMode: ctx.autonomyMode,
-      humanBehavior: v2HumanBehavior(ctx.config),
-    });
-    return { action, ok: true, productId, text };
+    const card = await buildV2ProductCard({ organizationId: orgId, productId, priceChannel: ctx.config.productPolicy?.priceChannel });
+    if (!card) return { action, ok: false, error: "Product not found" };
+    const text = card.text;
+
+    let imageSent = false;
+    let captioned = false;
+    if (card.image) {
+      if (ctx.autonomyMode === "DRAFT") {
+        traceStep("mídia", `Imagem de "${card.name}" não enviada (modo sugestão)`);
+      } else {
+        // As travas do envio (lista de teste, conversa ainda do agente, canal)
+        // são do próprio envio de mídia. Texto fora da legenda: espera a
+        // imagem sair para o texto chegar depois dela.
+        const { sendAgentFollowUpMedia, mediaNotSentTrace } = await import("@/services/ai/send-agent-media");
+        const caption = toWhatsAppText(text);
+        const fits = caption.length <= PRODUCT_CARD_CAPTION_MAX;
+        const since = await lastV2ResetAt(ctx.conversationId).catch(() => null);
+        let report: Parameters<typeof mediaNotSentTrace>[1];
+        const sent = await sendAgentFollowUpMedia({
+          conversationId: ctx.conversationId,
+          contactId: ctx.contactId,
+          agentUserId: ctx.agentUserId,
+          attachments: [{ url: card.image.url, mimeType: card.image.mimeType, name: card.image.name, ...(fits ? { caption } : {}) }],
+          ...(since ? { since } : {}),
+          ...(fits ? {} : { waitForSendMs: PRODUCT_CARD_IMAGE_WAIT_MS }),
+          report: (r) => {
+            report = r;
+          },
+        });
+        imageSent = sent > 0;
+        captioned = imageSent && fits;
+        traceStep("mídia", imageSent
+          ? `Imagem de "${card.name}" na fila de envio ao WhatsApp${captioned ? ", com o texto na legenda" : " (texto em mensagem própria, depois dela: passa do limite da legenda)"}`
+          : mediaNotSentTrace(`Imagem de "${card.name}"`, report));
+      }
+    }
+
+    if (!captioned) {
+      const sent = await sendV2TextMessage({
+        conversationId: ctx.conversationId,
+        contactId: ctx.contactId,
+        agentUserId: ctx.agentUserId,
+        text,
+        channel: ctx.channel,
+        autonomyMode: ctx.autonomyMode,
+        humanBehavior: v2HumanBehavior(ctx.config),
+      });
+      if (!sent.sent && !imageSent) {
+        return { action, ok: false, productId, error: sent.reason === "near_duplicate" ? PRODUCT_CARD_REPEATED : (sent.reason ?? "não enviado") };
+      }
+    }
+    return { action, ok: true, productId, text, imageSent };
   } catch (err) {
     return { action, ok: false, error: err instanceof Error ? err.message : String(err) };
   }

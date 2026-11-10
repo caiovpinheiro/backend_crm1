@@ -672,7 +672,7 @@ export function buildAgentRulesMarkdown(args: {
     `- Flows que ele pode enviar: ${list((c.allowedFlowIds ?? []).map((id) => names.messageFlows?.[id] ?? `(não encontrado: ${id})`))}`,
     `- Negócio usado: ${c.dealSelection === "ask" ? "pergunta quando há mais de um" : "o mais recente"}`,
     ...(c.includeLostDeals ? ["- Negócio perdido: usa o mais recente quando o cliente não tem outro negócio"] : []),
-    ...(c.productPolicy?.enabled ? [`- Catálogo: até ${c.productPolicy.maxItems} produto(s) · preço: ${yesNo(c.productPolicy.showPrice)} · link: ${yesNo(c.productPolicy.showLink)}${c.productPolicy.allowedProductIds?.length ? ` · ${c.productPolicy.allowedProductIds.length} produto(s) liberado(s)` : ""}`] : []),
+    ...(c.productPolicy?.enabled ? [`- Catálogo: até ${c.productPolicy.maxItems} produto(s) · preço: ${yesNo(c.productPolicy.showPrice)} · link: ${yesNo(c.productPolicy.showLink)}${c.productPolicy.allowedProductIds?.length ? ` · ${c.productPolicy.allowedProductIds.length} produto(s) liberado(s)` : ""} · envia o cartão: ${yesNo(c.productPolicy.sendCard)}${c.productPolicy.priceChannel ? ` · opção de preço: ${c.productPolicy.priceChannel}` : ""}`] : []),
     "", "**Dados do cliente**",
     ...[...c.contextFields.contact.map((f) => fieldLine(f, "contact", names)), ...c.contextFields.deal.map((f) => fieldLine(f, "deal", names))],
     ...(c.contextFields.contact.length + c.contextFields.deal.length === 0 ? ["_(nenhum campo)_"] : []),
