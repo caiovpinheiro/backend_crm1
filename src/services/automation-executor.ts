@@ -437,15 +437,24 @@ async function resolveAutomationSendConv(
   if (preferredId) {
     const pinned = await prisma.conversation.findFirst({
       where: { id: preferredId, contactId },
-      select: { id: true, status: true },
+      select: { id: true, status: true, channelId: true },
     });
+    // Envio por outro número (ex.: o da última mensagem do cliente) vai para
+    // o ticket desse número — é lá que a resposta do cliente entra.
+    const wantChannelId =
+      typeof opts?.channelId === "string" ? opts.channelId.trim() : "";
+    const otherNumber = Boolean(
+      pinned?.channelId && wantChannelId && pinned.channelId !== wantChannelId,
+    );
     // Ticket encerrado não recebe o template de reativação: o timeout
     // via `already_resolved` abortava o ramo (deal parado em Ativação —
     // DNAWORK "ativação perdidos"). Cai no ensure, que abre ticket novo.
-    if (pinned && pinned.status !== "RESOLVED") return { id: pinned.id };
+    if (pinned && pinned.status !== "RESOLVED" && !otherNumber) return { id: pinned.id };
     if (pinned) {
       log.info(
-        `resolveAutomationSendConv: conversa ${pinned.id} encerrada — abrindo ticket novo`,
+        otherNumber
+          ? `resolveAutomationSendConv: conversa ${pinned.id} é de outro número — usando o ticket de ${wantChannelId}`
+          : `resolveAutomationSendConv: conversa ${pinned.id} encerrada — abrindo ticket novo`,
       );
     }
   }
@@ -1083,6 +1092,62 @@ function sendConvOptsFromRt(
 }
 
 /**
+ * Número da última mensagem do cliente (inbound público com canal) entre os
+ * tickets de WhatsApp do contato, se esse número estiver CONNECTED. Mesma
+ * regra do seletor de canal do composer. Falha de consulta → `null`.
+ */
+async function loadCustomerLastInboundChannelId(
+  contactId: string,
+): Promise<string | null> {
+  try {
+    const convs = await prisma.conversation.findMany({
+      where: { contactId, channel: "whatsapp" },
+      orderBy: { updatedAt: "desc" },
+      take: 20,
+      select: { id: true },
+    });
+    if (convs.length === 0) return null;
+    const last = await prisma.message.findFirst({
+      where: {
+        conversationId: { in: convs.map((c) => c.id) },
+        direction: "in",
+        isPrivate: false,
+        channelId: { not: null },
+      },
+      orderBy: { createdAt: "desc" },
+      select: { channelId: true },
+    });
+    if (!last?.channelId) return null;
+    const connected = await prisma.channel.findFirst({
+      where: { id: last.channelId, status: "CONNECTED" },
+      select: { id: true },
+    });
+    return connected?.id ?? null;
+  } catch (err) {
+    log.warn({ err }, "[automation] último canal do cliente indisponível");
+    return null;
+  }
+}
+
+/**
+ * `resolveOutboundChannelId` para envios de sessão (texto, mídia, botões,
+ * lista, pergunta): com o número em aberto no passo, sai pelo número da
+ * última mensagem do cliente. Template e Flow não passam por aqui — dependem
+ * do que foi aprovado em cada número.
+ */
+async function resolveSessionOutboundChannelId(
+  cfg: Record<string, unknown>,
+  rt: RuntimeContext,
+): Promise<string | null> {
+  if (rt.customerChannelId === undefined) {
+    rt.customerChannelId = rt.contactId
+      ? await loadCustomerLastInboundChannelId(rt.contactId)
+      : null;
+  }
+  return resolveOutboundChannelId(cfg, rt, { preferCustomerChannel: true });
+}
+
+/**
  * Resolve o canal usado num passo de envio.
  *
  * Em gatilho de inbound (`message_received` etc.) o canal da conversa
@@ -1090,10 +1155,14 @@ function sendConvOptsFromRt(
  * obrigatório e gerava envio no número errado (sessão 24h fechada).
  * Campanha / stage_changed / demais: passo explícito, depois o canal
  * herdado do payload (`rt.activeChannelId` / conversa).
+ * `preferCustomerChannel` (envio de sessão): passo com "Selecionar tudo",
+ * vários números ou nenhum número sai pelo número da última mensagem do
+ * cliente (`rt.customerChannelId`) quando ele é permitido no passo.
  */
 export function resolveOutboundChannelId(
   cfg: Record<string, unknown>,
   rt: RuntimeContext,
+  opts?: { preferCustomerChannel?: boolean },
 ): string | null {
   const cfgChannelId = readString(cfg, "channelId")?.trim() || null;
   const bound = resolveBoundChannelId(rt);
@@ -1114,11 +1183,17 @@ export function resolveOutboundChannelId(
     }
     return bound;
   }
+  const customer = opts?.preferCustomerChannel
+    ? rt.customerChannelId?.trim() || null
+    : null;
   if (allowed?.length === 1) return allowed[0] ?? null;
   if (allowed && allowed.length > 1) {
+    if (customer && allowed.includes(customer)) return customer;
     if (bound && allowed.includes(bound)) return bound;
     return allowed[0] ?? null;
   }
+  // "Selecionar tudo" ou passo sem número: onde o cliente falou por último.
+  if (customer && (cfg.channelScope === "all" || !cfgChannelId)) return customer;
   return cfgChannelId || bound || null;
 }
 
@@ -1791,6 +1866,13 @@ type RuntimeContext = {
    * (ou canal não identificado).
    */
   activeChannelId?: string | null;
+  /**
+   * Número (Channel CONNECTED) da última mensagem do cliente, em qualquer
+   * ticket de WhatsApp do contato — onde a janela de 24h está aberta.
+   * Carregado sob demanda por `resolveSessionOutboundChannelId`
+   * (`undefined` = ainda não carregado; `null` = não há).
+   */
+  customerChannelId?: string | null;
   /**
    * Tipo do passo apontado por `nextStepId` do step atual. Usado para
    * não pausar o envio quando o próximo já é `wait_for_reply`.
@@ -3375,7 +3457,7 @@ export async function executeStep(
         );
       }
 
-      const resolvedChannelId = resolveOutboundChannelId(cfg, rt);
+      const resolvedChannelId = await resolveSessionOutboundChannelId(cfg, rt);
       let conversationId: string | undefined;
       if (rt.contactId) {
         const conv = await resolveAutomationSendConv(
@@ -3905,7 +3987,7 @@ export async function executeStep(
       const caption = readString(cfg, "caption") ?? "";
       const filename = readString(cfg, "filename") ?? "";
 
-      const mediaChannelId = resolveOutboundChannelId(cfg, rt);
+      const mediaChannelId = await resolveSessionOutboundChannelId(cfg, rt);
       let mediaConversationId: string | undefined;
       if (rt.contactId) {
         const conv = await resolveAutomationSendConv(
@@ -4096,7 +4178,7 @@ export async function executeStep(
         ? `${body}\n[Lista: ${btnLabels}]`
         : `${body}\n[Botões: ${btnLabels}]`;
 
-      const interactiveChannelId = resolveOutboundChannelId(cfg, rt);
+      const interactiveChannelId = await resolveSessionOutboundChannelId(cfg, rt);
       let conversationId: string | undefined;
       if (rt.contactId) {
         const conv = await resolveAutomationSendConv(
@@ -4277,7 +4359,7 @@ export async function executeStep(
       const rowLabels = rows.map((r) => r.title).join(", ");
       const displayContent = `${body}\n[Lista: ${rowLabels}]`;
 
-      const listChannelId = resolveOutboundChannelId(cfg, rt);
+      const listChannelId = await resolveSessionOutboundChannelId(cfg, rt);
       let conversationId: string | undefined;
       if (rt.contactId) {
         const conv = await resolveAutomationSendConv(
@@ -5006,7 +5088,7 @@ export async function executeStep(
         const vars = (cfg as Record<string, unknown>)["__variables"] as Record<string, unknown> | undefined;
         const interpolated = await interpolateMessageVariables(content, rt, vars);
 
-        const questionChannelId = resolveOutboundChannelId(cfg, rt);
+        const questionChannelId = await resolveSessionOutboundChannelId(cfg, rt);
         const conv = await resolveAutomationSendConv(
           rt.contactId,
           sendConvOptsFromRt(rt, questionChannelId),
