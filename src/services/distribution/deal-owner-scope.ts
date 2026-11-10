@@ -10,11 +10,14 @@
  * do negócio e o do contato ficam como estão. Ex.: o vendedor continua dono
  * do negócio enquanto o Financeiro ou o Suporte atende a conversa.
  *
- * Só preserva dono HUMANO: negócio sem dono, ou com um agente de IA como
- * dono, segue a regra padrão — senão o negócio ficaria órfão ou preso na IA.
+ * Pela flag do departamento, só preserva dono HUMANO: negócio sem dono, ou
+ * com um agente de IA como dono, segue a regra padrão — senão o negócio
+ * ficaria órfão ou preso na IA.
  *
- * `override` (checkbox "Manter dono do negócio" do modal do inbox) troca a
- * decisão do departamento naquela ação.
+ * `override` (escolha explícita: "Só a conversa" do modal do inbox ou
+ * "O que distribuir: só a conversa" no passo da automação) troca a decisão
+ * do departamento naquela ação. `override = true` troca só a conversa
+ * SEMPRE — negócio sem dono humano continua como está (sem dono ou com a IA).
  */
 
 import { prisma } from "@/lib/prisma";
@@ -66,7 +69,8 @@ export async function contactHasHumanDealOwner(
  * Decide se esta atribuição troca só a conversa.
  * `override` (true/false) vence o departamento; sem override vale o
  * `departmentId` informado — `undefined` = o departamento da conversa.
- * Precisa de conversa e de um dono humano a preservar.
+ * Precisa de conversa. Pelo departamento, também de um dono humano a
+ * preservar; `override = true` dispensa essa checagem.
  */
 export async function resolveKeepDealOwner(args: {
   conversationId: string | null | undefined;
@@ -92,6 +96,8 @@ export async function resolveKeepDealOwner(args: {
     ? args.override === true
     : await departmentKeepsDealOwner(departmentId);
   if (!wants) return false;
+  // Escolha explícita: o negócio nunca vai junto, tenha ou não dono humano.
+  if (needsOverride) return true;
   return contactHasHumanDealOwner(contactId, args.dealId);
 }
 
