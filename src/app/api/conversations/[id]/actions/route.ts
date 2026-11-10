@@ -867,14 +867,16 @@ export async function POST(request: Request, context: RouteContext) {
           : [];
         let requires = !!dept?.department?.requireTabulationOnClose;
         if (!dept?.departmentId) {
+          // Sem departamento: só exige motivo se um departamento do PRÓPRIO
+          // agente exige. Admin pode escolher folha de qualquer departamento,
+          // mas a exigência de outro departamento não vale para esta conversa.
+          const agentDepts = agentUserId ? await listDepartmentsForUser(agentUserId) : [];
           const depts =
             isAdmin(session) || isSuperAdmin(session)
               ? await listOrgDepartments()
-              : agentUserId
-                ? await listDepartmentsForUser(agentUserId)
-                : [];
+              : agentDepts;
           allowedDepartmentIds = depts.map((d) => d.id);
-          requires = depts.some((d) => d.requireTabulationOnClose);
+          requires = agentDepts.some((d) => d.requireTabulationOnClose);
         }
         if (requires && !rawTab) {
           // Encerramento MANUAL (esta rota). Bots/automações usam
