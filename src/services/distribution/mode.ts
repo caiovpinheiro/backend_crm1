@@ -45,3 +45,20 @@ export async function getOrgDistributionModeFresh(): Promise<OrgDistributionMode
     return "smart";
   }
 }
+
+/**
+ * O interruptor da aba Distribuição ("Distribuição ligada" do Inteligente,
+ * ou o do Por Leads) vale para esta execução do motor `engine`?
+ *
+ * O interruptor é o freio do modo ATIVO da org. Um passo de automação que
+ * escolheu o modo explicitamente e usa um modo DIFERENTE do ativo é
+ * independente da aba: ex.: o comercial usa Por Leads e o passo do
+ * Acadêmico usa Inteligente. Sem escolha explícita, vale sempre.
+ */
+export async function orgSwitchAppliesTo(
+  engine: OrgDistributionMode,
+  explicitStepMode: boolean,
+): Promise<boolean> {
+  if (!explicitStepMode) return true;
+  return (await getOrgDistributionMode()) === engine;
+}

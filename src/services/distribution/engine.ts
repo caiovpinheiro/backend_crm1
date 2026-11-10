@@ -15,7 +15,7 @@ import { Prisma } from "@prisma/client";
 
 import { getConversationSession } from "@/lib/channel-session";
 import { isDistributionEnabled } from "./enabled";
-import { ASSIGN_OWNER_VIA } from "./mode";
+import { ASSIGN_OWNER_VIA, orgSwitchAppliesTo } from "./mode";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { logEvent } from "@/services/activity-log";
@@ -117,6 +117,12 @@ export interface ExecuteDistributionInput {
    * departamento. Ver `deal-owner-scope.ts`.
    */
   keepDealOwner?: boolean | null;
+  /**
+   * O passo da automação escolheu o modo Inteligente explicitamente.
+   * Com a org usando outro modo (ex.: Por Leads), o passo fica independente
+   * da aba Distribuição: ignora o interruptor e o modo dos departamentos.
+   */
+  explicitStepMode?: boolean;
   /** Momento de referência (testes). Default: agora. */
   now?: Date;
 }
@@ -616,7 +622,8 @@ export async function executeDistribution(
   // manual. Inbound e varredura da Entrada usam origem SYSTEM e param aqui.
   if (
     rawInput.triggerSource === "SYSTEM" ||
-    !(await isDistributionEnabled())
+    (!(await isDistributionEnabled()) &&
+      (await orgSwitchAppliesTo("smart", rawInput.explicitStepMode === true)))
   ) {
     return {
       success: false,
@@ -687,8 +694,14 @@ export async function executeDistribution(
   // Departamentos no modo leads ficam FORA do smart: o pool explícito os
   // perde; se só sobraram deptos leads, o smart se abstém (sem atribuir e
   // sem enfileirar) — a distribuição é do bloco com mode="leads".
+  // Passo com modo Inteligente explícito: o departamento escolhido nele vale,
+  // qualquer que seja o modo de entrada do departamento.
   const explicitDeptIds = requestedDeptRows
-    .filter((d) => (d as { distributionMode?: string }).distributionMode !== "leads")
+    .filter(
+      (d) =>
+        input.explicitStepMode === true ||
+        (d as { distributionMode?: string }).distributionMode !== "leads",
+    )
     .map((d) => d.id);
   // Se o pool explícito só tinha deptos leads, o smart se abstém.
   if (requestedDeptRows.length > 0 && explicitDeptIds.length === 0) {

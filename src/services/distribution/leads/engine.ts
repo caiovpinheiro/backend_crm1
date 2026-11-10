@@ -56,6 +56,7 @@ import {
   isLeadsDepartmentRulesEnabled,
 } from "./department-rules";
 import { isLeadsDistributionEnabled } from "./enabled";
+import { orgSwitchAppliesTo } from "../mode";
 import { getLogger } from "@/lib/logger";
 
 const log = getLogger("distribution.leads.engine");
@@ -103,6 +104,11 @@ export interface ExecuteLeadsDistributionInput {
    * true/false vence `Department.keepDealOwner`; ausente = vale o departamento.
    */
   keepDealOwner?: boolean | null;
+  /**
+   * O passo da automação escolheu Por Leads explicitamente. Com a org usando
+   * outro modo, ignora o interruptor do Por Leads da aba Distribuição.
+   */
+  explicitStepMode?: boolean;
 }
 
 interface LeadsTarget {
@@ -407,7 +413,10 @@ export async function executeLeadsDistribution(
       selectedUserName: null,
     });
   }
-  if (!(await isLeadsDistributionEnabled())) {
+  if (
+    !(await isLeadsDistributionEnabled()) &&
+    (await orgSwitchAppliesTo("leads", input.explicitStepMode === true))
+  ) {
     return finish({
       success: false,
       reason: "DISTRIBUTION_DISABLED",
