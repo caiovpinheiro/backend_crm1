@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { normalizeV2Config } from "@/lib/ai-v2/config";
-import { actionValueAllowed, actionsGuide, allowedActionTypes, themeToolRestriction } from "../action-policy";
+import { actionValueAllowed, actionsGuide, allowedActionTypes, productAllowedByPolicy, themeToolRestriction } from "../action-policy";
+import { pickPolicyPrice } from "../product-card";
 import { matchV2Theme } from "../themes";
 import { defaultV2Counters, evaluateV2StopLimits } from "../limits";
 
@@ -83,6 +84,33 @@ describe("O que ele pode fazer", () => {
     const full = actionsGuide(allowed, { tags: ["Retorno"], stages: [{ id: "s1", name: "Funil › Novo" }] });
     expect(full).toContain("s1 (Funil › Novo)");
     expect(actionsGuide(new Set(["close_conversation"]), { tags: [], stages: [] })).toBe("");
+  });
+
+  it("cartão de produto: só com o catálogo e o envio do cartão ligados; o guia traz o formato", () => {
+    const off = normalizeV2Config({ ...base, productPolicy: { enabled: true } } as never);
+    expect(allowedActionTypes(off, null).has("send_product")).toBe(false);
+    const noCatalog = normalizeV2Config({ ...base, productPolicy: { enabled: false, sendCard: true } } as never);
+    expect(allowedActionTypes(noCatalog, null).has("send_product")).toBe(false);
+    const on = normalizeV2Config({ ...base, productPolicy: { enabled: true, sendCard: true, allowedProductIds: ["p1"] } } as never);
+    const allowed = allowedActionTypes(on, null);
+    expect(allowed.has("send_product")).toBe(true);
+    expect(actionsGuide(allowed, { tags: [], stages: [] })).toContain('{"type":"send_product","productId":"<id>"}');
+    expect(productAllowedByPolicy(on, "p1")).toBe(true);
+    expect(productAllowedByPolicy(on, "p2")).toBe(false);
+    expect(productAllowedByPolicy(off, "qualquer")).toBe(true);
+    expect(productAllowedByPolicy(off, "")).toBe(false);
+  });
+
+  it("preço do agente: a opção de preço escolhida vale; sem ela, ou sem cadastro dela, o de tabela sem desconto", () => {
+    const options = [
+      { price: 200, channel: "Loja", discountPercent: 10 },
+      { price: 180, channel: "Parceiro", discountPercent: null },
+    ];
+    expect(pickPolicyPrice(250, options, "loja ")).toEqual({ unitPrice: 200, discount: 10 });
+    expect(pickPolicyPrice(250, options, "Parceiro")).toEqual({ unitPrice: 180, discount: 0 });
+    expect(pickPolicyPrice(250, options, "Outro")).toEqual({ unitPrice: 250, discount: 0 });
+    expect(pickPolicyPrice(250, options, undefined)).toEqual({ unitPrice: 250, discount: 0 });
+    expect(pickPolicyPrice(250, null, "Loja")).toEqual({ unitPrice: 250, discount: 0 });
   });
 });
 

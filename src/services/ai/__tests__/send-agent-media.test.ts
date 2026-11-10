@@ -6,6 +6,8 @@ const mocks = vi.hoisted(() => ({
   upload: vi.fn(),
   process: vi.fn(),
   updateMany: vi.fn(),
+  allowed: vi.fn(async (_contactId: string) => true),
+  authorized: vi.fn(async (_args: unknown): Promise<{ ok: true } | { ok: false; reason: string }> => ({ ok: true })),
 }));
 
 vi.mock("@/lib/audio-convert", () => ({ WHATSAPP_VIDEO_MAX_BYTES: 16 * 1024 * 1024 }));
@@ -45,6 +47,8 @@ vi.mock("@/lib/storage/read-for-send", () => ({
 }));
 vi.mock("@/lib/meta-whatsapp/client", () => ({ metaClientFromConfig: () => ({ configured: true, uploadMedia: mocks.upload }) }));
 vi.mock("@/jobs/whatsapp/meta-attach.job", () => ({ processMetaAttach: mocks.process }));
+vi.mock("@/services/ai/phone-allowlist", () => ({ isContactAllowedForAi: mocks.allowed }));
+vi.mock("@/services/ai/send-agent-message", () => ({ assertAiStillAuthorized: mocks.authorized }));
 
 import { mediaNotSentTrace, sendAgentFollowUpMedia, type MediaSendReport } from "../send-agent-media";
 
@@ -149,6 +153,31 @@ describe("conversa webchat", () => {
     expect(await send()).toBe(0);
     expect(prisma.message.create).not.toHaveBeenCalled();
     expect(mocks.upload).not.toHaveBeenCalled();
+    expect(mocks.enqueue).not.toHaveBeenCalled();
+  });
+});
+
+describe("travas do envio de texto valem para o anexo", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.allowed.mockResolvedValue(true);
+    mocks.authorized.mockResolvedValue({ ok: true });
+  });
+
+  it("número fora da lista de teste ou conversa que não é mais do agente: não cria mensagem e o motivo vai para o rastro", async () => {
+    const { prisma } = await import("@/lib/prisma");
+    let report: MediaSendReport | undefined;
+    const run = () =>
+      sendAgentFollowUpMedia({ conversationId: "conv-1", contactId: "c-1", agentUserId: "u-1", attachments: [VIDEO], report: (r) => (report = r) });
+
+    mocks.allowed.mockResolvedValueOnce(false);
+    expect(await run()).toBe(0);
+    expect(report?.blocked).toBe("phone_allowlist");
+
+    mocks.authorized.mockResolvedValueOnce({ ok: false, reason: "assignee_changed" });
+    expect(await run()).toBe(0);
+    expect(mediaNotSentTrace("Anexos", report)).toContain("passou para outra pessoa");
+    expect(prisma.message.create).not.toHaveBeenCalled();
     expect(mocks.enqueue).not.toHaveBeenCalled();
   });
 });

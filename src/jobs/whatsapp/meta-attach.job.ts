@@ -294,6 +294,13 @@ export async function processMetaAttach(
         audioDelivery: "document",
       });
     }
+    // Só serve como voz: não cai para áudio comum nem para documento.
+    if (payload.voiceOnly && !prepared.payload.voice) {
+      return markFailed(payload, "O áudio não pôde ser convertido em mensagem de voz.", {
+        messageType: "audio",
+        audioDelivery: prepared.payload.delivery,
+      });
+    }
     mediaType = prepared.payload.delivery === "document" ? "document" : "audio";
     sendAsVoice = prepared.payload.voice;
     audioDelivery = prepared.payload.delivery;

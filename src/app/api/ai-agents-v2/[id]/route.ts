@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import { requireAuth, requirePermission, runInSessionContext } from "@/lib/auth-helpers";
 import { reindexFailedKnowledgeDocs } from "@/services/ai/knowledge-docs";
-import { getV2Agent, updateV2Agent, deleteV2Agent } from "@/services/ai-v2/agents";
+import { ActivationNeedsChannelError, getV2Agent, updateV2Agent, deleteV2Agent } from "@/services/ai-v2/agents";
 import { ensureV2AgentSchema } from "@/services/ai-v2/ensure-schema";
 import { getLogger } from "@/lib/logger";
 
@@ -49,6 +49,8 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
       config?: unknown;
       openaiApiKey?: string | null;
       anthropicApiKey?: string | null;
+      voiceApiKey?: string | null;
+      confirmAnyChannel?: boolean;
     };
     const agent = await updateV2Agent(id, r.session.user.organizationId!, body);
     // Chave nova: os materiais que falharam por falta dela voltam a indexar.
@@ -60,6 +62,10 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
     }
     return NextResponse.json(agent);
   } catch (err) {
+    // Ligar sem número escolhido: a tela pede a confirmação e reenvia.
+    if (err instanceof ActivationNeedsChannelError) {
+      return NextResponse.json({ message: err.message, code: err.code }, { status: 409 });
+    }
     log.error({ err }, "[PUT /api/ai-agents-v2/[id]] falhou");
     return NextResponse.json(
       { message: err instanceof Error ? err.message : "Erro ao atualizar agente v2." },
