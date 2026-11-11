@@ -251,6 +251,8 @@ export interface V2VoiceConfig {
   permissionQuestion?: string;
   /** Linha escrita que acompanha o áudio quando ele não traz valor, data nem link. */
   companionText?: string;
+  /** Quando a linha escrita acompanha o áudio: sempre (padrão), só com valor/data/link, ou nunca. */
+  companionLine?: "always" | "data" | "off";
   /** Teto de caracteres falados por áudio (cerca de 15 por segundo). */
   maxChars: number;
   /** Teto de áudios por conversa. */

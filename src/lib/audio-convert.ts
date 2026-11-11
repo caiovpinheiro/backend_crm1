@@ -223,6 +223,23 @@ function runFFmpeg(bin: string, args: string[], timeoutMs = 20_000): Promise<{ o
  */
 export const VOICE_LOUDNORM_FILTER = "loudnorm=I=-16:TP=-1.5:LRA=11";
 
+/**
+ * Voz gerada (TTS) com volume padronizado. Recodifica sempre (a cópia direta
+ * do Opus fica de fora) e tenta primeiro o layout da nota de voz nativa —
+ * 16 kHz, 20 ms, voip (fala sai em SILK de banda larga). Em 48 kHz o libopus
+ * usa o modo híbrido, que o WhatsApp do iPhone mostra como arquivo ".opus" em
+ * vez de nota de voz. Os demais formatos ficam como reserva, na ordem de sempre.
+ */
+export function generatedVoiceStrategies(): { label: string; args: string[] }[] {
+  const recoded = getConversionStrategies().filter((s) => !s.args.includes("copy"));
+  const isNative = (s: { args: string[] }) =>
+    s.args.includes("libopus") && s.args.includes("16000") && s.args.includes("-frame_duration");
+  return [...recoded.filter(isNative), ...recoded.filter((s) => !isNative(s))].map((s) => ({
+    label: `${s.label} + loudnorm`,
+    args: ["-af", VOICE_LOUDNORM_FILTER, ...s.args],
+  }));
+}
+
 export async function convertToOgg(
   inputBuffer: Buffer,
   inputExt = "webm",
@@ -239,12 +256,7 @@ export async function convertToOgg(
     await writeFile(inputPath, inputBuffer);
 
     const bin = getFFmpeg();
-    // Normalizar o volume exige recodificar: a cópia direta do Opus fica de fora.
-    const strategies = opts.loudnorm
-      ? getConversionStrategies()
-          .filter((s) => !s.args.includes("copy"))
-          .map((s) => ({ label: `${s.label} + loudnorm`, args: ["-af", VOICE_LOUDNORM_FILTER, ...s.args] }))
-      : getConversionStrategies();
+    const strategies = opts.loudnorm ? generatedVoiceStrategies() : getConversionStrategies();
     const inputArgs = ffmpegInputArgs(inputPath, inputExt);
 
     for (const strategy of strategies) {

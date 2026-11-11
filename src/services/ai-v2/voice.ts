@@ -94,6 +94,18 @@ export function voiceCompanionText(config: V2AgentConfig, replyText: string): st
   return config.voice?.companionText?.trim() || VOICE_COMPANION_TEXT_DEFAULT;
 }
 
+/**
+ * Linha escrita que vai junto do áudio, conforme a configuração:
+ * "always" (padrão) manda sempre; "data" só quando a resposta tem valor, data
+ * ou link; "off" nunca — o áudio vai sozinho, como numa conversa entre pessoas.
+ */
+export function voiceCompanionLine(config: V2AgentConfig, replyText: string): string | null {
+  const mode = config.voice?.companionLine ?? "always";
+  if (mode === "off") return null;
+  if (mode === "data" && writtenData(stripAudioTags(replyText)).length === 0) return null;
+  return voiceCompanionText(config, replyText);
+}
+
 const digitsOf = (text: string) => (text.match(/\d+(?:[.,]\d+)*/g) ?? []).map((n) => n.replace(/\D/g, "")).filter(Boolean);
 
 /**

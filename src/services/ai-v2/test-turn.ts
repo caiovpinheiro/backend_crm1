@@ -12,7 +12,7 @@ import { getV2ThemeById } from "./themes";
 import { agentAskedQuestion, selectV2ThemeSemantic } from "./theme-semantic";
 import { actionValueAllowed, allowedActionTypes, allowedFlowIdsFor, allowedMessageModelIdsFor, humanRequestSubject, mentionsHumanRequest, normalizeAskOptions, productAllowedByPolicy } from "./action-policy";
 import { defaultV2Counters } from "./limits";
-import { decideVoice, speechMatchesReply, voiceCompanionText, voiceConfigured } from "./voice";
+import { decideVoice, speechMatchesReply, voiceCompanionLine, voiceConfigured } from "./voice";
 import { noteV2Fact, peekV2Fact, traceStep } from "./trace";
 import { isGreetingOnlyMessage, keepOpenOnNewRequest } from "./closure";
 import { isShortAckText } from "@/lib/ai-agents/tabulation-classify-policy";
@@ -864,8 +864,9 @@ export async function simulateV2Turn(
     if (decision.action === "speak") {
       // Com marcações de interpretação, quando o modelo de voz as aceita.
       voiceText = decision.spoken;
-      reply = voiceCompanionText(config, reply);
-      traceStep("voz", `Iria por áudio (${decision.spoken.length} caracteres falados) + linha escrita. Em produção: só com a chave do provedor, com o agente respondendo sozinho e depois de o cliente aceitar áudio ou mandar um`);
+      const companion = voiceCompanionLine(config, reply);
+      reply = companion ?? "";
+      traceStep("voz", `Iria por áudio (${decision.spoken.length} caracteres falados)${companion ? " + linha escrita" : ", sem linha escrita"}. Em produção: só com a chave do provedor, com o agente respondendo sozinho e depois de o cliente aceitar áudio ou mandar um`);
     } else if (decision.action === "none") {
       traceStep("voz", `Resposta em texto: ${decision.reason}`);
     }

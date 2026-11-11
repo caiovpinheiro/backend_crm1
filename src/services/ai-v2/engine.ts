@@ -21,7 +21,7 @@ import { detectV2MediaKinds, evaluateV2Media } from "./media";
 import { enrichTurnWithMedia } from "./media-turn";
 import { CLIENT_AUDIO_MARK } from "./media-understanding";
 import { startOfPeriod } from "./cost-guard";
-import { applyVoiceConsent, decideVoice, deliverVoiceReply, speechMatchesReply, stripAudioTags, traceVoiceSkipped, tryGetAgentVoiceKey, voiceCharsSince, voiceCompanionText, voiceConfigured, voicePromptSection } from "./voice";
+import { applyVoiceConsent, decideVoice, deliverVoiceReply, speechMatchesReply, stripAudioTags, traceVoiceSkipped, tryGetAgentVoiceKey, voiceCharsSince, voiceCompanionLine, voiceConfigured, voicePromptSection } from "./voice";
 import { isMediaPlaceholderText } from "@/lib/ai-agents/media-placeholder";
 import { clientWordsOnly, getMediaTexts, isBareFileName, mediaTextLine, understoodKindOf } from "./media-understanding";
 import { callV2LLM } from "./llm";
@@ -2816,10 +2816,10 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       if (voiceRes.sent) {
         voiceDelivered = true;
         counters.voiceCount = (counters.voiceCount ?? 0) + 1;
-        // Sempre uma linha escrita junto: o que tem número ou link, ou a linha padrão.
-        const companion = voiceCompanionText(config, replyText);
-        const line = await sendReply(companion, undefined, { bypassDuplicateGuard: true });
-        sentReply = [`[Áudio] ${decision.plain}`, line.sent ? companion : ""].filter(Boolean).join("\n\n");
+        // Linha escrita junto (o que tem número ou link, ou a linha padrão), se a configuração pedir.
+        const companion = voiceCompanionLine(config, replyText);
+        const line = companion ? await sendReply(companion, undefined, { bypassDuplicateGuard: true }) : { sent: false };
+        sentReply = [`[Áudio] ${decision.plain}`, line.sent && companion ? companion : ""].filter(Boolean).join("\n\n");
         noteV2Fact("send", { sent: true, reason: null });
         traceStep("voz", `Resposta enviada por áudio (${decision.plain.length} caracteres falados${speech ? ", com o roteiro falado" : ""})${line.sent ? " + linha escrita" : ""}`);
       } else {
