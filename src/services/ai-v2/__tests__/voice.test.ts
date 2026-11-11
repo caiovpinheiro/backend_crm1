@@ -29,12 +29,14 @@ import {
   decideVoice,
   deliverVoiceReply,
   speakableText,
+  speechMatchesReply,
+  stripAudioTags,
   voiceCompanionText,
   voiceKeyFields,
   voicePromptSection,
-  writtenFacts,
+  writtenData,
 } from "../voice";
-import { elevenLabsProvider } from "../voice-provider";
+import { elevenLabsProvider, resolveVoiceSettings } from "../voice-provider";
 
 const LONG = "Funciona assim: você escolhe a opção, a equipe confirma os dados e em seguida libera o acesso para você começar.";
 
@@ -60,17 +62,42 @@ describe("texto falado e texto escrito", () => {
     expect(speakableText("*Olha só* 😀\n- primeiro passo\n- segundo: veja em https://exemplo.com/a .")).toBe("Olha só primeiro passo segundo: veja em.");
   });
 
-  it("o que tem número ou link fica também por escrito; sem isso, vai a linha configurada ou a padrão", () => {
-    const reply = "Funciona assim. O valor é R$ 120,00 por mês. O prazo vai até 10/12. Veja em https://exemplo.com/a";
-    expect(writtenFacts(reply).split("\n")).toEqual(["O valor é R$ 120,00 por mês.", "O prazo vai até 10/12.", "Veja em https://exemplo.com/a"]);
+  it("por escrito vai só o dado (valor, data, horário, link), não a frase inteira", () => {
+    const reply = "Funciona assim. O valor é R$ 1.120,50 por mês, com 10% de desconto. A parte prática está prevista a partir de agosto de 2027, de uma a três vezes por mês. O prazo vai até 10/12, às 18h. Veja em https://exemplo.com/a.";
+    expect(writtenData(reply)).toEqual(["R$ 1.120,50", "10%", "agosto de 2027", "10/12", "18h", "https://exemplo.com/a"]);
+    expect(voiceCompanionText(config(), reply)).toBe("Por escrito: R$ 1.120,50 · 10% · agosto de 2027 · 10/12 · 18h · https://exemplo.com/a");
+    expect(writtenData("Dia 5 de março de 2027 começa a turma.")).toEqual(["5 de março de 2027"]);
+  });
+
+  it("sem dado para escrever, vai a linha configurada ou a padrão", () => {
     expect(voiceCompanionText(config(), "Funciona assim, sem segredo.")).toBe("Te respondi por áudio.");
     expect(voiceCompanionText(config({ companionText: "Segue o áudio." }), "Funciona assim, sem segredo.")).toBe("Segue o áudio.");
+  });
+
+  it("marcações de interpretação saem do texto escrito; colchete com número não é marcação", () => {
+    expect(stripAudioTags("[animada] Que bom! [pausa] Vamos lá. Veja o item [2].")).toBe("Que bom! Vamos lá. Veja o item [2].");
+    expect(voiceCompanionText(config(), "[confiante] O valor é R$ 50,00.")).toBe("Por escrito: R$ 50,00");
+  });
+
+  it("o roteiro falado só vale com os mesmos números da resposta e sem link", () => {
+    const reply = "A mensalidade é R$ 120,00 e o prazo vai até 10/12.";
+    expect(speechMatchesReply("[animada] Olha, fica cento e vinte por mês, e dá pra entrar até 10/12, tá?", reply)).toBe(true);
+    expect(speechMatchesReply("Fica R$ 99,00 por mês.", reply)).toBe(false);
+    expect(speechMatchesReply("Entra em https://exemplo.com e vê.", reply)).toBe(false);
+    expect(speechMatchesReply("[animada]", reply)).toBe(false);
   });
 });
 
 describe("quando a resposta vai por áudio", () => {
   it("com permissão, dentro dos limites e pedido pelo modelo: fala a própria resposta", () => {
-    expect(decide()).toEqual({ action: "speak", spoken: LONG });
+    expect(decide()).toEqual({ action: "speak", spoken: LONG, plain: LONG });
+  });
+
+  it("com roteiro falado, fala o roteiro; as marcações só vão ao provedor no modelo que as aceita", () => {
+    const speech = "[animada] Olha, funciona assim: você escolhe, a equipe confirma e já libera o acesso pra você.";
+    const plain = "Olha, funciona assim: você escolhe, a equipe confirma e já libera o acesso pra você.";
+    expect(decide({ speech })).toEqual({ action: "speak", spoken: plain, plain });
+    expect(decide({ speech, config: config({ model: "eleven_v3" }) })).toEqual({ action: "speak", spoken: speech, plain });
   });
 
   it("desligada, sem voz escolhida, sem chave ou em modo sugestão: texto", () => {
@@ -164,7 +191,26 @@ describe("provedor de voz e entrega", () => {
     expect(url).toBe("https://api.elevenlabs.io/v1/text-to-speech/voz%201?output_format=mp3_44100_64");
     expect(url).not.toContain("segredo");
     expect((init.headers as Record<string, string>)["xi-api-key"]).toBe("segredo");
-    expect(JSON.parse(String(init.body))).toEqual({ text: "Olá", model_id: "eleven_flash_v2_5", language_code: "pt" });
+    expect(JSON.parse(String(init.body))).toEqual({
+      text: "Olá",
+      model_id: "eleven_flash_v2_5",
+      language_code: "pt",
+      voice_settings: { stability: 0.4, similarity_boost: 0.75, style: 0, use_speaker_boost: true, speed: 1 },
+    });
+  });
+
+  it("modelo e ajustes do agente vão ao provedor; cada modelo tem o seu padrão", async () => {
+    fetchMock.mockResolvedValue(audioResponse());
+    await elevenLabsProvider.synthesize({ apiKey: "segredo", voiceId: "v", text: "Olá", model: "eleven_multilingual_v2", settings: { stability: 0.2, speed: 1.1 } });
+    const multilingual = JSON.parse(String((fetchMock.mock.calls[0] as [string, RequestInit])[1].body));
+    expect(multilingual.model_id).toBe("eleven_multilingual_v2");
+    expect("language_code" in multilingual).toBe(false);
+    expect(multilingual.voice_settings).toEqual({ stability: 0.2, similarity_boost: 0.75, style: 0.3, use_speaker_boost: true, speed: 1.1 });
+
+    // O v3 só tem três níveis de estabilidade; velocidade fica na faixa do provedor.
+    expect(resolveVoiceSettings("eleven_v3", { stability: 0.3, speed: 3 })).toMatchObject({ stability: 0.5, speed: 1.2 });
+    expect(resolveVoiceSettings("eleven_v3", { stability: 0.2 }).stability).toBe(0);
+    expect(resolveVoiceSettings("modelo-desconhecido").stability).toBe(0.4);
   });
 
   it("erro do provedor vira motivo claro, sem a chave", async () => {
@@ -173,13 +219,13 @@ describe("provedor de voz e entrega", () => {
   });
 
   const deliver = () =>
-    deliverVoiceReply({ organizationId: "org-1", agentId: "ag-1", agentUserId: "u-1", conversationId: "conv-1", contactId: "c-1", config: config(), spoken: LONG });
+    deliverVoiceReply({ organizationId: "org-1", agentId: "ag-1", agentUserId: "u-1", conversationId: "conv-1", contactId: "c-1", config: config(), spoken: `[animada] ${LONG}`, plain: LONG, record: "Resposta escrita." });
 
-  it("gera, guarda e manda só como mensagem de voz, com o texto falado gravado; conta o uso", async () => {
+  it("gera, guarda e manda só como mensagem de voz, com volume padronizado e o texto escrito gravado; conta o uso", async () => {
     fetchMock.mockResolvedValue(audioResponse());
     expect(await deliver()).toEqual({ sent: true });
     const media = mocks.sendMedia.mock.calls[0][0] as { attachments: Array<Record<string, unknown>>; waitForSendMs: number };
-    expect(media.attachments[0]).toMatchObject({ mimeType: "audio/mpeg", caption: LONG, voiceOnly: true });
+    expect(media.attachments[0]).toMatchObject({ mimeType: "audio/mpeg", caption: "Resposta escrita.", voiceOnly: true, normalizeLoudness: true });
     expect(media.waitForSendMs).toBeGreaterThan(0);
     expect(mocks.executeRaw.mock.calls.some((c) => String(c[0]).includes("ai_simple_voice_usage") && c.includes(LONG.length))).toBe(true);
   });
