@@ -23,7 +23,7 @@ import { withOrgContext } from "@/lib/auth-helpers";
 import { can, loadAuthzContext } from "@/lib/authz";
 import { metrics } from "@/lib/metrics";
 import { runDistributionExecuteOrInline } from "@/lib/distribution-execute-queue";
-import { executeDistribution } from "@/services/distribution";
+import { executeManualDistribution } from "@/services/distribution";
 import {
   assertSmartDistributionEnabled,
   WidgetNotEnabledError,
@@ -137,7 +137,7 @@ export async function POST(request: Request) {
           requestedByUserId: session.user.id,
           correlationId: randomUUID(),
         },
-        () => executeDistribution(executeInput),
+        () => executeManualDistribution(executeInput),
       );
 
       if (outcome.kind === "result") {

@@ -39,6 +39,12 @@ export {
   type ExecuteDistributionInput,
 } from "./engine";
 
+export {
+  executeManualDistribution,
+  leadsResultAsDistribution,
+  requestedDepartmentIds,
+} from "./manual-dispatch";
+
 export { DISTRIBUTION_ENABLED_KEY, isDistributionEnabled } from "./enabled";
 
 export {

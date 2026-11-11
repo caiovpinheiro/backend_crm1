@@ -2,7 +2,7 @@ import { getLogger } from "@/lib/logger";
 import type { DistributionExecutePayload } from "@/lib/distribution-execute-queue";
 import { withSystemContext } from "@/lib/webhook-context";
 import {
-  executeDistribution,
+  executeManualDistribution,
   type DistributionResult,
   type DistributionTriggerSource,
 } from "@/services/distribution";
@@ -44,7 +44,7 @@ export async function processDistributionExecuteJob(
   const result = await withSystemContext(
     organizationId,
     () =>
-      executeDistribution({
+      executeManualDistribution({
         dealId: payload.dealId ?? null,
         contactId: payload.contactId ?? null,
         conversationId: payload.conversationId ?? null,
