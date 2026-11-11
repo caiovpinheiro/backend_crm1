@@ -59,6 +59,7 @@ import { defaultV2Counters } from "./limits";
 import { voicePromptSection } from "./voice";
 import { actionsGuide, allowedActionTypes, allowedFlowIdsFor, allowedMessageModelIdsFor, queryToolRestriction, repairMessageModelId, themeToolRestriction, writableFieldsForGuide } from "./action-policy";
 import { getLogger } from "@/lib/logger";
+import { askedQuestionsSection, bubblesPromptLine, memoryPromptSection, profileAllowsOpinion, profilePromptSection } from "./conversation-profile";
 
 const log = getLogger("ai-v2.llm");
 
@@ -903,7 +904,7 @@ function isBadRequest(err: unknown): boolean {
 export function scopeInstruction(config: V2AgentConfig): string {
   const lines = [
     "Você só atende o que é do atendimento desta empresa: os assuntos, materiais, calendário e dados do cliente listados abaixo.",
-    "Não responda o que é de fora — contas e cálculos, conhecimentos gerais, programação, opiniões, dados internos da empresa (como número de clientes ou faturamento). Diga em uma frase, com gentileza, que aqui só pode ajudar com o atendimento e volte ao que o cliente precisa.",
+    `Não responda o que é de fora — contas e cálculos, conhecimentos gerais, programação, ${profileAllowsOpinion(config) ? "opiniões sobre assuntos de fora (comentar a escolha do cliente, sem inventar característica, pode)" : "opiniões"}, dados internos da empresa (como número de clientes ou faturamento). Diga em uma frase, com gentileza, que aqui só pode ajudar com o atendimento e volte ao que o cliente precisa.`,
     "Se a mensagem mistura as duas coisas, responda só a parte do atendimento e diga em meia frase que o resto não é com você. Mensagem só de fora: outOfScope=true.",
   ];
   const custom = config.scope?.message?.trim();
@@ -1077,6 +1078,8 @@ function buildV2SystemPrompt(
   lossReasons: string[] = [],
   /** Trecho "Resposta por áudio" (vazio = o modelo não fica sabendo de voz). */
   voiceSection = "",
+  /** Perguntas que o agente já fez (perfis fora de "support"). */
+  askedSection = "",
 ): string {
   const timezone = config.businessHours?.timezone || "America/Sao_Paulo";
   const lines: string[] = [];
@@ -1094,11 +1097,13 @@ function buildV2SystemPrompt(
   }
   lines.push(`# Fontes\n${SOURCES_GUIDE}`);
   lines.push(`# Como escrever\n${WRITING_GUIDE}`);
+  const profileSection = profilePromptSection(config);
+  if (profileSection) lines.push(profileSection);
   // Fecho configurado: quem põe é o motor; o modelo não cria o próprio.
   if (hasReplyEnding(effectiveReplyEnding(config, activeTheme(config, themeId)))) lines.push(REPLY_ENDING_PROMPT);
   if ((config.fallback?.confusion?.action ?? "rephrase") === "rephrase") lines.push(CONFUSION_PROMPT);
   lines.push(`# Procedimentos e listas\n${PROCEDURE_GUIDE}`);
-  lines.push(`# Tamanho das respostas\n${responseLengthInstruction(config.responseLength)}`);
+  lines.push(`# Tamanho das respostas\n${[responseLengthInstruction(config.responseLength), bubblesPromptLine(config)].filter(Boolean).join("\n")}`);
   lines.push(`# Emojis\n${emojiInstruction(config.emojis)}`);
   const bold = boldInstruction(config.bold);
   if (bold) lines.push(`# Negrito\n${bold}`);
@@ -1169,6 +1174,9 @@ function buildV2SystemPrompt(
     lines.push(themeInstructions);
   }
 
+  const memorySection = memoryPromptSection(config, collectedVariables);
+  if (memorySection) lines.push(memorySection);
+  if (askedSection) lines.push(askedSection);
   if (collectedVariables && Object.keys(collectedVariables).length > 0) {
     lines.push("# Variáveis já coletadas nesta conversa");
     lines.push(JSON.stringify(collectedVariables));
@@ -1483,6 +1491,7 @@ export async function callV2LLM(args: {
     userMessage,
     lossReasonLabels,
     args.voiceSection ?? "",
+    askedQuestionsSection(args.config, args.previousMessages),
   );
 
   const messages: Array<{ role: "user" | "assistant"; content: string }> = [
