@@ -67,6 +67,23 @@ describe("searchV2Products", () => {
     expect(result.products[0].priceFormatted).toMatch(/R\$/);
   });
 
+  it("produto com cadastro de curso traz nível, grau, modalidade e duração; sem cadastro, não traz o bloco", async () => {
+    (prisma.product.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([
+      {
+        id: "c1", name: "Curso Alfa", sku: null, type: "SERVICE", unit: "mês", price: 200, description: null, customValues: [],
+        courseConfig: { level: "GRADUATION", grau: "Licenciatura", mode: "HYBRID", semester: 8, pricingOptions: [{ price: 200, channel: "Loja", discountPercent: 25 }] },
+      },
+      { id: "c2", name: "Curso Beta", sku: null, type: "SERVICE", unit: "mês", price: 100, description: null, customValues: [], courseConfig: { level: null, grau: null, mode: "EAD", semester: null, pricingOptions: [] } },
+      { id: "p3", name: "Curso Gama avulso", sku: null, type: "PRODUCT", unit: "un", price: 50, description: null, customValues: [], courseConfig: null },
+    ]);
+    const result = await searchV2Products({ query: "curso", priceChannel: "loja" });
+    const byId = Object.fromEntries(result.products.map((p) => [p.id, p]));
+    expect(byId.c1.course).toEqual({ level: "Graduação", degree: "Licenciatura", mode: "Semi-Presencial", duration: "8 semestres" });
+    expect(byId.c1).toMatchObject({ price: 150, listPrice: 200, discountPercent: 25 });
+    expect(byId.c2.course).toEqual({ mode: "EAD" });
+    expect("course" in byId.p3).toBe(false);
+  });
+
   it("respeita filtro por tipo", async () => {
     (prisma.product.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([]);
     await searchV2Products({ query: "x", type: "SERVICE", limit: 3 });

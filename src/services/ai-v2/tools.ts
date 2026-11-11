@@ -17,6 +17,8 @@ import {
   type RetrievedMessageModel,
 } from "@/services/ai/message-models-retrieval";
 
+import { formatCourseDuration, formatCourseLevel, formatCourseMode } from "@/services/product-messages";
+
 import { pickPolicyPrice } from "./product-card";
 
 function normalizeSearch(s: string | null | undefined): string {
@@ -70,6 +72,11 @@ export async function searchV2Products(args: {
     unit: string | null;
     price: number | null;
     priceFormatted: string | null;
+    /**
+     * Dados do cadastro de curso do produto (nível, grau, modalidade,
+     * duração), os mesmos do cartão. Só o que está preenchido.
+     */
+    course?: { level?: string; degree?: string; mode?: string; duration?: string };
     listPrice?: number;
     listPriceFormatted?: string;
     discountPercent?: number;
@@ -99,7 +106,9 @@ export async function searchV2Products(args: {
           customField: { select: { id: true, name: true, label: true, type: true } },
         },
       },
-      ...(priceChannel ? { courseConfig: { select: { pricingOptions: true } } } : {}),
+      // Cadastro de curso: sem ele na busca, o agente dizia não ter a duração
+      // enquanto o cartão enviado no mesmo turno a mostrava.
+      courseConfig: { select: { level: true, grau: true, mode: true, semester: true, pricingOptions: true } },
     },
   });
 
@@ -129,9 +138,26 @@ export async function searchV2Products(args: {
     total: scored.length,
     products: scored.map(({ product: p }) => {
       const base = p.price ? Number(p.price) : null;
-      const options = (p as { courseConfig?: { pricingOptions?: unknown } | null }).courseConfig?.pricingOptions;
+      const cc = (p as { courseConfig?: { level?: string | null; grau?: string | null; mode?: string | null; semester?: number | null; pricingOptions?: unknown } | null }).courseConfig ?? null;
+      const options = cc?.pricingOptions;
       const picked = priceChannel && base !== null ? pickPolicyPrice(base, options, priceChannel) : null;
       const final = picked ? Math.round(picked.unitPrice * (1 - picked.discount / 100) * 100) / 100 : base;
+      const course = cc
+        ? {
+            level: formatCourseLevel(cc.level),
+            degree: cc.grau?.trim() ?? "",
+            mode: formatCourseMode(cc.mode),
+            duration: formatCourseDuration({
+              level: cc.level,
+              semester: cc.semester,
+              pricingOptions: options,
+              unitPrice: picked?.unitPrice ?? base ?? 0,
+              discount: picked?.discount ?? 0,
+              catalogPrice: base ?? 0,
+            }),
+          }
+        : null;
+      const courseFilled = course ? Object.fromEntries(Object.entries(course).filter(([, v]) => v)) : {};
       return {
         id: p.id,
         name: p.name,
@@ -140,6 +166,7 @@ export async function searchV2Products(args: {
         unit: p.unit,
         price: final,
         priceFormatted: final !== null ? fmtBRL.format(final) : null,
+        ...(Object.keys(courseFilled).length > 0 ? { course: courseFilled } : {}),
         ...(picked && picked.discount > 0
           ? { listPrice: picked.unitPrice, listPriceFormatted: fmtBRL.format(picked.unitPrice), discountPercent: picked.discount }
           : {}),
