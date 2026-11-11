@@ -1,11 +1,18 @@
+import { execFileSync } from "node:child_process";
+import { readFileSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import {
   ffmpegCapabilities,
+  generatedVoiceStrategies,
   metaCloudAudioUploadBlocked,
   prepareWhatsAppAudio,
+  VOICE_LOUDNORM_FILTER,
 } from "@/lib/audio-convert";
-import { isOggOpus, muxOggOpus } from "@/lib/ogg-opus-ptt";
+import { isOggOpus, muxOggOpus, oggOpusChannels } from "@/lib/ogg-opus-ptt";
 import { demuxWebmOpus } from "@/lib/webm-opus";
 
 function opusHead(channels = 1, preSkip = 312): Buffer {
@@ -131,6 +138,88 @@ describe("prepareWhatsAppAudio", () => {
       expect(result.payload.mime).toBe("audio/mp4");
       expect(result.payload.voice).toBe(false);
     }
+  });
+});
+
+/** Pacotes de áudio de um Ogg (pula OpusHead e OpusTags). */
+function oggAudioPackets(ogg: Buffer): Buffer[] {
+  const packets: Buffer[] = [];
+  let cur: Buffer[] = [];
+  let off = 0;
+  while (off + 27 <= ogg.length && ogg.toString("ascii", off, off + 4) === "OggS") {
+    const nseg = ogg[off + 26]!;
+    let data = off + 27 + nseg;
+    for (let s = 0; s < nseg; s++) {
+      const len = ogg[off + 27 + s]!;
+      cur.push(ogg.subarray(data, data + len));
+      data += len;
+      if (len < 255) {
+        packets.push(Buffer.concat(cur));
+        cur = [];
+      }
+    }
+    off = data;
+  }
+  return packets.slice(2);
+}
+
+/** MP3 mono de fala sintética curta, como o que o provedor de voz devolve. */
+function fakeTtsMp3(): Buffer | null {
+  const caps = ffmpegCapabilities();
+  if (!caps.available || !caps.libmp3lame) return null;
+  const out = path.join(os.tmpdir(), `tts-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.mp3`);
+  try {
+    execFileSync(caps.bin, [
+      "-hide_banner", "-loglevel", "error", "-y",
+      "-f", "lavfi", "-i", "sine=frequency=220:sample_rate=44100:duration=3",
+      "-af", "volume=0.05,tremolo=f=4:d=0.9",
+      "-ac", "1", "-c:a", "libmp3lame", "-b:a", "128k", out,
+    ]);
+    return readFileSync(out);
+  } catch {
+    return null;
+  } finally {
+    rmSync(out, { force: true });
+  }
+}
+
+describe("voz gerada com volume padronizado", () => {
+  it("tenta primeiro o layout da nota de voz nativa (16 kHz, 20 ms, voip) e sempre recodifica", () => {
+    const strategies = generatedVoiceStrategies();
+    expect(strategies.every((s) => !s.args.includes("copy"))).toBe(true);
+    expect(strategies.every((s) => s.args.join(" ").includes(VOICE_LOUDNORM_FILTER))).toBe(true);
+    if (ffmpegCapabilities().libopus) {
+      const first = strategies[0]!.args;
+      expect(first).toContain("libopus");
+      expect(first[first.indexOf("-ar") + 1]).toBe("16000");
+      expect(first[first.indexOf("-frame_duration") + 1]).toBe("20");
+      expect(first[first.indexOf("-application") + 1]).toBe("voip");
+    }
+  });
+
+  it("MP3 do provedor vira nota de voz Ogg/Opus mono de 16 kHz, não arquivo", async () => {
+    const mp3 = fakeTtsMp3();
+    if (!mp3 || !ffmpegCapabilities().libopus) return;
+    const result = await prepareWhatsAppAudio(mp3, "mp3", "voz.mp3", { loudnorm: true });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.payload.delivery).toBe("voice");
+    expect(result.payload.voice).toBe(true);
+    expect(result.payload.mime).toBe("audio/ogg; codecs=opus");
+    expect(result.payload.fileName.endsWith(".ogg")).toBe(true);
+    expect(isOggOpus(result.payload.buffer)).toBe(true);
+    expect(oggOpusChannels(result.payload.buffer)).toBe(1);
+    // OpusHead: taxa de entrada 16 kHz, como a nota de voz nativa.
+    const head = result.payload.buffer.indexOf("OpusHead");
+    expect(result.payload.buffer.readUInt32LE(head + 12)).toBe(16000);
+    const packets = oggAudioPackets(result.payload.buffer);
+    expect(packets.length).toBeGreaterThan(0);
+    // Nada de modo híbrido (config 12–15) nem banda super-larga/cheia do CELT
+    // (24–31): é o que sai em 48 kHz e o iPhone recebe como arquivo ".opus".
+    expect(packets.every((p) => {
+      const config = p[0]! >> 3;
+      return !(config >= 12 && config <= 15) && config < 24;
+    })).toBe(true);
   });
 });
 
