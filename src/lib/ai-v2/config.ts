@@ -485,6 +485,10 @@ export const v2AgentConfigSchema = z.object({
       permissionQuestion: optionalText,
       companionText: optionalText,
       companionLine: z.enum(["always", "data", "off"]).optional().default("always").catch("always"),
+      // De onde vem o texto falado: "model" (padrão) usa o roteiro que o
+      // modelo escreve junto da resposta; "rewrite" sempre reescreve a
+      // resposta conferida para fala, com o estilo das orientações.
+      speechFrom: z.enum(["model", "rewrite"]).optional().default("model").catch("model"),
       maxChars: z.number().int().min(80).max(1200).optional().default(450).catch(450),
       maxPerConversation: z.number().int().min(1).max(30).optional().default(4).catch(4),
       dailyCharCap: z.number().int().min(0).optional().default(20000).catch(20000),

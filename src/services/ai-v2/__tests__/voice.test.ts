@@ -75,6 +75,12 @@ describe("texto falado e texto escrito", () => {
     expect(voiceCompanionText(config({ companionText: "Segue o áudio." }), "Funciona assim, sem segredo.")).toBe("Segue o áudio.");
   });
 
+  it("de onde vem o texto falado: roteiro do modelo por padrão, reescrita quando configurado", () => {
+    expect(config().voice?.speechFrom).toBe("model");
+    expect(config({ speechFrom: "rewrite" }).voice?.speechFrom).toBe("rewrite");
+    expect(config({ speechFrom: "outro" }).voice?.speechFrom).toBe("model");
+  });
+
   it("a linha escrita segue a configuração: sempre, só com dado, ou nunca", () => {
     const withData = "Fica R$ 99,00 por mês.";
     const noData = "Funciona assim, sem segredo.";
