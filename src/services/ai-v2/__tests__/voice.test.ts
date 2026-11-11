@@ -31,6 +31,7 @@ import {
   speakableText,
   speechMatchesReply,
   stripAudioTags,
+  voiceCompanionLine,
   voiceCompanionText,
   voiceKeyFields,
   voicePromptSection,
@@ -72,6 +73,16 @@ describe("texto falado e texto escrito", () => {
   it("sem dado para escrever, vai a linha configurada ou a padrão", () => {
     expect(voiceCompanionText(config(), "Funciona assim, sem segredo.")).toBe("Te respondi por áudio.");
     expect(voiceCompanionText(config({ companionText: "Segue o áudio." }), "Funciona assim, sem segredo.")).toBe("Segue o áudio.");
+  });
+
+  it("a linha escrita segue a configuração: sempre, só com dado, ou nunca", () => {
+    const withData = "Fica R$ 99,00 por mês.";
+    const noData = "Funciona assim, sem segredo.";
+    expect(voiceCompanionLine(config(), noData)).toBe("Te respondi por áudio.");
+    expect(voiceCompanionLine(config({ companionLine: "data" }), noData)).toBeNull();
+    expect(voiceCompanionLine(config({ companionLine: "data" }), withData)).toBe("Por escrito: R$ 99,00");
+    expect(voiceCompanionLine(config({ companionLine: "off" }), withData)).toBeNull();
+    expect(voiceCompanionLine(config({ companionLine: "off" }), noData)).toBeNull();
   });
 
   it("marcações de interpretação saem do texto escrito; colchete com número não é marcação", () => {
