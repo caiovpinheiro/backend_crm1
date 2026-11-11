@@ -556,19 +556,35 @@ export async function processIdleV2(now: Date = new Date()): Promise<{ nudged: n
  * a próxima passada reconhecer que a última mensagem é o lembrete).
  */
 async function saveProgress(row: IdleRow, progress: { anchorAt: string; sent: number; kind: V2IdleKind }, now: Date): Promise<void> {
-  if (!row.has_state || !db.$executeRawUnsafe) return;
+  if (!db.$executeRawUnsafe) return;
   try {
     const last = await db.$queryRawUnsafe<Array<{ createdAt: Date }>>(
       `SELECT m."createdAt" FROM "messages" m WHERE m."conversationId" = $1 AND m."direction" = 'out' ORDER BY m."createdAt" DESC LIMIT 1`,
       row.conversation_id,
     );
     const lastAt = last?.[0]?.createdAt ? new Date(last[0].createdAt) : now;
+    const idleFollowUp = { ...progress, lastAt: lastAt.toISOString() };
+    if (!row.has_state) {
+      // Conversa sem estado (ex.: o primeiro envio do cliente foi um arquivo que
+      // o agente não leu): sem onde gravar, o lembrete 1 repetia a cada passada
+      // e o encerramento nunca chegava. Cria o estado para guardar o progresso.
+      const { upsertV2ConversationState } = await import("./state");
+      await upsertV2ConversationState({
+        organizationId: row.organization_id,
+        conversationId: row.conversation_id,
+        agentId: row.agent_config_id,
+        stage: "active",
+        owner: "agente",
+        counters: { idleFollowUp } as never,
+      });
+      return;
+    }
     await db.$executeRawUnsafe(
       `UPDATE "ai_simple_conversation_states"
           SET "counters" = jsonb_set(COALESCE("counters", '{}'::jsonb), '{idleFollowUp}', $2::jsonb, true)
         WHERE "conversationId" = $1`,
       row.conversation_id,
-      JSON.stringify({ ...progress, lastAt: lastAt.toISOString() }),
+      JSON.stringify(idleFollowUp),
     );
   } catch (err) {
     log.warn({ conv: row.conversation_id, err: err instanceof Error ? err.message : err }, "[ai-v2 inatividade] não gravou o lembrete");

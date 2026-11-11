@@ -330,6 +330,27 @@ describe("vários lembretes", () => {
   });
 });
 
+describe("conversa sem estado", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.send.mockResolvedValue({ sent: true });
+  });
+
+  it("cria o estado para guardar o lembrete enviado (senão o lembrete 1 repetia a cada passada)", async () => {
+    const config = { name: "Agente", tone: "Objetivo", autonomyMode: "auto", inactivity: { enabled: true, closeAfter: 120, followUps: [{ after: 10, mode: "fixed", message: "Ainda está aí?" }] } };
+    mocks.queryRaw.mockResolvedValueOnce([row({ simple_config: config, has_state: false, last_out_content: "Não consegui ler esse arquivo.", last_out_at: minutesAgo(15), last_inbound_at: minutesAgo(16) })]);
+    mocks.queryRaw.mockResolvedValueOnce([{ createdAt: NOW }]);
+    expect(await processIdleV2(NOW)).toEqual({ nudged: 1, closed: 0 });
+    expect(mocks.executeRaw).not.toHaveBeenCalled();
+    expect(mocks.upsertState).toHaveBeenCalledTimes(1);
+    expect(mocks.upsertState.mock.calls[0][0]).toMatchObject({
+      stage: "active",
+      owner: "agente",
+      counters: { idleFollowUp: { sent: 1, anchorAt: minutesAgo(15).toISOString(), lastAt: NOW.toISOString() } },
+    });
+  });
+});
+
 describe("lembrete escrito pelo agente", () => {
   beforeEach(() => {
     vi.clearAllMocks();
