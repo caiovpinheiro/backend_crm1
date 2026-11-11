@@ -484,6 +484,7 @@ export const v2AgentConfigSchema = z.object({
       guidance: optionalText,
       permissionQuestion: optionalText,
       companionText: optionalText,
+      companionLine: z.enum(["always", "data", "off"]).optional().default("always").catch("always"),
       maxChars: z.number().int().min(80).max(1200).optional().default(450).catch(450),
       maxPerConversation: z.number().int().min(1).max(30).optional().default(4).catch(4),
       dailyCharCap: z.number().int().min(0).optional().default(20000).catch(20000),
