@@ -62,6 +62,9 @@ import { getLogger } from "@/lib/logger";
 
 const log = getLogger("ai-v2.llm");
 
+/** Frase padrão quando a conferência tira o ponto pedido e o agente responde sem transferir. */
+export const GROUNDING_FALLBACK_DEFAULT = "Esse ponto eu prefiro confirmar antes de te passar, tá? Já deixei anotado.";
+
 type PrefetchedChunk = { docId: string; docTitle: string; content: string; distance: number; priority?: boolean };
 /** Trecho do material do assunto vai inteiro (o comum é cortado em PREFETCH_CHUNK_CHARS). */
 const PRIORITY_CHUNK_CHARS = 6000;
@@ -1728,6 +1731,9 @@ export async function callV2LLM(args: {
       ...lookupTexts,
       args.themeInstructions ?? "",
       ...args.config.globalRules,
+      // Persona e jeito de falar ("sou o Léo, assistente virtual…"): quem o
+      // agente é e o que ele faz na conversa vem daqui.
+      args.config.tone ?? "",
       ...args.config.variables.map((v) => `${v.key}: ${v.value}`),
       ...(args.config.calendar?.events ?? []).map((e) => e.title),
       ...messageModels.map((m) => m.name),
@@ -1784,6 +1790,7 @@ export async function callV2LLM(args: {
       ...args.config.variables.map((v) => `${v.key}: ${v.value}`),
       args.themeInstructions ?? "",
       ...args.config.globalRules,
+      args.config.tone ?? "",
       contextJson,
       allowedDomainsLine,
       ...linkedChunks.map((c) => `${c.docTitle}\n${c.content}`),
@@ -1810,7 +1817,12 @@ export async function callV2LLM(args: {
       // Apresentação curta de mensagem pronta/anexo: o conteúdo vem do
       // material; a frase só anuncia o envio ("vou te orientar…"). Conferir
       // a frase barrava o envio e transferia o cliente.
-      const presentsMaterial = !!output.messageModel?.id || (output.attachments?.length ?? 0) > 0;
+      // Formulário (flow) e cartão de produto também: a frase só anuncia o envio.
+      const presentsMaterial =
+        !!output.messageModel?.id ||
+        (output.attachments?.length ?? 0) > 0 ||
+        !!output.flow?.id ||
+        (output.actions ?? []).some((a) => a.type === "send_product" || a.type === "send_whatsapp_flow");
       if (presentsMaterial && output.reply.trim().split(/\s+/).length <= 40) return [];
       // Documento/imagem do cliente é fonte sobre o caso dele; conta certa
       // com valores das fontes ("documento menos desconto") vai conferida.
@@ -1980,7 +1992,8 @@ export async function callV2LLM(args: {
         traceStep("verificação", "O corte tiraria a parte que respondia a pergunta → reescreve em vez de mandar o resto");
         break;
       }
-      const candidate: V2LLMOutput = { ...output, reply: trimmed.reply };
+      // O roteiro falado do modelo pode ter a frase cortada: não vale mais.
+      const candidate: V2LLMOutput = { ...output, reply: trimmed.reply, speech: undefined };
       let still = unsupportedOf(candidate.reply, candidate.reason);
       if (still.length === 0 && !modelChecked) {
         still = await modelClaims(candidate);
@@ -2026,6 +2039,8 @@ export async function callV2LLM(args: {
       if (parsed?.success) {
         const fixed = parsed.data as V2LLMOutput;
         fixed.reply = renderMessage(fixed.reply, renderVars) ?? fixed.reply;
+        // Roteiro falado da reescrita não passou pela conferência: o motor refaz a partir da resposta final.
+        fixed.speech = undefined;
         // Reescrita que perdeu o link ou começa no meio ("Se aparecer…") não
         // sai assim: melhor uma pessoa do que uma resposta mutilada.
         if (!fixed.handoff && isMutilated(output.reply, fixed.reply, textsOf(flags))) {
@@ -2083,6 +2098,20 @@ export async function callV2LLM(args: {
         { err: err instanceof Error ? err.message : err },
         "[ai-v2] revisão de termos falhou",
       );
+    }
+    // Responder com o que foi conferido, em vez de transferir: tira as
+    // frases sem fonte e, se o que a pessoa pediu saiu junto, diz que vai
+    // confirmar. Nada sem fonte vai ao cliente; a conversa não cai.
+    if (args.config.groundingFallback === "answer" && !output.handoff) {
+      const unconfirmed = args.config.groundingFallbackMessage?.trim() || GROUNDING_FALLBACK_DEFAULT;
+      const trimmed = textsOf(flags).length === flags.length ? trimUnsupportedSentences(output.reply, textsOf(flags)) : null;
+      const kept = trimmed && unsupportedOf(trimmed.reply, output.reason).length === 0 ? trimmed.reply.trim() : "";
+      const droppedAnswer = !kept || trimDroppedTheAnswer(userMessage, output.reply, kept);
+      const reply = kept ? (droppedAnswer ? `${kept} ${unconfirmed}` : kept) : unconfirmed;
+      traceStep("verificação", `A reescrita ainda cita ${list} — responde só com o que foi conferido${droppedAnswer ? " e diz que vai confirmar" : ""}, sem transferir`);
+      noteV2Fact("verification", { unsupported: labelsOf(flags), rewritten: true, trimmed: kept ? [] : undefined, forcedHandoff: false, answeredWithConfirmed: true });
+      r.output = { ...output, reply, speech: undefined };
+      return;
     }
     traceStep("verificação", "A reescrita ainda cita o que não está no material — transferindo");
     noteV2Fact("verification", { unsupported: labelsOf(flags), rewritten: false, forcedHandoff: true });

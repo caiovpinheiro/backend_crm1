@@ -156,8 +156,11 @@ export function scrubNonCitableFields(
   text: string,
   ctx: ScrubContext,
 ): { text: string; scrubbedFields: string[] } {
-  const publicText = [...(ctx.publicTexts ?? []), ...(ctx.ownerTexts ?? [])].join("\n");
-  const values = collectNonCitableValues(ctx).filter((v) => !publicText.includes(v));
+  // Sem diferenciar maiúsculas e acentos: o lead escreve "pedagogia" e o
+  // campo guarda "Pedagogia" — é o mesmo valor, já público na conversa.
+  const fold = (t: string) => t.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const publicText = fold([...(ctx.publicTexts ?? []), ...(ctx.ownerTexts ?? [])].join("\n"));
+  const values = collectNonCitableValues(ctx).filter((v) => !publicText.includes(fold(v)));
   const scrubbedFields: string[] = [];
   let result = text;
   for (const value of values) {

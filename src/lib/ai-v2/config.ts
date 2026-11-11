@@ -550,6 +550,12 @@ export const v2AgentConfigSchema = z.object({
   // "model" (padrão): além das regras, um modelo confere cada afirmação da
   // resposta contra os materiais. "rules": só as regras fixas.
   groundingCheck: z.enum(["model", "rules"]).optional(),
+  // Quando a conferência barra uma frase e a reescrita não resolve:
+  // "handoff" (padrão) transfere; "answer" manda o que sobrou da resposta
+  // conferida e diz que vai confirmar o ponto, sem transferir.
+  groundingFallback: z.enum(["handoff", "answer"]).optional(),
+  /** Frase usada quando groundingFallback="answer" tira o ponto que a pessoa pediu. */
+  groundingFallbackMessage: z.string().max(300).optional(),
   /**
    * Ligado: se o cliente responde um disparo, o agente lê o texto do modelo
    * gravado no chat (e, se a bolha só tiver o nome, o texto salvo do modelo)
