@@ -175,6 +175,8 @@ export type MetaAttachPayload = {
    * Ogg/Opus de voz, o envio falha em vez de sair como arquivo ou documento.
    */
   voiceOnly?: boolean;
+  /** Padroniza o volume na conversão para nota de voz (voz gerada). */
+  normalizeLoudness?: boolean;
 };
 
 /** Campos extras quando o job envia template Meta (mesma fila `meta-outbound`). */

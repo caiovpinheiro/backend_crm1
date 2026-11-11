@@ -657,6 +657,7 @@ const v2LLMOutputSchema: z.ZodType<V2LLMOutput> = z.object({
     .optional()
     .transform((v) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string" && !!x.trim()).map((x) => x.trim()) : undefined)),
   voice: z.boolean().optional().catch(undefined),
+  speech: z.union([z.string(), z.null()]).optional().catch(undefined).transform((v) => (typeof v === "string" && v.trim() ? v.trim() : undefined)),
   voiceConsent: z.boolean().nullable().optional().catch(undefined),
   // Campo fora do formato vira o padrão em vez de invalidar a resposta
   // inteira: antes, um `"nome": null` em collected ou um sentimento fora da
@@ -1259,7 +1260,7 @@ function buildV2SystemPrompt(
     ...(offerTheme ? { theme: null } : {}),
     messageModel: null,
     ...(flows.length > 0 ? { flow: null } : {}),
-    ...(voiceSection ? { voice: false, voiceConsent: null } : {}),
+    ...(voiceSection ? { voice: false, speech: null, voiceConsent: null } : {}),
     handoff: false,
     concluded: false,
     confirmed: null,
@@ -1274,7 +1275,7 @@ function buildV2SystemPrompt(
     "- messageModel: null ou { id: string, adapt?: boolean, variables?: {chave: valor} }. Nunca um objeto vazio.",
     ...(flows.length > 0 ? ["- flow: null ou { id: string } com o id de um formulário da lista. Nunca um objeto vazio."] : []),
     ...(attachmentsSection ? ["- attachments: ids de \"Anexos dos materiais\" para enviar, ou []."] : []),
-    ...(voiceSection ? ["- voice: true quando esta resposta deve ir por áudio (ver \"Resposta por áudio\"); senão false.", "- voiceConsent: true ou false só quando o cliente disse nesta mensagem se aceita áudio; senão null."] : []),
+    ...(voiceSection ? ["- voice: true quando esta resposta deve ir por áudio (ver \"Resposta por áudio\"); senão false.", "- speech: o roteiro falado da resposta quando voice=true; senão null.", "- voiceConsent: true ou false só quando o cliente disse nesta mensagem se aceita áudio; senão null."] : []),
     "- collected: dados que o cliente informou neste turno; vazio se nenhum.",
     "- concluded: true só quando o cliente indicou que terminou (agradeceu, se despediu ou disse que era só isso) e não fez pedido novo nesta mensagem. Se ele perguntou algo, responda e deixe concluded=false.",
     ...(offerTheme ? [`- theme: id do assunto que melhor descreve o pedido (${config.themes.map((t) => t.id).join(", ")}) ou null.`] : []),

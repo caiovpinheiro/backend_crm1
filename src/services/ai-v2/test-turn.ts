@@ -12,7 +12,7 @@ import { getV2ThemeById } from "./themes";
 import { agentAskedQuestion, selectV2ThemeSemantic } from "./theme-semantic";
 import { actionValueAllowed, allowedActionTypes, allowedFlowIdsFor, allowedMessageModelIdsFor, humanRequestSubject, mentionsHumanRequest, normalizeAskOptions, productAllowedByPolicy } from "./action-policy";
 import { defaultV2Counters } from "./limits";
-import { decideVoice, voiceCompanionText, voiceConfigured } from "./voice";
+import { decideVoice, speechMatchesReply, voiceCompanionText, voiceConfigured } from "./voice";
 import { noteV2Fact, peekV2Fact, traceStep } from "./trace";
 import { isGreetingOnlyMessage, keepOpenOnNewRequest } from "./closure";
 import { isShortAckText } from "@/lib/ai-agents/tabulation-classify-policy";
@@ -843,6 +843,12 @@ export async function simulateV2Turn(
   // O teste só recebe texto, então o caso "cliente mandou áudio" não aparece aqui.
   let voiceText: string | undefined;
   if (!handoff && !closed && nextStage === "active" && voiceConfigured(config) && output.voice === true) {
+    // Roteiro falado, com a mesma conferência da produção (mesmos números, sem link).
+    let speech = output.speech?.trim() || "";
+    if (speech && !speechMatchesReply(speech, reply)) {
+      traceStep("voz", "O roteiro falado trazia algo que não está na resposta conferida → o áudio usa a própria resposta");
+      speech = "";
+    }
     const decision = decideVoice({
       config,
       counters: { ...defaultV2Counters(), voiceConsent: "granted" },
@@ -851,10 +857,12 @@ export async function simulateV2Turn(
       autonomous: true,
       hasKey: true,
       replyText: reply,
+      speech,
       hasOptions: !!interactive,
       charsToday: 0,
     });
     if (decision.action === "speak") {
+      // Com marcações de interpretação, quando o modelo de voz as aceita.
       voiceText = decision.spoken;
       reply = voiceCompanionText(config, reply);
       traceStep("voz", `Iria por áudio (${decision.spoken.length} caracteres falados) + linha escrita. Em produção: só com a chave do provedor, com o agente respondendo sozinho e depois de o cliente aceitar áudio ou mandar um`);
