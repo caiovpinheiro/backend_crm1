@@ -46,6 +46,7 @@ import { NONSENSE_LIMIT_REASON } from "./limits";
 import { applyV2Tabulation } from "./tabulation";
 import { withoutChoiceQuestionAfterSteps, applyReplyEnding, asksClient, classifyReply, effectiveReplyEnding, isGreetingOnlyReply, replyEndingButtons, replyEndingPhrases, withoutReplyEndings } from "./reply-ending";
 import { hasSearchableQuestion, knowledgeChunkTexts, lookupResultTexts, repeatFallback } from "./ground-reply";
+import { splitReplyBubbles } from "./conversation-profile";
 import { loadPriorV2Summary, summaryEnabled, updateRunningSummary, writeV2Summary, SUMMARY_MESSAGE_TYPE } from "./summary";
 import { looksLikeSystemError, saysTriedAndFailed } from "./retry-signal";
 import { noticeExplainingFailure } from "./notices";
@@ -2859,12 +2860,29 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // Envia reply se houver e não for handoff/close
   if (!voiceDelivered && !anyHandoff && !anyClose && replyText.trim()) {
     const withOptions = replyOptions.length > 0 ? buildV2Interactive(replyText, replyOptions, optionTexts) : null;
-    const outText = withOptions ? withOptions.fallbackText : replyText;
+    let outText = withOptions ? withOptions.fallbackText : replyText;
+    // Balões: as primeiras partes saem antes, cada uma com o seu "digitando…";
+    // a última segue o envio de sempre (opções, trava de repetição).
+    const bubbles = !withOptions && config.replyBubbles === "split" ? splitReplyBubbles(outText) : [];
+    const sentBubbles: string[] = [];
+    if (bubbles.length > 1) {
+      for (const part of bubbles.slice(0, -1)) {
+        const partRes = await sendReply(part, null, { dropIfSuperseded: true });
+        if (!partRes.sent) break;
+        sentBubbles.push(part);
+      }
+      if (sentBubbles.length === bubbles.length - 1) {
+        outText = bubbles[bubbles.length - 1];
+        traceStep("resposta", `Resposta em ${bubbles.length} mensagens curtas`);
+      } else if (sentBubbles.length > 0) {
+        outText = bubbles.slice(sentBubbles.length).join("\n\n");
+      }
+    }
     // A saudação é conferida de novo depois do "digitando…".
     const res = await sendReply(outText, withOptions?.payload, { dropIfSuperseded: greetingOnlyReply || asksSomething });
     noteV2Fact("send", { sent: res.sent, reason: res.sent ? null : (res.reason ?? "unknown") });
     if (res.sent) {
-      sentReply = outText;
+      sentReply = [...sentBubbles, outText].join("\n\n");
       if (withOptions && withOptions.labels.length > 0) {
         counters.pendingOptions = withOptions.labels;
         traceStep("opções", `${withOptions.payload ? (withOptions.payload.kind === "buttons" ? "Botões" : "Lista") : "Opções numeradas"}: ${withOptions.labels.join(" | ")}`);

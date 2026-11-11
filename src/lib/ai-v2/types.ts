@@ -774,6 +774,12 @@ export interface V2AgentConfig {
   groundingFallback?: "handoff" | "answer";
   /** Frase de "vou confirmar" usada pelo groundingFallback="answer". */
   groundingFallbackMessage?: string;
+  /** Finalidade da conversa (venda, cobrança, pós-venda); padrão "support". */
+  conversationProfile?: "support" | "sales" | "collections" | "aftercare";
+  /** O que guardar do que a pessoa conta; vazio no perfil "sales" usa a lista padrão. */
+  personMemory?: Array<{ key: string; label: string }>;
+  /** "split": até 3 mensagens curtas por resposta; padrão "single". */
+  replyBubbles?: "single" | "split";
   /** Lê o texto do último disparo no chat e atende a partir dele. */
   useDispatchText?: boolean;
   /** Inatividade do cliente. */
