@@ -554,6 +554,19 @@ export const v2AgentConfigSchema = z.object({
   // "handoff" (padrão) transfere; "answer" manda o que sobrou da resposta
   // conferida e diz que vai confirmar o ponto, sem transferir.
   groundingFallback: z.enum(["handoff", "answer"]).optional(),
+  // Finalidade da conversa: muda só o jeito de conduzir (venda consultiva,
+  // cobrança, pós-venda). "support" (padrão) mantém o comportamento de antes.
+  conversationProfile: z.enum(["support", "sales", "collections", "aftercare"]).optional(),
+  // O que o agente guarda do que a pessoa conta (motivo, momento, objeção…).
+  // Vazio no perfil "sales" usa a lista padrão; nos outros, nada.
+  personMemory: z
+    .array(z.object({ key: z.string().trim().min(1).max(40), label: z.string().trim().min(1).max(120) }))
+    .max(8)
+    .optional()
+    .catch(undefined),
+  // "split": a resposta pode sair em até 3 mensagens curtas, como alguém
+  // digitando. "single" (padrão): uma mensagem só.
+  replyBubbles: z.enum(["single", "split"]).optional(),
   /** Frase usada quando groundingFallback="answer" tira o ponto que a pessoa pediu. */
   groundingFallbackMessage: z.string().max(300).optional(),
   /**
