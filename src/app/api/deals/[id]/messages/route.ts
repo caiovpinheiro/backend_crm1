@@ -5,9 +5,9 @@
  * (node do n8n) não têm: elas conhecem o negócio. Antes era preciso encadear
  * `GET /api/deals/:id` → `GET /api/conversations?contactId=` → criar conversa
  * (essa última só por sessão, o que travava o fluxo). Aqui a resolução da
- * conversa acontece server-side, com a MESMA regra da automação
- * (`ensureWhatsAppConversationForContact`): reusa o ticket ativo do contato e
- * cria um novo no canal Meta padrão da org quando não existe.
+ * conversa acontece server-side (`pickDealSendConversation`): com `channelId`,
+ * garante o ticket nesse canal; sem, reusa a conversa aberta mais recente do
+ * contato em qualquer canal e só cria no canal Meta padrão quando não há.
  *
  * Autenticação híbrida (Bearer OU sessão). O envio em si vive em
  * `services/outbound-messaging`, compartilhado com o composer do inbox — as
@@ -56,6 +56,7 @@ import {
   type OutboundResult,
 } from "@/services/outbound-messaging";
 import { ensureWhatsAppConversationForContact } from "@/services/whatsapp-conversation";
+import { pickDealSendConversation } from "@/lib/deal-send-conversation";
 import { getLogger } from "@/lib/logger";
 
 const log = getLogger("api/deals/[id]/messages");
@@ -295,7 +296,32 @@ export async function POST(request: Request, ctx: Ctx) {
         );
       }
 
-      const ensured = await ensureWhatsAppConversationForContact(deal.contactId);
+      // Sem `channelId`, reusa a conversa aberta do contato em qualquer canal:
+      // o ensure sem canal só olha o canal padrão e abria ticket duplicado,
+      // vazio e sem responsável (ver `pickDealSendConversation`).
+      const requestedChannelId =
+        kind !== "note" && typeof body.channelId === "string" ? body.channelId : null;
+      const active = requestedChannelId
+        ? []
+        : await prisma.conversation.findMany({
+            where: {
+              contactId: deal.contactId,
+              channel: "whatsapp",
+              status: { not: "RESOLVED" },
+              channelId: { not: null },
+            },
+            orderBy: { updatedAt: "desc" },
+            select: { id: true, channelId: true },
+            take: 5,
+          });
+      const choice = pickDealSendConversation({ channelId: requestedChannelId, active });
+      const ensured =
+        choice.action === "reuse"
+          ? { status: "already_ok" as const, conversationId: choice.conversationId }
+          : await ensureWhatsAppConversationForContact(
+              deal.contactId,
+              choice.channelId ? { channelId: choice.channelId } : undefined,
+            );
       if (!("conversationId" in ensured)) {
         if (kind === "note") {
           return createDealOnlyNote({ dealId, contactId: deal.contactId, actor, content });
