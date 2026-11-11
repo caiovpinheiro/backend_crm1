@@ -29,6 +29,8 @@ NÃO liste:
 - repetir o que o cliente disse sem confirmar como verdade.
 - dizer o que o atendente vai fazer agora ou em seguida ("vou te orientar", "vou te enviar o passo a passo", "segue o material"): é intenção, não fato — só é afirmação se trouxer regra, valor, prazo ou canal que as fontes não dizem;
 - frase vaga sem dado concreto ("pode levar um tempo", "depende do caso", "varia conforme a solicitação", "fica confuso"): sem número, data, nome, canal ou condição definida, o cliente não tem o que usar como verdade.
+- opinião, elogio ou validação da escolha do cliente sem dado concreto ("é uma ótima escolha", "é uma opção bacana pra quem gosta de lidar com pessoas", "faz total sentido comparar"): é jeito de conversar, não fato — só é afirmação se trouxer característica verificável (duração, preço, certificado, reconhecimento, carga horária, garantia, resultado prometido);
+- o que o atendente consegue fazer nesta conversa ("consigo explicar de outro jeito", "posso falar mais simples", "te mando por áudio", "te mandei aqui embaixo"): é sobre a própria conversa, não sobre a empresa.
 
 O que o atendente já disse antes na conversa não é fonte: repetir uma afirmação anterior só está sustentado se as fontes a sustentam.
 
@@ -249,6 +251,16 @@ export function notAFactClaim(claim: string): boolean {
   // cliente contou —, não afirma nada. Com a consequência junto ("se pagar
   // até dia 10, tem 15% de desconto") ou número, continua sendo conferida.
   if (/^(?:se|caso)\s/.test(c) && !/[,;:]/.test(c) && !/\d/.test(c)) return true;
+  // Característica verificável na frase (modalidade, prazo, desconto, selo):
+  // continua sendo conferida, mesmo com tom de conversa.
+  const verifiable = /\b(?:ead|online|presencia\w*|semipresencia\w*|semestre\w*|anos?|mes(?:es)?|reconhecid\w*|mec|certificad\w*|diploma|gratis|gratuit\w*|isent\w*|desconto\w*|bolsa\w*|garant\w*|prazo\w*|emprego\w*|salario\w*)\b/.test(c);
+  // Anúncio do que vai junto nesta resposta ("te mandei aqui embaixo", "vou te
+  // mandar o formulário") e o que o atendente faz na conversa ("consigo, sim,
+  // explicar de outro jeito"): sem número nem link, não afirma nada da empresa.
+  if (!/\d|https?:\/\//.test(c) && /\b(?:te |lhe )?(?:mandei|enviei|mando|envio)\b.*\b(?:aqui embaixo|aqui em baixo|abaixo|aqui)\b|\b(?:vou|irei|posso|ja) (?:te |lhe )?(?:mandar|enviar|passar) (?:o |a |os |as )?(?:formulario|cartao|card|material|link|detalhes|informacoes|audio)\b/.test(c)) return true;
+  if (!verifiable && !/\d/.test(c) && c.split(/\s+/).length <= 20 && /^(?:consigo|posso|claro|sim)\b/.test(c) && /\b(?:explicar|falar|mandar|responder|ajudar|conversar|deixar)\b/.test(c) && !/\b(?:garant|prometo|desconto|gratis|isent|prazo)\w*/.test(c)) return true;
+  // Validação da escolha sem característica verificável ("é uma ótima escolha").
+  if (!verifiable && !/\d/.test(c) && c.split(/\s+/).length <= 25 && /\b(?:otima|boa|excelente|bela|bacana|legal|linda) (?:escolha|opcao|area|decisao)\b|\b(?:faz (?:todo|total) sentido|e normal|e natural) (?:comparar|pensar|querer)\b/.test(c)) return true;
   return isVagueClaim(claim);
 }
 

@@ -21,7 +21,7 @@ import { detectV2MediaKinds, evaluateV2Media } from "./media";
 import { enrichTurnWithMedia } from "./media-turn";
 import { CLIENT_AUDIO_MARK } from "./media-understanding";
 import { startOfPeriod } from "./cost-guard";
-import { applyVoiceConsent, decideVoice, deliverVoiceReply, speechMatchesReply, stripAudioTags, traceVoiceSkipped, tryGetAgentVoiceKey, voiceCharsSince, voiceCompanionLine, voiceConfigured, voicePromptSection } from "./voice";
+import { applyVoiceConsent, decideVoice, deliverVoiceReply, speechMatchesReply, stripAudioTags, traceVoiceSkipped, tryGetAgentVoiceKey, spokenVersion, voiceCharsSince, voiceCompanionLine, voiceConfigured, voicePromptSection } from "./voice";
 import { isMediaPlaceholderText } from "@/lib/ai-agents/media-placeholder";
 import { clientWordsOnly, getMediaTexts, isBareFileName, mediaTextLine, understoodKindOf } from "./media-understanding";
 import { callV2LLM } from "./llm";
@@ -45,7 +45,7 @@ import { announcesTransfer, answersBeforeHandoff, applyNoSourceGuard, conditiona
 import { NONSENSE_LIMIT_REASON } from "./limits";
 import { applyV2Tabulation } from "./tabulation";
 import { withoutChoiceQuestionAfterSteps, applyReplyEnding, asksClient, classifyReply, effectiveReplyEnding, isGreetingOnlyReply, replyEndingButtons, replyEndingPhrases, withoutReplyEndings } from "./reply-ending";
-import { hasSearchableQuestion, knowledgeChunkTexts, repeatFallback } from "./ground-reply";
+import { hasSearchableQuestion, knowledgeChunkTexts, lookupResultTexts, repeatFallback } from "./ground-reply";
 import { loadPriorV2Summary, summaryEnabled, updateRunningSummary, writeV2Summary, SUMMARY_MESSAGE_TYPE } from "./summary";
 import { looksLikeSystemError, saysTriedAndFailed } from "./retry-signal";
 import { noticeExplainingFailure } from "./notices";
@@ -862,6 +862,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // Para o fecho das respostas: não repetir a frase da mensagem anterior e alternar.
   let lastAgentMessage: string | null = null;
   let historyLength = 0;
+  let clientHistory: string[] = [];
   let versionId: string | undefined = stateRow?.versionId ?? agent.versionId ?? undefined;
   // Clique numa opção da pergunta que o agente acabou de mandar é resposta,
   // mesmo com o mesmo rótulo do clique anterior: o agente perguntou de novo
@@ -2142,6 +2143,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       governorStats = llmResult.governorStats;
       lastAgentMessage = llmResult.lastAgentMessage ?? null;
       historyLength = llmResult.historyLength ?? 0;
+      clientHistory = llmResult.clientTexts ?? [];
     }
   }
 
@@ -2376,7 +2378,15 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     citableContact: context.citableContact ?? null,
     selectedDeal: context.selectedDeal,
     citableDeal: context.citableDeal ?? null,
-    publicTexts: [input.userMessage],
+    // O que o cliente já disse na conversa e o que veio das consultas
+    // (catálogo, CRM) e dos dados coletados não é segredo: o curso que o
+    // próprio lead escolheu e o agente gravou no negócio não some da resposta.
+    publicTexts: [
+      input.userMessage,
+      ...clientHistory,
+      ...lookupResultTexts(toolCalls),
+      ...Object.values(collectedVariables ?? {}).filter((v): v is string => typeof v === "string"),
+    ],
     ownerTexts: [...knowledgeChunkTexts(toolCalls), ...chosenModelTexts],
   };
   const guard = guardV2Output(llmOutput.reply, config.allowedDomains, guardContext, systemMessage(config, "returnPromiseHandoff"));
@@ -2774,15 +2784,19 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     // Roteiro falado do modelo: só vale se diz o mesmo que a resposta
     // conferida (mesmos números, sem link) e passa pela guarda de saída.
     // Senão, o motor fala a própria resposta.
+    // Roteiro que passa: mesmos números e sem link, e a guarda de saída não
+    // muda nada nele. Senão o motor faz outro a partir da resposta conferida.
+    const speechPasses = (candidate: string): boolean => {
+      if (!candidate.trim() || !speechMatchesReply(candidate, replyText)) return false;
+      const g = guardV2Output(stripAudioTags(candidate), config.allowedDomains, guardContext, systemMessage(config, "returnPromiseHandoff"));
+      return g.warnings.length === 0 && !g.forceHandoff;
+    };
     let speech = llmOutput.speech?.trim() || "";
-    if (speech) {
-      const speechGuard = guardV2Output(stripAudioTags(speech), config.allowedDomains, guardContext, systemMessage(config, "returnPromiseHandoff"));
-      if (!speechMatchesReply(speech, replyText) || speechGuard.warnings.length > 0 || speechGuard.forceHandoff) {
-        traceStep("voz", "O roteiro falado trazia algo que não está na resposta conferida → o áudio usa a própria resposta");
-        speech = "";
-      }
+    if (speech && !speechPasses(speech)) {
+      traceStep("voz", "O roteiro falado trazia algo que não está na resposta conferida → refaz a partir da resposta");
+      speech = "";
     }
-    const decision = decideVoice({
+    const voiceArgs = {
       config,
       counters,
       modelWantsVoice: llmOutput.voice === true,
@@ -2793,7 +2807,19 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       speech,
       hasOptions: replyOptions.length > 0,
       charsToday,
-    });
+    };
+    let decision = decideVoice(voiceArgs);
+    if (decision.action === "speak" && !speech && replyText.trim()) {
+      const apiKey = await tryGetAgentApiKey(resolved!.agentConfigId);
+      const remade = apiKey ? await spokenVersion({ model: config.model, apiKey, reply: stripAudioTags(replyText), style: config.voice?.guidance }) : "";
+      if (speechPasses(remade)) {
+        speech = remade;
+        decision = decideVoice({ ...voiceArgs, speech });
+        traceStep("voz", "Roteiro falado refeito a partir da resposta conferida");
+      } else if (remade) {
+        traceStep("voz", "O roteiro refeito não passou na conferência → o áudio usa a própria resposta");
+      }
+    }
     if (decision.action === "ask") {
       // A resposta e o material ficam para depois do "sim" do cliente.
       counters.voiceAsked = true;
@@ -3222,6 +3248,8 @@ async function callLLMWithTheme(
   /** Última mensagem do agente na conversa (o fecho não se repete). */
   lastAgentMessage?: string | null;
   historyLength?: number;
+  /** O que o cliente escreveu antes nesta conversa (para a guarda de saída). */
+  clientTexts?: string[];
 }> {
   const theme = getV2ThemeById(config, themeId);
   let themeInstructions = theme
@@ -3302,6 +3330,7 @@ async function callLLMWithTheme(
       governorStats: result.governorStats,
       lastAgentMessage: [...previousMessages].reverse().find((m) => m.role === "assistant")?.content ?? null,
       historyLength: previousMessages.length,
+      clientTexts: previousMessages.filter((m) => m.role === "user").map((m) => m.content),
     };
   } catch (err) {
     return {

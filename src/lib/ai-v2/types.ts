@@ -770,6 +770,10 @@ export interface V2AgentConfig {
    * modelo para cada afirmação, além das regras; "rules" só as regras fixas.
    */
   groundingCheck?: "model" | "rules";
+  /** Conferência barrou e a reescrita não resolveu: transfere (padrão) ou responde com o que foi conferido. */
+  groundingFallback?: "handoff" | "answer";
+  /** Frase de "vou confirmar" usada pelo groundingFallback="answer". */
+  groundingFallbackMessage?: string;
   /** Lê o texto do último disparo no chat e atende a partir dele. */
   useDispatchText?: boolean;
   /** Inatividade do cliente. */
