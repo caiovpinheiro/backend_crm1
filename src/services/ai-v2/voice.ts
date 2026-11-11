@@ -15,12 +15,14 @@ import { decryptSecret, encryptSecret } from "@/lib/secret-crypto";
 
 import type { V2Counters } from "./limits";
 import { traceStep } from "./trace";
-import { VoiceProviderError, voiceProviderFor } from "./voice-provider";
+import { VoiceProviderError, voiceModelInfo, voiceProviderFor } from "./voice-provider";
 
 const log = getLogger("ai-v2.voice");
 
 export const VOICE_PERMISSION_QUESTION_DEFAULT = "Posso te responder por áudio? É rapidinho.";
 export const VOICE_COMPANION_TEXT_DEFAULT = "Te respondi por áudio.";
+/** Abre a linha escrita quando o áudio traz valor, data ou link. */
+export const VOICE_WRITTEN_PREFIX = "Por escrito:";
 /** Abaixo disto a resposta é um "ok"/cumprimento: vai em texto. */
 export const VOICE_MIN_CHARS = 40;
 /** Quanto o motor espera o áudio sair antes de mandar a linha escrita. */
@@ -43,22 +45,68 @@ export function speakableText(text: string): string {
     .trim();
 }
 
-/**
- * O que precisa ficar também por escrito: as frases da resposta que trazem
- * número (valor, data, prazo, horário) ou link. Quem não pode ouvir lê.
- */
-export function writtenFacts(text: string): string {
-  const sentences = text
-    .split(/\n+|(?<=[.!?])\s+/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-  const kept = sentences.filter((s) => /\d/.test(s) || /https?:\/\/|www\./i.test(s));
-  return [...new Set(kept)].join("\n");
+/** Marcações de interpretação do texto falado ("[animada]", "[pausa]"). Colchete com número não é marcação. */
+const AUDIO_TAG_RE = /\[[^\[\]\n\d]{2,40}\]/g;
+
+/** Tira as marcações de interpretação (ficam só no áudio, nunca no texto escrito). */
+export function stripAudioTags(text: string): string {
+  return text.replace(AUDIO_TAG_RE, " ").replace(/[ \t]{2,}/g, " ").replace(/\s+([.,!?;:])/g, "$1").trim();
 }
 
-/** Linha escrita que acompanha o áudio. Nunca vazia. */
+const MONTHS = "janeiro|fevereiro|março|marco|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro";
+const WRITTEN_DATA_PATTERNS: RegExp[] = [
+  /https?:\/\/[^\s)]+|www\.[^\s)]+/gi,
+  /R\$\s?\d{1,3}(?:\.\d{3})*(?:,\d{1,2})?|\b\d+(?:[.,]\d+)?\s?(?:reais|mil reais)\b/gi,
+  new RegExp(`\\b\\d{1,2}(?:º)?\\s+de\\s+(?:${MONTHS})(?:\\s+de\\s+\\d{4})?|\\b(?:${MONTHS})\\s+de\\s+\\d{4}\\b`, "gi"),
+  /\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b/g,
+  /\b\d{1,2}h(?:\d{2})?\b|\b\d{1,2}:\d{2}\b/g,
+  /\b\d+(?:,\d+)?\s?%/g,
+];
+
+/**
+ * Só os dados que precisam ficar por escrito — valor, data, horário,
+ * percentual e link — na ordem em que aparecem, sem a frase em volta. Quem
+ * não pode ouvir lê o essencial sem o áudio ser repetido em texto.
+ */
+export function writtenData(text: string): string[] {
+  const found: Array<{ at: number; end: number; value: string }> = [];
+  for (const re of WRITTEN_DATA_PATTERNS) {
+    for (const m of text.matchAll(re)) {
+      const value = m[0].replace(/[.,;:!?]+$/, "").trim();
+      const at = m.index ?? 0;
+      // Um dado dentro de outro já achado (o dia dentro da data por extenso) não repete.
+      if (!value || found.some((f) => at >= f.at && at < f.end)) continue;
+      found.push({ at, end: at + m[0].length, value });
+    }
+  }
+  const seen = new Set<string>();
+  return found
+    .sort((a, b) => a.at - b.at)
+    .map((f) => f.value)
+    .filter((v) => (seen.has(v.toLowerCase()) ? false : (seen.add(v.toLowerCase()), true)))
+    .slice(0, 6);
+}
+
+/** Linha escrita que acompanha o áudio: os dados, ou a linha configurada. Nunca vazia. */
 export function voiceCompanionText(config: V2AgentConfig, replyText: string): string {
-  return writtenFacts(replyText) || config.voice?.companionText?.trim() || VOICE_COMPANION_TEXT_DEFAULT;
+  const data = writtenData(stripAudioTags(replyText));
+  if (data.length > 0) return `${VOICE_WRITTEN_PREFIX} ${data.join(" · ")}`;
+  return config.voice?.companionText?.trim() || VOICE_COMPANION_TEXT_DEFAULT;
+}
+
+const digitsOf = (text: string) => (text.match(/\d+(?:[.,]\d+)*/g) ?? []).map((n) => n.replace(/\D/g, "")).filter(Boolean);
+
+/**
+ * O roteiro falado pode mudar o jeito de dizer, não o conteúdo: todo número
+ * dele precisa estar na resposta escrita (a que o motor conferiu) e ele não
+ * traz link. Fora disso, o motor fala a própria resposta.
+ */
+export function speechMatchesReply(speech: string, replyText: string): boolean {
+  const plain = stripAudioTags(speech);
+  if (!plain.trim()) return false;
+  if (/https?:\/\/|www\./i.test(plain)) return false;
+  const known = new Set(digitsOf(replyText));
+  return digitsOf(plain).every((n) => known.has(n));
 }
 
 // ─── Decisão ────────────────────────────────────────────────────────────
@@ -67,7 +115,8 @@ export type VoiceDecision =
   | { action: "none"; reason: string }
   /** Pergunta a permissão no lugar da resposta; o áudio fica para depois do "sim". */
   | { action: "ask"; question: string }
-  | { action: "speak"; spoken: string };
+  /** `spoken` vai ao provedor (com marcações, se o modelo aceita); `plain` é o mesmo texto sem elas. */
+  | { action: "speak"; spoken: string; plain: string };
 
 /** Configuração pronta para falar: ligada e com voz escolhida. */
 export function voiceConfigured(config: V2AgentConfig): boolean {
@@ -93,6 +142,8 @@ export function decideVoice(args: {
   autonomous: boolean;
   hasKey: boolean;
   replyText: string;
+  /** Roteiro falado do modelo, já conferido contra a resposta. Vazio = fala a resposta. */
+  speech?: string | null;
   /** A resposta vai com botões/lista (áudio não carrega opções). */
   hasOptions: boolean;
   /** Caracteres já falados hoje pelo agente. */
@@ -106,16 +157,19 @@ export function decideVoice(args: {
   if (!args.autonomous) return { action: "none", reason: "modo sugestão não gera áudio" };
   if (args.counters.voiceConsent === "denied") return { action: "none", reason: "o cliente recusou áudio" };
   if (args.hasOptions) return { action: "none", reason: "a resposta vai com botões" };
-  const spoken = speakableText(args.replyText);
-  if (spoken.length < VOICE_MIN_CHARS) return { action: "none", reason: "resposta curta demais para áudio" };
-  if (spoken.length > v.maxChars) return { action: "none", reason: `passa do limite de ${v.maxChars} caracteres falados` };
+  const source = args.speech?.trim() || args.replyText;
+  // Limites e custo contam o que é dito, sem as marcações de interpretação.
+  const plain = speakableText(stripAudioTags(source));
+  const spoken = voiceModelInfo(v.model).audioTags ? speakableText(source) : plain;
+  if (plain.length < VOICE_MIN_CHARS) return { action: "none", reason: "resposta curta demais para áudio" };
+  if (plain.length > v.maxChars) return { action: "none", reason: `passa do limite de ${v.maxChars} caracteres falados` };
   if ((args.counters.voiceCount ?? 0) >= v.maxPerConversation) return { action: "none", reason: `teto de ${v.maxPerConversation} áudio(s) por conversa` };
-  if (v.dailyCharCap > 0 && args.charsToday + spoken.length > v.dailyCharCap) return { action: "none", reason: "teto diário de voz atingido" };
+  if (v.dailyCharCap > 0 && args.charsToday + plain.length > v.dailyCharCap) return { action: "none", reason: "teto diário de voz atingido" };
   if (!voiceConsented(args.counters, args.clientAudioThisTurn)) {
     if (args.counters.voiceAsked) return { action: "none", reason: "permissão já pedida e ainda sem resposta" };
     return { action: "ask", question: v.permissionQuestion?.trim() || VOICE_PERMISSION_QUESTION_DEFAULT };
   }
-  return { action: "speak", spoken };
+  return { action: "speak", spoken, plain };
 }
 
 /**
@@ -147,7 +201,10 @@ export function voicePromptSection(args: {
     lines.push("Você pode mandar esta resposta por áudio: marque voice=true. O sistema confere se pode e, se não puder, manda em texto.");
     if (v.guidance?.trim()) lines.push(`Quando usar áudio:\n${v.guidance.trim()}`);
   }
-  lines.push(`Resposta que vai por áudio é escrita como fala: frases curtas, sem lista, sem emoji e sem link, até ${v.maxChars} caracteres. Valor, data e link o sistema repete por escrito — não precisa soletrar.`);
+  lines.push(`Quando a resposta for por áudio, preencha também speech: o roteiro falado da mesma resposta, como quem grava um áudio para um conhecido — coloquial, frases curtas, sem lista, sem emoji e sem link, até ${v.maxChars} caracteres. O speech diz o mesmo que a reply, com os mesmos valores e datas, e nada que não esteja nela. A reply continua sendo a resposta escrita completa: fica no registro. Valor, data e link o sistema manda por escrito junto com o áudio.`);
+  lines.push(voiceModelInfo(v.model).audioTags
+    ? "No speech você pode pôr marcações de interpretação entre colchetes, antes do trecho a que se aplicam, como [animada] ou [confiante]. Elas mudam o jeito de falar e não são lidas em voz alta; use poucas."
+    : "Não use colchetes nem marcações de interpretação no speech: seriam lidos em voz alta.");
   if (!voiceConsented(args.counters, args.clientAudioThisTurn)) {
     lines.push(args.counters.voiceAsked
       ? "O cliente já foi perguntado se aceita áudio. Se nesta mensagem ele aceitou, devolva voiceConsent=true; se recusou, voiceConsent=false; se não respondeu a isso, null."
@@ -275,7 +332,12 @@ export async function deliverVoiceReply(args: {
   conversationId: string;
   contactId: string;
   config: V2AgentConfig;
+  /** Texto enviado ao provedor (pode ter marcações de interpretação). */
   spoken: string;
+  /** O mesmo texto sem marcações: conta no uso. */
+  plain: string;
+  /** Texto gravado na mensagem de voz, para a equipe e para o histórico. */
+  record: string;
 }): Promise<{ sent: boolean; reason?: string }> {
   const v = args.config.voice;
   const voiceId = v?.voiceId?.trim();
@@ -287,9 +349,9 @@ export async function deliverVoiceReply(args: {
   let mime: string;
   let fileName: string;
   try {
-    const audio = await voiceProviderFor(v.provider).synthesize({ apiKey, voiceId, text: args.spoken });
+    const audio = await voiceProviderFor(v.provider).synthesize({ apiKey, voiceId, text: args.spoken, model: v.model, settings: v.settings });
     // Cobrado pelo provedor na geração, saia ou não a mensagem.
-    await recordVoiceUsage({ organizationId: args.organizationId, agentId: args.agentId, conversationId: args.conversationId, chars: args.spoken.length });
+    await recordVoiceUsage({ organizationId: args.organizationId, agentId: args.agentId, conversationId: args.conversationId, chars: args.plain.length });
     const { generateFileName, saveFile } = await import("@/lib/storage/local");
     fileName = generateFileName({ prefix: "voz", ext: audio.ext });
     const saved = await saveFile({ orgId: args.organizationId, bucket: "automation-media", fileName, buffer: audio.buffer });
@@ -308,7 +370,7 @@ export async function deliverVoiceReply(args: {
       conversationId: args.conversationId,
       contactId: args.contactId,
       agentUserId: args.agentUserId,
-      attachments: [{ url, mimeType: mime, name: fileName, caption: args.spoken, voiceOnly: true }],
+      attachments: [{ url, mimeType: mime, name: fileName, caption: args.record, voiceOnly: true, normalizeLoudness: true }],
       waitForSendMs: VOICE_SEND_WAIT_MS,
       report: (r) => {
         report = r;

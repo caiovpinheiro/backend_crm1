@@ -279,6 +279,7 @@ export async function processMetaAttach(
       storeBuffer,
       inputExt,
       payload.originalName,
+      { loudnorm: payload.normalizeLoudness === true },
     );
     if (!prepared.ok) {
       return markFailed(payload, prepared.reason);
