@@ -1,6 +1,11 @@
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
+import {
+  CONVERSATION_ACCESS_SELECT,
+  requireConversationAccessAndLoad,
+} from "@/lib/conversation-access";
+import { prisma } from "@/lib/prisma";
 import { resolveMetaTemplatesClient } from "@/lib/meta-whatsapp/resolve-templates-client";
 import { extractTemplateComponents } from "@/lib/whatsapp-template-components";
 import { getLogger } from "@/lib/logger";
@@ -34,13 +39,31 @@ function isCallPermissionCandidate(t: TemplateRow): boolean {
 
 /**
  * GET: lista nomes de templates APPROVED usáveis para opt-in de chamada (seleção no inbox).
+ *
+ * `?conversationId=` usa a WABA do canal da conversa (o envio sai por ele);
+ * `?channelId=` escolhe o canal direto. Sem nenhum dos dois, cai no último
+ * canal Cloud API conectado da organização — errado quando a org tem mais de
+ * uma WABA (ex.: DNA Work Candidaturas × Empresas).
  */
-export async function GET() {
+export async function GET(request: Request) {
   return withOrgContext(async (session) => {
     try {
+      const url = new URL(request.url);
+      const conversationId = url.searchParams.get("conversationId")?.trim() ?? "";
+      let channelId = url.searchParams.get("channelId")?.trim() || null;
+
+      if (conversationId) {
+        const access = await requireConversationAccessAndLoad(session, conversationId, (where) =>
+          prisma.conversation.findFirst({ where, select: CONVERSATION_ACCESS_SELECT }),
+        );
+        if (access.response) return access.response;
+        channelId = access.conversation.channelId ?? channelId;
+      }
+
       const resolved = await resolveMetaTemplatesClient({
         organizationId: session.user.organizationId,
         isSuperAdmin: session.user.isSuperAdmin,
+        channelId,
       });
       if (!resolved.ok) return resolved.response;
 
