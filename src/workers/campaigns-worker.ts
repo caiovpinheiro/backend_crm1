@@ -1020,6 +1020,30 @@ async function sendViaMetaCloudApi(
  * Garante conversa OPEN e grava a mensagem outbound da campanha no histórico.
  * Idempotente por `externalId` (wamid Meta).
  */
+/**
+ * Opções do ticket onde a campanha grava o envio. `channelId` é o número que
+ * enviou: sem ele o `ensure` caía no canal padrão da org (o WhatsApp mais
+ * antigo conectado) e abria ticket em outro número. A resposta do cliente ia
+ * para esse ticket e o consultor respondia pelo número errado — 131047 fora
+ * da janela (DNA Work, campanha atv.11.11, 11/nov/26: enviada pelo
+ * Candidaturas, ticket aberto no Empresas).
+ */
+export function campaignConversationOptions(channelId: string | null | undefined): {
+  inheritAssignee: false;
+  skipActivityLog: true;
+  skipTriggers: true;
+  channelId?: string;
+} {
+  return {
+    inheritAssignee: false,
+    skipActivityLog: true,
+    // O disparo não é um aluno chamando. Sem isso o inicio-pipe entra
+    // no ticket da campanha.
+    skipTriggers: true,
+    ...(channelId ? { channelId } : {}),
+  };
+}
+
 async function persistCampaignOutboundMessage(input: {
   contactId: string;
   channelId: string;
@@ -1062,13 +1086,10 @@ async function persistCampaignOutboundMessage(input: {
     }
   }
 
-  const ensured = await ensureWhatsAppConversationForContact(input.contactId, {
-    inheritAssignee: false,
-    skipActivityLog: true,
-    // O disparo não é um aluno chamando. Sem isso o inicio-pipe entra
-    // no ticket da campanha.
-    skipTriggers: true,
-  });
+  const ensured = await ensureWhatsAppConversationForContact(
+    input.contactId,
+    campaignConversationOptions(input.channelId),
+  );
   if (
     ensured.status === "skipped_contact_missing" ||
     ensured.status === "skipped_no_channel" ||

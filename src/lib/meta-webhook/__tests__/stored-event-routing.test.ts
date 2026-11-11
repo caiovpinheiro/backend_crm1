@@ -70,7 +70,7 @@ vi.mock("@/lib/status-write-buffer", mocks.empty);
 vi.mock("@/lib/meta-whatsapp/parse-flow-response", mocks.empty);
 vi.mock("@/services/whatsapp-flow-response", mocks.empty);
 
-import { processStoredMetaWebhookEvent } from "@/lib/meta-webhook/handler";
+import { campaignTicketMatchesInbound, processStoredMetaWebhookEvent } from "@/lib/meta-webhook/handler";
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -123,5 +123,20 @@ describe("processStoredMetaWebhookEvent — roteamento por objectType", () => {
     expect(mocks.prismaBase.metaWebhookEvent.update).toHaveBeenCalledWith(
       expect.objectContaining({ where: { id: "evt-wa" } }),
     );
+  });
+});
+
+// DNA Work, campanha atv.11.11 (11/nov/26): template saiu pelo Candidaturas,
+// o ticket ficou no Empresas e a resposta do cliente foi parar lá.
+describe("campaignTicketMatchesInbound — resposta à campanha fica no número que recebeu", () => {
+  it("ticket do mesmo número que recebeu a resposta: usa", () => {
+    expect(campaignTicketMatchesInbound("cand", "cand")).toBe(true);
+  });
+  it("ticket de outro número: não usa (vai para o ticket do número certo)", () => {
+    expect(campaignTicketMatchesInbound("empresas", "cand")).toBe(false);
+  });
+  it("sem canal conhecido em um dos lados: mantém o comportamento anterior", () => {
+    expect(campaignTicketMatchesInbound(null, "cand")).toBe(true);
+    expect(campaignTicketMatchesInbound("empresas", null)).toBe(true);
   });
 });

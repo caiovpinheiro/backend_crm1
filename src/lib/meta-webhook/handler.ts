@@ -1005,14 +1005,30 @@ async function reopenPausedAutomationConversation(contactId: string) {
 }
 
 /**
+ * A resposta à campanha só entra no ticket da campanha se ele for do mesmo
+ * número que recebeu a resposta. Ticket de outro número (gravado errado, ou
+ * campanha antiga por outro número) faria o consultor responder pelo número
+ * onde o cliente nunca escreveu — 131047. Sem canal conhecido de um dos
+ * lados, aceita (comportamento anterior).
+ */
+export function campaignTicketMatchesInbound(
+  ticketChannelId: string | null | undefined,
+  inboundChannelId: string | null | undefined,
+): boolean {
+  if (!inboundChannelId || !ticketChannelId) return true;
+  return ticketChannelId === inboundChannelId;
+}
+
+/**
  * Resposta a um template de campanha (botão ou citação). Reabre o mesmo
  * ticket em vez de criar outro — o ticket novo disparava o inicio-pipe
- * e a distribuição.
+ * e a distribuição. Só vale ticket do número que recebeu a resposta.
  */
 async function reopenCampaignReplyConversation(
   contactId: string,
   replyToWaMessageId: string | null,
   messageType: string,
+  inboundChannelId: string | null,
 ): Promise<{
   id: string;
   status: string;
@@ -1037,7 +1053,8 @@ async function reopenCampaignReplyConversation(
     });
     if (
       quoted?.conversation?.contactId === contactId &&
-      /^Campanha:/i.test(quoted.senderName ?? "")
+      /^Campanha:/i.test(quoted.senderName ?? "") &&
+      campaignTicketMatchesInbound(quoted.conversation.channelId, inboundChannelId)
     ) {
       conversationId = quoted.conversationId;
     }
@@ -1047,7 +1064,13 @@ async function reopenCampaignReplyConversation(
       where: {
         direction: "out",
         senderName: { startsWith: "Campanha:" },
-        conversation: { contactId },
+        conversation: {
+          contactId,
+          // Só o ticket do número que recebeu o clique (ou sem canal).
+          ...(inboundChannelId
+            ? { OR: [{ channelId: inboundChannelId }, { channelId: null }] }
+            : {}),
+        },
       },
       orderBy: { createdAt: "desc" },
       select: { createdAt: true, conversationId: true },
@@ -1063,6 +1086,7 @@ async function reopenCampaignReplyConversation(
     select,
   });
   if (!row) return null;
+  if (!campaignTicketMatchesInbound(row.channelId, inboundChannelId)) return null;
   if (row.status === "RESOLVED") {
     await prisma.conversation.update({
       where: { id: row.id },
@@ -3165,6 +3189,7 @@ export async function processMetaWebhookPayload(
                 contact.id,
                 parsed.replyToWaMessageId,
                 parsed.type,
+                (await findChannelByPhoneNumberId(phoneNumberId || undefined))?.id ?? null,
               );
           // Clique no botão da campanha, sem automação pausada: conta como
           // mensagem do cliente no gatilho. Texto citado e fluxo pausado
