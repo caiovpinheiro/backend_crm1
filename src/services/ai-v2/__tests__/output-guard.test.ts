@@ -74,6 +74,15 @@ describe("campo só-leitura — informação pública e marcador nunca visível"
     citableDeal: {},
   };
 
+  it("valor que o cliente escreveu com outra caixa ou sem acento não some da resposta", () => {
+    const deal = { ...ctx, selectedDeal: { Curso: "Pedagogia", Código: "X9-771" } };
+    const out = scrubNonCitableFields("Em Pedagogia, a teoria é online.", { ...deal, publicTexts: ["to pensando em fazer pedagogia"] });
+    expect(out.text).toBe("Em Pedagogia, a teoria é online.");
+    expect(out.scrubbedFields).toEqual([]);
+    const hidden = scrubNonCitableFields("Em Pedagogia, a teoria é online.", { ...deal, publicTexts: ["oi"] });
+    expect(hidden.scrubbedFields).toEqual(["Pedagogia"]);
+  });
+
   it("valor que também está no material lido não é tratado como dado interno", () => {
     const out = scrubNonCitableFields("Para clientes do plano Premium, a entrega é gratuita.", { ...ctx, publicTexts: ["No plano Premium a entrega é gratuita."] });
     expect(out.text).toBe("Para clientes do plano Premium, a entrega é gratuita.");

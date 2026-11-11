@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("@/services/ai/provider", () => ({ generateWithTools: vi.fn() }));
 
-import { buildClaimCheckInput, parseClaimCheck, worthClaimCheck } from "../claim-check";
+import { buildClaimCheckInput, notAFactClaim, parseClaimCheck, worthClaimCheck } from "../claim-check";
 
 describe("checagem por modelo — auxiliares", () => {
   it("só confere resposta com conteúdo", () => {
@@ -45,5 +45,24 @@ describe("documento do cliente e conta conferida na checagem", () => {
     expect(claimBackedByArithmetic("pagando até 20/10 você paga R$ 180,00", derived, docs)).toBe(false);
     expect(claimBackedByArithmetic("o desconto vale até 13/10", derived, docs)).toBe(false);
     expect(claimBackedByArithmetic("você paga R$ 180,00", [], docs)).toBe(false);
+  });
+});
+
+
+describe("linguagem de conversa não é afirmação de fato", () => {
+  it("anúncio do que vai junto e o que o atendente faz na conversa ficam livres", () => {
+    expect(notAFactClaim("Te mandei os detalhes aqui embaixo")).toBe(true);
+    expect(notAFactClaim("Vou te mandar o formulário de inscrição")).toBe(true);
+    expect(notAFactClaim("Consigo, sim. Vou falar mais de boa com você daqui pra frente.")).toBe(true);
+    expect(notAFactClaim("É uma ótima escolha pra quem gosta de lidar com pessoas")).toBe(true);
+    expect(notAFactClaim("Faz total sentido comparar com calma")).toBe(true);
+  });
+
+  it("com característica verificável continua sendo conferida", () => {
+    expect(notAFactClaim("Boa escolha! É uma graduação EAD de 4 semestres")).toBe(false);
+    expect(notAFactClaim("Ótima escolha, e a matrícula é isenta")).toBe(false);
+    expect(notAFactClaim("Consigo sim, garanto o desconto até sexta")).toBe(false);
+    expect(notAFactClaim("Vou te mandar o formulário, que leva 2 minutos")).toBe(false);
+    expect(notAFactClaim("O curso tem estágio obrigatório")).toBe(false);
   });
 });
