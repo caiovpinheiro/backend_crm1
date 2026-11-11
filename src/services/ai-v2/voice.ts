@@ -16,6 +16,8 @@ import { decryptSecret, encryptSecret } from "@/lib/secret-crypto";
 import type { V2Counters } from "./limits";
 import { traceStep } from "./trace";
 import { VoiceProviderError, voiceModelInfo, voiceProviderFor } from "./voice-provider";
+import { generateWithTools } from "@/services/ai/provider";
+import { v2FastAuxModel } from "@/lib/ai-v2/models";
 
 const log = getLogger("ai-v2.voice");
 
@@ -400,4 +402,39 @@ export async function deliverVoiceReply(args: {
 /** Registra no rastro do turno por que a resposta não foi por áudio (quando alguém pediu áudio). */
 export function traceVoiceSkipped(reason: string): void {
   traceStep("voz", `Resposta em texto: ${reason}`);
+}
+
+
+const SPOKEN_VERSION_SYSTEM = `Você reescreve a resposta escrita de um atendente como ele falaria num áudio de WhatsApp para a pessoa com quem está conversando.
+
+Regras:
+- Diga exatamente os mesmos fatos, números, nomes e datas da resposta escrita. Não acrescente nada que não esteja nela, nem informação, nem promessa.
+- Pode mudar a ordem, juntar ou dividir frases e usar linguagem do dia a dia, com frases curtas.
+- Números por extenso, do jeito que se fala.
+- Sem link, lista, emoji, asterisco ou marcação.
+- Devolva só o texto falado.`;
+
+/**
+ * Roteiro falado feito a partir da resposta já conferida: quando o roteiro do
+ * modelo é descartado (a resposta foi cortada na conferência ou ele trazia
+ * algo a mais), o áudio não volta a ler o texto escrito. Quem chama confere
+ * o resultado (mesmos números, sem link, guarda de saída) antes de usar.
+ */
+export async function spokenVersion(args: { model: string; apiKey: string; reply: string; style?: string | null }): Promise<string> {
+  try {
+    const style = args.style?.trim();
+    const res = await generateWithTools({
+      model: v2FastAuxModel(args.model),
+      apiKey: args.apiKey,
+      system: style ? `${SPOKEN_VERSION_SYSTEM}\n\nJeito de falar desta empresa (use só o estilo, nunca como fonte de fato):\n${style.slice(0, 2000)}` : SPOKEN_VERSION_SYSTEM,
+      messages: [{ role: "user", content: args.reply }] as never,
+      temperature: 0.5,
+      maxOutputTokens: 400,
+      maxSteps: 1,
+    });
+    return res.text.trim().replace(/^["“]|["”]$/g, "").trim();
+  } catch (err) {
+    log.warn({ err: err instanceof Error ? err.message : err }, "[voice] roteiro falado a partir da resposta falhou");
+    return "";
+  }
 }
