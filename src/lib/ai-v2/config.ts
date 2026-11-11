@@ -468,6 +468,18 @@ export const v2AgentConfigSchema = z.object({
       enabled: z.boolean().optional().default(false),
       provider: z.enum(["elevenlabs"]).optional().default("elevenlabs").catch("elevenlabs"),
       voiceId: optionalText,
+      model: z.enum(["eleven_flash_v2_5", "eleven_multilingual_v2", "eleven_v3"]).optional().default("eleven_flash_v2_5").catch("eleven_flash_v2_5"),
+      // Ajustes da voz: vazio = padrão do modelo. Valor fora da faixa é descartado.
+      settings: z
+        .object({
+          stability: z.number().min(0).max(1).optional().catch(undefined),
+          similarityBoost: z.number().min(0).max(1).optional().catch(undefined),
+          style: z.number().min(0).max(1).optional().catch(undefined),
+          speakerBoost: z.boolean().optional().catch(undefined),
+          speed: z.number().min(0.7).max(1.2).optional().catch(undefined),
+        })
+        .optional()
+        .catch(undefined),
       mode: z.enum(["mirror", "agent"]).optional().default("mirror").catch("mirror"),
       guidance: optionalText,
       permissionQuestion: optionalText,

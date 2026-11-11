@@ -217,9 +217,16 @@ function runFFmpeg(bin: string, args: string[], timeoutMs = 20_000): Promise<{ o
  * Converts any audio buffer to OGG/Opus via FFmpeg.
  * Returns the converted buffer, or null if every strategy fails.
  */
+/**
+ * Volume padronizado para nota de voz gerada (EBU R128): -16 LUFS integrado,
+ * pico real de -1,5 dBTP. Voz sintetizada costuma vir baixa.
+ */
+export const VOICE_LOUDNORM_FILTER = "loudnorm=I=-16:TP=-1.5:LRA=11";
+
 export async function convertToOgg(
   inputBuffer: Buffer,
   inputExt = "webm",
+  opts: { loudnorm?: boolean } = {},
 ): Promise<Buffer | null> {
   await mkdir(TMP_DIR, { recursive: true });
 
@@ -232,7 +239,12 @@ export async function convertToOgg(
     await writeFile(inputPath, inputBuffer);
 
     const bin = getFFmpeg();
-    const strategies = getConversionStrategies();
+    // Normalizar o volume exige recodificar: a cópia direta do Opus fica de fora.
+    const strategies = opts.loudnorm
+      ? getConversionStrategies()
+          .filter((s) => !s.args.includes("copy"))
+          .map((s) => ({ label: `${s.label} + loudnorm`, args: ["-af", VOICE_LOUDNORM_FILTER, ...s.args] }))
+      : getConversionStrategies();
     const inputArgs = ffmpegInputArgs(inputPath, inputExt);
 
     for (const strategy of strategies) {
@@ -596,6 +608,7 @@ export async function prepareWhatsAppAudio(
   inputBuffer: Buffer,
   inputExt: string,
   originalName: string,
+  opts: { loudnorm?: boolean } = {},
 ): Promise<PrepareAudioResult> {
   if (!inputBuffer.length) return { ok: false, reason: "Arquivo de áudio vazio." };
 
@@ -603,6 +616,17 @@ export async function prepareWhatsAppAudio(
   const ext = guessInputExtFromBuffer(inputBuffer, sourceMime);
   let pttReason = "não foi possível gerar Ogg/Opus";
   let remuxedOgg: Buffer | null = null;
+
+  // Volume padronizado (voz gerada): recodifica já com o filtro. Se não der,
+  // segue o caminho de sempre, sem normalizar — o áudio sai do mesmo jeito.
+  if (opts.loudnorm && ffmpegCapabilities().available) {
+    const normalized = await convertToOgg(inputBuffer, ext, { loudnorm: true });
+    if (normalized && isOggOpus(normalized)) {
+      const finalized = finalizeVoiceOgg(normalized, originalName);
+      if (finalized.ok) return finalized;
+    }
+    log.warn("[audio-convert] normalização de volume indisponível — seguindo sem ela");
+  }
 
   if (isOggOpus(inputBuffer)) {
     log.info("[audio-convert] entrada já é Ogg/Opus — reempacotando sem transcode");

@@ -204,4 +204,36 @@ describe("executeV2Actions effect tools", () => {
     expect(customMocks.upsertDeal).toHaveBeenCalledWith("deal-1", [{ fieldId: "cf-plano", value: "Básico" }]);
     expect(prisma.customField.findFirst).toHaveBeenCalled();
   });
+
+  it("update_field aceita o rótulo quando a chave da configuração é o id do campo, e grava pela chave", async () => {
+    customMocks.findField.mockResolvedValue({ id: "cf-123" });
+    const config = {
+      contextFields: {
+        contact: [],
+        deal: [
+          { key: "cf-123", label: "plano_escolhido", permissions: ["read", "write"] },
+          { key: "cf-456", label: "Origem", permissions: ["read"] },
+        ],
+      },
+    } as unknown as V2AgentConfig;
+    const byLabel = await executeV2Actions([{ type: "update_field", entity: "deal", field: "Plano escolhido", value: "Básico" }], ctx({ config }));
+    expect(byLabel.results[0].ok).toBe(true);
+    expect(prisma.customField.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ OR: [{ id: "cf-123" }, expect.anything()] }) }));
+    expect(customMocks.upsertDeal).toHaveBeenCalledWith("deal-1", [{ fieldId: "cf-123", value: "Básico" }]);
+
+    // Campo só de leitura continua recusado, pelo rótulo ou pela chave; desconhecido também.
+    for (const field of ["origem", "cf-456", "campo que não existe"]) {
+      const res = await executeV2Actions([{ type: "update_field", entity: "deal", field, value: "x" }], ctx({ config }));
+      expect(res.results[0].ok, field).toBe(false);
+    }
+  });
+
+  it("update_field: rótulo que serve a dois campos não grava em nenhum", async () => {
+    const config = {
+      contextFields: { contact: [], deal: [{ key: "cf-1", label: "Curso", permissions: ["write"] }, { key: "cf-2", label: "curso", permissions: ["write"] }] },
+    } as unknown as V2AgentConfig;
+    const res = await executeV2Actions([{ type: "update_field", entity: "deal", field: "curso", value: "x" }], ctx({ config }));
+    expect(res.results[0].ok).toBe(false);
+    expect(customMocks.upsertDeal).not.toHaveBeenCalled();
+  });
 });

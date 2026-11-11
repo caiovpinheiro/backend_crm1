@@ -21,7 +21,7 @@ import { detectV2MediaKinds, evaluateV2Media } from "./media";
 import { enrichTurnWithMedia } from "./media-turn";
 import { CLIENT_AUDIO_MARK } from "./media-understanding";
 import { startOfPeriod } from "./cost-guard";
-import { applyVoiceConsent, decideVoice, deliverVoiceReply, traceVoiceSkipped, tryGetAgentVoiceKey, voiceCharsSince, voiceCompanionText, voiceConfigured, voicePromptSection } from "./voice";
+import { applyVoiceConsent, decideVoice, deliverVoiceReply, speechMatchesReply, stripAudioTags, traceVoiceSkipped, tryGetAgentVoiceKey, voiceCharsSince, voiceCompanionText, voiceConfigured, voicePromptSection } from "./voice";
 import { isMediaPlaceholderText } from "@/lib/ai-agents/media-placeholder";
 import { clientWordsOnly, getMediaTexts, isBareFileName, mediaTextLine, understoodKindOf } from "./media-understanding";
 import { callV2LLM } from "./llm";
@@ -2371,14 +2371,15 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
         .then(() => prisma.messageTemplate.findMany({ where: { id: { in: ownerModelIds }, organizationId: orgId }, select: { content: true } }))
         .catch(() => [])) ?? []).map((r) => r.content ?? "")
     : [];
-  const guard = guardV2Output(llmOutput.reply, config.allowedDomains, {
+  const guardContext = {
     contact: context.contact,
     citableContact: context.citableContact ?? null,
     selectedDeal: context.selectedDeal,
     citableDeal: context.citableDeal ?? null,
     publicTexts: [input.userMessage],
     ownerTexts: [...knowledgeChunkTexts(toolCalls), ...chosenModelTexts],
-  }, systemMessage(config, "returnPromiseHandoff"));
+  };
+  const guard = guardV2Output(llmOutput.reply, config.allowedDomains, guardContext, systemMessage(config, "returnPromiseHandoff"));
   // Negrito conforme "Quem é o agente › Destaques em negrito".
   let replyText = applyBoldPolicy(guard.text, config.bold);
   // "Vou te enviar a orientação" sem mensagem pronta deixava o cliente sem
@@ -2770,6 +2771,17 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     const charsToday = cap > 0
       ? await voiceCharsSince(resolved!.agentConfigId, startOfPeriod("day", config.businessHours?.timezone || "America/Sao_Paulo"))
       : 0;
+    // Roteiro falado do modelo: só vale se diz o mesmo que a resposta
+    // conferida (mesmos números, sem link) e passa pela guarda de saída.
+    // Senão, o motor fala a própria resposta.
+    let speech = llmOutput.speech?.trim() || "";
+    if (speech) {
+      const speechGuard = guardV2Output(stripAudioTags(speech), config.allowedDomains, guardContext, systemMessage(config, "returnPromiseHandoff"));
+      if (!speechMatchesReply(speech, replyText) || speechGuard.warnings.length > 0 || speechGuard.forceHandoff) {
+        traceStep("voz", "O roteiro falado trazia algo que não está na resposta conferida → o áudio usa a própria resposta");
+        speech = "";
+      }
+    }
     const decision = decideVoice({
       config,
       counters,
@@ -2778,6 +2790,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       autonomous: config.autonomyMode === "auto",
       hasKey: voiceKeyPresent,
       replyText,
+      speech,
       hasOptions: replyOptions.length > 0,
       charsToday,
     });
@@ -2796,6 +2809,9 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
         contactId: contactId!,
         config,
         spoken: decision.spoken,
+        plain: decision.plain,
+        // Na mensagem fica o texto escrito e conferido, não o roteiro.
+        record: stripAudioTags(replyText),
       });
       if (voiceRes.sent) {
         voiceDelivered = true;
@@ -2803,9 +2819,9 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
         // Sempre uma linha escrita junto: o que tem número ou link, ou a linha padrão.
         const companion = voiceCompanionText(config, replyText);
         const line = await sendReply(companion, undefined, { bypassDuplicateGuard: true });
-        sentReply = [`[Áudio] ${decision.spoken}`, line.sent ? companion : ""].filter(Boolean).join("\n\n");
+        sentReply = [`[Áudio] ${decision.plain}`, line.sent ? companion : ""].filter(Boolean).join("\n\n");
         noteV2Fact("send", { sent: true, reason: null });
-        traceStep("voz", `Resposta enviada por áudio (${decision.spoken.length} caracteres falados)${line.sent ? " + linha escrita" : ""}`);
+        traceStep("voz", `Resposta enviada por áudio (${decision.plain.length} caracteres falados${speech ? ", com o roteiro falado" : ""})${line.sent ? " + linha escrita" : ""}`);
       } else {
         traceVoiceSkipped(voiceRes.reason ?? "o áudio não saiu");
       }

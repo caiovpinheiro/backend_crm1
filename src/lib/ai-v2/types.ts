@@ -213,13 +213,33 @@ export interface V2ProductPolicy {
   priceChannel?: string;
 }
 
-/** Resposta por áudio (voz gerada). O texto falado é a própria resposta do turno. */
+export type V2VoiceModel = "eleven_flash_v2_5" | "eleven_multilingual_v2" | "eleven_v3";
+
+/** Ajustes da voz gerada. Faixas: 0–1, exceto `speed` (0,7–1,2). */
+export interface V2VoiceSettings {
+  /** Menor = mais variação e emoção; maior = mais estável e monótona. */
+  stability?: number;
+  /** Quanto a fala se prende ao timbre original da voz. */
+  similarityBoost?: number;
+  /** Exagero do estilo da voz (0 = desligado). */
+  style?: number;
+  /** Reforço de semelhança com o locutor. */
+  speakerBoost?: boolean;
+  /** Velocidade da fala. */
+  speed?: number;
+}
+
+/** Resposta por áudio (voz gerada). */
 export interface V2VoiceConfig {
   enabled: boolean;
   /** Provedor de voz. A chave fica por agente, fora da configuração. */
   provider: "elevenlabs";
   /** Voz escolhida no provedor. Sem ela, não há áudio. */
   voiceId?: string;
+  /** Modelo de voz do provedor. */
+  model: V2VoiceModel;
+  /** Ajustes da voz. O que ficar vazio usa o padrão do modelo. */
+  settings?: V2VoiceSettings;
   /**
    * "mirror": só responde por áudio a quem mandou áudio.
    * "agent": além disso, o agente decide pelas orientações escritas.
@@ -808,6 +828,8 @@ export interface V2LLMOutput {
   attachments?: string[];
   /** A resposta deste turno deve ir por áudio (o motor confere se pode). */
   voice?: boolean;
+  /** Roteiro falado da resposta (coloquial, frases curtas), usado quando ela vai por áudio. */
+  speech?: string;
   /** O cliente aceitou (true) ou recusou (false) receber áudio nesta mensagem. */
   voiceConsent?: boolean | null;
   handoff: boolean;

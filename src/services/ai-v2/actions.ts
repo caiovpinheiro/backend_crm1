@@ -93,11 +93,25 @@ async function executeAddTag(action: V2Action, ctx: V2ActionContext): Promise<V2
   }
 }
 
+/**
+ * Campo liberado na configuração, pela chave ou pelo rótulo. A chave de um
+ * campo personalizado é o id dele; o modelo costuma devolver o rótulo que lê
+ * no prompt, e a gravação era recusada como "somente leitura". Rótulo que
+ * serve a mais de um campo não resolve (não dá para saber qual).
+ */
+function configuredField(config: V2AgentConfig, entity: string, field: string) {
+  const fields = entity === "contact" ? config.contextFields.contact : entity === "deal" ? config.contextFields.deal : [];
+  const exact = fields.find((f) => f.key === field);
+  if (exact) return exact;
+  const squash = (s: string) => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]/g, "");
+  const wanted = squash(field);
+  if (!wanted) return null;
+  const matches = fields.filter((f) => squash(f.key) === wanted || (!!f.label && squash(f.label) === wanted));
+  return matches.length === 1 ? matches[0] : null;
+}
+
 function isFieldWritable(config: V2AgentConfig, entity: string, field: string): boolean {
-  const fields = entity === "contact" ? config.contextFields.contact : config.contextFields.deal;
-  const cfg = fields.find((f) => f.key === field);
-  if (!cfg) return false;
-  return cfg.permissions.includes("write");
+  return configuredField(config, entity, field)?.permissions.includes("write") === true;
 }
 
 const NATIVE_CONTACT_FIELDS = new Set(["name", "email", "phone"]);
@@ -178,11 +192,13 @@ async function executeUpdateField(action: V2Action, ctx: V2ActionContext): Promi
   if (!isFieldWritable(ctx.config, entity, field)) {
     return { action, ok: false, error: `Field ${entity}.${field} is read-only` };
   }
+  // A gravação usa a chave da configuração, mesmo quando o modelo mandou o rótulo.
+  const key = configuredField(ctx.config, entity, field)?.key ?? field;
   try {
     if (entity === "deal" && ctx.dealId) {
-      await writeConfiguredField("deal", ctx.dealId, field, value);
+      await writeConfiguredField("deal", ctx.dealId, key, value);
     } else if (entity === "contact" && ctx.contactId) {
-      await writeConfiguredField("contact", ctx.contactId, field, value);
+      await writeConfiguredField("contact", ctx.contactId, key, value);
     } else {
       return { action, ok: false, error: "Entity/target not available" };
     }

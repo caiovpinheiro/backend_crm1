@@ -4,14 +4,79 @@
  * nem para mensagem de erro. Nenhum domínio de cliente.
  */
 
+import type { V2VoiceModel, V2VoiceSettings } from "@/lib/ai-v2/types";
+
 export type VoiceAudio = { buffer: Buffer; mime: string; ext: string };
+
+/** Ajustes já resolvidos (padrão do modelo + o que o agente configurou). */
+export type ResolvedVoiceSettings = Required<V2VoiceSettings>;
+
+export type VoiceModelInfo = {
+  id: V2VoiceModel;
+  label: string;
+  /** Aceita marcações de interpretação entre colchetes no texto falado. */
+  audioTags: boolean;
+  /** Máximo de caracteres por pedido ao provedor. */
+  maxChars: number;
+  defaults: ResolvedVoiceSettings;
+};
+
+/**
+ * Modelos de voz oferecidos. Os padrões puxam para uma fala menos monótona:
+ * estabilidade abaixo do meio dá mais variação de entonação.
+ */
+export const VOICE_MODELS: Record<V2VoiceModel, VoiceModelInfo> = {
+  eleven_flash_v2_5: {
+    id: "eleven_flash_v2_5",
+    label: "Flash v2.5 (mais rápido)",
+    audioTags: false,
+    maxChars: 40_000,
+    defaults: { stability: 0.4, similarityBoost: 0.75, style: 0, speakerBoost: true, speed: 1 },
+  },
+  eleven_multilingual_v2: {
+    id: "eleven_multilingual_v2",
+    label: "Multilingual v2 (mais natural)",
+    audioTags: false,
+    maxChars: 10_000,
+    defaults: { stability: 0.4, similarityBoost: 0.75, style: 0.3, speakerBoost: true, speed: 1 },
+  },
+  eleven_v3: {
+    id: "eleven_v3",
+    label: "v3 (mais expressivo, aceita marcações)",
+    audioTags: true,
+    maxChars: 5_000,
+    defaults: { stability: 0.5, similarityBoost: 0.75, style: 0, speakerBoost: true, speed: 1 },
+  },
+};
+
+export function voiceModelInfo(model: string | null | undefined): VoiceModelInfo {
+  return VOICE_MODELS[(model ?? "") as V2VoiceModel] ?? VOICE_MODELS.eleven_flash_v2_5;
+}
+
+const clamp = (n: number, min: number, max: number) => Math.min(max, Math.max(min, n));
+
+/** Padrão do modelo com o que o agente configurou por cima, dentro das faixas do provedor. */
+export function resolveVoiceSettings(model: string | null | undefined, own?: V2VoiceSettings | null): ResolvedVoiceSettings {
+  const info = voiceModelInfo(model);
+  const d = info.defaults;
+  let stability = clamp(typeof own?.stability === "number" ? own.stability : d.stability, 0, 1);
+  // O v3 trabalha com três níveis de estabilidade (criativa, natural, robusta).
+  if (info.id === "eleven_v3") stability = Math.round(stability * 2) / 2;
+  return {
+    stability,
+    similarityBoost: clamp(typeof own?.similarityBoost === "number" ? own.similarityBoost : d.similarityBoost, 0, 1),
+    style: clamp(typeof own?.style === "number" ? own.style : d.style, 0, 1),
+    speakerBoost: typeof own?.speakerBoost === "boolean" ? own.speakerBoost : d.speakerBoost,
+    speed: clamp(typeof own?.speed === "number" ? own.speed : d.speed, 0.7, 1.2),
+  };
+}
 
 export type VoiceOption = { id: string; name: string; language: string | null; previewUrl: string | null };
 
 export interface VoiceProvider {
   id: string;
   /** Gera o áudio do texto, em português. Lança `VoiceProviderError` quando não dá. */
-  synthesize(args: { apiKey: string; voiceId: string; text: string }): Promise<VoiceAudio>;
+  synthesize(args: { apiKey: string; voiceId: string; text: string; model?: string | null; settings?: V2VoiceSettings | null }): Promise<VoiceAudio>;
   /** Vozes da conta, para a tela escolher. */
   listVoices(apiKey: string): Promise<VoiceOption[]>;
 }
@@ -28,8 +93,8 @@ export class VoiceProviderError extends Error {
 }
 
 const ELEVENLABS_BASE = "https://api.elevenlabs.io";
-/** Modelo de baixa latência; aceita `language_code`. */
-const ELEVENLABS_MODEL = "eleven_flash_v2_5";
+/** O provedor não aceita `language_code` neste modelo (o idioma vem do texto). */
+const ELEVENLABS_NO_LANGUAGE_CODE = new Set<string>(["eleven_multilingual_v2"]);
 /**
  * MP3: formato de saída sempre disponível. A conversão para mensagem de voz
  * (Ogg/Opus mono) é a mesma do áudio enviado pela equipe.
@@ -65,14 +130,27 @@ async function elevenLabsFetch(path: string, apiKey: string, init: RequestInit):
 export const elevenLabsProvider: VoiceProvider = {
   id: "elevenlabs",
 
-  async synthesize({ apiKey, voiceId, text }) {
+  async synthesize({ apiKey, voiceId, text, model, settings }) {
+    const info = voiceModelInfo(model);
+    const s = resolveVoiceSettings(info.id, settings);
     const res = await elevenLabsFetch(
       `/v1/text-to-speech/${encodeURIComponent(voiceId)}?output_format=${ELEVENLABS_OUTPUT}`,
       apiKey,
       {
         method: "POST",
         headers: { "Content-Type": "application/json", Accept: "audio/mpeg" },
-        body: JSON.stringify({ text, model_id: ELEVENLABS_MODEL, language_code: "pt" }),
+        body: JSON.stringify({
+          text: text.slice(0, info.maxChars),
+          model_id: info.id,
+          ...(ELEVENLABS_NO_LANGUAGE_CODE.has(info.id) ? {} : { language_code: "pt" }),
+          voice_settings: {
+            stability: s.stability,
+            similarity_boost: s.similarityBoost,
+            style: s.style,
+            use_speaker_boost: s.speakerBoost,
+            speed: s.speed,
+          },
+        }),
       },
     );
     const buffer = Buffer.from(await res.arrayBuffer());
