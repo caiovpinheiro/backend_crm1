@@ -171,7 +171,7 @@ vi.mock("@/lib/distribution-execute-queue", () => ({
   }),
 }));
 vi.mock("@/services/distribution", () => ({
-  executeDistribution: vi.fn(async () => {
+  executeManualDistribution: vi.fn(async () => {
     if (h.distributionAssignsTo) h.conv.assignedToId = h.distributionAssignsTo;
     return {
       success: true,

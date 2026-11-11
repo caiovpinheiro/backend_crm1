@@ -34,7 +34,7 @@ import {
   departmentTransferDistributionInput,
   transferDistributionFromQueueOutcome,
 } from "@/lib/transfer-distribution";
-import { executeDistribution } from "@/services/distribution";
+import { executeManualDistribution } from "@/services/distribution";
 import {
   assertLeafInDepartments,
   assertLeafInOrg,
@@ -565,7 +565,7 @@ export async function POST(request: Request, context: RouteContext) {
                   keepDealOwner: distInput.keepDealOwner,
                   requestedByUserId: sessionUser.id,
                 },
-                () => executeDistribution(distInput),
+                () => executeManualDistribution(distInput),
               );
               distribution = transferDistributionFromQueueOutcome(outcome);
               if (!distribution && outcome.kind === "unavailable") {

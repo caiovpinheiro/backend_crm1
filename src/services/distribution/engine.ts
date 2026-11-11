@@ -68,7 +68,9 @@ export type DistributionReason =
   | "DISTRIBUTION_DISABLED"
   | "NO_ELIGIBLE_RESPONSIBLE"
   | "NO_DEPARTMENT"
-  | "RETIRED_WHATSAPP_CHANNEL";
+  | "RETIRED_WHATSAPP_CHANNEL"
+  /** Modo Por Leads (manual por departamento): ninguém elegível no rodízio agora. */
+  | "NO_ELIGIBLE_PARTICIPANT";
 
 /**
  * Só para o `DistributionLog` (coluna livre): registra que a redistribuição
