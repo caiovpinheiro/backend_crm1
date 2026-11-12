@@ -200,8 +200,13 @@ export async function learnGroupMemberName(input: {
   if (jids.length) or.push({ jid: { in: jids } });
   if (input.phone) or.push({ phone: input.phone });
   if (or.length === 0) return 0;
+  // `NOT: { name }` sozinho exclui quem ainda não tem nome (NULL no SQL):
+  // justamente o participante que mais precisa aprender o nome.
   const res = await prisma.whatsAppGroupMember.updateMany({
-    where: { groupId: input.groupId, OR: or, NOT: { name } },
+    where: {
+      groupId: input.groupId,
+      AND: [{ OR: or }, { OR: [{ name: null }, { name: { not: name } }] }],
+    },
     data: { name: name.slice(0, 120) },
   });
   return res.count;
