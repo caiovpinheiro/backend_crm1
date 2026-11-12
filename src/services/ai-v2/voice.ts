@@ -405,14 +405,22 @@ export function traceVoiceSkipped(reason: string): void {
 }
 
 
-const SPOKEN_VERSION_SYSTEM = `Você reescreve a resposta escrita de um atendente como ele falaria num áudio de WhatsApp para a pessoa com quem está conversando.
+const SPOKEN_VERSION_SYSTEM = `Você transforma a resposta escrita de um atendente no que ele falaria de improviso num áudio de WhatsApp para a pessoa com quem está conversando. Não é leitura do texto: é fala.
 
-Regras:
+Conteúdo:
 - Diga exatamente os mesmos fatos, números, nomes e datas da resposta escrita. Não acrescente nada que não esteja nela, nem informação, nem promessa.
-- Pode mudar a ordem, juntar ou dividir frases e usar linguagem do dia a dia, com frases curtas.
+- Se a resposta escrita tiver muita coisa, fale o essencial e deixe o detalhe para o texto; nunca invente.
+
+Jeito de falar:
+- Frases curtas, de até 12 palavras, como alguém falando: comece reagindo ao que a pessoa disse ou com "olha", "então", "ó", "bom", e varie.
+- Use vírgulas e reticências onde a pessoa respiraria ou pensaria ("então... é bem tranquilo, tá?").
+- Linguagem do dia a dia: pra, tá, né, a gente, tipo, aí.
+- Nada de ponto e vírgula, parênteses, travessão ou palavras de texto formal (conforme, previsto, referente, disponível).
 - Números por extenso, do jeito que se fala.
 - Sem link, lista, emoji, asterisco ou marcação.
 - Devolva só o texto falado.`;
+
+const AUDIO_TAGS_HINT = "Este modelo de voz entende marcações de interpretação entre colchetes, antes do trecho: use de 1 a 3 por áudio para dar vida à fala, por exemplo [animado], [sorrindo], [pensativo], [confiante], [com calma]. Elas não são lidas em voz alta.";
 
 /**
  * Roteiro falado feito a partir da resposta já conferida: quando o roteiro do
@@ -420,13 +428,18 @@ Regras:
  * algo a mais), o áudio não volta a ler o texto escrito. Quem chama confere
  * o resultado (mesmos números, sem link, guarda de saída) antes de usar.
  */
-export async function spokenVersion(args: { model: string; apiKey: string; reply: string; style?: string | null }): Promise<string> {
+export async function spokenVersion(args: { model: string; apiKey: string; reply: string; style?: string | null; audioTags?: boolean }): Promise<string> {
   try {
     const style = args.style?.trim();
+    const system = [
+      SPOKEN_VERSION_SYSTEM,
+      args.audioTags ? AUDIO_TAGS_HINT : "",
+      style ? `Jeito de falar desta empresa (use só o estilo, nunca como fonte de fato):\n${style.slice(0, 2000)}` : "",
+    ].filter(Boolean).join("\n\n");
     const res = await generateWithTools({
       model: v2FastAuxModel(args.model),
       apiKey: args.apiKey,
-      system: style ? `${SPOKEN_VERSION_SYSTEM}\n\nJeito de falar desta empresa (use só o estilo, nunca como fonte de fato):\n${style.slice(0, 2000)}` : SPOKEN_VERSION_SYSTEM,
+      system,
       messages: [{ role: "user", content: args.reply }] as never,
       temperature: 0.5,
       maxOutputTokens: 400,

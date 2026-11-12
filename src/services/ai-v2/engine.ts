@@ -47,6 +47,7 @@ import { applyV2Tabulation } from "./tabulation";
 import { withoutChoiceQuestionAfterSteps, applyReplyEnding, asksClient, classifyReply, effectiveReplyEnding, isGreetingOnlyReply, replyEndingButtons, replyEndingPhrases, withoutReplyEndings } from "./reply-ending";
 import { hasSearchableQuestion, knowledgeChunkTexts, lookupResultTexts, repeatFallback } from "./ground-reply";
 import { splitReplyBubbles } from "./conversation-profile";
+import { voiceModelInfo } from "./voice-provider";
 import { loadPriorV2Summary, summaryEnabled, updateRunningSummary, writeV2Summary, SUMMARY_MESSAGE_TYPE } from "./summary";
 import { looksLikeSystemError, saysTriedAndFailed } from "./retry-signal";
 import { noticeExplainingFailure } from "./notices";
@@ -2792,7 +2793,9 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       const g = guardV2Output(stripAudioTags(candidate), config.allowedDomains, guardContext, systemMessage(config, "returnPromiseHandoff"));
       return g.warnings.length === 0 && !g.forceHandoff;
     };
-    let speech = llmOutput.speech?.trim() || "";
+    // "rewrite": o roteiro do modelo costuma copiar o texto escrito; a
+    // reescrita dedicada à fala sai mais natural e é conferida do mesmo jeito.
+    let speech = config.voice?.speechFrom === "rewrite" ? "" : llmOutput.speech?.trim() || "";
     if (speech && !speechPasses(speech)) {
       traceStep("voz", "O roteiro falado trazia algo que não está na resposta conferida → refaz a partir da resposta");
       speech = "";
@@ -2812,7 +2815,9 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     let decision = decideVoice(voiceArgs);
     if (decision.action === "speak" && !speech && replyText.trim()) {
       const apiKey = await tryGetAgentApiKey(resolved!.agentConfigId);
-      const remade = apiKey ? await spokenVersion({ model: config.model, apiKey, reply: stripAudioTags(replyText), style: config.voice?.guidance }) : "";
+      const remade = apiKey
+        ? await spokenVersion({ model: config.model, apiKey, reply: stripAudioTags(replyText), style: config.voice?.guidance, audioTags: voiceModelInfo(config.voice?.model).audioTags })
+        : "";
       if (speechPasses(remade)) {
         speech = remade;
         decision = decideVoice({ ...voiceArgs, speech });
