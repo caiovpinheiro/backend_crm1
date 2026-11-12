@@ -79,6 +79,24 @@ function snapshotsFromChats(
   return out;
 }
 
+/**
+ * Quais mensagens do `messages.upsert` o CRM processa.
+ * - Só `notify` (chegou pela rede). `append` é eco do que este socket enviou
+ *   (o CRM já gravou) ou fila offline.
+ * - Conversa 1:1: só as recebidas (`fromMe` é tratado pelo envio do CRM).
+ * - Grupo: também as do próprio número enviadas pelo celular/WhatsApp Web,
+ *   senão o histórico do grupo no CRM fica sem o que a empresa escreveu
+ *   (DNA Work, 12/11: "TESTEZIM PAE" e "123" no "Teste Grupo").
+ */
+export function shouldHandleUpsertMessage(
+  type: string,
+  key: { remoteJid?: string | null; fromMe?: boolean | null },
+): boolean {
+  if (type !== "notify") return false;
+  if (!key.fromMe) return true;
+  return Boolean(key.remoteJid?.endsWith("@g.us"));
+}
+
 export class BaileysSession {
   channelId: string;
   socket: WASocket | null = null;
@@ -333,7 +351,6 @@ export class BaileysSession {
     });
 
     sock.ev.on("messages.upsert", ({ messages, type }) => {
-      if (type !== "notify") return;
       const orgId = this.organizationId;
       if (!orgId) {
         log.warn(
@@ -344,7 +361,7 @@ export class BaileysSession {
       }
       for (const msg of messages) {
         if (!msg.message) continue;
-        if (msg.key.fromMe) continue;
+        if (!shouldHandleUpsertMessage(type, msg.key)) continue;
         // CRITICAL: o callback `sock.ev.on` é disparado fora do
         // AsyncLocalStorage scope estabelecido em BaileysManager. Sem
         // o `withSystemContext` aqui, queries scoped (prisma extension
