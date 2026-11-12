@@ -134,11 +134,16 @@ describe("nome dos participantes", () => {
     expect(db.whatsAppGroupMember.updateMany).toHaveBeenCalledWith({
       where: {
         groupId: "g1",
-        OR: [
-          { jid: { in: ["123@lid", "5511944690752@s.whatsapp.net"] } },
-          { phone: "5511944690752" },
+        AND: [
+          {
+            OR: [
+              { jid: { in: ["123@lid", "5511944690752@s.whatsapp.net"] } },
+              { phone: "5511944690752" },
+            ],
+          },
+          // Participante sem nome (NULL) também aprende.
+          { OR: [{ name: null }, { name: { not: "Caio" } }] },
         ],
-        NOT: { name: "Caio" },
       },
       data: { name: "Caio" },
     });
