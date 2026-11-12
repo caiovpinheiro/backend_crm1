@@ -96,7 +96,7 @@ Job de worker: payload com `organizationId` + `runWithContext` antes de `prisma`
 
 API pública (n8n): `APP_MODE=api-public`, Bearer `eduit_…`. Não misturar com cookie de sessão.
 
-Rotas só para integração externa, sem tela que as chame: `/api/integrations/*`, sempre por `withIntegrationsApi` (`src/lib/integrations-api.ts`: Bearer ou sessão + permissão RBAC do dono do token). Campanha por ali passa pela trava de público (`src/services/campaign-audience-guard.ts`: sem segmento, filtro que resolve para todos os contatos é recusado); as rotas de sessão `/api/campaigns/*` não passam. Ciclo de vida compartilhável em `src/services/campaign-lifecycle.ts` — mudou regra de lançar/pausar/retomar/cancelar em um lado, mude no outro (`existing-routes-unchanged.test.ts` compara os dois).
+Rotas só para integração externa, sem tela que as chame: `/api/integrations/*`, sempre por `withIntegrationsApi` (`src/lib/integrations-api.ts`: só Bearer — sessão recebe 401, para nunca rodarem fora do `api-public` — + permissão RBAC do dono do token). Campanha por ali passa pela trava de público (`src/services/campaign-audience-guard.ts`: sem segmento, filtro que resolve para todos os contatos é recusado); as rotas de sessão `/api/campaigns/*` não passam. Ciclo de vida compartilhável em `src/services/campaign-lifecycle.ts` — mudou regra de lançar/pausar/retomar/cancelar em um lado, mude no outro (`existing-routes-unchanged.test.ts` compara os dois).
 
 ## Produção (não quebrar)
 

@@ -1,6 +1,6 @@
 /**
- * Rotas `/api/integrations/*`: autenticação (Bearer e sessão), permissão,
- * isolamento por organização e trava de público.
+ * Rotas `/api/integrations/*`: autenticação (só Bearer), permissão,
+ * isolamento por organização, trava de público e cache da fila.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -13,6 +13,9 @@ vi.mock("@/lib/api-access-audit", async () => (await import("./harness")).auditM
 vi.mock("@/lib/rate-limit", async () => (await import("./harness")).rateLimitModule);
 vi.mock("@/lib/authz", async (importOriginal) =>
   (await import("./harness")).authzModule(await importOriginal<typeof import("@/lib/authz")>()),
+);
+vi.mock("@/lib/cache", async (importOriginal) =>
+  (await import("./harness")).cacheModule(await importOriginal<typeof import("@/lib/cache")>()),
 );
 vi.mock("@/lib/metrics", () => ({ observeHttpRequest: vi.fn() }));
 vi.mock("@/lib/org-rate-limit", () => ({ enforceOrgApiRateLimit: vi.fn().mockResolvedValue(null) }));
@@ -150,16 +153,10 @@ describe.each(ROUTES)("$name", (route) => {
     }
   });
 
-  it("403 sem a permissão, com `required` no corpo (Bearer e sessão)", async () => {
-    const id = seed(route);
-    const viaToken = await route.call({ token: TOKEN_A_SEM_PERMISSAO }, id);
-    expect(viaToken.status).toBe(403);
-    expect(await viaToken.json()).toEqual({ message: "Acesso negado.", required: route.permission });
-
-    world.session = { user: USER_A_SEM_PERMISSAO };
-    const viaSession = await route.call({}, id);
-    expect(viaSession.status).toBe(403);
-    expect((await viaSession.json()).required).toBe(route.permission);
+  it("403 sem a permissão, com `required` no corpo", async () => {
+    const res = await route.call({ token: TOKEN_A_SEM_PERMISSAO }, seed(route));
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ message: "Acesso negado.", required: route.permission });
   });
 
   it("a permissão exata basta; outra do mesmo recurso não", async () => {
@@ -178,10 +175,18 @@ describe.each(ROUTES)("$name", (route) => {
     expect(res.status).toBe(route.okStatus);
   });
 
-  it("sucesso com sessão", async () => {
+  it("sessão sem token (mesmo de admin) → 401 bearer_required e nada acontece", async () => {
     world.session = { user: USER_A };
-    const res = await route.call({}, seed(route));
-    expect(res.status).toBe(route.okStatus);
+    const id = seed(route);
+    const before = { ...campaignRow(id) };
+    for (const auth of [{}, { token: "eduit_nao_existe" }]) {
+      const res = await route.call(auth, id);
+      expect(res.status).toBe(401);
+      expect((await res.json()).code).toBe("bearer_required");
+    }
+    expect(campaignRow(id)).toEqual(before);
+    expect(world.db.table("campaign")).toHaveLength(1);
+    expect(world.dispatched).toEqual([]);
   });
 });
 
@@ -217,24 +222,27 @@ describe("isolamento por organização", () => {
     expect(world.db.table("campaign")).toHaveLength(1);
   });
 
-  it("fila de atendimento conta só a organização do token", async () => {
-    const conv = (id: string, organizationId: string, extra: Record<string, unknown> = {}) => ({
-      id,
-      organizationId,
-      status: "OPEN",
-      closedAt: null,
-      hasError: false,
-      lastMessageDirection: "in",
-      lastInboundAt: new Date(Date.now() - 20 * 60_000),
-      contactId: `ct-${organizationId}`,
-      assignedToId: null,
-      ...extra,
-    });
+  const conv = (id: string, organizationId: string, extra: Record<string, unknown> = {}) => ({
+    id,
+    organizationId,
+    status: "OPEN",
+    closedAt: null,
+    hasError: false,
+    lastMessageDirection: "in",
+    lastInboundAt: new Date(Date.now() - 20 * 60_000),
+    contactId: `ct-${organizationId}`,
+    assignedToId: null,
+    ...extra,
+  });
+  const seedContacts = () =>
     world.db.insert(
       "contact",
       { id: "ct-org-a", organizationId: "org-a", name: "Contato A" },
       { id: "ct-org-b", organizationId: "org-b", name: "Contato B" },
     );
+
+  it("fila de atendimento conta só a organização do token", async () => {
+    seedContacts();
     world.db.insert(
       "conversation",
       conv("c1", "org-a"),
@@ -260,6 +268,31 @@ describe("isolamento por organização", () => {
 
     const other = await serviceQueue(request("/api/integrations/service-queue", { token: TOKEN_B }));
     expect(await other.json()).toMatchObject({ awaitingReply: 1, inService: 0, agents: { online: 0, total: 1 } });
+  });
+
+  it("fila: 15 s de cache por organização e por relógio; não vaza entre organizações", async () => {
+    seedContacts();
+    world.db.insert("conversation", conv("c1", "org-a"));
+    const get = async (token: string, clock = "elapsed") =>
+      (await serviceQueue(request(`/api/integrations/service-queue?clock=${clock}`, { token }))).json();
+
+    const first = await get(TOKEN_A);
+    world.db.insert("conversation", conv("c2", "org-a"), conv("c3", "org-b"));
+    // Dentro da janela: mesma resposta, sem consultar de novo.
+    expect(await get(TOKEN_A)).toEqual(first);
+    expect(first.awaitingReply).toBe(1);
+    // Outra organização e outro relógio têm chave própria.
+    expect((await get(TOKEN_B)).awaitingReply).toBe(1);
+    expect((await get(TOKEN_A, "business")).awaitingReply).toBe(2);
+    expect(world.cacheTtls).toEqual([15, 15, 15]);
+    expect([...world.cache.keys()].sort()).toEqual([
+      "integrations:service_queue:org-a:business",
+      "integrations:service_queue:org-a:elapsed",
+      "integrations:service_queue:org-b:elapsed",
+    ]);
+
+    world.cache.clear();
+    expect((await get(TOKEN_A)).awaitingReply).toBe(2);
   });
 });
 

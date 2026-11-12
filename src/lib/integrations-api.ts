@@ -1,9 +1,11 @@
 /**
  * Base das rotas `/api/integrations/*`: API para sistemas externos.
  *
- * Aceita Bearer (`eduit_…`, no processo `api-public`) ou sessão, pelo mesmo
- * `withApiAuthContext` das demais rotas com autenticação dupla, exige
- * organização e checa a permissão RBAC do dono do token / da sessão.
+ * Só token de API (`Authorization: Bearer eduit_…`): em produção o token é
+ * aceito apenas no processo `api-public`, então estas rotas nunca rodam no
+ * processo da API privada (inbox). Sessão recebe 401. Autentica pelo mesmo
+ * `withApiAuthContext` das demais rotas da API pública, exige organização e
+ * checa a permissão RBAC do dono do token.
  */
 import { NextResponse } from "next/server";
 
@@ -23,8 +25,18 @@ export async function withIntegrationsApi(
   handler: (user: IntegrationUser) => Promise<NextResponse>,
 ): Promise<NextResponse> {
   return withApiAuthContext(request, async (user) => {
+    // Bearer válido → ator INTEGRATION (`authenticateApiRequest`); sessão → HUMAN.
+    if (user.actor?.type !== "INTEGRATION") {
+      return NextResponse.json(
+        {
+          message: "Esta rota aceita apenas token de API (Authorization: Bearer).",
+          code: "bearer_required",
+        },
+        { status: 401 },
+      );
+    }
     if (!user.organizationId) {
-      return NextResponse.json({ message: "Sessão sem organização." }, { status: 401 });
+      return NextResponse.json({ message: "Token sem organização." }, { status: 401 });
     }
     const denied = await requirePermissionForUser(user, permission);
     if (denied) return denied;
