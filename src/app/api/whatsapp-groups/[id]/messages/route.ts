@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { requireAuth } from "@/lib/auth-helpers";
 import { requirePermission } from "@/lib/authz";
+import { getLogger } from "@/lib/logger";
 import { enqueueBaileysOutbound } from "@/lib/queue";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import {
@@ -12,6 +13,12 @@ import {
 } from "@/services/whatsapp-groups";
 
 export const dynamic = "force-dynamic";
+
+const log = getLogger("whatsapp-groups");
+
+function errMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -35,8 +42,17 @@ export async function GET(_request: Request, context: RouteContext) {
     return NextResponse.json({ message: "Grupo não encontrado." }, { status: 404 });
   }
 
-  const messages = await listWhatsAppGroupMessages(group.id);
-  return NextResponse.json({ messages });
+  try {
+    const messages = await listWhatsAppGroupMessages(group.id);
+    return NextResponse.json({ messages });
+  } catch (err) {
+    // Sem isto o Next devolvia 500 sem corpo JSON e a tela ficava vazia, sem aviso.
+    log.error({ groupId: group.id, err: errMessage(err) }, "[whatsapp-groups] falha ao listar mensagens");
+    return NextResponse.json(
+      { message: "Não foi possível carregar as mensagens do grupo." },
+      { status: 500 },
+    );
+  }
 }
 
 export async function POST(request: Request, context: RouteContext) {
@@ -84,14 +100,25 @@ export async function POST(request: Request, context: RouteContext) {
   }
   // Não espera o worker aqui: o rewrite do frontend/Traefik corta ~10–15s
   // e devolve 502 HTML ("Servidor temporariamente indisponível").
-  const message = await appendWhatsAppGroupMessage({
-    organizationId: getOrgIdOrThrow(),
-    groupId: group.id,
-    fromJid: channel.phoneNumber ? `${channel.phoneNumber.replace(/\D/g, "")}@s.whatsapp.net` : "me",
-    fromName: r.session.user.name ?? "Você",
-    fromPhone: channel.phoneNumber,
-    fromMe: true,
-    text,
-  });
+  // A mensagem já está na fila e vai sair no WhatsApp. Falha ao gravar o
+  // histórico não pode virar 500 sem corpo: a UI mostrava "Servidor
+  // temporariamente indisponível" para uma mensagem que tinha sido enviada.
+  let message: Awaited<ReturnType<typeof appendWhatsAppGroupMessage>> = null;
+  try {
+    message = await appendWhatsAppGroupMessage({
+      organizationId: getOrgIdOrThrow(),
+      groupId: group.id,
+      fromJid: channel.phoneNumber ? `${channel.phoneNumber.replace(/\D/g, "")}@s.whatsapp.net` : "me",
+      fromName: r.session.user.name ?? "Você",
+      fromPhone: channel.phoneNumber,
+      fromMe: true,
+      text,
+    });
+  } catch (err) {
+    log.error(
+      { groupId: group.id, jobId: job.id, err: errMessage(err) },
+      "[whatsapp-groups] mensagem enfileirada, mas não gravada no histórico",
+    );
+  }
   return NextResponse.json({ ok: true, groupId: group.id, message });
 }
