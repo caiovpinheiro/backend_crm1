@@ -27,6 +27,8 @@ export type WhatsAppGroupListItem = {
   ownerJid: string | null;
   participantCount: number;
   syncedAt: string;
+  /** Última mensagem recebida ou enviada. Nulo = grupo sem mensagem no CRM. */
+  lastMessageAt: string | null;
 };
 
 export type WhatsAppGroupDetail = WhatsAppGroupListItem & {
@@ -40,8 +42,46 @@ export type WhatsAppGroupMessageDto = {
   fromPhone: string | null;
   fromMe: boolean;
   text: string;
+  /** text | image | video | audio | ptt | document | sticker. */
+  messageType: string;
+  mediaUrl: string | null;
+  mimeType: string | null;
+  fileName: string | null;
   createdAt: string;
 };
+
+/** Tipos de mensagem com arquivo — os mesmos do inbox. */
+export const GROUP_MEDIA_TYPES = new Set(["image", "video", "audio", "ptt", "document", "sticker"]);
+
+const MESSAGE_SELECT = {
+  id: true,
+  fromJid: true,
+  fromName: true,
+  fromPhone: true,
+  fromMe: true,
+  text: true,
+  messageType: true,
+  mediaUrl: true,
+  mimeType: true,
+  fileName: true,
+  createdAt: true,
+} as const;
+
+function serializeMessage(r: {
+  id: string;
+  fromJid: string;
+  fromName: string | null;
+  fromPhone: string | null;
+  fromMe: boolean;
+  text: string;
+  messageType: string;
+  mediaUrl: string | null;
+  mimeType: string | null;
+  fileName: string | null;
+  createdAt: Date;
+}): WhatsAppGroupMessageDto {
+  return { ...r, createdAt: r.createdAt.toISOString() };
+}
 
 export type BaileysGroupSnapshot = {
   jid: string;
@@ -75,7 +115,8 @@ export async function findConnectedBaileysChannel() {
 export async function listWhatsAppGroups(channelId: string): Promise<WhatsAppGroupListItem[]> {
   const rows = await prisma.whatsAppGroup.findMany({
     where: { channelId },
-    orderBy: { name: "asc" },
+    // Como no WhatsApp: quem conversou por último fica em cima.
+    orderBy: [{ lastMessageAt: { sort: "desc", nulls: "last" } }, { name: "asc" }],
     select: {
       id: true,
       jid: true,
@@ -84,6 +125,7 @@ export async function listWhatsAppGroups(channelId: string): Promise<WhatsAppGro
       ownerJid: true,
       participantCount: true,
       syncedAt: true,
+      lastMessageAt: true,
     },
   });
   return rows.map(serializeGroup);
@@ -100,17 +142,69 @@ export async function getWhatsAppGroup(
     },
   });
   if (!row) return null;
+  const crmNames = await crmNamesByPhone(
+    row.members.filter((m) => !m.name?.trim() && m.phone).map((m) => m.phone!),
+  );
   return {
     ...serializeGroup(row),
     members: row.members.map((m) => ({
       id: m.id,
       jid: m.jid,
       phone: m.phone,
-      name: m.name,
+      // Nome do perfil do WhatsApp; sem ele, o do contato do CRM (só na tela).
+      name: m.name?.trim() || (m.phone ? crmNames.get(m.phone) ?? null : null),
       isAdmin: m.isAdmin,
       isSuperAdmin: m.isSuperAdmin,
     })),
   };
+}
+
+/** Telefone do participante → nome do contato do CRM com o mesmo número. */
+export async function crmNamesByPhone(phones: string[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (phones.length === 0) return out;
+  const variantOf = new Map<string, string>();
+  for (const phone of phones) {
+    const normalized = normalizePhone(phone) ?? phone;
+    for (const v of phoneMatchVariants(normalized)) variantOf.set(v, phone);
+    variantOf.set(normalized, phone);
+    variantOf.set(phone, phone);
+  }
+  const contacts = await prisma.contact.findMany({
+    where: { phone: { in: [...variantOf.keys()] } },
+    select: { phone: true, name: true },
+  });
+  for (const c of contacts) {
+    const name = c.name?.trim();
+    const original = c.phone ? variantOf.get(c.phone) : undefined;
+    if (name && original && !out.has(original) && name !== c.phone) out.set(original, name);
+  }
+  return out;
+}
+
+/**
+ * Grava o nome do perfil (pushName) no participante que mandou a mensagem.
+ * Casa pelo jid (o WhatsApp pode mandar LID e o telefone como alternativo)
+ * ou pelo telefone.
+ */
+export async function learnGroupMemberName(input: {
+  groupId: string;
+  jids: Array<string | null | undefined>;
+  phone: string | null;
+  name: string;
+}): Promise<number> {
+  const name = input.name.trim();
+  if (!name) return 0;
+  const jids = [...new Set(input.jids.filter((j): j is string => Boolean(j)))];
+  const or: Array<Record<string, unknown>> = [];
+  if (jids.length) or.push({ jid: { in: jids } });
+  if (input.phone) or.push({ phone: input.phone });
+  if (or.length === 0) return 0;
+  const res = await prisma.whatsAppGroupMember.updateMany({
+    where: { groupId: input.groupId, OR: or, NOT: { name } },
+    data: { name: name.slice(0, 120) },
+  });
+  return res.count;
 }
 
 async function writeGroupSnapshot(
@@ -148,6 +242,19 @@ async function writeGroupSnapshot(
   // (jid ausente) e um erro aqui interrompia o restante do lote.
   if (snap.partial || members.length === 0) return;
 
+  // O WhatsApp quase nunca manda nome na lista de participantes: guarda o
+  // que já foi aprendido das mensagens antes de recriar a lista.
+  const previous = await prisma.whatsAppGroupMember.findMany({
+    where: { groupId: group.id, name: { not: null } },
+    select: { jid: true, phone: true, name: true },
+  });
+  const known = new Map<string, string>();
+  for (const p of previous) {
+    if (!p.name?.trim()) continue;
+    known.set(p.jid, p.name);
+    if (p.phone) known.set(`tel:${p.phone}`, p.name);
+  }
+
   await prisma.whatsAppGroupMember.deleteMany({ where: { groupId: group.id } });
   await prisma.whatsAppGroupMember.createMany({
     data: members.map((m) => ({
@@ -155,7 +262,11 @@ async function writeGroupSnapshot(
       groupId: group.id,
       jid: m.jid,
       phone: m.phone,
-      name: m.name,
+      name:
+        m.name?.trim() ||
+        known.get(m.jid) ||
+        (m.phone ? known.get(`tel:${m.phone}`) : undefined) ||
+        null,
       isAdmin: m.isAdmin,
       isSuperAdmin: m.isSuperAdmin,
     })),
@@ -217,25 +328,9 @@ export async function listWhatsAppGroupMessages(
     where: { groupId },
     orderBy: { createdAt: "desc" },
     take: Math.min(Math.max(limit, 1), 200),
-    select: {
-      id: true,
-      fromJid: true,
-      fromName: true,
-      fromPhone: true,
-      fromMe: true,
-      text: true,
-      createdAt: true,
-    },
+    select: MESSAGE_SELECT,
   });
-  return rows.reverse().map((r) => ({
-    id: r.id,
-    fromJid: r.fromJid,
-    fromName: r.fromName,
-    fromPhone: r.fromPhone,
-    fromMe: r.fromMe,
-    text: r.text,
-    createdAt: r.createdAt.toISOString(),
-  }));
+  return rows.reverse().map(serializeMessage);
 }
 
 export async function appendWhatsAppGroupMessage(input: {
@@ -247,9 +342,17 @@ export async function appendWhatsAppGroupMessage(input: {
   fromPhone?: string | null;
   fromMe: boolean;
   text: string;
+  messageType?: string;
+  mediaUrl?: string | null;
+  mimeType?: string | null;
+  fileName?: string | null;
 }): Promise<WhatsAppGroupMessageDto | null> {
   const text = input.text.trim();
   if (!text) return null;
+  const messageType =
+    input.messageType && (input.messageType === "text" || GROUP_MEDIA_TYPES.has(input.messageType))
+      ? input.messageType
+      : "text";
   if (input.waMessageId) {
     const dup = await prisma.whatsAppGroupMessage.findFirst({
       where: { groupId: input.groupId, waMessageId: input.waMessageId },
@@ -267,26 +370,23 @@ export async function appendWhatsAppGroupMessage(input: {
       fromPhone: input.fromPhone ?? null,
       fromMe: input.fromMe,
       text: text.slice(0, 4096),
+      messageType,
+      mediaUrl: input.mediaUrl ?? null,
+      mimeType: input.mimeType ?? null,
+      fileName: input.fileName?.slice(0, 255) ?? null,
     }),
-    select: {
-      id: true,
-      fromJid: true,
-      fromName: true,
-      fromPhone: true,
-      fromMe: true,
-      text: true,
-      createdAt: true,
-    },
+    select: MESSAGE_SELECT,
   });
-  return {
-    id: row.id,
-    fromJid: row.fromJid,
-    fromName: row.fromName,
-    fromPhone: row.fromPhone,
-    fromMe: row.fromMe,
-    text: row.text,
-    createdAt: row.createdAt.toISOString(),
-  };
+  await bumpGroupLastMessageAt(input.groupId, row.createdAt);
+  return serializeMessage(row);
+}
+
+/** Sobe o grupo na lista. Só avança: mensagem antiga chegando depois não rebaixa. */
+export async function bumpGroupLastMessageAt(groupId: string, at: Date): Promise<void> {
+  await prisma.whatsAppGroup.updateMany({
+    where: { id: groupId, OR: [{ lastMessageAt: null }, { lastMessageAt: { lt: at } }] },
+    data: { lastMessageAt: at },
+  });
 }
 
 export async function findWhatsAppGroupByJid(channelId: string, jid: string) {
@@ -393,6 +493,7 @@ function serializeGroup(row: {
   ownerJid: string | null;
   participantCount: number;
   syncedAt: Date;
+  lastMessageAt?: Date | null;
 }): WhatsAppGroupListItem {
   return {
     id: row.id,
@@ -402,5 +503,6 @@ function serializeGroup(row: {
     ownerJid: row.ownerJid,
     participantCount: row.participantCount,
     syncedAt: row.syncedAt.toISOString(),
+    lastMessageAt: row.lastMessageAt ? row.lastMessageAt.toISOString() : null,
   };
 }

@@ -10,6 +10,7 @@ import {
   WHATSAPP_VIDEO_MAX_BYTES,
   WHATSAPP_VIDEO_TOO_LARGE_MESSAGE,
 } from "@/lib/audio-convert";
+import { ATTACHMENT_ALLOWED_PREFIXES, ATTACHMENT_MAX_BYTES } from "@/lib/attachment-allowlist";
 import { sniffAttachment } from "@/lib/file-sniff";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
@@ -65,20 +66,8 @@ const CONVERSATION_LITE_SELECT = {
   },
 } as const;
 
-const MAX_FILE_SIZE = 16 * 1024 * 1024;
-// SEC2-3: allowlist aplicada ao MIME DETECTADO por magic bytes (nunca ao
-// Content-Type do cliente). `application/octet-stream` saiu.
-const ALLOWED_PREFIXES = [
-  "image/", "video/", "audio/",
-  "application/pdf",
-  "application/msword",
-  "application/vnd.openxmlformats-officedocument",
-  "application/vnd.ms-excel",
-  "application/vnd.ms-powerpoint",
-  "application/vnd.oasis.opendocument",
-  "application/zip",
-  "text/plain", "text/csv",
-];
+const MAX_FILE_SIZE = ATTACHMENT_MAX_BYTES;
+const ALLOWED_PREFIXES = ATTACHMENT_ALLOWED_PREFIXES;
 
 function isFileLike(v: unknown): v is Blob & { name?: string } {
   return (

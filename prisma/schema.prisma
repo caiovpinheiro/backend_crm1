@@ -6944,6 +6944,8 @@ model WhatsAppGroup {
   ownerJid         String?
   participantCount Int      @default(0)
   syncedAt         DateTime @default(now())
+  /// Última mensagem recebida ou enviada — ordena a lista como no WhatsApp.
+  lastMessageAt    DateTime?
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
@@ -6953,6 +6955,7 @@ model WhatsAppGroup {
   @@unique([channelId, jid])
   @@index([organizationId])
   @@index([channelId])
+  @@index([channelId, lastMessageAt])
   @@map("whatsapp_groups")
 }
 
@@ -6987,6 +6990,12 @@ model WhatsAppGroupMessage {
   fromPhone    String?
   fromMe       Boolean  @default(false)
   text         String   @db.Text
+  /// text | image | video | audio | ptt | document | sticker (mesmos tipos do inbox).
+  messageType  String   @default("text")
+  /// Arquivo no storage da org. Nulo quando é texto ou o download falhou.
+  mediaUrl     String?
+  mimeType     String?
+  fileName     String?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
