@@ -8,12 +8,25 @@ const svc = vi.hoisted(() => ({
 }));
 const queue = vi.hoisted(() => ({ enqueueBaileysOutbound: vi.fn() }));
 
+const ctxOrg = vi.hoisted(() => ({ value: "org1" as string | null }));
 vi.mock("@/lib/auth-helpers", () => ({
   requireAuth: async () => ({ ok: true, session: { user: { id: "u1", name: "Ana" } } }),
+  // Como o real: o handler roda dentro do contexto da org (runWithContext).
+  withOrgContext: async (h: (s: unknown) => unknown) => {
+    ctxOrg.value = "org1";
+    try {
+      return await h({ user: { id: "u1", name: "Ana" } });
+    } finally {
+      ctxOrg.value = null;
+    }
+  },
 }));
 vi.mock("@/lib/authz", () => ({ requirePermission: async () => null }));
 vi.mock("@/lib/request-context", () => ({
-  getOrgIdOrThrow: () => "org1",
+  getOrgIdOrThrow: () => {
+    if (!ctxOrg.value) throw new Error("getOrgIdOrThrow: organization context ausente");
+    return ctxOrg.value;
+  },
   getRequestContext: () => undefined,
 }));
 vi.mock("@/lib/queue", () => queue);
