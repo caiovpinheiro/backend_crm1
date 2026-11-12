@@ -6,6 +6,7 @@ import { enqueueAutomationJob, type AutomationJobContext } from "@/lib/queue";
 export type { AutomationJobContext } from "@/lib/queue";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
+import { normalizeActivityScheduleConfig } from "@/lib/activity-schedule-trigger";
 import { normalizeHoursBeforeExpiry } from "@/services/whatsapp-session-expiry";
 import {
   findFirstMessageStepIndex,
@@ -34,6 +35,7 @@ export const AUTOMATION_TRIGGER_TYPES = [
   "conversation_tabulated",
   "attendance_closing",
   "whatsapp_session_expiring",
+  "activity_scheduled",
   "lead_distributed",
 ] as const;
 
@@ -362,6 +364,8 @@ export function evaluateTrigger(
     }
     case "whatsapp_session_expiring":
       return normalizeHoursBeforeExpiry(cfg.hoursBeforeExpiry) !== null;
+    case "activity_scheduled":
+      return normalizeActivityScheduleConfig(cfg) !== null;
     case "lead_distributed": {
       // Disparado pelo motor quando um HUMAN assume vindo de IA/sem dono
       // (inclui conversas que já tiveram resposta humana). Filtro opcional por depto.
@@ -819,6 +823,9 @@ export function validateAutomationTriggerConfig(
   triggerType: string,
   triggerConfig: unknown,
 ): boolean {
+  if (triggerType === "activity_scheduled") {
+    return normalizeActivityScheduleConfig(triggerConfig) !== null;
+  }
   if (triggerType !== "whatsapp_session_expiring") return true;
   const cfg = asRecord(triggerConfig);
   return cfg !== null && normalizeHoursBeforeExpiry(cfg.hoursBeforeExpiry) !== null;

@@ -587,6 +587,12 @@ export function startWhatsappOwnedSweepers() {
       log.error({ err: e }, "[sse-bus] failed to start session-expiry sweeper"),
     );
 
+  import("@/services/activity-schedule-sweeper")
+    .then(({ startActivityScheduleSweeper }) => startActivityScheduleSweeper())
+    .catch((e) =>
+      log.error({ err: e }, "[sse-bus] failed to start activity-schedule sweeper"),
+    );
+
   import("@/services/activity-alert-push-sweeper")
     .then(({ startActivityAlertPushSweeper }) => startActivityAlertPushSweeper())
     .catch((e) =>

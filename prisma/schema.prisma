@@ -77,6 +77,7 @@ model Organization {
   automationLogs           AutomationLog[]
   automationContexts       AutomationContext[]
   automationSessionExpiryClaims AutomationSessionExpiryClaim[]
+  automationActivityScheduleClaims AutomationActivityScheduleClaim[]
   automationRoundRobinStates AutomationRoundRobinState[]
   metaWebhookEvents        MetaWebhookEvent[]
   channels                 Channel[]
@@ -2951,6 +2952,7 @@ model Activity {
 
   comments    ActivityComment[]
   alertStates ActivityAlertState[]
+  automationScheduleClaims AutomationActivityScheduleClaim[]
   teamChatWorkItems       TeamChatWorkItem[]      @relation("WorkItemCalendar")
   teamChatWorkItemEntries TeamChatWorkItemEntry[] @relation("WorkItemEntryCalendar")
 
@@ -3503,6 +3505,7 @@ model Automation {
   steps          AutomationStep[]
   contexts       AutomationContext[]
   sessionExpiryClaims AutomationSessionExpiryClaim[]
+  activityScheduleClaims AutomationActivityScheduleClaim[]
   roundRobinStates AutomationRoundRobinState[]
   campaigns      Campaign[]
 
@@ -3539,6 +3542,26 @@ model AutomationSessionExpiryClaim {
   @@index([contactId, channel, windowStartedAt], map: "automation_session_expiry_contact_channel_window_idx")
   @@index([conversationId], map: "automation_session_expiry_claims_conversationId_idx")
   @@map("automation_session_expiry_claims")
+}
+
+/// Claim durável do gatilho "horário da tarefa" (activity_scheduled). Uma
+/// execução por automação + tarefa + horário agendado; reagendar a tarefa
+/// gera um novo horário e, portanto, um novo disparo.
+model AutomationActivityScheduleClaim {
+  id             String       @id
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade, map: "automation_activity_schedule_org_fk")
+  automationId   String
+  automation     Automation   @relation(fields: [automationId], references: [id], onDelete: Cascade, map: "automation_activity_schedule_automation_fk")
+  activityId     String
+  activity       Activity     @relation(fields: [activityId], references: [id], onDelete: Cascade, map: "automation_activity_schedule_activity_fk")
+  scheduledAt    DateTime
+  createdAt      DateTime     @default(now())
+
+  @@unique([automationId, activityId, scheduledAt], map: "automation_activity_schedule_claim_uq")
+  @@index([organizationId, createdAt], map: "automation_activity_schedule_org_created_idx")
+  @@index([activityId], map: "automation_activity_schedule_activity_idx")
+  @@map("automation_activity_schedule_claims")
 }
 
 /// Cursor persistido do node "Round Robin de caminhos" (estilo Kommo).

@@ -8,6 +8,7 @@ import {
   summarizeRoundRobinConfig,
   type RoundRobinConfig,
 } from "@/lib/automation-round-robin";
+import { describeActivitySchedule } from "@/lib/activity-schedule-trigger";
 import { summarizeRestoreAttendance } from "@/lib/restore-attendance";
 
 export type AutomationTriggerType =
@@ -29,6 +30,8 @@ export type AutomationTriggerType =
   | "conversation_tabulated"
   | "attendance_closing"
   | "whatsapp_session_expiring"
+  /** Horário da tarefa (Activity.scheduledAt), com deslocamento antes/depois. */
+  | "activity_scheduled"
   /** Distribuição Inteligente atribuiu um consultor HUMAN (1ª vez). */
   | "lead_distributed"
   | "manual";
@@ -58,6 +61,7 @@ export const AUTOMATION_TRIGGER_TYPES: AutomationTriggerType[] = [
   "conversation_tabulated",
   "attendance_closing",
   "whatsapp_session_expiring",
+  "activity_scheduled",
   "lead_distributed",
   "manual",
 ];
@@ -394,6 +398,7 @@ export function triggerTypeLabel(t: string): string {
     conversation_tabulated: "Conversa encerrada",
     attendance_closing: "Atendimento sendo encerrado",
     whatsapp_session_expiring: "Sessão do WhatsApp prestes a encerrar",
+    activity_scheduled: "Horário da tarefa",
     lead_distributed: "Lead distribuído (consultor humano)",
     manual: "Manual (executar pela conversa)",
   };
@@ -565,6 +570,8 @@ export function summarizeTriggerConfig(
       return "Sem resposta no aguardo — protocolo de encerramento";
     case "whatsapp_session_expiring":
       return `${String(c.hoursBeforeExpiry ?? 1)}h antes do encerramento`;
+    case "activity_scheduled":
+      return describeActivitySchedule(c);
     default:
       return "—";
   }
@@ -1257,6 +1264,14 @@ export function defaultTriggerConfig(triggerType: string): Record<string, unknow
       };
     case "whatsapp_session_expiring":
       return { hoursBeforeExpiry: 1 };
+    case "activity_scheduled":
+      return {
+        timing: "before",
+        offsetAmount: 30,
+        offsetUnit: "minutes",
+        activityType: "",
+        includeCompleted: false,
+      };
     default:
       return {};
   }
