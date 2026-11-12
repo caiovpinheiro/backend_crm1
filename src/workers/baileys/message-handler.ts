@@ -36,7 +36,7 @@ import {
   parseBaileysSharedContacts,
   type SharedContact,
 } from "@/lib/shared-contact";
-import { isLidJid, resolveJid } from "./lid-resolver";
+import { isLidJid, resolveLidJid } from "./lid-resolver";
 import { noteContactActivity } from "./contact-typing";
 import {
   appendWhatsAppGroupMessage,
@@ -671,7 +671,14 @@ export async function handleBaileysMessage(
 
     let jid = rawJid;
     if (isLidJid(rawJid)) {
-      const resolved = resolveJid(channelId, rawJid);
+      // Contato fora da agenda sincronizada não tem par no mapa: usa o
+      // telefone que o WhatsApp manda junto (`remoteJidAlt`) ou o mapa LID
+      // da sessão. Antes caía direto no LID e criava contato "+<lid>".
+      const resolved = await resolveLidJid(channelId, rawJid, {
+        alt: msg.key.remoteJidAlt,
+        lookup: (lid) =>
+          sock.signalRepository?.lidMapping?.getPNForLID(lid) ?? Promise.resolve(null),
+      });
       if (resolved) {
         jid = resolved;
       } else {

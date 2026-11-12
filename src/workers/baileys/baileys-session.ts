@@ -272,6 +272,22 @@ export class BaileysSession {
       }
     });
 
+    // Baileys 7 avisa cada par LID↔telefone que aprende (mensagens, sync).
+    // Sem isto, contato fora da agenda ficava só com o LID.
+    sock.ev.on("lid-mapping.update", (mapping) => {
+      const pairs = Array.isArray(mapping) ? mapping : [mapping];
+      let added = 0;
+      for (const m of pairs as Array<{ lid?: string; pn?: string }>) {
+        if (m?.lid && m.pn && m.pn.endsWith("@s.whatsapp.net")) {
+          if (registerLidMapping(this.channelId, m.lid, m.pn)) added++;
+        }
+      }
+      const orgId = this.organizationId;
+      if (added > 0 && orgId) {
+        void withSystemContext(orgId, () => fixLidContacts(this.channelId)).catch(() => {});
+      }
+    });
+
     sock.ev.on("contacts.update", (updates) => {
       for (const c of updates as Array<{ id?: string; lid?: string }>) {
         if (c.lid && c.id && c.id.endsWith("@s.whatsapp.net")) {
