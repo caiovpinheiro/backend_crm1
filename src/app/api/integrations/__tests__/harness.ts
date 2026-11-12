@@ -2,7 +2,7 @@
  * Mundo de teste das rotas `/api/integrations/*`: banco em memória com
  * `where` de verdade (`FakeDb`), ESCOPADO pela organização do
  * `RequestContext` — o papel da extension de tenant do Prisma —, mais os
- * dublês de autenticação (sessão, token Bearer), permissões e fila.
+ * dublês de autenticação (sessão, token Bearer), permissões, cache e fila.
  *
  * Sem `vi.mock` aqui: cada arquivo de teste declara os seus e aponta para
  * as fábricas deste módulo.
@@ -52,6 +52,8 @@ export const world = {
   tokens: new Map<string, SessionUser>(),
   permissions: new Map<string, string[]>(),
   queueUp: true,
+  cache: new Map<string, { value: unknown; expiresAt: number }>(),
+  cacheTtls: [] as number[],
   dispatched: [] as unknown[],
   sends: [] as unknown[],
   seq: 0,
@@ -206,6 +208,24 @@ export const rateLimitModule = {
   }),
 };
 
+/** `@/lib/cache` real, com `cache.wrap` em memória (zerado a cada teste). */
+export function cacheModule<T extends { cache: object }>(original: T) {
+  return {
+    ...original,
+    cache: {
+      ...original.cache,
+      wrap: async (key: string, ttlSec: number, loader: () => Promise<unknown>) => {
+        const hit = world.cache.get(key);
+        if (hit && hit.expiresAt > Date.now()) return hit.value;
+        const value = await loader();
+        world.cache.set(key, { value, expiresAt: Date.now() + ttlSec * 1000 });
+        world.cacheTtls.push(ttlSec);
+        return value;
+      },
+    },
+  };
+}
+
 /**
  * `@/lib/authz` real, trocando só a carga do contexto (que leria cache e
  * banco) pelas permissões do mundo de teste. `can()` continua o de produção.
@@ -269,6 +289,8 @@ export function resetWorld(): void {
   world.db = new FakeDb(SCHEMA);
   world.session = null;
   world.queueUp = true;
+  world.cache = new Map();
+  world.cacheTtls = [];
   world.dispatched = [];
   world.sends = [];
   world.seq = 0;

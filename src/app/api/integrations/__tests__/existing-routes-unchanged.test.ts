@@ -3,8 +3,9 @@
  * com a chegada de `/api/integrations/*`:
  *   - continuam só com sessão (token válido sem cookie → 401);
  *   - continuam sem a trava de público;
- *   - o ciclo de vida responde igual ao serviço novo (mesmo status e corpo),
- *     então as duas superfícies não divergem em silêncio.
+ *   - o ciclo de vida responde igual nas rotas de integração (sessão de um
+ *     lado, token do outro: mesmo status e corpo), então as duas superfícies
+ *     não divergem em silêncio.
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -20,6 +21,9 @@ vi.mock("@/lib/api-access-audit", async () => (await import("./harness")).auditM
 vi.mock("@/lib/rate-limit", async () => (await import("./harness")).rateLimitModule);
 vi.mock("@/lib/authz", async (importOriginal) =>
   (await import("./harness")).authzModule(await importOriginal<typeof import("@/lib/authz")>()),
+);
+vi.mock("@/lib/cache", async (importOriginal) =>
+  (await import("./harness")).cacheModule(await importOriginal<typeof import("@/lib/cache")>()),
 );
 vi.mock("@/lib/metrics", () => ({ observeHttpRequest: vi.fn() }));
 vi.mock("@/lib/org-rate-limit", () => ({ enforceOrgApiRateLimit: vi.fn().mockResolvedValue(null) }));
@@ -178,7 +182,8 @@ describe("ciclo de vida: rota de sessão e rota de integração respondem igual"
       contactId: "ct1",
       status: "PENDING",
     });
-    const res = await handler(request("/x", { method: "POST" }), params(id));
+    // A rota de sessão ignora o Authorization; a de integração ignora o cookie.
+    const res = await handler(request("/x", { method: "POST", token: TOKEN_A }), params(id));
     return {
       http: res.status,
       body: await res.json(),
