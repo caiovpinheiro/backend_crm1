@@ -41,6 +41,8 @@ import { noteContactActivity } from "./contact-typing";
 import {
   appendWhatsAppGroupMessage,
   findWhatsAppGroupByJid,
+  GROUP_MEDIA_TYPES,
+  learnGroupMemberName,
 } from "@/services/whatsapp-groups";
 import { noteMessageRowChange } from "@/lib/cache/message-versions";
 
@@ -631,19 +633,53 @@ function groupMessagePreview(msg: WAMessage): string | null {
   return null;
 }
 
+/** Tipo/nome do arquivo de uma mídia recebida em grupo (o que o balão precisa). */
+export function groupMediaMeta(msg: WAMessage): { mimeType: string | null; fileName: string | null } {
+  const raw = msg.message;
+  if (!raw) return { mimeType: null, fileName: null };
+  const { inner, isViewOnce } = unwrapViewOnce(raw as AnyMsg);
+  const content = isViewOnce ? inner : (raw as AnyMsg);
+  const type = getContentType(content as WAMessage["message"] & object);
+  const node = type ? (content as AnyMsg)[type] : null;
+  const mimeType = typeof node?.mimetype === "string" ? node.mimetype.split(";")[0].trim() || null : null;
+  const fileName = typeof node?.fileName === "string" && node.fileName.trim() ? node.fileName.trim() : null;
+  return { mimeType, fileName };
+}
+
 async function persistIncomingGroupMessage(
   channelId: string,
   groupJid: string,
   msg: WAMessage,
+  sock: WASocket,
 ): Promise<void> {
-  const text = groupMessagePreview(msg);
-  if (!text) return;
+  const preview = groupMessagePreview(msg);
+  if (!preview) return;
   const group = await findWhatsAppGroupByJid(channelId, groupJid);
   if (!group) return;
-  const fromJid = msg.key.participant || groupJid;
-  const phone = fromJid.endsWith("@s.whatsapp.net") || fromJid.endsWith("@c.us")
-    ? jidToPhone(fromJid)
-    : null;
+
+  const key = msg.key as WAMessage["key"] & { participantAlt?: string | null };
+  const fromJid = key.participant || groupJid;
+  const phoneJid = [fromJid, key.participantAlt].find(
+    (j): j is string => Boolean(j && (j.endsWith("@s.whatsapp.net") || j.endsWith("@c.us"))),
+  );
+  const phone = phoneJid ? jidToPhone(phoneJid) : null;
+
+  // Mídia: baixa e guarda como o inbox (o balão só carrega ao tocar).
+  let text = preview;
+  let messageType = "text";
+  let mediaUrl: string | null = null;
+  let meta: { mimeType: string | null; fileName: string | null } = { mimeType: null, fileName: null };
+  const parsed = await parseMessage(msg, sock, group.organizationId).catch((err) => {
+    log.warn({ channelId, groupJid, err }, "[baileys] mídia do grupo não processada");
+    return null;
+  });
+  if (parsed && GROUP_MEDIA_TYPES.has(parsed.messageType)) {
+    text = parsed.text || preview;
+    messageType = parsed.messageType;
+    mediaUrl = parsed.mediaUrl;
+    meta = groupMediaMeta(msg);
+  }
+
   await appendWhatsAppGroupMessage({
     organizationId: group.organizationId,
     groupId: group.id,
@@ -653,7 +689,24 @@ async function persistIncomingGroupMessage(
     fromPhone: phone,
     fromMe: Boolean(msg.key.fromMe),
     text,
+    messageType,
+    mediaUrl,
+    mimeType: meta.mimeType,
+    fileName: meta.fileName,
   });
+
+  // Nome do perfil do WhatsApp no participante (como o nome dos candidatos).
+  if (!msg.key.fromMe && msg.pushName?.trim()) {
+    await learnGroupMemberName({
+      groupId: group.id,
+      jids: [key.participant, key.participantAlt],
+      // Participante sincronizado guarda o telefone só com dígitos.
+      phone: phone ? phone.replace(/\D/g, "") : null,
+      name: msg.pushName,
+    }).catch((err) =>
+      log.warn({ channelId, groupJid, err }, "[baileys] nome do participante não gravado"),
+    );
+  }
 }
 
 export async function handleBaileysMessage(
@@ -665,7 +718,7 @@ export async function handleBaileysMessage(
     const rawJid = msg.key.remoteJid;
     if (!rawJid || rawJid === "status@broadcast") return;
     if (rawJid.endsWith("@g.us")) {
-      await persistIncomingGroupMessage(channelId, rawJid, msg);
+      await persistIncomingGroupMessage(channelId, rawJid, msg, sock);
       return;
     }
 
