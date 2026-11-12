@@ -268,3 +268,18 @@ describe("BaileysSession — desligamento do processo", () => {
     expect(h.sockets).toHaveLength(1);
   });
 });
+
+describe("shouldHandleUpsertMessage", () => {
+  it("recebida: sim; eco do próprio envio (append): não", async () => {
+    const { shouldHandleUpsertMessage } = await import("./baileys-session");
+    expect(shouldHandleUpsertMessage("notify", { remoteJid: "55@s.whatsapp.net", fromMe: false })).toBe(true);
+    expect(shouldHandleUpsertMessage("append", { remoteJid: "1@g.us", fromMe: true })).toBe(false);
+    expect(shouldHandleUpsertMessage("append", { remoteJid: "55@s.whatsapp.net", fromMe: false })).toBe(false);
+  });
+
+  it("enviada pelo celular do número: grava no grupo, não na conversa 1:1", async () => {
+    const { shouldHandleUpsertMessage } = await import("./baileys-session");
+    expect(shouldHandleUpsertMessage("notify", { remoteJid: "120363@g.us", fromMe: true })).toBe(true);
+    expect(shouldHandleUpsertMessage("notify", { remoteJid: "55@s.whatsapp.net", fromMe: true })).toBe(false);
+  });
+});
