@@ -166,6 +166,7 @@ export async function PUT(request: Request, context: RouteContext) {
           : typeof b.departmentId === "string"
             ? b.departmentId
             : undefined,
+      visibleToAll: typeof b.visibleToAll === "boolean" ? b.visibleToAll : undefined,
       startedById: b.inProgress === true ? authResult.user.id : undefined,
       startedAt: b.inProgress === true ? new Date() : undefined,
       completedById:

@@ -9,7 +9,8 @@ import { prismaBase } from "@/lib/prisma-base";
  *   - ADMIN / MANAGER → veem todas as tarefas da org.
  *   - Demais (MEMBER/AGENT) → veem apenas as tarefas atribuídas a si
  *     (`userId = eu`) OU a algum departamento do qual são membros
- *     (`departmentId ∈ meus departamentos`). É a base do "grupo de
+ *     (`departmentId ∈ meus departamentos`) OU públicas (`visibleToAll`).
+ *     É a base do "grupo de
  *     suporte" com tarefas compartilhadas.
  *
  * A associação usuário↔departamento vem de `DepartmentMember` (vínculo
@@ -70,7 +71,7 @@ export async function getTaskVisibility(viewer: TaskViewer): Promise<TaskVisibil
       ? await getUserDepartmentIds(viewer.id, viewer.organizationId)
       : [];
 
-  const or: Prisma.ActivityWhereInput[] = [{ userId: viewer.id }];
+  const or: Prisma.ActivityWhereInput[] = [{ userId: viewer.id }, { visibleToAll: true }];
   if (departmentIds.length) {
     or.push({ departmentId: { in: departmentIds } });
   }
@@ -101,9 +102,10 @@ export function departmentTasksWhere(
  */
 export async function canAccessActivity(
   viewer: TaskViewer,
-  activity: { userId: string | null; departmentId: string | null },
+  activity: { userId: string | null; departmentId: string | null; visibleToAll?: boolean },
 ): Promise<boolean> {
   if (canSeeAllTasks(viewer)) return true;
+  if (activity.visibleToAll) return true;
   if (activity.userId && activity.userId === viewer.id) return true;
   if (activity.departmentId && viewer.organizationId != null) {
     const deptIds = await getUserDepartmentIds(viewer.id, viewer.organizationId);

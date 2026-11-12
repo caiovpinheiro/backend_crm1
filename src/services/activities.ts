@@ -95,6 +95,8 @@ export type CreateActivityInput = {
   userId?: string | null;
   /** Responsável departamento (tarefa compartilhada). */
   departmentId?: string | null;
+  /** Todos da organização veem a tarefa. */
+  visibleToAll?: boolean;
   /** Quem criou a tarefa (distinto do responsável). Null = sistema/automação. */
   createdById?: string | null;
 };
@@ -140,6 +142,7 @@ export async function createActivity(data: CreateActivityInput) {
       dealId: data.dealId === undefined ? undefined : data.dealId,
       userId: data.userId ?? null,
       departmentId,
+      visibleToAll: data.visibleToAll ?? false,
       createdById: data.createdById === undefined ? undefined : data.createdById,
     }),
     include: listInclude,
@@ -159,6 +162,8 @@ export type UpdateActivityInput = {
   userId?: string | null;
   /** Reatribuir para um departamento (ou null p/ remover). */
   departmentId?: string | null;
+  /** Todos da organização veem a tarefa. */
+  visibleToAll?: boolean;
   /** Quem está executando. Null libera. O id vem da sessão, não do cliente. */
   startedById?: string | null;
   startedAt?: Date | string | null;
@@ -199,6 +204,7 @@ export async function updateActivity(id: string, data: UpdateActivityInput) {
         ? { disconnect: true }
         : { connect: { id: data.departmentId } };
   }
+  if (data.visibleToAll !== undefined) payload.visibleToAll = data.visibleToAll;
   if (data.startedAt !== undefined) payload.startedAt = data.startedAt;
   if (data.startedById !== undefined) {
     payload.startedBy =

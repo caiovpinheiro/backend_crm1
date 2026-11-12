@@ -171,6 +171,7 @@ export async function POST(request: Request) {
         dealId: resolvedDealId,
         userId: resolvedUserId,
         departmentId,
+        visibleToAll: b.visibleToAll === true,
         createdById: authResult.user.id,
       });
 

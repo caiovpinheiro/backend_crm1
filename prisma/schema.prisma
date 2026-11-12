@@ -2933,6 +2933,8 @@ model Activity {
   user         User?       @relation("ActivityAssignee", fields: [userId], references: [id])
   departmentId String?
   department   Department? @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  /// Tarefa pública: todos da organização veem/concluem, além do responsável.
+  visibleToAll Boolean     @default(false)
 
   /// Quem criou a tarefa (distinto do responsável). Nullable para
   /// registros legados/automação sem ator identificável.
