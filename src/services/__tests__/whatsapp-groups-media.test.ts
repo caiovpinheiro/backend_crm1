@@ -21,6 +21,7 @@ const db = vi.hoisted(() => ({
   },
   whatsAppGroupMessage: { findFirst: vi.fn(), create: vi.fn(), findMany: vi.fn(), count: vi.fn() },
   contact: { findMany: vi.fn() },
+  company: { findFirst: vi.fn() },
 }));
 vi.mock("@/lib/prisma", () => ({ prisma: db }));
 vi.mock("@/lib/prisma-helpers", () => ({ withOrgFromCtx: (d: unknown) => d }));
@@ -270,5 +271,42 @@ describe("groupMessagePreviewText", () => {
     expect(
       svc.groupMessagePreviewText({ messageType: "document", text: "segue\n📎 a.pdf", fileName: "a.pdf" }),
     ).toBe("📎 a.pdf · segue");
+  });
+});
+
+describe("empresa vinculada ao grupo", () => {
+  it("vincula só empresa da org e devolve o resumo", async () => {
+    db.company.findFirst.mockResolvedValue({ id: "c1", number: 4, name: "5RS Sucata Digital Eirelli" });
+    db.whatsAppGroup.updateMany.mockResolvedValue({ count: 1 });
+    const r = await svc.setWhatsAppGroupCompany({ groupId: "g1", channelId: "ch1", companyId: "c1" });
+    expect(r).toEqual({ company: { id: "c1", number: 4, name: "5RS Sucata Digital Eirelli" } });
+    expect(db.whatsAppGroup.updateMany).toHaveBeenCalledWith({
+      where: { id: "g1", channelId: "ch1" },
+      data: { companyId: "c1" },
+    });
+  });
+
+  it("empresa inexistente (ou de outra org): 404 e nada muda", async () => {
+    db.company.findFirst.mockResolvedValue(null);
+    expect(await svc.setWhatsAppGroupCompany({ groupId: "g1", channelId: "ch1", companyId: "x" })).toEqual({
+      error: "Empresa não encontrada.",
+      status: 404,
+    });
+    expect(db.whatsAppGroup.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("desvincula", async () => {
+    db.whatsAppGroup.updateMany.mockResolvedValue({ count: 1 });
+    expect(await svc.setWhatsAppGroupCompany({ groupId: "g1", channelId: "ch1", companyId: null })).toEqual({
+      company: null,
+    });
+    expect(db.whatsAppGroup.updateMany.mock.calls[0][0].data).toEqual({ companyId: null });
+  });
+
+  it("grupo de outro número: 404", async () => {
+    db.whatsAppGroup.updateMany.mockResolvedValue({ count: 0 });
+    expect(await svc.setWhatsAppGroupCompany({ groupId: "g9", channelId: "ch1", companyId: null })).toMatchObject({
+      status: 404,
+    });
   });
 });

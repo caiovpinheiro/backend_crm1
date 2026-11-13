@@ -1382,6 +1382,8 @@ model Company {
 
   contacts    Contact[]
   jobOpenings JobOpening[]
+  /// Grupos WhatsApp (QR) vinculados a esta empresa.
+  whatsappGroups WhatsAppGroup[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -6958,6 +6960,9 @@ model WhatsAppGroup {
   lastMessageFromMe  Boolean  @default(false)
   /// "Visto até": compartilhado por número QR — quem abrir o grupo no CRM zera para todos.
   lastReadAt       DateTime?
+  /// Empresa vinculada ao grupo (uma por grupo; uma empresa pode ter vários).
+  companyId        String?
+  company          Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
@@ -6968,6 +6973,7 @@ model WhatsAppGroup {
   @@index([organizationId])
   @@index([channelId])
   @@index([channelId, lastMessageAt])
+  @@index([companyId])
   @@map("whatsapp_groups")
 }
 
