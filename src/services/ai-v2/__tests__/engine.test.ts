@@ -2550,6 +2550,35 @@ describe("processV2Turn — correções do motor", () => {
       expect(sentTexts()).toEqual([]);
     });
 
+    it("formulário reenviado igual depois do pedido de correção vira turno (DNAWORK #82167)", async () => {
+      const form = "📋 *Resposta do formulário* — _flow_\n\n*Nome*\n↳ Thainara\n\n*Cep*\n↳ 48737244821";
+      mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: baseConfig(), active: true });
+      mocks.getState.mockResolvedValue(makeState("active", "agente"));
+      mocks.messageFindMany.mockImplementation(async (args: { take?: number }) =>
+        args.take === 3
+          ? [
+              { direction: "out", content: "Inscrição da vaga CLT\n[Flow: Abrir formulário]", messageType: "interactive" },
+              { direction: "out", content: "O CEP precisa ter 8 números. Pode preencher de novo?", messageType: "text" },
+              { direction: "in", content: form, messageType: "interactive" },
+            ]
+          : [],
+      );
+      mocks.callLLM.mockResolvedValue(llmOut({ reply: "O CEP ainda está com 11 números. Confere e envia de novo com 8 números?" }));
+
+      await run(form, { messageType: "interactive", messageIds: ["m-cur"] });
+
+      expect(mocks.callLLM).toHaveBeenCalled();
+      expect(sentTexts().join(" ")).toContain("11 números");
+    });
+
+    it("isFlowFormReplyText reconhece só a resposta de formulário", async () => {
+      const { isFlowFormReplyText } = await import("../engine");
+      expect(isFlowFormReplyText("📋 *Resposta do formulário* — _flow_\n\n*Cep*\n↳ 1")).toBe(true);
+      expect(isFlowFormReplyText("📋 Resposta do formulário recebida (sem campos).")).toBe(true);
+      expect(isFlowFormReplyText("Contrato novo")).toBe(false);
+      expect(isFlowFormReplyText("quero a resposta do formulário")).toBe(false);
+    });
+
     it("mesmo rótulo do clique anterior, mas como resposta à pergunta nova com botões: vira turno", async () => {
       mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: baseConfig(), active: true });
       mocks.getState.mockResolvedValue(makeState("active", "agente", { pendingOptions: ["Plano mensal", "Plano anual"] }));
