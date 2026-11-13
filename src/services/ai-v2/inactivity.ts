@@ -202,7 +202,13 @@ type IdleRow = {
   last_out_content: string | null;
   last_out_at: Date;
   last_inbound_at: Date | null;
-  idle_follow_up?: { anchorAt?: string; sent?: number; lastAt?: string; kind?: V2IdleKind } | null;
+  idle_follow_up?: { anchorAt?: string; sent?: number; lastAt?: string; kind?: V2IdleKind; text?: string } | null;
+  /**
+   * Primeira mensagem do agente depois da última do cliente. Se o agente está
+   * falando sozinho há mais que o prazo do primeiro lembrete, a última
+   * mensagem só pode ser lembrete — mesmo que o texto não seja reconhecido.
+   */
+  first_out_since_inbound?: Date | null;
   has_state?: boolean;
   /** Ticket novo depois de um encerramento: o agente perguntou se é algo novo e espera. */
   post_close_asked?: boolean;
@@ -233,6 +239,11 @@ async function listIdleV2(now: Date): Promise<IdleRow[]> {
             )) AS deal_id,
             last_out."content" AS last_out_content, last_out."createdAt" AS last_out_at,
             c."lastInboundAt" AS last_inbound_at,
+            (SELECT MIN(m2."createdAt") FROM "messages" m2
+              WHERE m2."conversationId" = c."id" AND m2."direction" = 'out'
+                AND COALESCE(m2."isPrivate", false) = false AND m2."messageType" <> 'note'
+                AND m2."aiAgentUserId" = c."assignedToId"
+                AND c."lastInboundAt" IS NOT NULL AND m2."createdAt" > c."lastInboundAt") AS first_out_since_inbound,
             s."counters"->'idleFollowUp' AS idle_follow_up,
             (s."id" IS NOT NULL) AS has_state,
             (s."stage" = 'closed' AND s."counters"->>'postCloseAsked' = 'true') AS post_close_asked
@@ -279,31 +290,84 @@ function autonomy(config: V2AgentConfig): "AUTONOMOUS" | "DRAFT" {
   return config.autonomyMode === "auto" ? "AUTONOMOUS" : "DRAFT";
 }
 
+/** Texto comparável: sem diferença de espaço, quebra de linha ou maiúscula. */
+function normText(t: string | null | undefined): string {
+  return (t ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
 /**
- * De onde contam os prazos: se a última mensagem enviada é o lembrete que
- * esta passada registrou, vale a âncora gravada; senão a última mensagem é
- * nova e a contagem recomeça dela.
+ * A última mensagem enviada é este lembrete? Vale o texto inteiro ou o fim
+ * dele (lembrete que saiu em balões: a última mensagem é o último balão).
  */
-export function idleProgress(row: Pick<IdleRow, "idle_follow_up" | "last_out_at" | "last_out_content">, config: V2AgentConfig): {
+function isSameFollowUp(followUp: string | null | undefined, lastOut: string | null | undefined): boolean {
+  const a = normText(followUp);
+  const b = normText(lastOut);
+  if (!a || !b) return false;
+  return a === b || (b.length >= 12 && a.endsWith(b));
+}
+
+/** Todos os textos fixos que um lembrete pode ter (qualquer modo e tipo). */
+function fixedTextsOf(step: V2FollowUpStep): string[] {
+  return [...new Set((["other", "question", "procedure"] as const).map((k) => followUpFixedText(step, k)))];
+}
+
+/**
+ * De onde contam os prazos. A última mensagem enviada é lembrete quando:
+ * 1. bate com o registro gravado na passada que o mandou (pela hora ou pelo
+ *    texto — a mensagem pode ser gravada segundos depois do registro);
+ * 2. o texto é um dos lembretes configurados (conversa sem estado gravado);
+ * 3. o agente já fala sozinho, sem resposta do cliente, há mais que o prazo
+ *    do primeiro lembrete (lembrete escrito pelo agente, com variável ou em
+ *    balões — texto que não dá para reconhecer).
+ * Sem nada disso, a última mensagem é nova e a contagem recomeça dela. Antes
+ * só valiam a hora exata do registro e o texto do lembrete "fixo": o
+ * lembrete "depois de uma pergunta" sem registro recomeçava a contagem a cada
+ * envio e virava um loop (10–12/11).
+ */
+export function idleProgress(
+  row: Pick<IdleRow, "idle_follow_up" | "last_out_at" | "last_out_content"> &
+    Partial<Pick<IdleRow, "last_inbound_at" | "first_out_since_inbound">>,
+  config: V2AgentConfig,
+): {
   anchorAt: Date;
   sent: number;
   lastFollowUpAt: Date | null;
   kind: V2IdleKind;
 } {
   const lastOutAt = new Date(row.last_out_at);
+  const lastInboundAt = row.last_inbound_at ? new Date(row.last_inbound_at) : null;
   const f = row.idle_follow_up;
-  if (f?.anchorAt && f.lastAt && Math.abs(new Date(f.lastAt).getTime() - lastOutAt.getTime()) < 5000) {
-    return { anchorAt: new Date(f.anchorAt), sent: Math.max(0, f.sent ?? 0), lastFollowUpAt: new Date(f.lastAt), kind: f.kind ?? "other" };
+  if (f?.anchorAt && f.lastAt) {
+    const savedAt = new Date(f.lastAt);
+    const sameTime = Math.abs(savedAt.getTime() - lastOutAt.getTime()) < 5000;
+    // Registro de um atendimento anterior (cliente escreveu depois) não vale,
+    // mesmo com o mesmo texto de lembrete.
+    const current = !lastInboundAt || savedAt.getTime() >= lastInboundAt.getTime() - 5000;
+    const sameText = current && !!f.text && isSameFollowUp(f.text, row.last_out_content)
+      && lastOutAt.getTime() >= new Date(f.anchorAt).getTime();
+    if (sameTime || sameText) {
+      return {
+        anchorAt: new Date(f.anchorAt),
+        sent: Math.max(0, f.sent ?? 0),
+        lastFollowUpAt: sameTime ? savedAt : lastOutAt,
+        kind: f.kind ?? "other",
+      };
+    }
   }
-  // Sem registro (conversa sem estado): o aviso único antigo ainda é
-  // reconhecido pelo texto, como antes.
   const steps = followUpSteps(config.inactivity);
   const lastText = (row.last_out_content ?? "").trim();
-  const fixedTexts = steps.map((s) => followUpFixedText(s, "other"));
-  const idx = lastText ? fixedTexts.findIndex((t) => t === lastText) : -1;
+  const idx = lastText ? steps.findIndex((s) => fixedTextsOf(s).some((t) => isSameFollowUp(t, lastText))) : -1;
   if (idx >= 0) {
     const anchorAt = new Date(lastOutAt.getTime() - steps[idx].after * MINUTE);
     return { anchorAt, sent: idx + 1, lastFollowUpAt: lastOutAt, kind: "other" };
+  }
+  const firstOut = row.first_out_since_inbound ? new Date(row.first_out_since_inbound) : null;
+  if (firstOut && steps.length > 0) {
+    const talkingAlone = (lastOutAt.getTime() - firstOut.getTime()) / MINUTE;
+    if (talkingAlone >= steps[0].after - 1) {
+      const sent = Math.min(steps.length, Math.max(1, steps.filter((s) => s.after <= talkingAlone + 1).length));
+      return { anchorAt: firstOut, sent, lastFollowUpAt: lastOutAt, kind: "other" };
+    }
   }
   return { anchorAt: lastOutAt, sent: 0, lastFollowUpAt: null, kind: idleKindOf(row.last_out_content, config) };
 }
@@ -448,6 +512,7 @@ export async function processIdleV2(now: Date = new Date()): Promise<{ nudged: n
                 anchorAt: progress.anchorAt.toISOString(),
                 sent: decision.index + 1,
                 kind: progress.kind,
+                text,
               }, now);
             }
           } else if (theme?.idle?.onTimeout === "handoff") {
@@ -555,7 +620,7 @@ export async function processIdleV2(now: Date = new Date()): Promise<{ nudged: n
  * Grava quantos lembretes saíram e quando (a hora da mensagem enviada, para
  * a próxima passada reconhecer que a última mensagem é o lembrete).
  */
-async function saveProgress(row: IdleRow, progress: { anchorAt: string; sent: number; kind: V2IdleKind }, now: Date): Promise<void> {
+async function saveProgress(row: IdleRow, progress: { anchorAt: string; sent: number; kind: V2IdleKind; text: string }, now: Date): Promise<void> {
   if (!row.has_state || !db.$executeRawUnsafe) return;
   try {
     const last = await db.$queryRawUnsafe<Array<{ createdAt: Date }>>(
