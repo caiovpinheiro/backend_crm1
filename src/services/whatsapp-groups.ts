@@ -38,8 +38,12 @@ export type WhatsAppGroupListItem = {
   unreadCount: number;
 };
 
+export type WhatsAppGroupCompanyRef = { id: string; number: number; name: string };
+
 export type WhatsAppGroupDetail = WhatsAppGroupListItem & {
   members: WhatsAppGroupMemberDto[];
+  /** Empresa do CRM vinculada ao grupo. */
+  company: WhatsAppGroupCompanyRef | null;
 };
 
 export type WhatsAppGroupMessageDto = {
@@ -219,6 +223,7 @@ export async function getWhatsAppGroup(
     where: { id, channelId },
     include: {
       members: { orderBy: [{ isSuperAdmin: "desc" }, { isAdmin: "desc" }, { name: "asc" }] },
+      company: { select: { id: true, number: true, name: true } },
     },
   });
   if (!row) return null;
@@ -227,6 +232,7 @@ export async function getWhatsAppGroup(
   );
   return {
     ...serializeGroup(row),
+    company: row.company ?? null,
     members: row.members.map((m) => ({
       id: m.id,
       jid: m.jid,
@@ -617,4 +623,41 @@ function serializeGroup(row: {
     lastMessageFromMe: row.lastMessageFromMe ?? false,
     unreadCount: 0,
   };
+}
+
+/**
+ * Vincula (ou desvincula, com `null`) a empresa do CRM ao grupo. A empresa
+ * precisa ser da mesma org (o prisma com escopo já filtra).
+ */
+export async function setWhatsAppGroupCompany(input: {
+  groupId: string;
+  channelId: string;
+  companyId: string | null;
+}): Promise<{ company: WhatsAppGroupCompanyRef | null } | { error: string; status: number }> {
+  let company: WhatsAppGroupCompanyRef | null = null;
+  if (input.companyId) {
+    company = await prisma.company.findFirst({
+      where: { id: input.companyId },
+      select: { id: true, number: true, name: true },
+    });
+    if (!company) return { error: "Empresa não encontrada.", status: 404 };
+  }
+  const res = await prisma.whatsAppGroup.updateMany({
+    where: { id: input.groupId, channelId: input.channelId },
+    data: { companyId: company?.id ?? null },
+  });
+  if (res.count === 0) return { error: "Grupo não encontrado.", status: 404 };
+  return { company };
+}
+
+/**
+ * Grupos WhatsApp de uma empresa — base para, no futuro, automação e
+ * campanha "enviar pelo grupo da empresa" (pelo número QR do grupo).
+ */
+export async function listCompanyWhatsAppGroups(companyId: string) {
+  return prisma.whatsAppGroup.findMany({
+    where: { companyId },
+    orderBy: { name: "asc" },
+    select: { id: true, jid: true, name: true, channelId: true },
+  });
 }
