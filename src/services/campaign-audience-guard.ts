@@ -29,7 +29,7 @@ const STRING_KEYS = [
   "pipelineId",
   "createdAfter",
 ] as const;
-const STRING_ARRAY_KEYS = ["tagIds", "stageIds"] as const;
+const STRING_ARRAY_KEYS = ["tagIds", "stageIds", "excludeTagIds"] as const;
 
 /** Chaves que `buildContactWhere` lê (espelha `SegmentFilters`). */
 export const AUDIENCE_FILTER_KEYS: readonly string[] = [
@@ -113,8 +113,9 @@ export function checkAudienceFilters(
   }
 
   const filters = raw as SegmentFilters;
-  // `hasPhone` não restringe: o dispatch já exige telefone.
-  const where = buildContactWhere({ ...filters, hasPhone: undefined });
+  // `hasPhone` não restringe: o dispatch já exige telefone. `excludeTagIds`
+  // também não: sozinho manda para todos menos os excluídos.
+  const where = buildContactWhere({ ...filters, hasPhone: undefined, excludeTagIds: undefined });
   if (Object.keys(where).length === 0) {
     return { ok: false, code: "AUDIENCE_FILTERS_REQUIRED", message: REQUIRED_MESSAGE };
   }
