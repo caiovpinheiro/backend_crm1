@@ -29,6 +29,13 @@ export type WhatsAppGroupListItem = {
   syncedAt: string;
   /** Última mensagem recebida ou enviada. Nulo = grupo sem mensagem no CRM. */
   lastMessageAt: string | null;
+  /** Prévia da última mensagem (uma linha, já cortada). */
+  lastMessagePreview: string | null;
+  /** Quem mandou a última (nulo quando foi o próprio número). */
+  lastMessageAuthor: string | null;
+  lastMessageFromMe: boolean;
+  /** Mensagens recebidas depois do último "visto" (compartilhado no número). */
+  unreadCount: number;
 };
 
 export type WhatsAppGroupDetail = WhatsAppGroupListItem & {
@@ -126,9 +133,82 @@ export async function listWhatsAppGroups(channelId: string): Promise<WhatsAppGro
       participantCount: true,
       syncedAt: true,
       lastMessageAt: true,
+      lastMessagePreview: true,
+      lastMessageAuthor: true,
+      lastMessageFromMe: true,
+      lastReadAt: true,
     },
   });
-  return rows.map(serializeGroup);
+  const unread = await countUnreadByGroup(rows);
+  return rows.map((r) => ({ ...serializeGroup(r), unreadCount: unread.get(r.id) ?? 0 }));
+}
+
+/** Teto do contador: acima disso a lista mostra "99+". */
+export const UNREAD_COUNT_CAP = 100;
+
+/**
+ * Não lidas por grupo. Só consulta quem teve mensagem depois do último
+ * "visto" (na prática, poucos grupos por vez); mensagens do próprio número
+ * não contam.
+ */
+async function countUnreadByGroup(
+  rows: Array<{ id: string; lastMessageAt: Date | null; lastReadAt: Date | null }>,
+): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  const pending = rows.filter(
+    (r) => r.lastMessageAt && (!r.lastReadAt || r.lastMessageAt > r.lastReadAt),
+  );
+  await Promise.all(
+    pending.map(async (r) => {
+      const n = await prisma.whatsAppGroupMessage.count({
+        where: {
+          groupId: r.id,
+          fromMe: false,
+          ...(r.lastReadAt ? { createdAt: { gt: r.lastReadAt } } : {}),
+        },
+        take: UNREAD_COUNT_CAP,
+      });
+      if (n > 0) out.set(r.id, n);
+    }),
+  );
+  return out;
+}
+
+/** Alguém abriu o grupo no CRM: zera o contador para todos do número. */
+export async function markWhatsAppGroupRead(groupId: string, channelId: string, at = new Date()): Promise<void> {
+  await prisma.whatsAppGroup.updateMany({
+    where: { id: groupId, channelId, OR: [{ lastReadAt: null }, { lastReadAt: { lt: at } }] },
+    data: { lastReadAt: at },
+  });
+}
+
+/** Texto da prévia na lista: uma linha, mídia com rótulo, cortado em 120. */
+export function groupMessagePreviewText(msg: {
+  messageType: string;
+  text: string;
+  fileName?: string | null;
+}): string {
+  const label: Record<string, string> = {
+    ptt: "🎤 Áudio",
+    audio: "🎤 Áudio",
+    image: "📷 Foto",
+    video: "🎥 Vídeo",
+    sticker: "Figurinha",
+  };
+  const clean = msg.text.replace(/\s+/g, " ").trim();
+  // Rótulo que o CRM grava quando não há legenda ("[ptt]", "📎 a.pdf").
+  const placeholder = /^\[[a-z]+\]( 👁)?$/i.test(clean) || clean.startsWith("📎 ") || clean === "[áudio]";
+  let out: string;
+  if (msg.messageType === "document") {
+    const file = `📎 ${msg.fileName?.trim() || "Arquivo"}`;
+    const caption = clean.split("📎")[0]?.trim();
+    out = caption ? `${file} · ${caption}` : file;
+  } else if (label[msg.messageType]) {
+    out = placeholder || !clean ? label[msg.messageType] : `${label[msg.messageType]} ${clean}`;
+  } else {
+    out = clean;
+  }
+  return out.length > 120 ? `${out.slice(0, 119)}…` : out;
 }
 
 export async function getWhatsAppGroup(
@@ -382,15 +462,35 @@ export async function appendWhatsAppGroupMessage(input: {
     }),
     select: MESSAGE_SELECT,
   });
-  await bumpGroupLastMessageAt(input.groupId, row.createdAt);
+  await bumpGroupLastMessageAt(input.groupId, row.createdAt, {
+    preview: groupMessagePreviewText(row),
+    author: row.fromMe ? null : row.fromName?.trim() || row.fromPhone || null,
+    fromMe: row.fromMe,
+  });
   return serializeMessage(row);
 }
 
-/** Sobe o grupo na lista. Só avança: mensagem antiga chegando depois não rebaixa. */
-export async function bumpGroupLastMessageAt(groupId: string, at: Date): Promise<void> {
+/**
+ * Sobe o grupo na lista e troca a prévia, no mesmo UPDATE. Só avança:
+ * mensagem antiga chegando depois não rebaixa nem troca a prévia.
+ */
+export async function bumpGroupLastMessageAt(
+  groupId: string,
+  at: Date,
+  last?: { preview: string; author: string | null; fromMe: boolean },
+): Promise<void> {
   await prisma.whatsAppGroup.updateMany({
     where: { id: groupId, OR: [{ lastMessageAt: null }, { lastMessageAt: { lt: at } }] },
-    data: { lastMessageAt: at },
+    data: {
+      lastMessageAt: at,
+      ...(last
+        ? {
+            lastMessagePreview: last.preview,
+            lastMessageAuthor: last.author,
+            lastMessageFromMe: last.fromMe,
+          }
+        : {}),
+    },
   });
 }
 
@@ -499,6 +599,9 @@ function serializeGroup(row: {
   participantCount: number;
   syncedAt: Date;
   lastMessageAt?: Date | null;
+  lastMessagePreview?: string | null;
+  lastMessageAuthor?: string | null;
+  lastMessageFromMe?: boolean;
 }): WhatsAppGroupListItem {
   return {
     id: row.id,
@@ -509,5 +612,9 @@ function serializeGroup(row: {
     participantCount: row.participantCount,
     syncedAt: row.syncedAt.toISOString(),
     lastMessageAt: row.lastMessageAt ? row.lastMessageAt.toISOString() : null,
+    lastMessagePreview: row.lastMessagePreview ?? null,
+    lastMessageAuthor: row.lastMessageAuthor ?? null,
+    lastMessageFromMe: row.lastMessageFromMe ?? false,
+    unreadCount: 0,
   };
 }
