@@ -24,7 +24,8 @@ describe("checkAudienceFilters", () => {
       { dealStatus: "OPEN" },
       { createdAfter: "2026-01-01T00:00:00Z" },
     ];
-    const covered = new Set<string>(["hasPhone"]);
+    // hasPhone e excludeTagIds não restringem sozinhos (testados abaixo).
+    const covered = new Set<string>(["hasPhone", "excludeTagIds"]);
     for (const filters of restrictive) {
       expect(checkAudienceFilters(filters, { rejectUnknownKeys: true })).toEqual({ ok: true, filters });
       expect(Object.keys(buildContactWhere(filters)).length).toBeGreaterThan(0);
@@ -42,6 +43,51 @@ describe("checkAudienceFilters", () => {
         expect(buildContactWhere({ ...(raw as SegmentFilters), hasPhone: undefined })).toEqual({});
       }
     }
+  });
+
+  it("excludeTagIds sozinho não restringe: recusa (mandaria para todos menos os excluídos)", () => {
+    expect(checkAudienceFilters({ excludeTagIds: ["optout"] }, { rejectUnknownKeys: true })).toMatchObject({
+      ok: false,
+      code: "AUDIENCE_FILTERS_REQUIRED",
+    });
+    expect(checkAudienceFilters({ hasPhone: true, excludeTagIds: ["optout"] })).toMatchObject({
+      ok: false,
+      code: "AUDIENCE_FILTERS_REQUIRED",
+    });
+  });
+
+  it("excludeTagIds junto de um filtro que restringe: aceita e exclui no contato e nos negócios", () => {
+    const filters: SegmentFilters = { tagIds: ["em-aberto"], excludeTagIds: ["optout", "controle"] };
+    expect(checkAudienceFilters(filters, { rejectUnknownKeys: true })).toEqual({ ok: true, filters });
+    expect(buildContactWhere(filters)).toEqual({
+      AND: [
+        {
+          OR: [
+            { tags: { some: { tagId: { in: ["em-aberto"] } } } },
+            { deals: { some: { tags: { some: { tagId: { in: ["em-aberto"] } } } } } },
+          ],
+        },
+        {
+          NOT: {
+            OR: [
+              { tags: { some: { tagId: { in: ["optout", "controle"] } } } },
+              { deals: { some: { tags: { some: { tagId: { in: ["optout", "controle"] } } } } } },
+            ],
+          },
+        },
+      ],
+    });
+  });
+
+  it("excludeTagIds vazio é ignorado", () => {
+    expect(buildContactWhere({ tagIds: ["t1"], excludeTagIds: [] })).toEqual(buildContactWhere({ tagIds: ["t1"] }));
+  });
+
+  it("excludeTagIds com formato errado é recusado", () => {
+    expect(checkAudienceFilters({ tagIds: ["t1"], excludeTagIds: "optout" })).toMatchObject({
+      ok: false,
+      code: "AUDIENCE_FILTERS_INVALID",
+    });
   });
 
   it("recusa formato e tipo errados", () => {

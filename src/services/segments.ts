@@ -7,6 +7,12 @@ export type SegmentFilters = {
   search?: string;
   lifecycleStage?: LifecycleStage;
   tagIds?: string[];
+  /**
+   * Exclui quem tem alguma destas etiquetas (no contato ou em qualquer
+   * negócio dele), com a mesma regra de `tagIds`. Sozinho não restringe o
+   * público: só tira gente de um filtro que já restringe.
+   */
+  excludeTagIds?: string[];
   companyId?: string;
   /** Dono do contato (Contact.assignedToId). */
   assignedToId?: string;
@@ -96,6 +102,18 @@ export function buildContactWhere(
         { tags: { some: { tagId: { in: filters.tagIds } } } },
         { deals: { some: { tags: { some: { tagId: { in: filters.tagIds } } } } } },
       ],
+    });
+  }
+
+  // Exclusão por etiqueta (ex.: quem pediu para não receber), mesma regra.
+  if (filters.excludeTagIds && filters.excludeTagIds.length > 0) {
+    conditions.push({
+      NOT: {
+        OR: [
+          { tags: { some: { tagId: { in: filters.excludeTagIds } } } },
+          { deals: { some: { tags: { some: { tagId: { in: filters.excludeTagIds } } } } } },
+        ],
+      },
     });
   }
 
