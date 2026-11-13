@@ -14,7 +14,7 @@ import {
   type ReplayTranscript,
 } from "@/services/ai-v2/replay";
 import { IMPORT_LIMITS } from "@/services/ai-v2/replay-import";
-import { v2ModelInfo } from "@/lib/ai-v2/models";
+import { isModelAvailableForOrg } from "@/services/ai-v2/model-catalog";
 import { getLogger } from "@/lib/logger";
 
 const log = getLogger("api/ai-agents-v2/[id]/replay");
@@ -32,7 +32,7 @@ function parseTranscripts(body: Record<string, unknown>): ReplayTranscript[] {
     }));
 }
 
-function parseParams(body: Record<string, unknown>): ReplayParams {
+function parseParams(body: Record<string, unknown>, modelAllowed: boolean): ReplayParams {
   const days = Number(body.days ?? 1);
   const conversations = Number(body.conversations ?? 30);
   return {
@@ -41,8 +41,8 @@ function parseParams(body: Record<string, unknown>): ReplayParams {
       ? Math.min(Math.max(Math.round(conversations), 1), REPLAY_LIMITS.maxConversations)
       : 30,
     config: body.config === "published" ? "published" : "draft",
-    // Benchmark: só modelos da lista.
-    ...(typeof body.model === "string" && v2ModelInfo(body.model) ? { model: body.model } : {}),
+    // Benchmark: só modelos da lista da organização (fixos + descobertos).
+    ...(typeof body.model === "string" && modelAllowed ? { model: body.model } : {}),
   };
 }
 
@@ -75,8 +75,8 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   if (denied) return denied;
   return runInSessionContext(r.session, async () => {    try {
       const body = ((await request.json().catch(() => ({}))) ?? {}) as Record<string, unknown>;
-      const p = parseParams(body);
       const organizationId = r.session.user.organizationId!;
+      const p = parseParams(body, await isModelAvailableForOrg(organizationId, body.model));
       const requester = {
         userId: r.session.user.id,
         role: (r.session.user as { role?: string | null }).role ?? null,

@@ -5,6 +5,8 @@
 
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
+import { costForUsage, resolveModelPrice, type ModelPriceSource } from "@/lib/ai-v2/model-catalog";
+import { getModelPriceForOrg } from "./model-catalog";
 import { nextUserNumber } from "@/lib/public-id";
 import type { V2AgentConfig } from "@/lib/ai-v2/types";
 import {
@@ -38,6 +40,15 @@ export type V2AgentListItem = {
   themeCount: number;
   conversationsToday: number;
   handoffsToday: number;
+  /** Modelo em uso (rascunho, senão publicado). */
+  model: string;
+  /** Tokens de hoje (fuso de Brasília). */
+  inputTokensToday: number;
+  outputTokensToday: number;
+  /** Gasto estimado de hoje, US$, pelo preço do modelo para a organização. */
+  costTodayUsd: number;
+  /** "unknown": modelo sem preço; o gasto usa o teto do provedor. */
+  costPriceSource: ModelPriceSource;
 };
 
 function formatZodIssues(error: z.ZodError): string {
@@ -51,27 +62,39 @@ function startOfTodayBrazil(now = new Date()): Date {
 }
 
 /** Conversas atendidas e transferências de hoje, por agente. Falha não derruba a lista. */
-async function todayStats(organizationId: string, agentIds: string[]): Promise<Map<string, { conversations: number; handoffs: number }>> {
-  const out = new Map<string, { conversations: number; handoffs: number }>();
+type TodayStats = { conversations: number; handoffs: number; inputTokens: number; outputTokens: number };
+
+async function todayStats(organizationId: string, agentIds: string[]): Promise<Map<string, TodayStats>> {
+  const out = new Map<string, TodayStats>();
+  const empty = (): TodayStats => ({ conversations: 0, handoffs: 0, inputTokens: 0, outputTokens: 0 });
   if (agentIds.length === 0) return out;
   try {
     const since = startOfTodayBrazil();
     const where = { organizationId, agentId: { in: agentIds }, createdAt: { gte: since } };
     const db = prisma as any;
-    const [perConversation, handoffs] = await Promise.all([
+    const [perConversation, handoffs, tokens] = await Promise.all([
       db.aISimpleTurnLog.groupBy({ by: ["agentId", "conversationId"], where }) as Promise<Array<{ agentId: string }>>,
       db.aISimpleTurnLog.groupBy({ by: ["agentId"], where: { ...where, handoff: true }, _count: { _all: true } }) as Promise<
         Array<{ agentId: string; _count: { _all: number } }>
       >,
+      (db.aISimpleTurnLog.groupBy({ by: ["agentId"], where, _sum: { inputTokens: true, outputTokens: true } }) as Promise<
+        Array<{ agentId: string; _sum?: { inputTokens: number | null; outputTokens: number | null } }>
+      >).catch(() => []),
     ]);
     for (const r of perConversation) {
-      const cur = out.get(r.agentId) ?? { conversations: 0, handoffs: 0 };
+      const cur = out.get(r.agentId) ?? empty();
       cur.conversations += 1;
       out.set(r.agentId, cur);
     }
     for (const r of handoffs) {
-      const cur = out.get(r.agentId) ?? { conversations: 0, handoffs: 0 };
+      const cur = out.get(r.agentId) ?? empty();
       cur.handoffs = r._count._all;
+      out.set(r.agentId, cur);
+    }
+    for (const r of tokens ?? []) {
+      const cur = out.get(r.agentId) ?? empty();
+      cur.inputTokens = r._sum?.inputTokens ?? 0;
+      cur.outputTokens = r._sum?.outputTokens ?? 0;
       out.set(r.agentId, cur);
     }
   } catch (err) {
@@ -110,7 +133,7 @@ export async function listV2Agents(organizationId: string): Promise<V2AgentListI
   ]);
   const lastVersion = new Map(versions.map((v) => [v.agentId, v._max.versionNumber ?? 0]));
 
-  return rows.map((r) => {
+  const items = rows.map((r) => {
     // Uma config malformada (schema antigo, agente de teste abandonado) não
     // pode derrubar a listagem inteira da org — loga e cai pro default.
     const parse = (raw: unknown, label: string): V2AgentConfig | null => {
@@ -145,8 +168,23 @@ export async function listV2Agents(organizationId: string): Promise<V2AgentListI
       themeCount: (current?.themes ?? []).length,
       conversationsToday: today?.conversations ?? 0,
       handoffsToday: today?.handoffs ?? 0,
+      model: current?.model ?? "gpt-4o-mini",
+      inputTokensToday: today?.inputTokens ?? 0,
+      outputTokensToday: today?.outputTokens ?? 0,
+      costTodayUsd: 0,
+      costPriceSource: "builtin" as V2AgentListItem["costPriceSource"],
     };
   });
+
+  // Gasto de hoje pelo preço do modelo para a organização (sem preço: teto do provedor).
+  await Promise.all(
+    items.map(async (it) => {
+      const price = await getModelPriceForOrg(organizationId, it.model).catch(() => resolveModelPrice(it.model));
+      it.costPriceSource = price.source;
+      it.costTodayUsd = Number(costForUsage(price, it.inputTokensToday, it.outputTokensToday).toFixed(4));
+    }),
+  );
+  return items;
 }
 
 export type V2AgentDetail = {

@@ -45,6 +45,27 @@ describe("listV2Agents", () => {
     expect(a2).toMatchObject({ lastVersionNumber: 0, hasUnpublishedChanges: false, conversationsToday: 0 });
   });
 
+  it("traz o modelo e o gasto de hoje pelo preço do modelo (sem preço: teto do provedor)", async () => {
+    mocks.agentFindMany.mockResolvedValue([
+      { id: "a1", active: true, createdAt: new Date(), updatedAt: new Date(), user: { name: "A" }, simpleConfig: cfg({ model: "gpt-4o-mini" }), draftConfig: null },
+      { id: "a2", active: true, createdAt: new Date(), updatedAt: new Date(), user: { name: "B" }, simpleConfig: cfg({ model: "gpt-6.1-terra" }), draftConfig: null },
+    ]);
+    mocks.versionGroupBy.mockResolvedValue([]);
+    mocks.turnGroupBy.mockImplementation(async (args: { by: string[]; _sum?: unknown }) =>
+      args._sum
+        ? [
+            { agentId: "a1", _sum: { inputTokens: 1_000_000, outputTokens: 1_000_000 } },
+            { agentId: "a2", _sum: { inputTokens: 1_000_000, outputTokens: 0 } },
+          ]
+        : [],
+    );
+    const [a1, a2] = await listV2Agents("org");
+    expect(a1).toMatchObject({ model: "gpt-4o-mini", costPriceSource: "builtin", inputTokensToday: 1_000_000 });
+    expect(a1.costTodayUsd).toBeCloseTo(0.75, 4);
+    expect(a2).toMatchObject({ model: "gpt-6.1-terra", costPriceSource: "unknown" });
+    expect(a2.costTodayUsd).toBeCloseTo(4, 4);
+  });
+
   it("sem registro de turnos, a lista continua funcionando", async () => {
     mocks.agentFindMany.mockResolvedValue([
       { id: "a1", active: true, createdAt: new Date(), updatedAt: new Date(), user: { name: "A" }, simpleConfig: cfg(), draftConfig: null },
