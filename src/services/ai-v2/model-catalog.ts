@@ -276,6 +276,56 @@ export async function isModelAvailableForOrg(organizationId: string, modelId: un
   return models.some((m) => m.id === modelId);
 }
 
+// ── Uso do agente (custo por conversa) ──────────────────────────────────
+
+export type AgentTokenUsage = {
+  days: number;
+  conversations: number;
+  /** Média por conversa nos últimos `days` dias. */
+  avgInputTokens: number;
+  avgOutputTokens: number;
+  /** Modelo(s) que geraram esse histórico (o mais usado primeiro). */
+  models: string[];
+};
+
+/** Mínimo de conversas para a média valer como estimativa. */
+export const MIN_CONVERSATIONS_FOR_ESTIMATE = 5;
+
+/**
+ * Tokens por conversa do agente nos últimos dias, pelo log de turnos.
+ * Base do "custo estimado por conversa" de cada modelo na tela. Poucas
+ * conversas (ou erro): null — a tela mostra só o preço.
+ */
+export async function getAgentTokenUsage(organizationId: string, agentId: string, days = 30): Promise<AgentTokenUsage | null> {
+  try {
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+    const rows = await db.$queryRawUnsafe<Array<{ conversations: bigint | number; input: bigint | number | null; output: bigint | number | null }>>(
+      `SELECT COUNT(DISTINCT "conversationId") AS "conversations", SUM("inputTokens") AS "input", SUM("outputTokens") AS "output"
+         FROM "ai_simple_turn_logs" WHERE "organizationId" = $1 AND "agentId" = $2 AND "createdAt" >= $3`,
+      organizationId, agentId, since,
+    );
+    const r = rows[0];
+    const conversations = Number(r?.conversations ?? 0);
+    if (!r || conversations < MIN_CONVERSATIONS_FOR_ESTIMATE) return null;
+    const modelRows = await db.$queryRawUnsafe<Array<{ model: string | null }>>(
+      `SELECT "contextSnapshot"->'facts'->>'model' AS "model" FROM "ai_simple_turn_logs"
+        WHERE "organizationId" = $1 AND "agentId" = $2 AND "createdAt" >= $3
+        GROUP BY 1 ORDER BY COUNT(*) DESC LIMIT 3`,
+      organizationId, agentId, since,
+    ).catch(() => []);
+    return {
+      days,
+      conversations,
+      avgInputTokens: Math.round(Number(r.input ?? 0) / conversations),
+      avgOutputTokens: Math.round(Number(r.output ?? 0) / conversations),
+      models: modelRows.map((m) => m.model).filter((m): m is string => Boolean(m)),
+    };
+  } catch (err) {
+    log.warn({ err }, "[model-catalog] uso do agente indisponível");
+    return null;
+  }
+}
+
 // ── Preço para a estimativa ─────────────────────────────────────────────
 
 type PriceMap = Map<string, { inputPer1M: number; outputPer1M: number }>;
