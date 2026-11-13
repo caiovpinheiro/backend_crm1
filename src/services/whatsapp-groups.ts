@@ -25,6 +25,8 @@ export type WhatsAppGroupListItem = {
   id: string;
   jid: string;
   name: string;
+  /** Apelido interno (só no CRM). A tela mostra ele no lugar de `name`. */
+  customName: string | null;
   description: string | null;
   ownerJid: string | null;
   participantCount: number;
@@ -182,6 +184,7 @@ export async function listWhatsAppGroups(channelId: string): Promise<WhatsAppGro
       id: true,
       jid: true,
       name: true,
+      customName: true,
       description: true,
       ownerJid: true,
       participantCount: true,
@@ -654,6 +657,7 @@ function serializeGroup(row: {
   id: string;
   jid: string;
   name: string;
+  customName?: string | null;
   description: string | null;
   ownerJid: string | null;
   participantCount: number;
@@ -667,6 +671,7 @@ function serializeGroup(row: {
     id: row.id,
     jid: row.jid,
     name: row.name,
+    customName: row.customName ?? null,
     description: row.description,
     ownerJid: row.ownerJid,
     participantCount: row.participantCount,
@@ -702,6 +707,30 @@ export async function setWhatsAppGroupCompany(input: {
   });
   if (res.count === 0) return { error: "Grupo não encontrado.", status: 404 };
   return { company };
+}
+
+/** Tamanho máximo do apelido interno do grupo. */
+export const GROUP_CUSTOM_NAME_MAX = 100;
+
+/**
+ * Apelido interno do grupo (só no CRM; nada vai para o WhatsApp). Vazio ou
+ * `null` apaga e o grupo volta a mostrar o nome do WhatsApp.
+ */
+export async function setWhatsAppGroupCustomName(input: {
+  groupId: string;
+  channelId: string;
+  customName: string | null;
+}): Promise<{ customName: string | null } | { error: string; status: number }> {
+  const customName = input.customName?.replace(/\s+/g, " ").trim() || null;
+  if (customName && customName.length > GROUP_CUSTOM_NAME_MAX) {
+    return { error: `O apelido pode ter até ${GROUP_CUSTOM_NAME_MAX} caracteres.`, status: 400 };
+  }
+  const res = await prisma.whatsAppGroup.updateMany({
+    where: { id: input.groupId, channelId: input.channelId },
+    data: { customName },
+  });
+  if (res.count === 0) return { error: "Grupo não encontrado.", status: 404 };
+  return { customName };
 }
 
 /**
