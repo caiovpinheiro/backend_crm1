@@ -11,6 +11,7 @@ const state = vi.hoisted(() => ({
   catalog: [] as Array<Record<string, unknown>>,
   executed: [] as Array<{ sql: string; values: unknown[] }>,
   audits: [] as unknown[],
+  usage: [] as Array<Record<string, unknown>>,
 }));
 
 vi.mock("@/lib/prisma-base", () => ({
@@ -23,6 +24,8 @@ vi.mock("@/lib/prisma-base", () => ({
       if (sql.includes(`"openaiApiKeyEnc", "anthropicApiKeyEnc" FROM "ai_agent_configs"`)) return state.agents;
       if (sql.includes(`FROM "ai_v2_model_catalog" WHERE "organizationId" = $1`)) return state.catalog;
       if (sql.includes(`"draftConfig"->>'model'`)) return [];
+      if (sql.includes(`COUNT(DISTINCT "conversationId")`)) return state.usage;
+      if (sql.includes(`'facts'->>'model'`)) return [{ model: "gpt-5.6-luna" }];
       return [];
     }),
     $executeRawUnsafe: vi.fn(async (sql: string, ...values: unknown[]) => {
@@ -39,6 +42,7 @@ import {
   RefreshCooldownError,
   __resetModelCatalogCaches,
   fetchProviderModels,
+  getAgentTokenUsage,
   isModelAvailableForOrg,
   parsePriceInput,
   refreshOrgModelCatalog,
@@ -195,5 +199,19 @@ describe("validações", () => {
     expect(parsePriceInput(-1)).toBeUndefined();
     expect(parsePriceInput("abc")).toBeUndefined();
     expect(parsePriceInput(20_000)).toBeUndefined();
+  });
+});
+
+describe("uso do agente para o custo por conversa", () => {
+  it("média de tokens por conversa dos últimos 30 dias", async () => {
+    state.usage = [{ conversations: BigInt(10), input: BigInt(50_000), output: BigInt(8_000) }];
+    await expect(getAgentTokenUsage("org-1", "ag-1")).resolves.toEqual({
+      days: 30, conversations: 10, avgInputTokens: 5_000, avgOutputTokens: 800, models: ["gpt-5.6-luna"],
+    });
+  });
+
+  it("com poucas conversas não estima (a tela mostra só o preço)", async () => {
+    state.usage = [{ conversations: 3, input: 9_000, output: 900 }];
+    await expect(getAgentTokenUsage("org-1", "ag-1")).resolves.toBeNull();
   });
 });
