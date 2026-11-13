@@ -7008,10 +7008,17 @@ model WhatsAppGroupMessage {
   mediaUrl     String?
   mimeType     String?
   fileName     String?
+  /// Reações: [{ emoji, from (jid ou "me"), name }]. Uma por remetente (regra do WhatsApp).
+  reactions    Json     @default("[]")
+  /// Resposta citada: id da mensagem no WhatsApp + prévia (texto e autor).
+  replyToWaId   String?
+  replyToText   String?
+  replyToAuthor String?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
   @@index([groupId, createdAt])
+  @@index([groupId, waMessageId])
   @@index([organizationId])
   @@map("whatsapp_group_messages")
 }

@@ -40,7 +40,10 @@ import { isLidJid, resolveLidJid } from "./lid-resolver";
 import { noteContactActivity } from "./contact-typing";
 import {
   appendWhatsAppGroupMessage,
+  applyGroupMessageReaction,
+  findGroupMessageByWaId,
   findWhatsAppGroupByJid,
+  groupQuoteAuthor,
   GROUP_MEDIA_TYPES,
   learnGroupMemberName,
 } from "@/services/whatsapp-groups";
@@ -646,12 +649,71 @@ export function groupMediaMeta(msg: WAMessage): { mimeType: string | null; fileN
   return { mimeType, fileName };
 }
 
+/** Citação de uma mensagem do grupo (resposta): id, trecho e participante. */
+export function groupQuoteRef(
+  msg: WAMessage,
+): { waId: string; text: string; participant: string | null } | null {
+  const raw = msg.message as AnyMsg | null | undefined;
+  if (!raw) return null;
+  const type = getContentType(raw as WAMessage["message"] & object);
+  const ctx = type ? (raw as AnyMsg)[type]?.contextInfo : null;
+  if (!ctx?.stanzaId) return null;
+  const q = (ctx.quotedMessage ?? {}) as AnyMsg;
+  const qType = getContentType(q as WAMessage["message"] & object);
+  const node = qType ? q[qType] : null;
+  const labels: Record<string, string> = {
+    imageMessage: "📷 Foto",
+    videoMessage: "🎥 Vídeo",
+    audioMessage: "🎤 Áudio",
+    stickerMessage: "Figurinha",
+  };
+  const text =
+    q.conversation ||
+    q.extendedTextMessage?.text ||
+    node?.caption ||
+    (qType === "documentMessage" ? `📎 ${node?.fileName ?? "Arquivo"}` : null) ||
+    (qType ? labels[qType] : null) ||
+    "";
+  return { waId: String(ctx.stanzaId), text: String(text), participant: ctx.participant ?? null };
+}
+
+async function groupQuoteFor(
+  groupId: string,
+  msg: WAMessage,
+): Promise<{ waId: string; text: string; author: string | null } | null> {
+  const ref = groupQuoteRef(msg);
+  if (!ref) return null;
+  // Autor: pela mensagem gravada no CRM; senão pelo telefone de quem foi citado.
+  const original = await findGroupMessageByWaId(groupId, ref.waId).catch(() => null);
+  const author = original
+    ? groupQuoteAuthor(original)
+    : ref.participant?.endsWith("@s.whatsapp.net")
+      ? jidToPhone(ref.participant)
+      : null;
+  return { waId: ref.waId, text: ref.text || original?.text || "", author };
+}
+
 async function persistIncomingGroupMessage(
   channelId: string,
   groupJid: string,
   msg: WAMessage,
   sock: WASocket,
 ): Promise<void> {
+  // Reação de alguém do grupo (ou do próprio número pelo celular).
+  const reaction = msg.message?.reactionMessage;
+  if (reaction?.key?.id) {
+    const group = await findWhatsAppGroupByJid(channelId, groupJid);
+    if (!group) return;
+    const target = await findGroupMessageByWaId(group.id, reaction.key.id);
+    if (!target) return;
+    await applyGroupMessageReaction(target.id, target.reactions, {
+      from: msg.key.fromMe ? "me" : msg.key.participant || groupJid,
+      emoji: reaction.text ?? "",
+      name: msg.key.fromMe ? null : msg.pushName ?? null,
+    });
+    return;
+  }
+
   const preview = groupMessagePreview(msg);
   if (!preview) return;
   const group = await findWhatsAppGroupByJid(channelId, groupJid);
@@ -693,6 +755,7 @@ async function persistIncomingGroupMessage(
     mediaUrl,
     mimeType: meta.mimeType,
     fileName: meta.fileName,
+    replyTo: await groupQuoteFor(group.id, msg),
   });
 
   // Nome do perfil do WhatsApp no participante (como o nome dos candidatos).

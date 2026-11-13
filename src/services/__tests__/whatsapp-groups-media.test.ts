@@ -310,3 +310,42 @@ describe("empresa vinculada ao grupo", () => {
     });
   });
 });
+
+describe("reações e respostas", () => {
+  it("uma reação por remetente: troca a anterior; vazio remove", () => {
+    const cur = [
+      { emoji: "👍", from: "me", name: "William" },
+      { emoji: "❤️", from: "77@lid", name: "Kleber" },
+    ];
+    expect(svc.nextGroupReactions(cur, { from: "me", emoji: "🙏", name: "Caio" })).toEqual([
+      { emoji: "❤️", from: "77@lid", name: "Kleber" },
+      { emoji: "🙏", from: "me", name: "Caio" },
+    ]);
+    expect(svc.nextGroupReactions(cur, { from: "77@lid", emoji: "", name: null })).toEqual([
+      { emoji: "👍", from: "me", name: "William" },
+    ]);
+  });
+
+  it("JSON de reações inválido vira lista vazia", () => {
+    expect(svc.parseGroupReactions(null)).toEqual([]);
+    expect(svc.parseGroupReactions([{ emoji: "👍" }, { emoji: "😂", from: "x" }])).toEqual([
+      { emoji: "😂", from: "x", name: null },
+    ]);
+  });
+
+  it("responder: cita com participant e autor; antiga sem id não dá", async () => {
+    db.whatsAppGroupMessage.findFirst.mockResolvedValueOnce({
+      id: "m1", waMessageId: "WA1", fromJid: "77@lid", fromMe: false, fromName: "Kleber Raia", fromPhone: null,
+      text: "folha assinada", messageType: "text", fileName: null, reactions: [],
+    });
+    expect(await svc.groupReplyFor("g1", "m1")).toEqual({
+      quoted: { id: "WA1", fromMe: false, participant: "77@lid", text: "folha assinada" },
+      replyTo: { waId: "WA1", text: "folha assinada", author: "Kleber Raia" },
+    });
+    db.whatsAppGroupMessage.findFirst.mockResolvedValueOnce({
+      id: "m2", waMessageId: null, fromJid: "me", fromMe: true, fromName: null, fromPhone: null,
+      text: "x", messageType: "text", fileName: null, reactions: [],
+    });
+    expect(await svc.groupReplyFor("g1", "m2")).toMatchObject({ status: 409 });
+  });
+});
