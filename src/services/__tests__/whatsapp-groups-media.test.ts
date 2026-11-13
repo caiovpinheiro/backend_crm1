@@ -19,7 +19,7 @@ const db = vi.hoisted(() => ({
     createMany: vi.fn(),
     updateMany: vi.fn(),
   },
-  whatsAppGroupMessage: { findFirst: vi.fn(), create: vi.fn(), findMany: vi.fn() },
+  whatsAppGroupMessage: { findFirst: vi.fn(), create: vi.fn(), findMany: vi.fn(), count: vi.fn() },
   contact: { findMany: vi.fn() },
 }));
 vi.mock("@/lib/prisma", () => ({ prisma: db }));
@@ -76,7 +76,12 @@ describe("appendWhatsAppGroupMessage", () => {
     });
     expect(db.whatsAppGroup.updateMany).toHaveBeenCalledWith({
       where: { id: "g1", OR: [{ lastMessageAt: null }, { lastMessageAt: { lt: at } }] },
-      data: { lastMessageAt: at },
+      data: {
+        lastMessageAt: at,
+        lastMessagePreview: "📎 proposta.pdf",
+        lastMessageAuthor: null,
+        lastMessageFromMe: true,
+      },
     });
   });
 
@@ -197,5 +202,73 @@ describe("nome dos participantes", () => {
     const group = await svc.getWhatsAppGroup("g1", "ch1");
     expect(group?.members.map((m) => m.name)).toEqual(["Caio Pinheiro", "William"]);
     expect(db.whatsAppGroupMember.updateMany).not.toHaveBeenCalled();
+  });
+});
+
+describe("prévia e não lidas na lista", () => {
+  const group = (over: Record<string, unknown>) => ({
+    id: "g1",
+    jid: "1@g.us",
+    name: "A",
+    description: null,
+    ownerJid: null,
+    participantCount: 3,
+    syncedAt: at,
+    lastMessageAt: at,
+    lastMessagePreview: "Ah tá ótimo",
+    lastMessageAuthor: "Kleber Raia",
+    lastMessageFromMe: false,
+    lastReadAt: null,
+    ...over,
+  });
+
+  it("conta só grupos com mensagem depois do visto, sem as do próprio número", async () => {
+    const read = new Date("2026-11-12T19:00:00Z");
+    db.whatsAppGroup.findMany.mockResolvedValue([
+      group({ id: "g1", lastReadAt: read }),
+      group({ id: "g2", lastReadAt: new Date("2026-11-12T20:00:00Z") }),
+    ]);
+    db.whatsAppGroupMessage.count.mockResolvedValue(3);
+    const list = await svc.listWhatsAppGroups("ch1");
+    expect(db.whatsAppGroupMessage.count).toHaveBeenCalledTimes(1);
+    expect(db.whatsAppGroupMessage.count).toHaveBeenCalledWith({
+      where: { groupId: "g1", fromMe: false, createdAt: { gt: read } },
+      take: svc.UNREAD_COUNT_CAP,
+    });
+    expect(list.map((g) => [g.id, g.unreadCount, g.lastMessageAuthor, g.lastMessagePreview])).toEqual([
+      ["g1", 3, "Kleber Raia", "Ah tá ótimo"],
+      ["g2", 0, "Kleber Raia", "Ah tá ótimo"],
+    ]);
+  });
+
+  it("abrir o grupo zera para todos do número (só avança)", async () => {
+    const now = new Date("2026-11-13T15:00:00Z");
+    await svc.markWhatsAppGroupRead("g1", "ch1", now);
+    expect(db.whatsAppGroup.updateMany).toHaveBeenCalledWith({
+      where: { id: "g1", channelId: "ch1", OR: [{ lastReadAt: null }, { lastReadAt: { lt: now } }] },
+      data: { lastReadAt: now },
+    });
+  });
+});
+
+describe("groupMessagePreviewText", () => {
+  it("texto vira uma linha e é cortado", () => {
+    expect(svc.groupMessagePreviewText({ messageType: "text", text: "oi\n  tudo bem?" })).toBe("oi tudo bem?");
+    const long = svc.groupMessagePreviewText({ messageType: "text", text: "a".repeat(300) });
+    expect(long).toHaveLength(120);
+    expect(long.endsWith("…")).toBe(true);
+  });
+
+  it("mídia com rótulo, legenda quando houver", () => {
+    expect(svc.groupMessagePreviewText({ messageType: "ptt", text: "[ptt]" })).toBe("🎤 Áudio");
+    expect(svc.groupMessagePreviewText({ messageType: "ptt", text: "[áudio]" })).toBe("🎤 Áudio");
+    expect(svc.groupMessagePreviewText({ messageType: "image", text: "olha isso" })).toBe("📷 Foto olha isso");
+    expect(svc.groupMessagePreviewText({ messageType: "image", text: "[image]" })).toBe("📷 Foto");
+    expect(
+      svc.groupMessagePreviewText({ messageType: "document", text: "📎 proposta.pdf", fileName: "proposta.pdf" }),
+    ).toBe("📎 proposta.pdf");
+    expect(
+      svc.groupMessagePreviewText({ messageType: "document", text: "segue\n📎 a.pdf", fileName: "a.pdf" }),
+    ).toBe("📎 a.pdf · segue");
   });
 });
