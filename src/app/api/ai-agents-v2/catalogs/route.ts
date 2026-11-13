@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAuth, requirePermission, runInSessionContext } from "@/lib/auth-helpers";
 import { ensureWhatsappFlowHiddenAtColumn } from "@/lib/meta-whatsapp/ensure-hidden-at";
-import { V2_MODELS } from "@/lib/ai-v2/models";
+import { listOrgModels } from "@/services/ai-v2/model-catalog";
 import { getLogger } from "@/lib/logger";
 
 const log = getLogger("api/ai-agents-v2/catalogs");
@@ -39,6 +39,7 @@ export async function GET() {
       memberRows,
       roleAssignmentRows,
       lossReasonRows,
+      orgModels,
     ] = await Promise.all([
       p.department.findMany({ where: { organizationId }, select: { id: true, name: true } }),
       p.distributionRule.findMany({ where: { organizationId }, select: { id: true, name: true } }),
@@ -143,6 +144,8 @@ export async function GET() {
           orderBy: { position: "asc" },
         }) ?? [],
       ).catch(() => []),
+      // Lista fixa + descobertos em "Atualizar modelos" (sem banco: só os fixos).
+      listOrgModels(organizationId),
     ]);
 
     const tabulations = (tabulationRows as Array<{ id: string; path: string; departmentName: string }>).map((t) => ({
@@ -181,14 +184,7 @@ export async function GET() {
       messageFlows: (publishedFlowRows as Array<{ id: string; name: string; metaFlowId: string | null }>)
         .filter((f) => Boolean(f.metaFlowId?.trim()))
         .map((f) => ({ id: f.id, name: f.name })),
-      models: V2_MODELS.map((m) => ({
-        id: m.id,
-        name: m.label,
-        provider: m.provider,
-        hint: m.hint,
-        inputPer1M: m.inputPer1M,
-        outputPer1M: m.outputPer1M,
-      })),
+      models: orgModels,
       contacts: contacts.map((c: any) => ({
         id: c.id,
         name: c.name || c.phone || c.email || c.id,

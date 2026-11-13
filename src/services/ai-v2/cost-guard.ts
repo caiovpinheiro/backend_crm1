@@ -6,8 +6,8 @@
  */
 
 import { prisma } from "@/lib/prisma";
-import { estimateCost } from "@/lib/ai-agents/pricing";
-import { v2ModelInfo } from "@/lib/ai-v2/models";
+import { resolveModelPrice, costForUsage } from "@/lib/ai-v2/model-catalog";
+import { getModelPriceForOrg } from "./model-catalog";
 import type { V2AgentConfig } from "@/lib/ai-v2/types";
 
 type Usage = { inputTokens: number; outputTokens: number };
@@ -39,12 +39,19 @@ export function startOfPeriod(unit: "day" | "month", timeZone: string, now = new
 /**
  * Custo estimado em US$ pelo preço do modelo do agente. O log do turno não
  * guarda o modelo de cada chamada (a checagem usa um auxiliar mais barato):
- * a estimativa pelo modelo principal fica do lado seguro.
+ * a estimativa pelo modelo principal fica do lado seguro. Modelo sem preço
+ * (descoberto no provedor e ninguém preencheu) usa o teto do provedor.
  */
-export function estimateV2Cost(model: string, usage: Usage): number {
-  const info = v2ModelInfo(model);
-  if (info) return (usage.inputTokens / 1_000_000) * info.inputPer1M + (usage.outputTokens / 1_000_000) * info.outputPer1M;
-  return estimateCost(model, usage.inputTokens, usage.outputTokens);
+export function estimateV2Cost(model: string, usage: Usage, price?: { inputPer1M: number; outputPer1M: number }): number {
+  return costForUsage(price ?? resolveModelPrice(model), usage.inputTokens, usage.outputTokens);
+}
+
+async function priceFor(organizationId: string, model: string) {
+  try {
+    return await getModelPriceForOrg(organizationId, model);
+  } catch {
+    return resolveModelPrice(model);
+  }
 }
 
 async function usageSince(organizationId: string, agentId: string, since: Date): Promise<Usage> {
@@ -85,14 +92,14 @@ export async function checkV2CostCap(args: {
       return { allowed: false, reason: "Teto diário de tokens atingido" };
     }
     if (perDayUsd > 0) {
-      const usd = estimateV2Cost(args.config.model, today);
+      const usd = estimateV2Cost(args.config.model, today, await priceFor(args.organizationId, args.config.model));
       if (usd > perDayUsd) return { allowed: false, reason: `Teto diário de gasto atingido (≈ US$ ${usd.toFixed(2)} de US$ ${perDayUsd})` };
     }
   }
 
   if (perMonthUsd > 0) {
     const month = withTurn(await usageSince(args.organizationId, args.agentId, startOfPeriod("month", timeZone, now)));
-    const usd = estimateV2Cost(args.config.model, month);
+    const usd = estimateV2Cost(args.config.model, month, await priceFor(args.organizationId, args.config.model));
     if (usd > perMonthUsd) return { allowed: false, reason: `Teto mensal de gasto atingido (≈ US$ ${usd.toFixed(2)} de US$ ${perMonthUsd})` };
   }
 
