@@ -1,3 +1,5 @@
+import type { Prisma } from "@prisma/client";
+
 import { getLogger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
@@ -58,8 +60,16 @@ export type WhatsAppGroupMessageDto = {
   mediaUrl: string | null;
   mimeType: string | null;
   fileName: string | null;
+  /** Reações (uma por remetente; "me" = o próprio número, enviada pelo CRM ou celular). */
+  reactions: GroupReaction[];
+  /** Mensagem citada (resposta). */
+  replyTo: { waId: string; text: string; author: string | null } | null;
+  /** Tem id do WhatsApp: dá para reagir e responder. */
+  canReact: boolean;
   createdAt: string;
 };
+
+export type GroupReaction = { emoji: string; from: string; name: string | null };
 
 /** Tipos de mensagem com arquivo — os mesmos do inbox. */
 export const GROUP_MEDIA_TYPES = new Set(["image", "video", "audio", "ptt", "document", "sticker"]);
@@ -75,8 +85,36 @@ const MESSAGE_SELECT = {
   mediaUrl: true,
   mimeType: true,
   fileName: true,
+  reactions: true,
+  replyToWaId: true,
+  replyToText: true,
+  replyToAuthor: true,
+  waMessageId: true,
   createdAt: true,
 } as const;
+
+/** Lê o JSON de reações com segurança (linha antiga ou corrompida = []). */
+export function parseGroupReactions(raw: unknown): GroupReaction[] {
+  if (!Array.isArray(raw)) return [];
+  const out: GroupReaction[] = [];
+  for (const r of raw) {
+    if (!r || typeof r !== "object") continue;
+    const { emoji, from, name } = r as Record<string, unknown>;
+    if (typeof emoji === "string" && emoji && typeof from === "string" && from) {
+      out.push({ emoji, from, name: typeof name === "string" ? name : null });
+    }
+  }
+  return out;
+}
+
+/** Aplica a reação de um remetente: troca a anterior; emoji vazio remove. */
+export function nextGroupReactions(
+  current: GroupReaction[],
+  reaction: { from: string; emoji: string; name: string | null },
+): GroupReaction[] {
+  const rest = current.filter((r) => r.from !== reaction.from);
+  return reaction.emoji ? [...rest, { emoji: reaction.emoji, from: reaction.from, name: reaction.name }] : rest;
+}
 
 function serializeMessage(r: {
   id: string;
@@ -89,9 +127,21 @@ function serializeMessage(r: {
   mediaUrl: string | null;
   mimeType: string | null;
   fileName: string | null;
+  reactions: unknown;
+  replyToWaId: string | null;
+  replyToText: string | null;
+  replyToAuthor: string | null;
+  waMessageId: string | null;
   createdAt: Date;
 }): WhatsAppGroupMessageDto {
-  return { ...r, createdAt: r.createdAt.toISOString() };
+  const { reactions, replyToWaId, replyToText, replyToAuthor, waMessageId, ...rest } = r;
+  return {
+    ...rest,
+    reactions: parseGroupReactions(reactions),
+    replyTo: replyToWaId ? { waId: replyToWaId, text: replyToText ?? "", author: replyToAuthor } : null,
+    canReact: Boolean(waMessageId),
+    createdAt: r.createdAt.toISOString(),
+  };
 }
 
 export type BaileysGroupSnapshot = {
@@ -437,6 +487,7 @@ export async function appendWhatsAppGroupMessage(input: {
   mediaUrl?: string | null;
   mimeType?: string | null;
   fileName?: string | null;
+  replyTo?: { waId: string; text: string; author: string | null } | null;
 }): Promise<WhatsAppGroupMessageDto | null> {
   const text = input.text.trim();
   if (!text) return null;
@@ -465,6 +516,9 @@ export async function appendWhatsAppGroupMessage(input: {
       mediaUrl: input.mediaUrl ?? null,
       mimeType: input.mimeType ?? null,
       fileName: input.fileName?.slice(0, 255) ?? null,
+      replyToWaId: input.replyTo?.waId ?? null,
+      replyToText: input.replyTo ? input.replyTo.text.replace(/\s+/g, " ").trim().slice(0, 200) : null,
+      replyToAuthor: input.replyTo?.author?.slice(0, 120) ?? null,
     }),
     select: MESSAGE_SELECT,
   });
@@ -660,4 +714,88 @@ export async function listCompanyWhatsAppGroups(companyId: string) {
     orderBy: { name: "asc" },
     select: { id: true, jid: true, name: true, channelId: true },
   });
+}
+
+/** Mensagem do grupo pelo id do WhatsApp (reação e resposta que chegam). */
+export async function findGroupMessageByWaId(groupId: string, waMessageId: string) {
+  return prisma.whatsAppGroupMessage.findFirst({
+    where: { groupId, waMessageId },
+    select: { id: true, text: true, fromName: true, fromPhone: true, fromMe: true, reactions: true },
+  });
+}
+
+/** Mensagem do grupo pelo id do CRM (responder/reagir pela tela). */
+export async function findGroupMessageForAction(groupId: string, messageId: string) {
+  return prisma.whatsAppGroupMessage.findFirst({
+    where: { id: messageId, groupId },
+    select: {
+      id: true,
+      waMessageId: true,
+      fromJid: true,
+      fromMe: true,
+      fromName: true,
+      fromPhone: true,
+      text: true,
+      messageType: true,
+      fileName: true,
+      reactions: true,
+    },
+  });
+}
+
+/** Grava a reação de um remetente na mensagem (troca a anterior; vazio remove). */
+export async function applyGroupMessageReaction(
+  messageId: string,
+  current: unknown,
+  reaction: { from: string; emoji: string; name: string | null },
+): Promise<GroupReaction[]> {
+  const next = nextGroupReactions(parseGroupReactions(current), reaction);
+  await prisma.whatsAppGroupMessage.update({
+    where: { id: messageId },
+    data: { reactions: next as unknown as Prisma.InputJsonValue },
+    select: { id: true },
+  });
+  return next;
+}
+
+/** Autor exibido na citação ("Você" quando foi o próprio número). */
+export function groupQuoteAuthor(m: { fromMe: boolean; fromName: string | null; fromPhone: string | null }): string {
+  if (m.fromMe) return "Você";
+  return m.fromName?.trim() || m.fromPhone || "Participante";
+}
+
+/**
+ * Resposta a uma mensagem do grupo: a citação que vai ao WhatsApp e o que o
+ * CRM grava para desenhar o quadro. Precisa do id do WhatsApp da original.
+ */
+export async function groupReplyFor(
+  groupId: string,
+  messageId: string,
+): Promise<
+  | {
+      quoted: { id: string; fromMe: boolean; participant: string | null; text: string };
+      replyTo: { waId: string; text: string; author: string | null };
+    }
+  | { error: string; status: number }
+> {
+  const target = await findGroupMessageForAction(groupId, messageId);
+  if (!target) return { error: "Mensagem respondida não encontrada.", status: 404 };
+  if (!target.waMessageId) {
+    return { error: "Esta mensagem é antiga e não pode ser respondida pelo CRM.", status: 409 };
+  }
+  const text = groupMessagePreviewText(target);
+  return {
+    quoted: {
+      id: target.waMessageId,
+      fromMe: target.fromMe,
+      participant: target.fromMe ? null : target.fromJid,
+      text,
+    },
+    replyTo: { waId: target.waMessageId, text, author: groupQuoteAuthor(target) },
+  };
+}
+
+/** Desfaz a gravação quando a mensagem não entrou na fila (não saiu no WhatsApp). */
+export async function deleteGroupMessage(id: string): Promise<void> {
+  await prisma.whatsAppGroupMessage.delete({ where: { id }, select: { id: true } });
 }

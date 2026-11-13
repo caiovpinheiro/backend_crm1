@@ -16,7 +16,7 @@ import { publishMessageStatus } from "@/lib/realtime-events";
 import { withSystemContext } from "@/lib/webhook-context";
 import type { BaileysManager } from "./baileys-manager";
 import { noteContactActivity } from "./contact-typing";
-import type { AnyMessageContent } from "@whiskeysockets/baileys";
+import type { AnyMessageContent, WAMessage } from "@whiskeysockets/baileys";
 import { maskPhone } from "@/lib/pii-mask";
 import { getLogger } from "@/lib/logger";
 import { noteMessageChange, noteMessageRowChange } from "@/lib/cache/message-versions";
@@ -42,6 +42,9 @@ export function startOutboundConsumer(
         messageId,
         mime: payloadMime,
         originalName,
+        groupMessageId,
+        quoted,
+        reaction,
       } = job.data;
 
       const session = manager.getSession(channelId);
@@ -51,6 +54,20 @@ export function startOutboundConsumer(
       }
 
       const jid = to.includes("@") ? to : to.replace(/\D/g, "") + "@s.whatsapp.net";
+
+      // Reação em grupo: não é mensagem nova, só o emoji na mensagem citada.
+      if (messageType === "reaction" && reaction) {
+        await withTimeout(
+          session.sendMessage(jid, {
+            react: { text: reaction.emoji, key: waKeyFor(jid, reaction.key) },
+          }),
+          15_000,
+          "WhatsApp não confirmou a reação",
+        );
+        log.info({ jid: maskPhone(jid) }, "[baileys-outbound] reação enviada");
+        return;
+      }
+
       let waContent: AnyMessageContent;
 
       if (mediaUrl && messageType !== "text") {
@@ -183,11 +200,28 @@ export function startOutboundConsumer(
         };
       }
 
+      // Grupo: o `quoted` vai como 3º argumento com a mensagem original
+      // (sem `message` o WhatsApp não desenha o quadro da citação).
+      const sendOpts = quoted
+        ? {
+            quoted: {
+              key: waKeyFor(jid, quoted),
+              message: { conversation: quoted.text || " " },
+            } as WAMessage,
+          }
+        : undefined;
+
       const sent = await withTimeout(
-        session.sendMessage(jid, waContent),
+        session.sendMessage(jid, waContent, sendOpts),
         15_000,
         "WhatsApp não confirmou o envio",
       );
+      // Mensagem de grupo do CRM: guarda o id do WhatsApp para reagir/responder depois.
+      if (groupMessageId && sent?.key?.id) {
+        await prismaBase.whatsAppGroupMessage
+          .update({ where: { id: groupMessageId }, data: { waMessageId: sent.key.id }, select: { id: true } })
+          .catch((err) => log.warn({ groupMessageId, err }, "[baileys-outbound] id do WhatsApp não gravado no grupo"));
+      }
       if (sent?.key?.id) {
         log.info({ messageId: sent.key.id, jid: maskPhone(jid) }, "[baileys-outbound] enviado");
       } else {
@@ -308,4 +342,18 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
       timer = setTimeout(() => reject(new Error(label)), ms);
     }),
   ]);
+}
+
+/** Chave da mensagem a citar/reagir. Em grupo, mensagem de outro precisa do `participant`. */
+export function waKeyFor(
+  jid: string,
+  ref: { id: string; fromMe: boolean; participant?: string | null },
+): { remoteJid: string; id: string; fromMe: boolean; participant?: string } {
+  const key: { remoteJid: string; id: string; fromMe: boolean; participant?: string } = {
+    remoteJid: jid,
+    id: ref.id,
+    fromMe: ref.fromMe,
+  };
+  if (!ref.fromMe && ref.participant && jid.endsWith("@g.us")) key.participant = ref.participant;
+  return key;
 }

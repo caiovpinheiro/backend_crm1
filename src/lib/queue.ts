@@ -115,6 +115,21 @@ export type BaileysOutboundPayload = {
   /** MIME original (áudio: remux no outbound-consumer). */
   mime?: string;
   originalName?: string;
+  /** Mensagem de grupo do CRM: o worker grava nela o id que o WhatsApp devolver. */
+  groupMessageId?: string;
+  /** Resposta citada em grupo (o WhatsApp mostra o quadro com a mensagem original). */
+  quoted?: BaileysQuotedRef;
+  /** messageType "reaction": reagir (emoji vazio remove) à mensagem `key`. */
+  reaction?: { emoji: string; key: BaileysQuotedRef };
+};
+
+/** Mensagem do WhatsApp a citar/reagir: id + quem mandou (grupo exige participant). */
+export type BaileysQuotedRef = {
+  id: string;
+  fromMe: boolean;
+  participant?: string | null;
+  /** Texto curto para o quadro da citação. */
+  text?: string;
 };
 
 export type BaileysControlPayload = {

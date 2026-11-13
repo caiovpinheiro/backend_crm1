@@ -5,6 +5,8 @@ const svc = vi.hoisted(() => ({
   getWhatsAppGroup: vi.fn(),
   listWhatsAppGroupMessages: vi.fn(),
   appendWhatsAppGroupMessage: vi.fn(),
+  deleteGroupMessage: vi.fn(),
+  groupReplyFor: vi.fn(),
 }));
 const queue = vi.hoisted(() => ({ enqueueBaileysOutbound: vi.fn() }));
 
@@ -60,6 +62,48 @@ describe("POST /api/whatsapp-groups/:id/messages", () => {
     expect(res.headers.get("content-type")).toContain("application/json");
     expect(await res.json()).toMatchObject({ ok: true, message: null });
     expect(queue.enqueueBaileysOutbound).toHaveBeenCalledOnce();
+  });
+});
+
+describe("POST — responder e id do WhatsApp", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    svc.findConnectedBaileysChannel.mockResolvedValue({ id: "ch1", phoneNumber: "5511900000000" });
+    svc.getWhatsAppGroup.mockResolvedValue({ id: "g1", jid: "1@g.us" });
+    svc.appendWhatsAppGroupMessage.mockResolvedValue({ id: "m9", text: "ok" });
+    queue.enqueueBaileysOutbound.mockResolvedValue({ id: "job1" });
+  });
+  const postBody = (body: unknown) =>
+    POST(new Request("http://x", { method: "POST", body: JSON.stringify(body) }), ctx);
+
+  it("grava antes e manda o id para o worker guardar o id do WhatsApp", async () => {
+    await postBody({ text: "oi" });
+    expect(queue.enqueueBaileysOutbound).toHaveBeenCalledWith(expect.objectContaining({ groupMessageId: "m9" }));
+  });
+
+  it("responder cita a original no WhatsApp e grava o quadro", async () => {
+    const reply = {
+      quoted: { id: "WA1", fromMe: false, participant: "77@lid", text: "folha assinada" },
+      replyTo: { waId: "WA1", text: "folha assinada", author: "Kleber Raia" },
+    };
+    svc.groupReplyFor.mockResolvedValue(reply);
+    await postBody({ text: "certo", replyToMessageId: "m1" });
+    expect(svc.groupReplyFor).toHaveBeenCalledWith("g1", "m1");
+    expect(svc.appendWhatsAppGroupMessage).toHaveBeenCalledWith(expect.objectContaining({ replyTo: reply.replyTo }));
+    expect(queue.enqueueBaileysOutbound).toHaveBeenCalledWith(expect.objectContaining({ quoted: reply.quoted }));
+  });
+
+  it("original antiga sem id: devolve o erro e não envia", async () => {
+    svc.groupReplyFor.mockResolvedValue({ error: "antiga", status: 409 });
+    expect((await postBody({ text: "x", replyToMessageId: "m1" })).status).toBe(409);
+    expect(queue.enqueueBaileysOutbound).not.toHaveBeenCalled();
+  });
+
+  it("fila fora: apaga a linha gravada (não saiu no WhatsApp)", async () => {
+    queue.enqueueBaileysOutbound.mockResolvedValue(null);
+    svc.deleteGroupMessage.mockResolvedValue(undefined);
+    expect((await postBody({ text: "x" })).status).toBe(503);
+    expect(svc.deleteGroupMessage).toHaveBeenCalledWith("m9");
   });
 });
 

@@ -17,6 +17,7 @@ import { generateFileName, resolveOutboundAttachmentMime, saveFile } from "@/lib
 import { groupAttachmentMessageType, groupAttachmentText } from "@/lib/whatsapp-group-attachment";
 import {
   appendWhatsAppGroupMessage,
+  deleteGroupMessage,
   findConnectedBaileysChannel,
   getWhatsAppGroup,
 } from "@/services/whatsapp-groups";
@@ -102,20 +103,9 @@ export async function POST(request: Request, context: RouteContext) {
     }
 
     const messageType = groupAttachmentMessageType(sniffed.mime);
-    const job = await enqueueBaileysOutbound({
-      channelId: channel.id,
-      to: group.jid,
-      // Documento: o worker usa `content` como nome do arquivo no WhatsApp.
-      content: messageType === "document" ? fileName : caption.trim(),
-      mediaUrl: saved.url,
-      messageType,
-      mime: sniffed.mime,
-      originalName: fileName,
-    });
-    if (!job) {
-      return NextResponse.json({ message: "Fila indisponível. Tente de novo." }, { status: 503 });
-    }
 
+    // Grava antes de enfileirar: o worker guarda o id do WhatsApp nesta
+    // linha (reagir/responder depois). Falha ao gravar não impede o envio.
     let message: Awaited<ReturnType<typeof appendWhatsAppGroupMessage>> = null;
     try {
       message = await appendWhatsAppGroupMessage({
@@ -132,10 +122,23 @@ export async function POST(request: Request, context: RouteContext) {
         fileName,
       });
     } catch (err) {
-      log.error(
-        { groupId: group.id, jobId: job.id, err: errMessage(err) },
-        "[whatsapp-groups] anexo enfileirado, mas não gravado no histórico",
-      );
+      log.error({ groupId: group.id, err: errMessage(err) }, "[whatsapp-groups] anexo não gravado no histórico");
+    }
+
+    const job = await enqueueBaileysOutbound({
+      channelId: channel.id,
+      to: group.jid,
+      // Documento: o worker usa `content` como nome do arquivo no WhatsApp.
+      content: messageType === "document" ? fileName : caption.trim(),
+      mediaUrl: saved.url,
+      messageType,
+      mime: sniffed.mime,
+      originalName: fileName,
+      ...(message ? { groupMessageId: message.id } : {}),
+    });
+    if (!job) {
+      if (message) await deleteGroupMessage(message.id).catch(() => {});
+      return NextResponse.json({ message: "Fila indisponível. Tente de novo." }, { status: 503 });
     }
     return NextResponse.json({ ok: true, groupId: group.id, message });
   });

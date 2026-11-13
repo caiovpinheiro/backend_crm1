@@ -710,7 +710,12 @@ export class BaileysSession {
     }
   }
 
-  async sendMessage(jid: string, content: AnyMessageContent): Promise<WAMessage | undefined> {
+  async sendMessage(
+    jid: string,
+    content: AnyMessageContent,
+    /** Mensagem citada (resposta), como no WhatsApp. */
+    opts?: { quoted?: WAMessage },
+  ): Promise<WAMessage | undefined> {
     if (!this.socket) throw new Error("Socket não conectado");
     if (!this.socket.user) {
       await this.waitForOpen(12_000);
@@ -737,11 +742,11 @@ export class BaileysSession {
     const dest = this.groupCache.get(jid)?.id ?? jid;
     // Baileys 7 cifra grupo com sender-keys + addressing LID. Cache
     // parcial (groups.update) fazia o relay pular o groupMetadata vivo.
-    return this.socket.sendMessage(
-      dest,
-      content,
-      dest.endsWith("@g.us") ? { useCachedGroupMetadata: false } : undefined,
-    );
+    const base = dest.endsWith("@g.us") ? { useCachedGroupMetadata: false } : {};
+    return this.socket.sendMessage(dest, content, {
+      ...base,
+      ...(opts?.quoted ? { quoted: opts.quoted } : {}),
+    });
   }
 
   /**

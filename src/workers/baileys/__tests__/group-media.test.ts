@@ -8,6 +8,9 @@ const groups = vi.hoisted(() => ({
   appendWhatsAppGroupMessage: vi.fn(),
   findWhatsAppGroupByJid: vi.fn(),
   learnGroupMemberName: vi.fn(),
+  findGroupMessageByWaId: vi.fn(),
+  applyGroupMessageReaction: vi.fn(),
+  groupQuoteAuthor: (m: { fromMe: boolean; fromName: string | null }) => (m.fromMe ? "Você" : m.fromName),
   GROUP_MEDIA_TYPES: new Set(["image", "video", "audio", "ptt", "document", "sticker"]),
 }));
 const media = vi.hoisted(() => ({ download: vi.fn(), save: vi.fn() }));
@@ -114,5 +117,49 @@ describe("groupMediaMeta", () => {
       groupMediaMeta({ message: { documentMessage: { mimetype: "application/pdf; x=1", fileName: " a.pdf " } } } as never),
     ).toEqual({ mimeType: "application/pdf", fileName: "a.pdf" });
     expect(groupMediaMeta({ message: { conversation: "oi" } } as never)).toEqual({ mimeType: null, fileName: null });
+  });
+});
+
+describe("reação e resposta que chegam do grupo", () => {
+  it("reação aponta para a mensagem pelo id do WhatsApp", async () => {
+    groups.findGroupMessageByWaId.mockResolvedValue({ id: "m1", reactions: [] });
+    await handleBaileysMessage("ch1", groupMsg({ reactionMessage: { text: "❤️", key: { id: "WA1" } } }), sock);
+    expect(groups.findGroupMessageByWaId).toHaveBeenCalledWith("g1", "WA1");
+    expect(groups.applyGroupMessageReaction).toHaveBeenCalledWith("m1", [], {
+      from: "77@lid",
+      emoji: "❤️",
+      name: "Caio",
+    });
+    expect(groups.appendWhatsAppGroupMessage).not.toHaveBeenCalled();
+  });
+
+  it("reação do próprio número (celular) conta como 'me'", async () => {
+    groups.findGroupMessageByWaId.mockResolvedValue({ id: "m1", reactions: [] });
+    await handleBaileysMessage(
+      "ch1",
+      groupMsg({ reactionMessage: { text: "", key: { id: "WA1" } } }, { fromMe: true }),
+      sock,
+    );
+    expect(groups.applyGroupMessageReaction).toHaveBeenCalledWith("m1", [], { from: "me", emoji: "", name: null });
+  });
+
+  it("resposta grava a citação com autor da mensagem original", async () => {
+    groups.findGroupMessageByWaId.mockResolvedValue({ id: "m1", text: "folha", fromMe: false, fromName: "Kleber Raia", fromPhone: null, reactions: [] });
+    await handleBaileysMessage(
+      "ch1",
+      groupMsg({
+        extendedTextMessage: {
+          text: "certo",
+          contextInfo: { stanzaId: "WA1", participant: "88@lid", quotedMessage: { conversation: "A escola falou que essa folha" } },
+        },
+      }),
+      sock,
+    );
+    expect(groups.appendWhatsAppGroupMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: "certo",
+        replyTo: { waId: "WA1", text: "A escola falou que essa folha", author: "Kleber Raia" },
+      }),
+    );
   });
 });
