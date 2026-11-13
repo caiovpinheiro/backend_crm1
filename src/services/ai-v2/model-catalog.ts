@@ -22,8 +22,10 @@ import { getLogger } from "@/lib/logger";
 import {
   V2_MODELS,
   isAgentChatModelId,
+  stripModelDateSuffix,
   type V2ModelProvider,
 } from "@/lib/ai-v2/models";
+import { OFFICIAL_PRICING_URL, parseOfficialPricing, type OfficialPrice } from "@/lib/ai-v2/official-prices";
 import {
   costForUsage,
   mergeModelCatalog,
@@ -79,6 +81,10 @@ async function ensureSchema(): Promise<void> {
   await db.$executeRawUnsafe(
     `CREATE INDEX IF NOT EXISTS "ai_v2_model_catalog_refreshes_org_idx" ON "ai_v2_model_catalog_refreshes" ("organizationId", "startedAt")`,
   );
+  // Preço da página oficial do provedor (lido no "Atualizar modelos").
+  await db.$executeRawUnsafe(`ALTER TABLE "ai_v2_model_catalog" ADD COLUMN IF NOT EXISTS "officialInputPer1M" DOUBLE PRECISION`);
+  await db.$executeRawUnsafe(`ALTER TABLE "ai_v2_model_catalog" ADD COLUMN IF NOT EXISTS "officialOutputPer1M" DOUBLE PRECISION`);
+  await db.$executeRawUnsafe(`ALTER TABLE "ai_v2_model_catalog" ADD COLUMN IF NOT EXISTS "officialPriceAt" TIMESTAMPTZ`);
   schemaReady = true;
 }
 
@@ -215,7 +221,8 @@ async function readRows(organizationId: string): Promise<DbRow[]> {
   await ensureSchema();
   return db.$queryRawUnsafe<DbRow[]>(
     `SELECT "modelId", "provider", "label", "providerCreatedAt", "firstSeenAt", "lastSeenAt", "missingSince",
-            "inputPer1M", "outputPer1M", "priceUpdatedById", "priceUpdatedAt"
+            "inputPer1M", "outputPer1M", "priceUpdatedById", "priceUpdatedAt",
+            "officialInputPer1M", "officialOutputPer1M", "officialPriceAt"
        FROM "ai_v2_model_catalog" WHERE "organizationId" = $1`,
     organizationId,
   );
@@ -328,7 +335,8 @@ export async function getAgentTokenUsage(organizationId: string, agentId: string
 
 // ── Preço para a estimativa ─────────────────────────────────────────────
 
-type PriceMap = Map<string, { inputPer1M: number; outputPer1M: number }>;
+type PriceRowLite = { inputPer1M: number | null; outputPer1M: number | null; officialInputPer1M: number | null; officialOutputPer1M: number | null };
+type PriceMap = Map<string, PriceRowLite>;
 const PRICE_TTL_MS = 60_000;
 const priceCache = new Map<string, { at: number; prices: PriceMap }>();
 
@@ -338,12 +346,20 @@ async function orgPrices(organizationId: string): Promise<PriceMap> {
   const prices: PriceMap = new Map();
   try {
     await ensureSchema();
-    const rows = await db.$queryRawUnsafe<Array<{ modelId: string; inputPer1M: number; outputPer1M: number }>>(
-      `SELECT "modelId", "inputPer1M", "outputPer1M" FROM "ai_v2_model_catalog"
-        WHERE "organizationId" = $1 AND "inputPer1M" IS NOT NULL AND "outputPer1M" IS NOT NULL`,
+    const rows = await db.$queryRawUnsafe<Array<{ modelId: string } & PriceRowLite>>(
+      `SELECT "modelId", "inputPer1M", "outputPer1M", "officialInputPer1M", "officialOutputPer1M" FROM "ai_v2_model_catalog"
+        WHERE "organizationId" = $1 AND ("inputPer1M" IS NOT NULL OR "officialInputPer1M" IS NOT NULL)`,
       organizationId,
     );
-    for (const r of rows ?? []) prices.set(r.modelId, { inputPer1M: Number(r.inputPer1M), outputPer1M: Number(r.outputPer1M) });
+    const num = (v: unknown) => (v === null || v === undefined ? null : Number(v));
+    for (const r of rows ?? []) {
+      prices.set(r.modelId, {
+        inputPer1M: num(r.inputPer1M),
+        outputPer1M: num(r.outputPer1M),
+        officialInputPer1M: num(r.officialInputPer1M),
+        officialOutputPer1M: num(r.officialOutputPer1M),
+      });
+    }
   } catch (err) {
     log.warn({ err }, "[model-catalog] preços da organização indisponíveis");
   }
@@ -351,13 +367,14 @@ async function orgPrices(organizationId: string): Promise<PriceMap> {
   return prices;
 }
 
-/** Preço do modelo para a organização (admin → tabela do código → teto do provedor). Nunca lança. */
+/** Preço do modelo para a organização (admin → oficial → tabela do código → teto do provedor). Nunca lança. */
 export async function getModelPriceForOrg(
   organizationId: string,
   modelId: string,
 ): Promise<{ inputPer1M: number; outputPer1M: number; source: ModelPriceSource }> {
   const prices = await orgPrices(organizationId);
-  return resolveModelPrice(modelId, prices.get(modelId));
+  const alias = stripModelDateSuffix(modelId);
+  return resolveModelPrice(modelId, prices.get(modelId), alias !== modelId ? prices.get(alias) : undefined);
 }
 
 export async function estimateCostForOrg(organizationId: string, modelId: string, inputTokens: number, outputTokens: number): Promise<number> {
@@ -375,6 +392,8 @@ export type ProviderRefreshResult = {
   chatModels?: number;
   added?: string[];
   missing?: string[];
+  /** Preços lidos da página oficial do provedor (independe da chave). */
+  prices?: { ok: boolean; count?: number; error?: string; url: string };
 };
 
 export type RefreshResult = Record<V2ModelProvider, ProviderRefreshResult>;
@@ -421,6 +440,9 @@ export async function refreshOrgModelCatalog(args: {
     const keys = await resolveProviderKeys(organizationId, args.agentId);
     const existing = await readRows(organizationId);
     const providers: V2ModelProvider[] = ["openai", "anthropic"];
+    const priceResults = await Promise.all(
+      providers.map((provider) => refreshOfficialPrices({ organizationId, provider, now, fetchImpl: args.fetchImpl })),
+    );
     const entries = await Promise.all(
       providers.map(async (provider): Promise<[V2ModelProvider, ProviderRefreshResult]> => {
         const key = keys[provider];
@@ -438,6 +460,10 @@ export async function refreshOrgModelCatalog(args: {
       }),
     );
     const result = Object.fromEntries(entries) as RefreshResult;
+    providers.forEach((provider, i) => {
+      result[provider] = { ...result[provider], prices: priceResults[i] };
+    });
+    priceCache.delete(organizationId);
     // O resumo cita só o que aparece na lista: versões com data escondidas
     // pelo nome sem data (ex.: gpt-4o-2024-11-20) e descobertos que saíram
     // sem uso não entram — antes o resumo dizia "39 novos" com ~20 na lista.
@@ -514,6 +540,64 @@ async function applyProviderList(args: {
   }
 
   return { ok: true, chatModels: chat.length, added, missing };
+}
+
+// ── Preço oficial (página de preços do provedor) ────────────────────────
+
+const MAX_PRICING_BYTES = 2_000_000;
+
+/** Baixa a página oficial de preços (markdown). Sem chave: é pública. */
+export async function fetchOfficialPricing(
+  provider: V2ModelProvider,
+  fetchImpl: FetchLike = fetch as unknown as FetchLike,
+): Promise<Map<string, OfficialPrice>> {
+  const url = OFFICIAL_PRICING_URL[provider];
+  const name = PROVIDER_NAME[provider];
+  let res: Awaited<ReturnType<FetchLike>> & { text?: () => Promise<string> };
+  try {
+    res = (await fetchImpl(url, { method: "GET", headers: { Accept: "text/markdown, text/plain;q=0.9" }, signal: AbortSignal.timeout(PROVIDER_TIMEOUT_MS) })) as typeof res;
+  } catch {
+    throw new ProviderModelsError("network", `Não foi possível ler a página de preços da ${name}.`);
+  }
+  if (!res.ok) throw new ProviderModelsError("http", `A página de preços da ${name} respondeu com erro ${res.status}.`);
+  const body = res.text ? await res.text() : String(await res.json());
+  if (body.length > MAX_PRICING_BYTES) throw new ProviderModelsError("invalid_response", `Página de preços da ${name} grande demais.`);
+  const prices = parseOfficialPricing(provider, body);
+  if (prices.size === 0) throw new ProviderModelsError("invalid_response", `Não encontrei a tabela na página de preços da ${name} (o formato pode ter mudado).`);
+  return prices;
+}
+
+/**
+ * Grava o preço oficial de cada modelo listado na página do provedor.
+ * Falha (página fora do ar, formato novo) não apaga o preço lido antes.
+ */
+async function refreshOfficialPrices(args: {
+  organizationId: string;
+  provider: V2ModelProvider;
+  now: Date;
+  fetchImpl?: FetchLike;
+}): Promise<NonNullable<ProviderRefreshResult["prices"]>> {
+  const url = OFFICIAL_PRICING_URL[args.provider];
+  try {
+    const prices = await fetchOfficialPricing(args.provider, args.fetchImpl);
+    for (const [modelId, p] of prices) {
+      await db.$executeRawUnsafe(
+        `INSERT INTO "ai_v2_model_catalog" ("organizationId","modelId","provider","officialInputPer1M","officialOutputPer1M","officialPriceAt","updatedAt")
+         VALUES ($1,$2,$3,$4,$5,$6,$6)
+         ON CONFLICT ("organizationId","modelId") DO UPDATE SET
+           "officialInputPer1M" = EXCLUDED."officialInputPer1M",
+           "officialOutputPer1M" = EXCLUDED."officialOutputPer1M",
+           "officialPriceAt" = EXCLUDED."officialPriceAt",
+           "updatedAt" = EXCLUDED."updatedAt"`,
+        args.organizationId, modelId, args.provider, p.inputPer1M, p.outputPer1M, args.now,
+      );
+    }
+    return { ok: true, count: prices.size, url };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log.warn({ provider: args.provider, err: message }, "[model-catalog] preço oficial indisponível");
+    return { ok: false, error: message, url };
+  }
 }
 
 // ── Preço informado pelo admin ──────────────────────────────────────────
