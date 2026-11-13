@@ -8,7 +8,7 @@
 
 import type { V2AgentConfig, V2Destination, V2FieldConfig, V2PostCloseCaseBehavior, V2ReplyEnding, V2Rule, V2Theme } from "@/lib/ai-v2/types";
 import { HUMAN_REQUEST_PHRASES, isHumanRequestRule, TRANSFER_FALLBACK_NONE } from "@/lib/ai-v2/config";
-import { V2_MODELS } from "@/lib/ai-v2/models";
+import { v2ModelCaps } from "@/lib/ai-v2/models";
 import { FACT_IN_SENTENCE } from "./ground-reply";
 import { extractUrls, isUrlAllowed } from "./output-guard";
 import { QUERY_TOOL_NAMES } from "./theme-prompt";
@@ -251,7 +251,7 @@ export function detectConfigGaps(config: V2AgentConfig, names: V2ExportNames, ct
   if ((c.channelIds ?? []).length === 0) {
     add("baixa", "Publicação", "Nenhum número de WhatsApp vinculado: conversa nova só chega a ele se for o primeiro agente sem vínculo (transferências chegam normalmente).", "Vincule o número que ele atende.");
   }
-  if (c.model && !V2_MODELS.some((m) => m.id === c.model)) {
+  if (c.model && !v2ModelCaps(c.model)) {
     add("alta", "Quem é o agente", `Modelo “${c.model}” não está na lista de modelos suportados.`, "Escolha um modelo da lista.");
   }
 

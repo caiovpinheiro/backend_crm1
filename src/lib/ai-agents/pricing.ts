@@ -6,11 +6,14 @@
  *  - gravar `AIAgentRun.costUsd` após cada run
  *  - render do painel "Uso" na página do agente
  *
- * Atualizar quando a OpenAI mudar preços. Se um modelo não estiver
- * listado, assume fallback (gpt-4o-mini) — é seguro.
+ * Atualizar quando a OpenAI mudar preços. Modelo de chat fora da tabela
+ * (descoberto em "Atualizar modelos", sem preço preenchido) usa o teto do
+ * provedor — a estimativa fica do lado seguro. Com a organização em mãos,
+ * prefira `estimateCostForOrg` (vale o preço que o admin preencheu).
+ * Outros ids desconhecidos: gpt-4o-mini.
  */
 
-import { V2_MODELS } from "@/lib/ai-v2/models";
+import { V2_MODELS, inferV2ModelCaps, unknownModelPriceCeiling } from "@/lib/ai-v2/models";
 
 export type ModelPricing = {
   /// USD por 1M tokens de INPUT.
@@ -34,7 +37,10 @@ for (const m of V2_MODELS) {
 const FALLBACK = PRICING["gpt-4o-mini"];
 
 export function getModelPricing(model: string): ModelPricing {
-  return PRICING[model] ?? FALLBACK;
+  const known = PRICING[model];
+  if (known) return known;
+  const caps = inferV2ModelCaps(model);
+  return caps ? unknownModelPriceCeiling(caps.provider) : FALLBACK;
 }
 
 /**
