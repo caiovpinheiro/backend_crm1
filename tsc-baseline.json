@@ -44,6 +44,8 @@
   "src/scripts/backfill-conversation-first-inbound-at.ts|TS7022|'last' implicitly has type 'any' because it does not have a type annotation and is referenced directly or indirectly in its own initializer.": 1,
   "src/scripts/backfill-conversation-first-inbound-at.ts|TS7022|'page' implicitly has type 'any' because it does not have a type annotation and is referenced directly or indirectly in its own initializer.": 1,
   "src/services/activity-outbox.ts|TS2345|Argument of type 'Omit<PrismaClient<PrismaClientOptions, never, DefaultArgs>, \"$connect\" | \"$disconnect\" | \"$on\" | \"$transaction\" | \"$extends\">' is not assignable to parameter of type 'ActivityEventWriter'.": 1,
+  "src/services/activity-schedule-sweeper.ts|TS18047|'activity.scheduledAt' is possibly 'null'.": 1,
+  "src/services/activity-schedule-sweeper.ts|TS2345|Argument of type 'Date | null' is not assignable to parameter of type 'Date'.": 1,
   "src/services/ai/__tests__/stuck-inbound-sweep.test.ts|TS2551|Property 'executeDepartmentHandoff' does not exist on type 'typeof import(\"/home/runner/work/backend_crm1/backend_crm1/src/services/ai/department-handoff\")'. Did you mean 'executeGenericDepartmentHandoff'?": 2,
   "src/services/api4com/provisioning.ts|TS18048|'config.webhookUrl' is possibly 'undefined'.": 2,
   "src/services/api4com/provisioning.ts|TS2322|Type 'string | undefined' is not assignable to type 'string'.": 1,
@@ -78,5 +80,5 @@
   "src/services/team-chat-work-items.ts|TS2322|Type '{ value: string | null; error?: undefined; status?: undefined; } | { error: string; status: 400; value?: undefined; }' is not assignable to type 'WorkItemCommandResult'.": 2,
   "src/services/whatsapp-conversation.ts|TS2561|Object literal may only specify known properties, but 'channelId' does not exist in type 'ConversationUpdateInput'. Did you mean to write 'channel'?": 1,
   "src/services/whatsapp-flow-definitions.ts|TS2322|Type 'Omit<MetaFlowListItem, \"alreadyImported\" | \"crmFlowDefinitionId\">[]' is not assignable to type 'MetaFlowListItem[]'.": 1,
-  "src/workers/baileys/message-handler.ts|TS2367|This comparison appears to be unintentional because the types '\"call\" | \"questionMessage\" | \"chat\" | \"contactMessage\" | \"viewOnceMessage\" | \"viewOnceMessageV2\" | \"viewOnceMessageV2Extension\" | \"senderKeyDistributionMessage\" | \"locationMessage\" | ... 80 more ... | \"pollResultSnapshotMessageV3\"' and '\"ptt\"' have no overlap.": 1
+  "src/workers/baileys/message-handler.ts|TS2367|This comparison appears to be unintentional because the types '\"call\" | \"questionMessage\" | \"chat\" | \"contactMessage\" | \"reactionMessage\" | \"viewOnceMessage\" | \"viewOnceMessageV2\" | \"viewOnceMessageV2Extension\" | \"senderKeyDistributionMessage\" | ... 80 more ... | \"pollResultSnapshotMessageV3\"' and '\"ptt\"' have no overlap.": 1
 }
