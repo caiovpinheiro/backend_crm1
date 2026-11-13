@@ -420,6 +420,11 @@ export function looksLikeIdentification(text: string): boolean {
   return /[^\s@]+@[^\s@]+\.[^\s@]+/.test(text) || (text.match(/\d/g)?.length ?? 0) >= 5;
 }
 
+/** Texto que o webhook grava para a resposta de um WhatsApp Flow (`parse-flow-response.ts`, `handler.ts`). */
+export function isFlowFormReplyText(text: string): boolean {
+  return /^\s*(📋\s*)?\*?resposta do formul/i.test(text);
+}
+
 /** Chegou mensagem do cliente depois das deste turno. */
 /**
  * O cliente clicou de novo na mesma opção que acabou de responder (clique
@@ -428,6 +433,10 @@ export function looksLikeIdentification(text: string): boolean {
  * "confirmava de novo" e refazia a pergunta seguinte.
  */
 async function isRepeatedInteractiveReply(conversationId: string, text: string, messageIds: string[] | undefined): Promise<boolean> {
+  // Resposta de formulário (Flow) nunca é clique duplo: reenviar o mesmo
+  // formulário é resposta ao "preencha de novo" do agente (DNAWORK #82167,
+  // CEP errado reenviado igual ficava sem resposta).
+  if (isFlowFormReplyText(text)) return false;
   try {
     const db = prisma as unknown as {
       message: { findMany: (args: unknown) => Promise<Array<{ direction: string; content: string | null; messageType: string | null }>> };
