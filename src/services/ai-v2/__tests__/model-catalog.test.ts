@@ -22,7 +22,13 @@ vi.mock("@/lib/prisma-base", () => ({
       }
       if (sql.includes(`FROM "ai_v2_model_catalog_refreshes" r`)) return [];
       if (sql.includes(`"openaiApiKeyEnc", "anthropicApiKeyEnc" FROM "ai_agent_configs"`)) return state.agents;
-      if (sql.includes(`FROM "ai_v2_model_catalog" WHERE "organizationId" = $1`)) return state.catalog;
+      if (sql.includes(`FROM "ai_v2_model_catalog" WHERE "organizationId" = $1`)) {
+        // Linhas gravadas nesta atualização entram na leitura seguinte.
+        const seen = state.executed
+          .filter((e) => e.sql.includes(`"label","providerCreatedAt","firstSeenAt"`))
+          .map((e) => ({ modelId: e.values[1], provider: e.values[2], firstSeenAt: e.values[5], lastSeenAt: e.values[5] }));
+        return [...state.catalog, ...seen];
+      }
       if (sql.includes(`"draftConfig"->>'model'`)) return [];
       if (sql.includes(`COUNT(DISTINCT "conversationId")`)) return state.usage;
       if (sql.includes(`'facts'->>'model'`)) return [{ model: "gpt-5.6-luna" }];
@@ -143,6 +149,17 @@ describe("atualizar o catálogo da organização", () => {
     const insert = state.executed.find((e) => e.sql.includes(`INSERT INTO "ai_v2_model_catalog_refreshes"`))!;
     expect(insert.values.slice(1, 3)).toEqual(["org-1", "u-1"]);
     expect(state.audits).toHaveLength(1);
+  });
+
+  it("resumo cita só o que aparece na lista (versão com data escondida não conta como nova)", async () => {
+    const list = { data: [{ id: "gpt-6.1-terra" }, { id: "gpt-6.1-terra-2026-10-01" }, { id: "gpt-4o-2024-11-20" }, { id: "gpt-4o" }] };
+    const { impl } = fakeFetch({ [OPENAI]: { status: 200, body: list }, [ANTHROPIC]: { status: 200, body: { data: [], has_more: false } } });
+    const out = await refreshOrgModelCatalog({ organizationId: "org-1", userId: "u-1", fetchImpl: impl as never });
+    expect(out.result.openai.added).toEqual(["gpt-6.1-terra"]);
+    expect(upserted()).toContain("gpt-4o-2024-11-20");
+    // O que foi gravado no registro da atualização também é o resumo filtrado.
+    const saved = state.executed.find((e) => e.sql.includes(`SET "finishedAt" = now()`))!;
+    expect(JSON.parse(String(saved.values[1])).openai.added).toEqual(["gpt-6.1-terra"]);
   });
 
   it("falha de um provedor não apaga nem marca nada dele; o outro segue", async () => {
