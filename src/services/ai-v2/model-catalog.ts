@@ -438,6 +438,15 @@ export async function refreshOrgModelCatalog(args: {
       }),
     );
     const result = Object.fromEntries(entries) as RefreshResult;
+    // O resumo cita só o que aparece na lista: versões com data escondidas
+    // pelo nome sem data (ex.: gpt-4o-2024-11-20) e descobertos que saíram
+    // sem uso não entram — antes o resumo dizia "39 novos" com ~20 na lista.
+    const visibleIds = new Set((await listOrgModels(organizationId)).map((m) => m.id));
+    for (const r of Object.values(result)) {
+      if (!r.ok) continue;
+      if (r.added) r.added = r.added.filter((id) => visibleIds.has(id));
+      if (r.missing) r.missing = r.missing.filter((id) => visibleIds.has(id));
+    }
     await db.$executeRawUnsafe(
       `UPDATE "ai_v2_model_catalog_refreshes" SET "finishedAt" = now(), "result" = $2::jsonb WHERE "id" = $1`,
       refreshId, JSON.stringify(result),
