@@ -11,11 +11,11 @@ import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { prismaBase } from "@/lib/prisma-base";
 import { runWithContext } from "@/lib/request-context";
-import { estimateCost } from "@/lib/ai-agents/pricing";
 import { generateWithTools } from "@/services/ai/provider";
 import { getAgentApiKey, getAgentChatKey } from "@/services/ai/agent-key";
 import { validateV2Config } from "@/lib/ai-v2/config";
-import { v2ModelInfo, v2ModelProvider } from "@/lib/ai-v2/models";
+import { v2ModelCaps, v2ModelProvider } from "@/lib/ai-v2/models";
+import { estimateCostForOrg, isModelAvailableForOrg } from "./model-catalog";
 import type { V2AgentConfig } from "@/lib/ai-v2/types";
 import { getV2Agent, saveV2AgentDraft } from "./agents";
 import { applyConfigChanges, getAtPath, touchesProtectedPath, type V2ConfigChange } from "./config-patch";
@@ -445,7 +445,7 @@ export async function startConfigReview(args: {
   params: ReviewParams;
 }): Promise<{ runId: string }> {
   await ensureSchema();
-  if (!v2ModelInfo(args.params.model)) throw new Error("Escolha um modelo da lista.");
+  if (!(await isModelAvailableForOrg(args.organizationId, args.params.model))) throw new Error("Escolha um modelo da lista.");
   const agent = await getV2Agent(args.agentId, args.organizationId);
   if (!agent) throw new Error("Agente não encontrado.");
   const openaiKey = await getAgentApiKey(args.agentId).catch(() => null);
@@ -507,7 +507,7 @@ async function executeReview(args: { organizationId: string; agentId: string; pa
     temperature: 0,
     maxOutputTokens: 8000,
     maxSteps: 1,
-    jsonMode: v2ModelInfo(args.params.model)?.jsonMode ?? false,
+    jsonMode: v2ModelCaps(args.params.model)?.jsonMode ?? false,
     timeoutMs: REVIEW_LIMITS.timeoutMs,
   });
   const parsed = parseReview(res.text);
@@ -520,7 +520,7 @@ async function executeReview(args: { organizationId: string; agentId: string; pa
     scope: args.params.scope ?? "problemas",
   });
   const descartadas = Math.min(parsed.sugestoes.length, REVIEW_LIMITS.maxSuggestions) - suggestions.length;
-  const cost = estimateCost(args.params.model, res.inputTokens, res.outputTokens);
+  const cost = await estimateCostForOrg(args.organizationId, args.params.model, res.inputTokens, res.outputTokens);
   await db.$executeRawUnsafe(
     `UPDATE "ai_v2_config_reviews" SET "status"='done', "result"=$2::jsonb, "costUsd"=$3, "finishedAt"=now() WHERE "id"=$1`,
     args.runId, JSON.stringify({ resumo: parsed.resumo, suggestions, configHash: reviewConfigHash(config), descartadas }), cost,

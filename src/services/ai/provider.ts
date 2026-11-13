@@ -9,7 +9,7 @@
 
 import { createOpenAI } from "@ai-sdk/openai";
 import { createAnthropic } from "@ai-sdk/anthropic";
-import { v2ModelInfo } from "@/lib/ai-v2/models";
+import { v2ModelCaps } from "@/lib/ai-v2/models";
 import {
   embedMany,
   experimental_transcribe as transcribe,
@@ -82,7 +82,7 @@ const REASONING_HEADROOM = 4000;
  * modo JSON sem esquema (o prompt já exige JSON e quem chama extrai).
  */
 function modelCallOptions(modelName: string, args: { temperature?: number; maxOutputTokens?: number; jsonMode?: boolean }) {
-  const info = v2ModelInfo(modelName);
+  const info = v2ModelCaps(modelName);
   const isClaude = modelName.startsWith("claude-");
   const reasoning = info?.reasoning ?? false;
   const temperature = info && !info.temperature ? undefined : (args.temperature ?? 0.7);

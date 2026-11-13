@@ -4,7 +4,7 @@ import { requireAuth, requirePermission, runInSessionContext } from "@/lib/auth-
 import { getV2Agent } from "@/services/ai-v2/agents";
 import { ensureV2AgentSchema } from "@/services/ai-v2/ensure-schema";
 import { simulateV2Turn } from "@/services/ai-v2/test-turn";
-import { v2ModelInfo } from "@/lib/ai-v2/models";
+import { isModelAvailableForOrg } from "@/services/ai-v2/model-catalog";
 import { getLogger } from "@/lib/logger";
 
 const log = getLogger("api/ai-agents-v2/[id]/test");
@@ -35,7 +35,8 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       if (!agent) return NextResponse.json({ message: "Agente não encontrado." }, { status: 404 });
 
       const base = agent.draftConfig ?? agent.publishedConfig;
-      const configToTest = typeof body.model === "string" && v2ModelInfo(body.model) ? { ...base, model: body.model } : base;
+      const otherModel = typeof body.model === "string" && (await isModelAvailableForOrg(r.session.user.organizationId!, body.model)) ? body.model : null;
+      const configToTest = otherModel ? { ...base, model: otherModel } : base;
       const result = await simulateV2Turn(
         id,
         configToTest,

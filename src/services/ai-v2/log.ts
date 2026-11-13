@@ -4,7 +4,7 @@
  */
 
 import { prisma } from "@/lib/prisma";
-import { estimateCost } from "@/lib/ai-agents/pricing";
+import { estimateCostForOrg } from "./model-catalog";
 import type { V2Action, V2CRMContext, V2LLMOutput, V2Owner, V2Stage } from "@/lib/ai-v2/types";
 import type { V2ActionResult } from "./actions";
 import { takeV2Facts, takeV2TraceForLog } from "./trace";
@@ -45,7 +45,7 @@ export async function logV2Turn(args: {
   // DEV não aplica migrations: a coluna `feedback` pode ainda não existir e
   // o create devolveria (RETURNING) todas as colunas do model.
   await ensureV2AgentSchema().catch(() => undefined);
-  const costUsd = estimateCost(model, args.inputTokens, args.outputTokens);
+  const costUsd = await estimateCostForOrg(args.organizationId, model, args.inputTokens, args.outputTokens);
   await (prisma as unknown as {
     aISimpleTurnLog: {
       create: (args: { data: Record<string, unknown>; select: { id: true } }) => Promise<unknown>;
