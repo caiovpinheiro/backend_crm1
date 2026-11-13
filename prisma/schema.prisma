@@ -6942,6 +6942,8 @@ model WhatsAppGroup {
   channel          Channel  @relation(fields: [channelId], references: [id], onDelete: Cascade)
   jid              String
   name             String
+  /// Apelido interno (só no CRM). A sincronização com o WhatsApp não altera.
+  customName       String?
   description      String?
   ownerJid         String?
   participantCount Int      @default(0)

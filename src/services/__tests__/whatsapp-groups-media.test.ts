@@ -311,6 +311,52 @@ describe("empresa vinculada ao grupo", () => {
   });
 });
 
+describe("apelido interno do grupo", () => {
+  it("salva o apelido limpo, só no grupo do número", async () => {
+    db.whatsAppGroup.updateMany.mockResolvedValue({ count: 1 });
+    expect(
+      await svc.setWhatsAppGroupCustomName({ groupId: "g1", channelId: "ch1", customName: "  Confiança   RH " }),
+    ).toEqual({ customName: "Confiança RH" });
+    expect(db.whatsAppGroup.updateMany).toHaveBeenCalledWith({
+      where: { id: "g1", channelId: "ch1" },
+      data: { customName: "Confiança RH" },
+    });
+  });
+
+  it("vazio ou só espaços apaga (volta ao nome do WhatsApp)", async () => {
+    db.whatsAppGroup.updateMany.mockResolvedValue({ count: 1 });
+    expect(await svc.setWhatsAppGroupCustomName({ groupId: "g1", channelId: "ch1", customName: "   " })).toEqual({
+      customName: null,
+    });
+    expect(db.whatsAppGroup.updateMany.mock.calls[0][0].data).toEqual({ customName: null });
+  });
+
+  it("longo demais: 400 e nada muda; grupo de outro número: 404", async () => {
+    const long = "a".repeat(svc.GROUP_CUSTOM_NAME_MAX + 1);
+    expect(await svc.setWhatsAppGroupCustomName({ groupId: "g1", channelId: "ch1", customName: long })).toMatchObject({
+      status: 400,
+    });
+    expect(db.whatsAppGroup.updateMany).not.toHaveBeenCalled();
+    db.whatsAppGroup.updateMany.mockResolvedValue({ count: 0 });
+    expect(await svc.setWhatsAppGroupCustomName({ groupId: "g9", channelId: "ch1", customName: "x" })).toMatchObject({
+      status: 404,
+    });
+  });
+
+  it("a sincronização atualiza o nome do WhatsApp e não toca no apelido", async () => {
+    db.whatsAppGroup.upsert.mockResolvedValue({ id: "g1" });
+    db.whatsAppGroupMember.findMany.mockResolvedValue([]);
+    db.whatsAppGroup.findMany.mockResolvedValue([]);
+    await svc.replaceChannelGroups("org1", "ch1", [
+      { jid: "1@g.us", name: "DNA x CONFIANÇA", description: null, ownerJid: null, members: [] },
+    ]);
+    const arg = db.whatsAppGroup.upsert.mock.calls[0][0];
+    expect(arg.update.name).toBe("DNA x CONFIANÇA");
+    expect(arg.update).not.toHaveProperty("customName");
+    expect(arg.create).not.toHaveProperty("customName");
+  });
+});
+
 describe("reações e respostas", () => {
   it("uma reação por remetente: troca a anterior; vazio remove", () => {
     const cur = [
