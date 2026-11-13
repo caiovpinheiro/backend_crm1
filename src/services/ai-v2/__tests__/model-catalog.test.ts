@@ -22,7 +22,13 @@ vi.mock("@/lib/prisma-base", () => ({
       }
       if (sql.includes(`FROM "ai_v2_model_catalog_refreshes" r`)) return [];
       if (sql.includes(`"openaiApiKeyEnc", "anthropicApiKeyEnc" FROM "ai_agent_configs"`)) return state.agents;
-      if (sql.includes(`FROM "ai_v2_model_catalog" WHERE "organizationId" = $1`)) return state.catalog;
+      if (sql.includes(`FROM "ai_v2_model_catalog" WHERE "organizationId" = $1`)) {
+        // Linhas gravadas nesta atualização entram na leitura seguinte.
+        const seen = state.executed
+          .filter((e) => e.sql.includes(`"label","providerCreatedAt","firstSeenAt"`))
+          .map((e) => ({ modelId: e.values[1], provider: e.values[2], firstSeenAt: e.values[5], lastSeenAt: e.values[5] }));
+        return [...state.catalog, ...seen];
+      }
       if (sql.includes(`"draftConfig"->>'model'`)) return [];
       if (sql.includes(`COUNT(DISTINCT "conversationId")`)) return state.usage;
       if (sql.includes(`'facts'->>'model'`)) return [{ model: "gpt-5.6-luna" }];
@@ -61,6 +67,7 @@ function fakeFetch(routes: Record<string, Reply | ((url: string) => Reply)>) {
       status: r.status,
       headers: { get: (n: string) => r.headers?.[n.toLowerCase()] ?? null },
       json: async () => r.body,
+      text: async () => (typeof r.body === "string" ? r.body : JSON.stringify(r.body)),
     };
   });
   return { impl, calls };
@@ -145,6 +152,17 @@ describe("atualizar o catálogo da organização", () => {
     expect(state.audits).toHaveLength(1);
   });
 
+  it("resumo cita só o que aparece na lista (versão com data escondida não conta como nova)", async () => {
+    const list = { data: [{ id: "gpt-6.1-terra" }, { id: "gpt-6.1-terra-2026-10-01" }, { id: "gpt-4o-2024-11-20" }, { id: "gpt-4o" }] };
+    const { impl } = fakeFetch({ [OPENAI]: { status: 200, body: list }, [ANTHROPIC]: { status: 200, body: { data: [], has_more: false } } });
+    const out = await refreshOrgModelCatalog({ organizationId: "org-1", userId: "u-1", fetchImpl: impl as never });
+    expect(out.result.openai.added).toEqual(["gpt-6.1-terra"]);
+    expect(upserted()).toContain("gpt-4o-2024-11-20");
+    // O que foi gravado no registro da atualização também é o resumo filtrado.
+    const saved = state.executed.find((e) => e.sql.includes(`SET "finishedAt" = now()`))!;
+    expect(JSON.parse(String(saved.values[1])).openai.added).toEqual(["gpt-6.1-terra"]);
+  });
+
   it("falha de um provedor não apaga nem marca nada dele; o outro segue", async () => {
     const { impl } = fakeFetch({ [OPENAI]: { status: 429, headers: { "retry-after": "20" } }, [ANTHROPIC]: { status: 200, body: { data: [{ id: "claude-sonnet-5-5" }], has_more: false } } });
     const out = await refreshOrgModelCatalog({ organizationId: "org-1", userId: "u-1", fetchImpl: impl as never });
@@ -181,6 +199,45 @@ describe("atualizar o catálogo da organização", () => {
     expect(err).toBeInstanceOf(RefreshCooldownError);
     expect(err.retryAfterSec).toBe((REFRESH_COOLDOWN_MS - 10_000) / 1000);
     expect(impl).not.toHaveBeenCalled();
+  });
+});
+
+describe("preço oficial na atualização", () => {
+  const OPENAI_PRICING = "https://developers.openai.com/api/docs/pricing.md";
+  const ANTHROPIC_PRICING = "https://platform.claude.com/docs/en/about-claude/pricing.md";
+  const officialRows = () =>
+    state.executed.filter((e) => e.sql.includes(`"officialInputPer1M","officialOutputPer1M"`)).map((e) => [e.values[1], e.values[3], e.values[4]]);
+
+  it("lê a página oficial de cada provedor (mesmo sem chave) e grava o preço", async () => {
+    state.agents = [{ id: "ag-1", openaiApiKeyEnc: "enc:sk-openai-secreta", anthropicApiKeyEnc: null }];
+    const { impl, calls } = fakeFetch({
+      [OPENAI_PRICING]: { status: 200, body: "### Standard pricing data\n\n| Model | Input | Output |\n| --- | --- | --- |\n| gpt-6.1-terra | $1.00 | $5.00 |\n" },
+      [ANTHROPIC_PRICING]: { status: 200, body: "## Model pricing\n\n| Model | Base input tokens | Output tokens |\n| --- | --- | --- |\n| Claude Sonnet 5 | $2 / MTok | $10 / MTok |\n" },
+      [OPENAI]: { status: 200, body: openaiList },
+    });
+    const out = await refreshOrgModelCatalog({ organizationId: "org-1", userId: "u-1", fetchImpl: impl as never });
+    expect(officialRows()).toEqual(expect.arrayContaining([["gpt-6.1-terra", 1, 5], ["claude-sonnet-5", 2, 10]]));
+    expect(out.result.openai.prices).toMatchObject({ ok: true, count: 1 });
+    expect(out.result.anthropic).toMatchObject({ ok: false, code: "no_key", prices: { ok: true, count: 1 } });
+    // Página de preço não recebe chave.
+    const pricingCalls = calls.filter((c) => c.url.includes("pricing"));
+    expect(pricingCalls).toHaveLength(2);
+    expect(pricingCalls.every((c) => !c.headers.Authorization && !c.headers["x-api-key"])).toBe(true);
+  });
+
+  it("página de preço fora do ar ou com formato novo: avisa e não apaga o preço lido antes", async () => {
+    const { impl } = fakeFetch({
+      [OPENAI_PRICING]: { status: 200, body: "# Pricing\n\nmudou tudo" },
+      [ANTHROPIC_PRICING]: { status: 503 },
+      [OPENAI]: { status: 200, body: openaiList },
+      [ANTHROPIC]: { status: 200, body: { data: [], has_more: false } },
+    });
+    const out = await refreshOrgModelCatalog({ organizationId: "org-1", userId: "u-1", fetchImpl: impl as never });
+    expect(out.result.openai.prices).toMatchObject({ ok: false });
+    expect(out.result.openai.prices?.error).toContain("formato");
+    expect(out.result.anthropic.prices).toMatchObject({ ok: false });
+    expect(officialRows()).toEqual([]);
+    expect(out.result.openai.ok).toBe(true);
   });
 });
 

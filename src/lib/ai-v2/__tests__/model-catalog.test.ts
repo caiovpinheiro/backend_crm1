@@ -158,6 +158,27 @@ describe("modelo sem preço", () => {
     expect(list.find((m) => m.id === "gpt-4o-mini")).toMatchObject({ inputPer1M: 0.2, priceSource: "org" });
   });
 
+  it("preço oficial do provedor: depois do admin, antes da tabela do código; versão com data usa o do nome sem data", () => {
+    const list = mergeModelCatalog([
+      seen("gpt-6.1-terra", { officialInputPer1M: 1, officialOutputPer1M: 5, officialPriceAt: "2026-11-13T15:00:00Z" }),
+      { modelId: "gpt-5.6-sol", provider: "openai", officialInputPer1M: 3, officialOutputPer1M: 15 },
+      seen("gpt-5.4", { inputPer1M: 9, outputPer1M: 9, officialInputPer1M: 2.5, officialOutputPer1M: 15 }),
+    ]);
+    expect(list.find((m) => m.id === "gpt-6.1-terra")).toMatchObject({
+      inputPer1M: 1,
+      outputPer1M: 5,
+      priceSource: "official",
+      officialPriceAt: "2026-11-13T15:00:00.000Z",
+    });
+    expect(list.find((m) => m.id === "gpt-5.6-sol")).toMatchObject({ inputPer1M: 3, priceSource: "official" });
+    expect(list.find((m) => m.id === "gpt-5.4")).toMatchObject({ inputPer1M: 9, priceSource: "org" });
+    expect(resolveModelPrice("gpt-6.1-terra-2026-10-01", null, { officialInputPer1M: 1, officialOutputPer1M: 5 })).toEqual({
+      inputPer1M: 1,
+      outputPer1M: 5,
+      source: "official",
+    });
+  });
+
   it("preço pela metade (só entrada) ou inválido não conta", () => {
     expect(resolveModelPrice("gpt-6.1-terra", { inputPer1M: 1, outputPer1M: null }).source).toBe("unknown");
     expect(resolveModelPrice("gpt-6.1-terra", { inputPer1M: Number.NaN, outputPer1M: 2 }).source).toBe("unknown");
