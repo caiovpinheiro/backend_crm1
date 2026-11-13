@@ -5,7 +5,7 @@
 
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
-import { costForUsage, resolveModelPrice } from "@/lib/ai-v2/model-catalog";
+import { costForUsage, resolveModelPrice, type ModelPriceSource } from "@/lib/ai-v2/model-catalog";
 import { getModelPriceForOrg } from "./model-catalog";
 import { nextUserNumber } from "@/lib/public-id";
 import type { V2AgentConfig } from "@/lib/ai-v2/types";
@@ -48,7 +48,7 @@ export type V2AgentListItem = {
   /** Gasto estimado de hoje, US$, pelo preço do modelo para a organização. */
   costTodayUsd: number;
   /** "unknown": modelo sem preço; o gasto usa o teto do provedor. */
-  costPriceSource: "builtin" | "org" | "unknown";
+  costPriceSource: ModelPriceSource;
 };
 
 function formatZodIssues(error: z.ZodError): string {

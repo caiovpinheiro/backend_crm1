@@ -35,9 +35,14 @@ export type ModelCatalogRow = {
   inputPer1M?: number | null;
   outputPer1M?: number | null;
   priceUpdatedAt?: DateLike;
+  /** Preço da página oficial do provedor, lido no "Atualizar modelos". */
+  officialInputPer1M?: number | null;
+  officialOutputPer1M?: number | null;
+  officialPriceAt?: DateLike;
 };
 
-export type ModelPriceSource = "builtin" | "org" | "unknown";
+/** org: informado pelo admin; official: página de preços do provedor; builtin: tabela do código. */
+export type ModelPriceSource = "org" | "official" | "builtin" | "unknown";
 
 export type CatalogModel = {
   id: string;
@@ -59,6 +64,8 @@ export type CatalogModel = {
   missing: boolean;
   missingSince: string | null;
   discoveredAt: string | null;
+  /** Quando o preço oficial foi lido (null = sem preço oficial). */
+  officialPriceAt: string | null;
 };
 
 function iso(v: DateLike): string | null {
@@ -71,19 +78,30 @@ function validPrice(v: unknown): v is number {
   return typeof v === "number" && Number.isFinite(v) && v >= 0;
 }
 
+type PriceRow = Pick<ModelCatalogRow, "inputPer1M" | "outputPer1M" | "officialInputPer1M" | "officialOutputPer1M">;
+
 /**
- * Preço de um modelo: o informado pela organização vence (o provedor mudou
- * o preço e o código ainda não), depois a tabela do código; sem nenhum dos
- * dois, desconhecido — a estimativa usa o teto do provedor.
+ * Preço de um modelo, nesta ordem:
+ *  1. o informado pelo admin da organização;
+ *  2. o da página oficial do provedor (lido no "Atualizar modelos"; versão
+ *     com data usa o do nome sem data, `aliasRow`);
+ *  3. a tabela do código;
+ *  4. desconhecido — a estimativa usa o teto do provedor.
  */
 export function resolveModelPrice(
   modelId: string,
-  orgPrice?: { inputPer1M?: number | null; outputPer1M?: number | null } | null,
+  row?: PriceRow | null,
+  aliasRow?: PriceRow | null,
 ): { inputPer1M: number; outputPer1M: number; source: ModelPriceSource } {
-  if (orgPrice && validPrice(orgPrice.inputPer1M) && validPrice(orgPrice.outputPer1M)) {
-    return { inputPer1M: orgPrice.inputPer1M, outputPer1M: orgPrice.outputPer1M, source: "org" };
+  if (row && validPrice(row.inputPer1M) && validPrice(row.outputPer1M)) {
+    return { inputPer1M: row.inputPer1M, outputPer1M: row.outputPer1M, source: "org" };
   }
-  const info = v2ModelInfo(modelId);
+  for (const r of [row, aliasRow]) {
+    if (r && validPrice(r.officialInputPer1M) && validPrice(r.officialOutputPer1M)) {
+      return { inputPer1M: r.officialInputPer1M, outputPer1M: r.officialOutputPer1M, source: "official" };
+    }
+  }
+  const info = v2ModelInfo(modelId) ?? v2ModelInfo(stripModelDateSuffix(modelId));
   if (info) return { inputPer1M: info.inputPer1M, outputPer1M: info.outputPer1M, source: "builtin" };
   const ceiling = unknownModelPriceCeiling(modelId.startsWith("claude-") ? "anthropic" : "openai");
   return { ...ceiling, source: "unknown" };
@@ -129,6 +147,7 @@ export function mergeModelCatalog(
   for (const m of V2_MODELS) {
     const row = byId.get(m.id);
     const price = resolveModelPrice(m.id, row);
+    const officialAt = price.source === "official" ? iso(row?.officialPriceAt) : null;
     out.push({
       id: m.id,
       name: m.label,
@@ -145,6 +164,7 @@ export function mergeModelCatalog(
       missing: Boolean(row?.missingSince),
       missingSince: iso(row?.missingSince),
       discoveredAt: iso(row?.firstSeenAt),
+      officialPriceAt: officialAt,
       createdAt: iso(row?.providerCreatedAt),
     });
   }
@@ -161,7 +181,8 @@ export function mergeModelCatalog(
     if (alias !== r.modelId && allIds.has(alias) && !inUse.has(r.modelId)) continue;
     const caps = inferV2ModelCaps(r.modelId);
     if (!caps) continue;
-    const price = resolveModelPrice(r.modelId, r);
+    const aliasRow = alias !== r.modelId ? byId.get(alias) : undefined;
+    const price = resolveModelPrice(r.modelId, r, aliasRow);
     const known = price.source !== "unknown";
     out.push({
       id: r.modelId,
@@ -179,6 +200,7 @@ export function mergeModelCatalog(
       missing,
       missingSince: iso(r.missingSince),
       discoveredAt: iso(r.firstSeenAt),
+      officialPriceAt: price.source === "official" ? iso(r.officialPriceAt ?? aliasRow?.officialPriceAt) : null,
       createdAt: iso(r.providerCreatedAt),
     });
   }
