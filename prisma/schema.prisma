@@ -6946,6 +6946,12 @@ model WhatsAppGroup {
   syncedAt         DateTime @default(now())
   /// Última mensagem recebida ou enviada — ordena a lista como no WhatsApp.
   lastMessageAt    DateTime?
+  /// Prévia da última mensagem na lista (sobrescrita a cada mensagem).
+  lastMessagePreview String?
+  lastMessageAuthor  String?
+  lastMessageFromMe  Boolean  @default(false)
+  /// "Visto até": compartilhado por número QR — quem abrir o grupo no CRM zera para todos.
+  lastReadAt       DateTime?
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 

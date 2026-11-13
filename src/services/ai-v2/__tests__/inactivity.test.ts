@@ -356,3 +356,79 @@ describe("lembrete escrito pelo agente", () => {
     expect(mocks.send.mock.calls[0][0].text).toContain("Ainda está por aí?");
   });
 });
+
+/**
+ * Lembrete em loop (10–12/11): o motor não reconhecia o próprio lembrete e
+ * recomeçava a contagem a partir dele — "Ainda está aí?" a cada 16 min por
+ * até 23 h, sem nunca chegar ao encerramento. Acontecia quando a conversa não
+ * tinha estado gravado (o registro do lembrete não é salvo) ou quando o
+ * registro não batia com a hora da mensagem enviada.
+ */
+describe("lembrete não pode virar loop", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.send.mockResolvedValue({ sent: true });
+  });
+  const LEMBRETE = "Ainda está aí? 😊 Me conta o que você precisa que eu já te direciono.";
+  const config = {
+    name: "Agente", tone: "Objetivo", autonomyMode: "auto",
+    inactivity: {
+      enabled: true, closeAfter: 30,
+      followUps: [{ after: 15, mode: "by_reply", questionMessage: LEMBRETE, procedureMessage: "Conseguiu seguir o passo a passo?" }],
+    },
+  };
+
+  it("sem estado gravado: reconhece o lembrete 'depois de uma pergunta' pelo texto e encerra no prazo", async () => {
+    mocks.queryRaw.mockResolvedValueOnce([row({
+      simple_config: config, has_state: false,
+      last_out_content: LEMBRETE, last_out_at: minutesAgo(16), last_inbound_at: minutesAgo(33),
+    })]);
+    expect(await processIdleV2(NOW)).toEqual({ nudged: 0, closed: 1 });
+    expect(mocks.send).not.toHaveBeenCalled();
+    expect(mocks.closeState).toHaveBeenCalledTimes(1);
+  });
+
+  it("registro gravado com hora que não bate (mensagem saiu depois): vale pelo texto do lembrete", async () => {
+    mocks.queryRaw.mockResolvedValueOnce([row({
+      simple_config: config, has_state: true,
+      last_out_content: LEMBRETE, last_out_at: minutesAgo(16), last_inbound_at: minutesAgo(33),
+      idle_follow_up: { anchorAt: minutesAgo(32).toISOString(), sent: 1, lastAt: minutesAgo(17).toISOString(), kind: "question", text: LEMBRETE },
+    })]);
+    expect(await processIdleV2(NOW)).toEqual({ nudged: 0, closed: 1 });
+    expect(mocks.send).not.toHaveBeenCalled();
+  });
+
+  it("texto irreconhecível (lembrete escrito pelo agente ou em balões): o agente já falou sozinho há 15+ min → não manda outro, encerra", async () => {
+    mocks.queryRaw.mockResolvedValueOnce([row({
+      simple_config: config, has_state: false,
+      last_out_content: "Conseguiu achar o boleto?", last_out_at: minutesAgo(16), last_inbound_at: minutesAgo(33),
+      first_out_since_inbound: minutesAgo(32),
+    })]);
+    expect(await processIdleV2(NOW)).toEqual({ nudged: 0, closed: 1 });
+    expect(mocks.send).not.toHaveBeenCalled();
+  });
+
+  it("mesmo texto num atendimento novo (cliente escreveu depois do registro antigo): não usa o registro velho", async () => {
+    mocks.queryRaw.mockResolvedValueOnce([row({
+      simple_config: config, has_state: true,
+      last_out_content: "Qual é o seu curso?", last_out_at: minutesAgo(16), last_inbound_at: minutesAgo(17),
+      first_out_since_inbound: minutesAgo(16),
+      idle_follow_up: { anchorAt: minutesAgo(600).toISOString(), sent: 1, lastAt: minutesAgo(585).toISOString(), kind: "question", text: LEMBRETE },
+    })]);
+    mocks.queryRaw.mockResolvedValueOnce([{ createdAt: NOW }]);
+    expect(await processIdleV2(NOW)).toEqual({ nudged: 1, closed: 0 });
+    expect(mocks.send.mock.calls[0][0].text).toBe(LEMBRETE);
+    expect(JSON.parse(String(mocks.executeRaw.mock.calls[0][2]))).toMatchObject({ sent: 1, text: LEMBRETE, anchorAt: minutesAgo(16).toISOString() });
+  });
+
+  it("caso normal continua igual: agente perguntou há 16 min e ninguém respondeu → primeiro lembrete", async () => {
+    mocks.queryRaw.mockResolvedValueOnce([row({
+      simple_config: config, has_state: true,
+      last_out_content: "Qual é o seu curso?", last_out_at: minutesAgo(16), last_inbound_at: minutesAgo(17),
+      first_out_since_inbound: minutesAgo(16),
+    })]);
+    mocks.queryRaw.mockResolvedValueOnce([{ createdAt: NOW }]);
+    expect(await processIdleV2(NOW)).toEqual({ nudged: 1, closed: 0 });
+    expect(mocks.send.mock.calls[0][0].text).toBe(LEMBRETE);
+  });
+});
