@@ -41,6 +41,7 @@ import {
 } from "@/lib/automation-workflow";
 import { defaultDealTitleForContact } from "@/lib/display-name";
 import { getLogger } from "@/lib/logger";
+import { companyMessageVars, primaryCompanyForDeal } from "@/services/deal-companies";
 import {
   metaWhatsApp,
   metaClientFromConfig,
@@ -1519,6 +1520,8 @@ async function resolveLeadAssigneeVars(
 }
 
 const ASSIGNEE_TOKEN_RE = /\{\{\s*(assignee|responsavel)\s*\./i;
+/** `{{empresa.*}}` / `{{company.*}}`: empresa principal do negócio. */
+const COMPANY_TOKEN_RE = /\{\{\s*(empresa|company)\s*\./i;
 
 /**
  * `interpolateContextVariables` + responsável do lead. Só consulta o banco
@@ -1530,13 +1533,20 @@ async function interpolateMessageVariables(
   rt: RuntimeContext,
   flowVars: Record<string, unknown> | undefined,
 ): Promise<string> {
-  if (!ASSIGNEE_TOKEN_RE.test(template)) {
+  const wantsAssignee = ASSIGNEE_TOKEN_RE.test(template);
+  const wantsCompany = COMPANY_TOKEN_RE.test(template);
+  if (!wantsAssignee && !wantsCompany) {
     return interpolateContextVariables(template, rt, flowVars);
   }
-  const assigneeVars = await resolveLeadAssigneeVars(rt);
+  const assigneeVars = wantsAssignee ? await resolveLeadAssigneeVars(rt) : {};
+  // Empresa principal do negócio: {{empresa.nome}}, {{empresa.endereco}}…
+  const companyVars = wantsCompany
+    ? companyMessageVars(rt.dealId ? await primaryCompanyForDeal(rt.dealId).catch(() => null) : null)
+    : {};
   return interpolateContextVariables(template, rt, {
     ...(flowVars ?? {}),
     ...assigneeVars,
+    ...companyVars,
   });
 }
 
