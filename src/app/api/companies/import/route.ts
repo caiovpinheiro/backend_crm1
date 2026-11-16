@@ -15,6 +15,7 @@ import {
   readTableFromBuffer,
 } from "@/lib/import-helpers";
 import { prisma } from "@/lib/prisma";
+import { COMPANY_IMPORT_NAME_HEADERS, normalizeImportHeader } from "@/jobs/import/company-import.job";
 import { IMPORT_ETL_JOB_NAMES, enqueueImportEtl } from "@/lib/queue";
 import { generateFileName, saveFile } from "@/lib/storage/local";
 import { getLogger } from "@/lib/logger";
@@ -72,7 +73,19 @@ export async function POST(request: Request) {
       }
 
       const delimiter = readDelimiterFlag(formData);
-      const updateExisting = readUpdateExistingFlag(formData);
+      // Empresas: atualizar existentes só com escolha explícita do usuário
+      // (campo ausente = não atualizar; o helper genérico assume true).
+      const updateExisting =
+        formData.get("updateExisting") === null
+          ? false
+          : readUpdateExistingFlag(formData);
+      if (updateExisting) {
+        const editDenied = await requirePermissionForUser(
+          authResult.user,
+          "company:edit",
+        );
+        if (editDenied) return editDenied;
+      }
       const buffer = Buffer.from(await file.arrayBuffer());
       if (buffer.length > IMPORT_MAX_BYTES) {
         return NextResponse.json(
@@ -80,9 +93,16 @@ export async function POST(request: Request) {
           { status: 413 },
         );
       }
-      const { rows } = await readTableFromBuffer(buffer, file.name, delimiter, {
+      const { headers, rows } = await readTableFromBuffer(buffer, file.name, delimiter, {
         maxRows: MAX_ROWS,
       });
+
+      if (!headers.some((h) => COMPANY_IMPORT_NAME_HEADERS.has(normalizeImportHeader(h)))) {
+        return NextResponse.json(
+          { message: 'Coluna "Nome" obrigatória não encontrada no arquivo.' },
+          { status: 400 },
+        );
+      }
 
       if (rows.length === 0) {
         return NextResponse.json({ message: "Arquivo sem linhas de dados." }, { status: 400 });

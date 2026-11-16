@@ -2,8 +2,10 @@ import { NextResponse } from "next/server";
 
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import {
+  CompanyNumberConflictError,
   createCompany,
   getCompanies,
+  parseCompanyNumberInput,
   type CompanySegment,
   type CompanySortField,
 } from "@/services/companies";
@@ -11,7 +13,7 @@ import { getLogger } from "@/lib/logger";
 
 const log = getLogger("api/companies");
 
-const SORT_FIELDS = new Set<CompanySortField>(["name", "createdAt", "updatedAt"]);
+const SORT_FIELDS = new Set<CompanySortField>(["number", "name", "createdAt", "updatedAt"]);
 
 const SEGMENTS = new Set<CompanySegment>([
   "todos",
@@ -98,7 +100,15 @@ export async function POST(request: Request) {
       return NextResponse.json({ message: "Nome é obrigatório." }, { status: 400 });
     }
 
+    // `number` ausente/null → gerado automaticamente; informado → usado como
+    // está (inteiro positivo, único na org) ou 400/409 — nunca trocado.
+    const parsedNumber = parseCompanyNumberInput(b.number);
+    if (!parsedNumber.ok) {
+      return NextResponse.json({ message: parsedNumber.message }, { status: 400 });
+    }
+
     const company = await createCompany({
+      number: parsedNumber.value,
       name: b.name.trim(),
       domain: b.domain === null ? null : typeof b.domain === "string" ? b.domain.trim() : undefined,
       industry:
@@ -116,6 +126,12 @@ export async function POST(request: Request) {
     return NextResponse.json(company, { status: 201 });
     });
   } catch (e) {
+    if (e instanceof CompanyNumberConflictError) {
+      return NextResponse.json(
+        { message: e.message, field: "number", number: e.number },
+        { status: 409 },
+      );
+    }
     log.error({ err: e }, "POST falhou");
     return NextResponse.json({ message: "Erro ao criar empresa." }, { status: 500 });
   }

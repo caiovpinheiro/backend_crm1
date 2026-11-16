@@ -36,7 +36,10 @@ export async function GET(request: Request) {
       const companies = await prisma.company.findMany({
         take: MAX_ROWS,
         orderBy: [{ name: "asc" }],
-        include: { _count: { select: { contacts: true } } },
+        include: {
+          _count: { select: { contacts: true } },
+          parent: { select: { number: true } },
+        },
       });
 
       const headers = [
@@ -51,9 +54,11 @@ export async function GET(request: Request) {
         "Cidade",
         "Estado",
         "Notas",
+        "Matriz (número)",
         "Contatos",
         "Criado em",
         "Atualizado em",
+        "ID interno",
       ];
 
       const rows = companies.map((c) => ({
@@ -68,9 +73,11 @@ export async function GET(request: Request) {
         Cidade: c.city ?? "",
         Estado: c.state ?? "",
         Notas: c.notes ?? "",
+        "Matriz (número)": c.parent?.number ?? "",
         Contatos: c._count.contacts,
         "Criado em": csvDate(c.createdAt),
         "Atualizado em": csvDate(c.updatedAt),
+        "ID interno": c.id,
       }));
 
       const csv = toCsv(headers, rows);
