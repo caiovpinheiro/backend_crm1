@@ -173,6 +173,7 @@ model Organization {
   productMessageTemplates  ProductMessageTemplate[]
   quotaPolicies            QuotaConsumptionPolicy[]
   dealQuotas               DealQuota[]
+  dealCompanies            DealCompany[]
   quotaMovements           QuotaMovement[]
   demandBoards             DemandBoard[]
   demandStages             DemandStage[]
@@ -1386,6 +1387,8 @@ model Company {
   whatsappGroups WhatsAppGroup[]
   /// Tarefas vinculadas a esta empresa.
   activities     Activity[]
+  /// Negócios vinculados a esta empresa (qualquer posição).
+  dealLinks      DealCompany[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1689,6 +1692,8 @@ model Deal {
   calls          Call[]
   // Cotas de desconto vinculadas (PRD Cotas de Desconto — Fase 1).
   quotas         DealQuota[]
+  /// Empresas vinculadas ao negócio (uma pode ser a principal).
+  companies      DealCompany[]
 
   /// Unidade (filial) associada ao deal — resolve `ProductOffer` e escopo
   /// de matching de cotas de desconto (RN-01). Aditivo: null = deals legados.
@@ -2645,6 +2650,27 @@ model DealQuota {
   @@index([quotaId])
   @@index([status])
   @@map("deal_quotas")
+}
+
+/// Empresa vinculada a um negócio (ex.: candidato indicado para a empresa).
+/// Um negócio pode ter várias; `isPrimary` marca a do foco atual, usada nas
+/// variáveis `{{empresa.*}}`. Filtros/ativações "por empresa" contam todas.
+model DealCompany {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  dealId         String
+  deal           Deal         @relation(fields: [dealId], references: [id], onDelete: Cascade)
+  companyId      String
+  company        Company      @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  isPrimary      Boolean      @default(false)
+  createdAt      DateTime     @default(now())
+
+  @@unique([dealId, companyId])
+  @@index([organizationId])
+  @@index([dealId])
+  @@index([companyId])
+  @@map("deal_companies")
 }
 
 /// Ledger de movimentações da cota (fonte de verdade auditável).
