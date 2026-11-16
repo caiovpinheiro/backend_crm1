@@ -421,21 +421,31 @@ function numberedTableMeta(model: Prisma.ModelName): NumberedTableMeta {
  * falhar depois (o contador não participa da transaction dele). Isso abre
  * buracos na numeração, o que já acontecia antes via retry. Numeração é
  * identificador público, não contagem.
+ *
+ * `floor`: número mínimo já "ocupado" que a faixa precisa pular. Usado pelo
+ * `createMany` que mistura linhas com número manual e linhas automáticas —
+ * as manuais ainda não estão na tabela, então o `MAX(number)` não as vê e a
+ * faixa automática poderia cair em cima delas.
  */
 export async function allocateOrgNumber(
   model: Prisma.ModelName,
   orgId: string,
   count = 1,
+  floor = 0,
 ): Promise<number> {
   const { table, orgColumn, numberColumn } = numberedTableMeta(model);
   const n = Math.max(1, Math.trunc(count));
+  const minFloor = Number.isFinite(floor) ? Math.max(0, Math.trunc(floor)) : 0;
 
   const counter = Prisma.raw(quoteIdentifier(NUMBER_COUNTER_TABLE));
   const rows = await prismaBase.$queryRaw<
     Array<{ next_number: bigint | number | string }>
   >`
     WITH atual AS (
-      SELECT COALESCE(MAX(${Prisma.raw(quoteIdentifier(numberColumn))}), 0) AS max_num
+      SELECT GREATEST(
+               COALESCE(MAX(${Prisma.raw(quoteIdentifier(numberColumn))}), 0),
+               ${minFloor}::int
+             ) AS max_num
         FROM ${Prisma.raw(quoteIdentifier(table))}
        WHERE ${Prisma.raw(quoteIdentifier(orgColumn))} = ${orgId}
     )
@@ -514,6 +524,10 @@ function extend(base: typeof prismaBase = prismaBase) {
           const a = (args ?? {}) as AnyArgs;
 
           const numbered = NUMBERED_ORG_MODELS.has(model as Prisma.ModelName);
+          // true só quando o número foi gerado aqui. Número informado pelo
+          // caller (manual) nunca é trocado no retry: a colisão sobe como
+          // P2002 para o caller decidir (ex.: 409 em /api/companies).
+          let autoNumbered = false;
 
           switch (operation) {
             case "findUnique":
@@ -567,6 +581,7 @@ function extend(base: typeof prismaBase = prismaBase) {
               ) {
                 (a.data as { number: number }).number =
                   await allocateOrgNumber(model as Prisma.ModelName, orgId);
+                autoNumbered = true;
               }
               break;
             }
@@ -586,6 +601,13 @@ function extend(base: typeof prismaBase = prismaBase) {
                   (d) => d && typeof d === "object" && d.number == null,
                 );
                 if (missing.length > 0) {
+                  // Números manuais do próprio lote ainda não estão na tabela:
+                  // a faixa automática começa acima do maior deles.
+                  let manualMax = 0;
+                  for (const d of rows) {
+                    const v = (d as { number?: unknown } | null)?.number;
+                    if (typeof v === "number" && v > manualMax) manualMax = v;
+                  }
                   // Reserva a faixa inteira num statement: pedir 1 número e
                   // incrementar em memória devolvia números já emitidos para
                   // outro createMany concorrente.
@@ -593,6 +615,7 @@ function extend(base: typeof prismaBase = prismaBase) {
                     model as Prisma.ModelName,
                     orgId,
                     missing.length,
+                    manualMax,
                   );
                   for (const d of missing) {
                     d.number = n++;
@@ -621,6 +644,7 @@ function extend(base: typeof prismaBase = prismaBase) {
                 ) {
                   (a.create as { number: number }).number =
                     await allocateOrgNumber(model as Prisma.ModelName, orgId);
+                  autoNumbered = true;
                 }
               }
               if (a.update) {
@@ -643,8 +667,10 @@ function extend(base: typeof prismaBase = prismaBase) {
 
           // Retry mantido como rede de segurança: `allocateOrgNumber` já é
           // atômico, mas ainda existem call sites que atribuem `number` por
-          // conta própria (ex.: `withConversationNumberRetry`) e podem
-          // colidir com a faixa emitida pelo contador.
+          // conta própria (ex.: `withConversationNumberRetry`, número manual
+          // de empresa) e podem colidir com a faixa emitida pelo contador.
+          // Só o número que ESTA extension gerou é realocado; o informado pelo
+          // caller nunca é substituído em silêncio.
           if (
             numbered &&
             (operation === "create" ||
@@ -659,6 +685,7 @@ function extend(base: typeof prismaBase = prismaBase) {
               } catch (err) {
                 lastErr = err;
                 if (!isNumberUniqueViolation(err)) throw err;
+                if (!autoNumbered) throw err;
                 if (operation === "create" && a.data) {
                   (a.data as { number: number }).number =
                     await allocateOrgNumber(model as Prisma.ModelName, orgId);
