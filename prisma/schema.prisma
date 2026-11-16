@@ -6985,6 +6985,8 @@ model WhatsAppGroup {
   /// Empresa vinculada ao grupo (uma por grupo; uma empresa pode ter vários).
   companyId        String?
   company          Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  /// Quando a empresa atual foi vinculada — "grupo mais recente" da automação Enviar para empresa.
+  companyLinkedAt  DateTime?
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 

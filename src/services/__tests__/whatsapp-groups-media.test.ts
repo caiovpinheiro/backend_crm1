@@ -282,7 +282,7 @@ describe("empresa vinculada ao grupo", () => {
     expect(r).toEqual({ company: { id: "c1", number: 4, name: "5RS Sucata Digital Eirelli" } });
     expect(db.whatsAppGroup.updateMany).toHaveBeenCalledWith({
       where: { id: "g1", channelId: "ch1" },
-      data: { companyId: "c1" },
+      data: { companyId: "c1", companyLinkedAt: expect.any(Date) },
     });
   });
 
@@ -300,7 +300,7 @@ describe("empresa vinculada ao grupo", () => {
     expect(await svc.setWhatsAppGroupCompany({ groupId: "g1", channelId: "ch1", companyId: null })).toEqual({
       company: null,
     });
-    expect(db.whatsAppGroup.updateMany.mock.calls[0][0].data).toEqual({ companyId: null });
+    expect(db.whatsAppGroup.updateMany.mock.calls[0][0].data).toEqual({ companyId: null, companyLinkedAt: null });
   });
 
   it("grupo de outro número: 404", async () => {

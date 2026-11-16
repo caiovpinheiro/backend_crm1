@@ -41,7 +41,13 @@ import {
 } from "@/lib/automation-workflow";
 import { defaultDealTitleForContact } from "@/lib/display-name";
 import { getLogger } from "@/lib/logger";
-import { companyMessageVars, primaryCompanyForDeal } from "@/services/deal-companies";
+import { companyMessageVars, primaryCompanyForDeal, type DealCompanyDto } from "@/services/deal-companies";
+import {
+  CompanyGroupSendError,
+  readCompanyGroupConfig,
+  resolveCompanyGroupTargets,
+  sendToCompanyGroups,
+} from "@/services/company-group-send";
 import {
   metaWhatsApp,
   metaClientFromConfig,
@@ -145,6 +151,8 @@ const META_SEND_FAILURE_STEP_TYPES = new Set([
   "question",
   // SMTP: conta ausente, destinatário inválido ou recusa do servidor.
   "send_email",
+  // Grupo da empresa: sem empresa/grupo ou número QR desconectado.
+  "send_company_group",
 ]);
 
 /**
@@ -1532,6 +1540,8 @@ async function interpolateMessageVariables(
   template: string,
   rt: RuntimeContext,
   flowVars: Record<string, unknown> | undefined,
+  /** Empresa de `{{empresa.*}}` no lugar da principal do negócio (Enviar para empresa). */
+  companyOverride?: DealCompanyDto["company"] | null,
 ): Promise<string> {
   const wantsAssignee = ASSIGNEE_TOKEN_RE.test(template);
   const wantsCompany = COMPANY_TOKEN_RE.test(template);
@@ -1541,7 +1551,13 @@ async function interpolateMessageVariables(
   const assigneeVars = wantsAssignee ? await resolveLeadAssigneeVars(rt) : {};
   // Empresa principal do negócio: {{empresa.nome}}, {{empresa.endereco}}…
   const companyVars = wantsCompany
-    ? companyMessageVars(rt.dealId ? await primaryCompanyForDeal(rt.dealId).catch(() => null) : null)
+    ? companyMessageVars(
+        companyOverride !== undefined
+          ? companyOverride
+          : rt.dealId
+            ? await primaryCompanyForDeal(rt.dealId).catch(() => null)
+            : null,
+      )
     : {};
   return interpolateContextVariables(template, rt, {
     ...(flowVars ?? {}),
@@ -1659,6 +1675,7 @@ const ROUTE_TRACKED_STEP_TYPES = new Set([
   "send_whatsapp_interactive",
   "send_whatsapp_list",
   "send_email",
+  "send_company_group",
   "question",
 ]);
 
@@ -2483,6 +2500,34 @@ export async function executeStep(
         );
       }
       return { note: `enviado para ${to} via ${account.email}` };
+    }
+
+    case "send_company_group": {
+      // Grupo(s) de WhatsApp da empresa, pelo número QR do grupo.
+      const vars = (cfg as Record<string, unknown>)["__variables"] as
+        | Record<string, unknown>
+        | undefined;
+      const groupCfg = readCompanyGroupConfig(cfg);
+      try {
+        const dealId =
+          groupCfg.companyMode === "deal_primary"
+            ? (rt.dealId ?? (await resolveAutomationDealIds(rt))[0] ?? null)
+            : null;
+        const target = await resolveCompanyGroupTargets(groupCfg, dealId);
+        const res = await sendToCompanyGroups({
+          cfg: groupCfg,
+          target,
+          interpolate: (text) => interpolateMessageVariables(text, rt, vars, target.company),
+          senderName: rt.automationName?.trim() || "Automação",
+        });
+        const skipped = res.skipped.length > 0 ? ` (pulados: ${res.skipped.join(", ")})` : "";
+        return { note: `${res.companyName}: enviado em ${res.sent.join(", ")}${skipped}` };
+      } catch (err) {
+        if (err instanceof CompanyGroupSendError) {
+          throw new MetaSendFailureError(`send_company_group: ${err.message}`, err);
+        }
+        throw err;
+      }
     }
 
     case "move_stage":
