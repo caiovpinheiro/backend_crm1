@@ -4,7 +4,8 @@ import { withApiAuthContext } from "@/lib/api-auth";
 import type { AppUserRole } from "@/lib/auth-types";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
-import { getOrgIdOrThrow } from "@/lib/request-context";
+import { shouldFireDealTagAdded } from "@/lib/deal-tag-trigger";
+import { getActorContext, getOrgIdOrThrow } from "@/lib/request-context";
 import { notifyTagAdded } from "@/services/automation-triggers";
 import { createDealEvent, getDealById, syncBoardsAfterDealChanges } from "@/services/deals";
 
@@ -106,6 +107,8 @@ export async function POST(request: Request, ctx: Ctx) {
       const resolvedTag = await prisma.tag.findUnique({ where: { id: resolvedTagId }, select: { name: true, color: true } });
       if (!existed) {
         createDealEvent(dealId, uid, "TAG_ADDED", { tagName: resolvedTag?.name ?? tagName, tagColor: resolvedTag?.color ?? tagColor }).catch(() => {});
+      }
+      if (shouldFireDealTagAdded({ alreadyHadTag: !!existed, viaIntegration: getActorContext()?.type === "INTEGRATION" })) {
         void notifyTagAdded({
           dealId,
           contactId: existing.contactId,
