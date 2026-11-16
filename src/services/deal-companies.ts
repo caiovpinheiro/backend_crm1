@@ -164,6 +164,12 @@ export async function primaryCompanyForDeal(dealId: string): Promise<DealCompany
   return row ? serializeCompany(row.company) : null;
 }
 
+/** Empresa pelo id, no formato das variáveis `{{empresa.*}}`. */
+export async function companyForMessages(companyId: string): Promise<DealCompanyDto["company"] | null> {
+  const row = await prisma.company.findFirst({ where: { id: companyId }, select: COMPANY_SELECT });
+  return row ? serializeCompany(row) : null;
+}
+
 /**
  * Negócios vinculados à empresa em QUALQUER posição (principal ou não) —
  * base dos filtros/ativações "por empresa".

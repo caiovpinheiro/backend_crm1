@@ -5,6 +5,7 @@
  */
 export const STEP_LABELS: Record<string, string> = {
   send_email: "Enviando e-mail",
+  send_company_group: "Enviando para o grupo da empresa",
   move_stage: "Movendo estágio",
   assign_owner: "Atribuindo responsável",
   add_tag: "Adicionando tag",

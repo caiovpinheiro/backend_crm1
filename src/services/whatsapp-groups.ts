@@ -703,7 +703,7 @@ export async function setWhatsAppGroupCompany(input: {
   }
   const res = await prisma.whatsAppGroup.updateMany({
     where: { id: input.groupId, channelId: input.channelId },
-    data: { companyId: company?.id ?? null },
+    data: { companyId: company?.id ?? null, companyLinkedAt: company ? new Date() : null },
   });
   if (res.count === 0) return { error: "Grupo não encontrado.", status: 404 };
   return { company };
