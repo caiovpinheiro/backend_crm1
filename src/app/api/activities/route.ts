@@ -25,6 +25,7 @@ export async function GET(request: Request) {
     const { searchParams } = new URL(request.url);
     const dealId = searchParams.get("dealId") ?? undefined;
     const contactId = searchParams.get("contactId") ?? undefined;
+    const companyId = searchParams.get("companyId") ?? undefined;
     const userId = searchParams.get("userId") ?? undefined;
     const departmentId = searchParams.get("departmentId") ?? undefined;
     const typeRaw = searchParams.get("type");
@@ -63,6 +64,7 @@ export async function GET(request: Request) {
     const result = await getActivities({
       dealId,
       contactId,
+      companyId,
       userId,
       departmentId,
       type,
@@ -169,6 +171,12 @@ export async function POST(request: Request) {
               ? b.contactId
               : undefined,
         dealId: resolvedDealId,
+        companyId:
+          b.companyId === null
+            ? null
+            : typeof b.companyId === "string" && b.companyId
+              ? b.companyId
+              : undefined,
         userId: resolvedUserId,
         departmentId,
         visibleToAll: b.visibleToAll === true,
@@ -201,6 +209,9 @@ export async function POST(request: Request) {
         }
         if (err.message === "INVALID_DEPARTMENT") {
           return NextResponse.json({ message: "Departamento inválido." }, { status: 400 });
+        }
+        if (err.message === "INVALID_COMPANY") {
+          return NextResponse.json({ message: "Empresa inválida." }, { status: 400 });
         }
         if (err.message === "MISSING_ASSIGNEE") {
           return NextResponse.json(

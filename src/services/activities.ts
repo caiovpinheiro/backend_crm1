@@ -21,6 +21,7 @@ export function isValidActivityType(v: string): v is ActivityType {
 export type GetActivitiesParams = {
   dealId?: string;
   contactId?: string;
+  companyId?: string;
   userId?: string;
   departmentId?: string;
   type?: ActivityType;
@@ -42,6 +43,7 @@ const listInclude = {
   department: { select: { id: true, name: true, color: true, icon: true } },
   contact: { select: { id: true, name: true, email: true } },
   deal: { select: { id: true, title: true, stageId: true } },
+  company: { select: { id: true, name: true, number: true } },
 } satisfies Prisma.ActivityInclude;
 
 export async function getActivityById(id: string) {
@@ -60,6 +62,7 @@ export async function getActivities(params: GetActivitiesParams = {}) {
 
   if (params.dealId) where.dealId = params.dealId;
   if (params.contactId) where.contactId = params.contactId;
+  if (params.companyId) where.companyId = params.companyId;
   if (params.userId) where.userId = params.userId;
   if (params.departmentId) where.departmentId = params.departmentId;
   if (params.type) where.type = params.type;
@@ -91,6 +94,8 @@ export type CreateActivityInput = {
   completedAt?: Date | string | null;
   contactId?: string | null;
   dealId?: string | null;
+  /** Empresa vinculada (/companies). */
+  companyId?: string | null;
   /** Responsável usuário (opcional se atribuída a departamento). */
   userId?: string | null;
   /** Responsável departamento (tarefa compartilhada). */
@@ -106,6 +111,15 @@ export type CreateActivityInput = {
  * model auto-escopado pela extension, então filtramos por organizationId
  * explicitamente (evita atribuir tarefa a departamento de outra org).
  */
+/** Company é escopado por org pela extension; findFirst já filtra. */
+async function assertCompanyInOrg(companyId: string): Promise<boolean> {
+  const company = await prisma.company.findFirst({
+    where: { id: companyId },
+    select: { id: true },
+  });
+  return !!company;
+}
+
 async function assertDepartmentInOrg(departmentId: string): Promise<boolean> {
   const orgId = getRequestContext()?.organizationId ?? undefined;
   const dept = await prisma.department.findFirst({
@@ -124,6 +138,11 @@ export async function createActivity(data: CreateActivityInput) {
     throw new Error("INVALID_DEPARTMENT");
   }
 
+  const companyId = data.companyId ?? null;
+  if (companyId && !(await assertCompanyInOrg(companyId))) {
+    throw new Error("INVALID_COMPANY");
+  }
+
   // Pelo menos um responsável: se nada informado, cai como não-atribuída
   // (permitido — ex.: tarefa de departamento sem depto ainda seria raro).
   if (!departmentId && (data.userId === null || data.userId === undefined)) {
@@ -140,6 +159,7 @@ export async function createActivity(data: CreateActivityInput) {
       completedAt: data.completedAt === undefined ? undefined : data.completedAt,
       contactId: data.contactId === undefined ? undefined : data.contactId,
       dealId: data.dealId === undefined ? undefined : data.dealId,
+      companyId,
       userId: data.userId ?? null,
       departmentId,
       visibleToAll: data.visibleToAll ?? false,
@@ -158,6 +178,8 @@ export type UpdateActivityInput = {
   completedAt?: Date | string | null;
   contactId?: string | null;
   dealId?: string | null;
+  /** Empresa vinculada (null desvincula). */
+  companyId?: string | null;
   /** Reatribuir para outro usuário (ou null p/ liberar). */
   userId?: string | null;
   /** Reatribuir para um departamento (ou null p/ remover). */
@@ -190,6 +212,13 @@ export async function updateActivity(id: string, data: UpdateActivityInput) {
   }
   if (data.dealId !== undefined) {
     payload.deal = data.dealId === null ? { disconnect: true } : { connect: { id: data.dealId } };
+  }
+  if (data.companyId !== undefined) {
+    if (data.companyId !== null && !(await assertCompanyInOrg(data.companyId))) {
+      throw new Error("INVALID_COMPANY");
+    }
+    payload.company =
+      data.companyId === null ? { disconnect: true } : { connect: { id: data.companyId } };
   }
   if (data.userId !== undefined) {
     payload.user =

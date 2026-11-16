@@ -1384,6 +1384,8 @@ model Company {
   jobOpenings JobOpening[]
   /// Grupos WhatsApp (QR) vinculados a esta empresa.
   whatsappGroups WhatsAppGroup[]
+  /// Tarefas vinculadas a esta empresa.
+  activities     Activity[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -2929,6 +2931,9 @@ model Activity {
   contact      Contact?    @relation(fields: [contactId], references: [id])
   dealId       String?
   deal         Deal?       @relation(fields: [dealId], references: [id])
+  /// Empresa vinculada (/companies). Opcional.
+  companyId    String?
+  company      Company?    @relation(fields: [companyId], references: [id], onDelete: SetNull)
   // Responsável: usuário específico OU um departamento (tarefa
   // compartilhada — todos os membros do depto veem/concluem). Pelo menos
   // um dos dois costuma estar preenchido; ambos podem coexistir.
@@ -2966,6 +2971,7 @@ model Activity {
   @@index([organizationId, userId])
   @@index([organizationId, createdById])
   @@index([organizationId, departmentId])
+  @@index([organizationId, companyId])
   @@index([organizationId, completed, scheduledAt])
   @@index([contactId])
   @@index([dealId])

@@ -158,6 +158,12 @@ export async function PUT(request: Request, context: RouteContext) {
             : undefined,
       dealId:
         b.dealId === null ? null : typeof b.dealId === "string" ? b.dealId : undefined,
+      companyId:
+        b.companyId === null
+          ? null
+          : typeof b.companyId === "string" && b.companyId
+            ? b.companyId
+            : undefined,
       userId:
         b.userId === null ? null : typeof b.userId === "string" ? b.userId : undefined,
       departmentId:
@@ -321,6 +327,9 @@ export async function PUT(request: Request, context: RouteContext) {
         }
         if (err.message === "INVALID_DEPARTMENT") {
           return NextResponse.json({ message: "Departamento inválido." }, { status: 400 });
+        }
+        if (err.message === "INVALID_COMPANY") {
+          return NextResponse.json({ message: "Empresa inválida." }, { status: 400 });
         }
       }
       throw err;
