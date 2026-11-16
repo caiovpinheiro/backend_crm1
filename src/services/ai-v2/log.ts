@@ -7,7 +7,7 @@ import { prisma } from "@/lib/prisma";
 import { estimateCostForOrg } from "./model-catalog";
 import type { V2Action, V2CRMContext, V2LLMOutput, V2Owner, V2Stage } from "@/lib/ai-v2/types";
 import type { V2ActionResult } from "./actions";
-import { takeV2Facts, takeV2TraceForLog } from "./trace";
+import { dropLoneSurrogates, takeV2Facts, takeV2TraceForLog } from "./trace";
 import { ensureV2AgentSchema } from "./ensure-schema";
 import { maskSensitive, maskSensitiveDeep } from "./sensitive";
 export async function logV2Turn(args: {
@@ -51,7 +51,9 @@ export async function logV2Turn(args: {
       create: (args: { data: Record<string, unknown>; select: { id: true } }) => Promise<unknown>;
     };
   }).aISimpleTurnLog.create({
-    data: {
+    // Meio emoji solto (corte de texto em algum ponto do turno) faz o Prisma
+    // recusar o JSON e o turno falhar sem resposta (DNAWORK #83167).
+    data: mapStringsDeep({
       organizationId: args.organizationId,
       conversationId: args.conversationId,
       agentId: args.agentId,
@@ -84,7 +86,7 @@ export async function logV2Turn(args: {
       outputTokens: args.outputTokens,
       // Extra fields não colunados; persistidos em JSON no contextSnapshot ou podemos usar coluna adicional.
       // Colocamos metadados em contextSnapshot para manter compatibilidade.
-    },
+    } as Record<string, unknown>, dropLoneSurrogates),
     select: { id: true },
   });
 }
