@@ -33,13 +33,29 @@ export function runWithV2Trace<T>(fn: () => Promise<T>): Promise<T> {
   return store.run({ startedAt: Date.now(), steps: [], logged: false, facts: {} }, fn);
 }
 
+/**
+ * Corta em `max` unidades sem partir um emoji (par surrogate) ao meio. Meio
+ * emoji no JSON faz o Prisma recusar o log do turno ("unexpected end of hex
+ * escape") e o turno inteiro falhar sem resposta (DNAWORK #83167).
+ */
+export function sliceWholeChars(s: string, max: number): string {
+  const cut = s.slice(0, max);
+  const last = cut.charCodeAt(cut.length - 1);
+  return last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut;
+}
+
+/** Tira metades de emoji soltas (surrogate sem par), que o JSON do banco recusa. */
+export function dropLoneSurrogates(s: string): string {
+  return s.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "");
+}
+
 /** Registra um passo no turno corrente. Fora de um turno não faz nada. */
 export function traceStep(step: string, detail: string, data?: Record<string, unknown>): void {
   const s = store.getStore();
   if (!s || s.steps.length >= MAX_STEPS) return;
   s.steps.push({
     step,
-    detail: detail.length > MAX_DETAIL ? `${detail.slice(0, MAX_DETAIL)}…` : detail,
+    detail: detail.length > MAX_DETAIL ? `${sliceWholeChars(detail, MAX_DETAIL)}…` : detail,
     ...(data ? { data } : {}),
     at: Date.now() - s.startedAt,
   });
