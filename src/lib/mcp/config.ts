@@ -59,6 +59,15 @@ export function mcpPublicOrigin(request?: Request): string {
   return "http://localhost:3001";
 }
 
+/**
+ * `MCP_PUBLIC_URL` definida? Em produção é obrigatória nos serviços `api`
+ * (tela, consentimento) e `mcp`; sem ela a URL cairia em localhost.
+ */
+export function isMcpPublicUrlConfigured(): boolean {
+  if (originOf(runtimeEnv("MCP_PUBLIC_URL"))) return true;
+  return (runtimeEnv("NODE_ENV") ?? "development").toLowerCase() !== "production";
+}
+
 export function mcpResourceUrl(request?: Request): string {
   return `${mcpPublicOrigin(request)}/mcp`;
 }
