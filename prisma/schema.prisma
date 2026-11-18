@@ -173,6 +173,7 @@ model Organization {
   productMessageTemplates  ProductMessageTemplate[]
   quotaPolicies            QuotaConsumptionPolicy[]
   dealQuotas               DealQuota[]
+  dealCompanies            DealCompany[]
   quotaMovements           QuotaMovement[]
   demandBoards             DemandBoard[]
   demandStages             DemandStage[]
@@ -1384,6 +1385,10 @@ model Company {
   jobOpenings JobOpening[]
   /// Grupos WhatsApp (QR) vinculados a esta empresa.
   whatsappGroups WhatsAppGroup[]
+  /// Tarefas vinculadas a esta empresa.
+  activities     Activity[]
+  /// Negócios vinculados a esta empresa (qualquer posição).
+  dealLinks      DealCompany[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1687,6 +1692,8 @@ model Deal {
   calls          Call[]
   // Cotas de desconto vinculadas (PRD Cotas de Desconto — Fase 1).
   quotas         DealQuota[]
+  /// Empresas vinculadas ao negócio (uma pode ser a principal).
+  companies      DealCompany[]
 
   /// Unidade (filial) associada ao deal — resolve `ProductOffer` e escopo
   /// de matching de cotas de desconto (RN-01). Aditivo: null = deals legados.
@@ -2645,6 +2652,27 @@ model DealQuota {
   @@map("deal_quotas")
 }
 
+/// Empresa vinculada a um negócio (ex.: candidato indicado para a empresa).
+/// Um negócio pode ter várias; `isPrimary` marca a do foco atual, usada nas
+/// variáveis `{{empresa.*}}`. Filtros/ativações "por empresa" contam todas.
+model DealCompany {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  dealId         String
+  deal           Deal         @relation(fields: [dealId], references: [id], onDelete: Cascade)
+  companyId      String
+  company        Company      @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  isPrimary      Boolean      @default(false)
+  createdAt      DateTime     @default(now())
+
+  @@unique([dealId, companyId])
+  @@index([organizationId])
+  @@index([dealId])
+  @@index([companyId])
+  @@map("deal_companies")
+}
+
 /// Ledger de movimentações da cota (fonte de verdade auditável).
 model QuotaMovement {
   id             String            @id @default(cuid())
@@ -2929,6 +2957,9 @@ model Activity {
   contact      Contact?    @relation(fields: [contactId], references: [id])
   dealId       String?
   deal         Deal?       @relation(fields: [dealId], references: [id])
+  /// Empresa vinculada (/companies). Opcional.
+  companyId    String?
+  company      Company?    @relation(fields: [companyId], references: [id], onDelete: SetNull)
   // Responsável: usuário específico OU um departamento (tarefa
   // compartilhada — todos os membros do depto veem/concluem). Pelo menos
   // um dos dois costuma estar preenchido; ambos podem coexistir.
@@ -2966,6 +2997,7 @@ model Activity {
   @@index([organizationId, userId])
   @@index([organizationId, createdById])
   @@index([organizationId, departmentId])
+  @@index([organizationId, companyId])
   @@index([organizationId, completed, scheduledAt])
   @@index([contactId])
   @@index([dealId])
@@ -6965,6 +6997,8 @@ model WhatsAppGroup {
   /// Empresa vinculada ao grupo (uma por grupo; uma empresa pode ter vários).
   companyId        String?
   company          Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  /// Quando a empresa atual foi vinculada — "grupo mais recente" da automação Enviar para empresa.
+  companyLinkedAt  DateTime?
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 

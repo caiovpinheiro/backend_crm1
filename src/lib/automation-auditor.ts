@@ -130,6 +130,7 @@ const META_SEND_FAILURE_TYPES = new Set([
   "send_whatsapp_list",
   "send_whatsapp_flow",
   "question",
+  "send_company_group",
 ]);
 
 export function getStepOutgoing(step: StepLike): StepOutgoing {

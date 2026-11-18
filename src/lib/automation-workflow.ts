@@ -109,6 +109,7 @@ export const ACTION_STEP_TYPES = [
   "execute_distribution",
   "inventory.adjust",
   "send_product",
+  "send_company_group",
 ] as const;
 
 export type ActionStepType = (typeof ACTION_STEP_TYPES)[number];
@@ -408,6 +409,7 @@ export function triggerTypeLabel(t: string): string {
 export function stepTypeLabel(t: string): string {
   const map: Record<string, string> = {
     send_email: "Enviar e-mail",
+    send_company_group: "Enviar para empresa",
     move_stage: "Mover estágio",
     mark_deal_won: "Ganho",
     mark_deal_lost: "Perda",
@@ -582,6 +584,16 @@ export function summarizeStepConfig(stepType: string, config: unknown, lookup?: 
   switch (stepType) {
     case "send_email":
       return c.subject ? String(c.subject) : c.to ? `Para: ${String(c.to)}` : "Configurar e-mail";
+    case "send_company_group": {
+      const who =
+        c.companyMode === "deal_primary"
+          ? "Empresa principal do negócio"
+          : c.companyName
+            ? String(c.companyName)
+            : "Escolher empresa";
+      const where = c.allGroups === true ? "todos os grupos" : c.groupName ? String(c.groupName) : "";
+      return where ? `${who} · ${where}` : who;
+    }
     case "move_stage": {
       if (c.stageName) return String(c.stageName);
       const sid = c.stageId ? String(c.stageId) : "";
@@ -828,6 +840,11 @@ export function isStepIncomplete(
     case "send_email":
       // `to` vazio = e-mail do contato (resolvido no motor).
       return !str(c.subject) || !str(c.body);
+    case "send_company_group": {
+      const fixed = c.companyMode !== "deal_primary";
+      if (fixed && (!str(c.companyId) || (c.allGroups !== true && !str(c.groupId)))) return true;
+      return c.contentType === "media" ? !str(c.mediaUrl) : !str(c.content);
+    }
     case "webhook":
       return !str(c.url);
     case "create_conversation_note":
@@ -853,6 +870,19 @@ export function defaultStepConfig(stepType: string): Record<string, unknown> {
   switch (stepType) {
     case "send_email":
       return { to: "", subject: "", body: "" };
+    case "send_company_group":
+      return {
+        companyMode: "fixed",
+        companyId: "",
+        groupId: "",
+        allGroups: false,
+        contentType: "text",
+        content: "",
+        signatureEnabled: false,
+        signatureName: "DNA Work",
+        failureAction: "stop",
+        failureGotoStepId: "",
+      };
     case "move_stage":
       return { stageId: "" };
     case "mark_deal_won":
