@@ -268,6 +268,9 @@ fi
 #                         Isola event loop + pool Prisma da inbox. EasyPanel:
 #                         clone do serviço API, APP_MODE=api-public. No compose
 #                         DO, o Caddy manda `Authorization: Bearer` pra cá.
+# - mcp                 → Next.js irmão só com /mcp, /oauth/* e /.well-known/*
+#                         (ChatGPT/Claude/Cursor). Mesma imagem, sem migrate e
+#                         sem sweepers; demais rotas respondem 404.
 # - worker-whatsapp     → inbox Meta: meta-attach + meta-outbound + sweepers
 #                         de sessão/presença/agendadas/IA/push (campaign-worker.ts)
 # - worker-campaigns    → disparo de campanha CRM: campaign-dispatch, rodízio
@@ -306,7 +309,7 @@ esac
 #   que o idle do proxy até o backend (Traefik: 90 s), senão o Node fecha a
 #   conexão ociosa no meio de um POST reaproveitado → 502 esporádico.
 # >>> next-server-env
-if [ "$APP_MODE" = "api" ] || [ "$APP_MODE" = "api-public" ]; then
+if [ "$APP_MODE" = "api" ] || [ "$APP_MODE" = "api-public" ] || [ "$APP_MODE" = "mcp" ]; then
   if [ "${API_GRACEFUL_SHUTDOWN:-1}" != "0" ]; then
     export NEXT_MANUAL_SIG_HANDLE="${NEXT_MANUAL_SIG_HANDLE:-true}"
   fi
@@ -321,6 +324,10 @@ case "$APP_MODE" in
     ;;
   api-public)
     echo "[entrypoint] starting Next.js public API (Bearer/n8n, sem migrate)..."
+    exec node server.js
+    ;;
+  mcp)
+    echo "[entrypoint] starting MCP server (ChatGPT/Claude/Cursor — /mcp + OAuth, só leitura, sem migrate)..."
     exec node server.js
     ;;
   worker-whatsapp)
@@ -357,7 +364,7 @@ case "$APP_MODE" in
     ;;
   *)
     echo "[entrypoint] !! ERRO: APP_MODE='${APP_MODE}' não reconhecido."
-    echo "[entrypoint] !! Valores válidos: api | api-public | worker-whatsapp | worker-campaigns | worker-leads | worker-distribution | worker-etl | worker-automation | worker-meta-webhook | worker-baileys"
+    echo "[entrypoint] !! Valores válidos: api | api-public | mcp | worker-whatsapp | worker-campaigns | worker-leads | worker-distribution | worker-etl | worker-automation | worker-meta-webhook | worker-baileys"
     exit 1
     ;;
 esac

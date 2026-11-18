@@ -217,7 +217,48 @@ const PWA_PUBLIC_PATHS = new Set([
   "/api/push/vapid-public",
 ]);
 
+/**
+ * Servidor MCP (`APP_MODE=mcp`, ver `src/lib/mcp/config.ts`). URLs públicas
+ * do protocolo → rotas internas `/api/mcp/*`. As rotas fazem a própria
+ * autenticação (Bearer MCP / PKCE) e respondem 404 fora do processo MCP em
+ * produção. No processo MCP, qualquer outra rota responde 404: ele não
+ * serve a API do CRM.
+ */
+const MCP_REWRITES: Array<[RegExp, string]> = [
+  [/^\/mcp\/?$/, "/api/mcp/server"],
+  [/^\/\.well-known\/oauth-protected-resource(\/.*)?$/, "/api/mcp/well-known/protected-resource"],
+  [/^\/\.well-known\/oauth-authorization-server(\/.*)?$/, "/api/mcp/well-known/authorization-server"],
+  [/^\/\.well-known\/openid-configuration(\/.*)?$/, "/api/mcp/well-known/authorization-server"],
+  [/^\/oauth\/(register|authorize|token|revoke)\/?$/, "/api/mcp/oauth/$1"],
+];
+
+function isMcpProcess(): boolean {
+  const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env;
+  return (env?.APP_MODE ?? "").trim().toLowerCase() === "mcp";
+}
+
+/** `null` = não é rota MCP (segue o fluxo normal). */
+function routeMcp(req: NextRequest): NextResponse | null {
+  const { pathname } = req.nextUrl;
+  for (const [re, target] of MCP_REWRITES) {
+    const m = pathname.match(re);
+    if (!m) continue;
+    const url = req.nextUrl.clone();
+    url.pathname = target.replace("$1", m[1] ?? "");
+    return withSecurityHeaders(NextResponse.rewrite(url));
+  }
+  if (pathname.startsWith("/api/mcp/")) {
+    return withSecurityHeaders(NextResponse.next());
+  }
+  if (isMcpProcess() && !pathname.startsWith("/api/health") && !pathname.startsWith("/_next")) {
+    return withSecurityHeaders(NextResponse.json({ message: "Not found" }, { status: 404 }));
+  }
+  return null;
+}
+
 export async function middleware(req: NextRequest) {
+  const mcpRoute = routeMcp(req);
+  if (mcpRoute) return mcpRoute;
   // Preflight do browser → api.{tenant} (antes do 401 JSON). Origens
   // de widgets (não-tenant) caem nas rotas que já têm CORS próprio.
   let corsOrigin: string | null = null;

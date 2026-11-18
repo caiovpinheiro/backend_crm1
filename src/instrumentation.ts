@@ -28,7 +28,7 @@ export async function register() {
   const appMode = (process.env.APP_MODE ?? "api").trim().toLowerCase() || "api";
   if (
     process.env.NODE_ENV === "production" &&
-    (appMode === "api" || appMode === "api-public") &&
+    (appMode === "api" || appMode === "api-public" || appMode === "mcp") &&
     process.env.API_GRACEFUL_SHUTDOWN !== "0"
   ) {
     try {
