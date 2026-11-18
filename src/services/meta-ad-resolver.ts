@@ -9,9 +9,11 @@
  * - Reusa o token do canal Meta (META_WHATSAPP_ACCESS_TOKEN ou o
  *   token do canal). Se o token não tiver permissão `ads_read`, retorna
  *   `no_access` (não-fatal).
- * - Grava resultado nos campos `ad_resolved_*` do contato; replica para
- *   outros contatos da mesma org com o mesmo `ad_source_id` para evitar
- *   chamar a API novamente (cache de fato é o próprio banco).
+ * - Grava resultado nos campos `ad_resolved_*` do contato. O resultado da
+ *   Graph fica em cache em memória por (org, source_id) — só dados do
+ *   anúncio, nunca o rastreio de outro contato.
+ * - `url_tags` tem as macros `{{ad.name}}`/`{{campaign.name}}`… expandidas
+ *   aqui (em CTWA a Meta não expande).
  */
 import { prisma } from "@/lib/prisma";
 import { getLogger } from "@/lib/logger";
@@ -133,11 +135,58 @@ export function parseTrackingParams(raw: string | null | undefined): typeof EMPT
   }
 }
 
+type AdMacroContext = {
+  adId: string | null;
+  adName: string | null;
+  adsetId: string | null;
+  adsetName: string | null;
+  campaignId: string | null;
+  campaignName: string | null;
+};
+
+/**
+ * Expande os parâmetros dinâmicos da Meta (`{{ad.name}}`, `{{campaign.name}}`…)
+ * no `url_tags`. Em anúncio Click-to-WhatsApp não há clique em URL, então a
+ * Meta nunca substitui as macros — a Graph devolve o texto literal. Macro sem
+ * valor conhecido vira vazio (não gravamos `{{…}}` no contato).
+ */
+export function expandUrlTagMacros(
+  urlTags: string | null | undefined,
+  ctx: AdMacroContext,
+): string | null {
+  if (!urlTags || typeof urlTags !== "string") return null;
+  const values: Record<string, string | null> = {
+    "ad.id": ctx.adId,
+    "ad.name": ctx.adName,
+    "adset.id": ctx.adsetId,
+    "adset.name": ctx.adsetName,
+    "campaign.id": ctx.campaignId,
+    "campaign.name": ctx.campaignName,
+  };
+  return urlTags.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_m, key: string) => {
+    const v = values[key.toLowerCase()];
+    return v ? encodeURIComponent(v) : "";
+  });
+}
+
+/** Parseia `url_tags` do anúncio já com as macros expandidas. */
+function trackingFromUrlTags(urlTags: string | null, ctx: AdMacroContext) {
+  return parseTrackingParams(expandUrlTagMacros(urlTags, ctx));
+}
+
 type ResolutionResult = {
   status: ResolveStatus;
   error: string | null;
   data: ResolvedAd | null;
 };
+
+/**
+ * Graph responde 400 (code 100 / subcode 33) quando o token não enxerga o
+ * objeto — na prática, falta `ads_read` na conta de anúncios.
+ */
+function isGraphPermissionError(body: string): boolean {
+  return /missing permissions|"error_subcode":\s*33\b/i.test(body);
+}
 
 /**
  * Endpoint principal: GET /{post_id}/promotion_info — retorna metadados
@@ -182,6 +231,9 @@ async function fetchAdFromPost(
       body = (await res.text()).slice(0, 500);
     } catch {
       // ignore
+    }
+    if (isGraphPermissionError(body)) {
+      return { status: "no_access", error: `HTTP ${res.status} ${body}`, data: null };
     }
     return { status: "error", error: `HTTP ${res.status} ${body}`, data: null };
   }
@@ -265,12 +317,13 @@ async function fetchAdFromPost(
     }
   }
 
-  const utms = parseTrackingParams(urlTagsStr);
+  const ctx = { adId, adName, adsetId, adsetName, campaignId, campaignName };
+  const utms = trackingFromUrlTags(urlTagsStr, ctx);
 
   return {
     status: "ok",
     error: null,
-    data: { adId, adName, adsetId, adsetName, campaignId, campaignName, ...utms },
+    data: { ...ctx, ...utms },
   };
 }
 
@@ -299,6 +352,9 @@ async function fetchAdById(
       } catch {
         /* ignore */
       }
+      if (isGraphPermissionError(body)) {
+        return { status: "no_access", error: `HTTP ${r.status} ${body}`, data: null };
+      }
       return { status: "error", error: `HTTP ${r.status} ${body}`, data: null };
     }
     const a = (await r.json()) as Record<string, unknown>;
@@ -318,19 +374,12 @@ async function fetchAdById(
         if (typeof camp.name === "string") campaignName = camp.name;
       }
     }
-    const utms = parseTrackingParams(urlTagsStr);
+    const ctx = { adId, adName, adsetId, adsetName, campaignId, campaignName };
+    const utms = trackingFromUrlTags(urlTagsStr, ctx);
     return {
       status: "ok",
       error: null,
-      data: {
-        adId,
-        adName,
-        adsetId,
-        adsetName,
-        campaignId,
-        campaignName,
-        ...utms,
-      },
+      data: { ...ctx, ...utms },
     };
   } catch (err) {
     return { status: "error", error: describeFetchError(err), data: null };
@@ -374,69 +423,43 @@ function trackingPatchFromResolved(
 }
 
 /**
- * Tenta resolver pelo cache (banco): se outro contato da mesma org já
- * tem o mesmo `ad_source_id` resolvido com sucesso recentemente (< 24h),
- * reusa os dados sem chamar a Meta de novo.
+ * Cache em memória do resultado da Graph por (org, source_id).
+ *
+ * Antes o "cache" era outro contato do banco com o mesmo `ad_source_id`, e
+ * copiava o rastreio DAQUELE contato (gclid, referrer, UTMs vindas de
+ * formulário Google…) para todos os leads seguintes do anúncio. Agora só
+ * guardamos o que a Meta devolveu para o anúncio — nada da pessoa.
  */
-async function lookupCache(
-  organizationId: string,
-  sourceId: string,
-): Promise<ResolvedAd | null> {
-  const TTL_HOURS = 24;
-  const since = new Date(Date.now() - TTL_HOURS * 60 * 60 * 1000);
-  const cached = await prisma.contact.findFirst({
-    where: {
-      organizationId,
-      adSourceId: sourceId,
-      adResolveStatus: "ok",
-      adResolvedAt: { gte: since },
-      adResolvedId: { not: null },
-    },
-    select: {
-      adResolvedId: true,
-      adResolvedName: true,
-      adResolvedAdsetId: true,
-      adResolvedAdsetName: true,
-      adResolvedCampaignId: true,
-      adResolvedCampaignName: true,
-      adUtmSource: true,
-      adUtmMedium: true,
-      adUtmCampaign: true,
-      adUtmContent: true,
-      adUtmTerm: true,
-      utmId: true,
-      utmReferrer: true,
-      referrer: true,
-      gclid: true,
-      fbclid: true,
-      googleClientId: true,
-      ttadId: true,
-      ttadName: true,
-    },
-    orderBy: { adResolvedAt: "desc" },
-  });
-  if (!cached?.adResolvedId) return null;
-  return {
-    adId: cached.adResolvedId,
-    adName: cached.adResolvedName,
-    adsetId: cached.adResolvedAdsetId,
-    adsetName: cached.adResolvedAdsetName,
-    campaignId: cached.adResolvedCampaignId,
-    campaignName: cached.adResolvedCampaignName,
-    utmSource: cached.adUtmSource,
-    utmMedium: cached.adUtmMedium,
-    utmCampaign: cached.adUtmCampaign,
-    utmContent: cached.adUtmContent,
-    utmTerm: cached.adUtmTerm,
-    utmId: cached.utmId,
-    utmReferrer: cached.utmReferrer,
-    referrer: cached.referrer,
-    gclid: cached.gclid,
-    fbclid: cached.fbclid,
-    googleClientId: cached.googleClientId,
-    ttadId: cached.ttadId,
-    ttadName: cached.ttadName,
-  };
+const AD_CACHE_TTL_MS = 60 * 60 * 1000;
+const AD_CACHE_MAX = 500;
+const adCache = new Map<string, { at: number; data: ResolvedAd }>();
+
+function adCacheKey(organizationId: string, sourceId: string): string {
+  return `${organizationId}:${sourceId}`;
+}
+
+function lookupCache(organizationId: string, sourceId: string): ResolvedAd | null {
+  const key = adCacheKey(organizationId, sourceId);
+  const hit = adCache.get(key);
+  if (!hit) return null;
+  if (Date.now() - hit.at > AD_CACHE_TTL_MS) {
+    adCache.delete(key);
+    return null;
+  }
+  return hit.data;
+}
+
+function storeCache(organizationId: string, sourceId: string, data: ResolvedAd): void {
+  if (adCache.size >= AD_CACHE_MAX) {
+    const oldest = adCache.keys().next().value;
+    if (oldest !== undefined) adCache.delete(oldest);
+  }
+  adCache.set(adCacheKey(organizationId, sourceId), { at: Date.now(), data });
+}
+
+/** Só para testes. */
+export function __resetAdCacheForTests(): void {
+  adCache.clear();
 }
 
 /**
@@ -526,7 +549,7 @@ export async function resolveAdAndPersistAsync(args: {
   }
 
   // Cache lookup
-  const cached = await lookupCache(organizationId, sourceId).catch(() => null);
+  const cached = lookupCache(organizationId, sourceId);
   if (cached) {
     const existing = await prisma.contact
       .findUnique({
@@ -621,6 +644,9 @@ export async function resolveAdAndPersistAsync(args: {
       : null;
 
   const data = result.data ?? fallbackAd;
+  if (result.status === "ok" && result.data) {
+    storeCache(organizationId, sourceId, result.data);
+  }
 
   await prisma.contact
     .update({
@@ -634,7 +660,9 @@ export async function resolveAdAndPersistAsync(args: {
           ? { adResolvedId: existing?.adResolvedId || sourceId }
           : {}),
         adResolvedAt: new Date(),
-        adResolveStatus: result.status === "ok" || sourceType === "ad" ? "ok" : result.status,
+        // Status real da Graph — antes source_type=ad virava "ok" mesmo sem
+        // permissão, o que escondia a falta de `ads_read`.
+        adResolveStatus: result.status,
         adResolveError: result.status === "ok" ? null : result.error,
       },
     })

@@ -1,5 +1,42 @@
 import { describe, expect, it } from "vitest";
-import { parseTrackingParams } from "./meta-ad-resolver";
+import { expandUrlTagMacros, parseTrackingParams } from "./meta-ad-resolver";
+
+describe("expandUrlTagMacros", () => {
+  const ctx = {
+    adId: "120252525077210627",
+    adName: "CC Pedagogia R$245 & bônus",
+    adsetId: "as_1",
+    adsetName: "Conjunto 1",
+    campaignId: "cp_1",
+    campaignName: "cs.grad.whats.0826",
+  };
+
+  it("expande ad.name e campaign.name (url_tags real do CTWA)", () => {
+    const tags =
+      "utm_source=Meta&utm_medium=whatsapp_ads&utm_campaign=cs.grad.whats.0826.ciencia-computacao&utm_content={{ad.name}}&utm_term={{campaign.name}}";
+    const t = parseTrackingParams(expandUrlTagMacros(tags, ctx));
+    expect(t.utmSource).toBe("Meta");
+    expect(t.utmMedium).toBe("whatsapp_ads");
+    expect(t.utmCampaign).toBe("cs.grad.whats.0826.ciencia-computacao");
+    expect(t.utmContent).toBe("CC Pedagogia R$245 & bônus");
+    expect(t.utmTerm).toBe("cs.grad.whats.0826");
+  });
+
+  it("macro sem valor ou desconhecida vira vazio, nunca {{…}}", () => {
+    const t = parseTrackingParams(
+      expandUrlTagMacros("utm_content={{ad.name}}&utm_term={{placement}}", {
+        ...ctx,
+        adName: null,
+      }),
+    );
+    expect(t.utmContent).toBe("");
+    expect(t.utmTerm).toBe("");
+  });
+
+  it("aceita espaços e caixa diferente na macro", () => {
+    expect(expandUrlTagMacros("x={{ Campaign.Name }}", ctx)).toBe("x=cs.grad.whats.0826");
+  });
+});
 
 describe("parseTrackingParams", () => {
   it("extrai UTMs de url_tags", () => {
