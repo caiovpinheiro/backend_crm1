@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { isMcpServerAllowedOnThisProcess } from "@/lib/mcp/config";
+import { isMcpPublicUrlConfigured, isMcpServerAllowedOnThisProcess } from "@/lib/mcp/config";
 import { intersectScopes, parseScopeParam, sanitizeScopes } from "@/lib/mcp/scopes";
 import { sanitizeArgs } from "@/lib/mcp/audit";
 import { validateRedirectUri, verifyPkce } from "@/services/mcp/oauth";
@@ -59,5 +59,13 @@ describe("MCP — unidades", () => {
     expect(isMcpServerAllowedOnThisProcess()).toBe(false);
     process.env.APP_MODE = "mcp";
     expect(isMcpServerAllowedOnThisProcess()).toBe(true);
+  });
+
+  it("sem MCP_PUBLIC_URL em produção a URL de conexão é tratada como não configurada", () => {
+    (process.env as Record<string, string | undefined>).NODE_ENV = "production";
+    delete process.env.MCP_PUBLIC_URL;
+    expect(isMcpPublicUrlConfigured()).toBe(false);
+    process.env.MCP_PUBLIC_URL = "https://mcp.bwipo.com";
+    expect(isMcpPublicUrlConfigured()).toBe(true);
   });
 });
