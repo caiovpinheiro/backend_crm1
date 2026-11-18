@@ -2,7 +2,7 @@
 /**
  * HEALTHCHECK do container (Dockerfile). Mesma imagem para API e workers:
  *
- *  - APP_MODE=api | api-public → GET http://127.0.0.1:$PORT/api/health.
+ *  - APP_MODE=api | api-public | mcp → GET http://127.0.0.1:$PORT/api/health.
  *    200 (ok) e 503 (degraded: Postgres/Redis fora) contam como vivo — é
  *    checagem de liveness. Reiniciar a API não conserta o banco e o boot
  *    novo ainda rodaria `migrate deploy` contra ele. Timeout, conexão
@@ -37,7 +37,7 @@ const state = readState();
 const mode = (state.APP_MODE || process.env.APP_MODE || "").trim();
 const port = (state.PORT || process.env.PORT || "3000").trim();
 
-if (mode !== "api" && mode !== "api-public") process.exit(0);
+if (mode !== "api" && mode !== "api-public" && mode !== "mcp") process.exit(0);
 
 try {
   const res = await fetch(`http://127.0.0.1:${port}/api/health`, {

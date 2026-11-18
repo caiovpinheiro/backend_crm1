@@ -97,6 +97,8 @@ Job de worker: payload com `organizationId` + `runWithContext` antes de `prisma`
 
 API pública (n8n): `APP_MODE=api-public`, Bearer `eduit_…`. Não misturar com cookie de sessão.
 
+MCP (ChatGPT/Claude/Cursor): `APP_MODE=mcp`, só leitura, OAuth próprio (token `bwmcp_at_…`, nunca `eduit_`). Rotas públicas `/mcp`, `/oauth/*`, `/.well-known/oauth-*` são reescritas no middleware para `/api/mcp/*`; fora do processo `mcp` respondem 404 em produção. Ferramenta nova: escopo em `src/lib/mcp/scopes.ts` + reaproveitar o serviço e os filtros da rota de sessão equivalente (`src/lib/mcp/tools.ts`), nunca mais permissivo que a UI. Gestão e consentimento: `/api/settings/mcp/*` (API principal). Detalhes: `docs/mcp.md`.
+
 Rotas só para integração externa, sem tela que as chame: `/api/integrations/*`, sempre por `withIntegrationsApi` (`src/lib/integrations-api.ts`: só Bearer — sessão recebe 401, para nunca rodarem fora do `api-public` — + permissão RBAC do dono do token). Campanha por ali passa pela trava de público (`src/services/campaign-audience-guard.ts`: sem segmento, filtro que resolve para todos os contatos é recusado); as rotas de sessão `/api/campaigns/*` não passam. Ciclo de vida compartilhável em `src/services/campaign-lifecycle.ts` — mudou regra de lançar/pausar/retomar/cancelar em um lado, mude no outro (`existing-routes-unchanged.test.ts` compara os dois).
 
 ## Produção (não quebrar)

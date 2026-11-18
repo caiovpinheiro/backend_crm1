@@ -93,6 +93,13 @@ export function logRedisUnavailableOnce(
  * tivermos métricas de tráfego real (Prom + grafana de PR 2.2), revisar
  * com base no p95 observado.
  */
+/** `MCP_RATE_LIMIT_RPM` (default 60, 10–600): chamadas MCP por conexão/min. */
+function mcpRateLimitRpm(): number {
+  const n = Number(process.env.MCP_RATE_LIMIT_RPM);
+  if (!Number.isFinite(n) || n <= 0) return 60;
+  return Math.min(600, Math.max(10, Math.floor(n)));
+}
+
 export const RATE_LIMIT_PROFILES = {
   /** Endpoints quentes do CRM (mensagens, search, kanban). Teto por rota = ORG_RATE_LIMIT_RPM. */
   "api.default": { points: getOrgRateLimitRpm(), durationSec: 60 },
@@ -156,6 +163,15 @@ export const RATE_LIMIT_PROFILES = {
   "webchat.s2s": { points: 300, durationSec: 60 },
   /** `GET /api/public/remote-support/:token` — página do cliente, por IP. */
   "remote-support.client": { points: 30, durationSec: 60 },
+  // Servidor MCP (APP_MODE=mcp) — ChatGPT/Claude/Cursor. Só leitura.
+  /** Chamadas de ferramenta, por conexão autorizada. `MCP_RATE_LIMIT_RPM`. */
+  "mcp.tool": { points: mcpRateLimitRpm(), durationSec: 60 },
+  /** Teto da organização somando todas as conexões MCP. */
+  "mcp.org": { points: 600, durationSec: 60 },
+  /** `/oauth/authorize|token|revoke` — por IP. */
+  "mcp.oauth": { points: 60, durationSec: 60 },
+  /** `/oauth/register` (DCR) — por IP, contra registro em massa. */
+  "mcp.register": { points: 20, durationSec: 3600 },
   // Sessão cookie (NextAuth) NÃO tem perfil aqui: o antigo `api.session`
   // (600 pontos/60 s por usuário) bloqueava o usuário inteiro até a janela
   // virar. Agora é por classe de custo da rota — `api-cost-limit.ts`
