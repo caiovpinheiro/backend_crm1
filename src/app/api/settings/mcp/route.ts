@@ -6,7 +6,7 @@ import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { getLogger } from "@/lib/logger";
-import { mcpResourceUrl } from "@/lib/mcp/config";
+import { isMcpPublicUrlConfigured, mcpResourceUrl } from "@/lib/mcp/config";
 import { MCP_SCOPE_INFO, MCP_SCOPES } from "@/lib/mcp/scopes";
 import { getMcpStatus } from "@/services/mcp/connections";
 import { canUserConnectMcp, getMcpOrgConfig, updateMcpOrgConfig } from "@/services/mcp/settings";
@@ -30,7 +30,10 @@ export async function GET() {
         canManage: viewer.canManage,
         canConnect: eligibility.ok,
         cannotConnectReason: eligibility.ok ? null : eligibility.reason,
-        connectionUrl: mcpResourceUrl(),
+        // Sem MCP_PUBLIC_URL em produção: não mostra URL errada (localhost);
+        // a tela avisa e o consentimento recusaria o `resource` de qualquer jeito.
+        connectionUrl: isMcpPublicUrlConfigured() ? mcpResourceUrl() : null,
+        configError: isMcpPublicUrlConfigured() ? null : "mcp_public_url_missing",
         scopes: MCP_SCOPES.map((s) => ({ id: s, ...MCP_SCOPE_INFO[s] })),
         status: viewer.canManage ? await getMcpStatus(viewer.organizationId) : null,
       });
