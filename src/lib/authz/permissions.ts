@@ -378,6 +378,16 @@ export const PERMISSION_CATALOG: ResourceDef[] = [
     ],
   },
   {
+    resource: "mcp",
+    label: "Assistentes de IA (MCP)",
+    description:
+      "Conectar ChatGPT, Claude, Cursor e outros clientes MCP à própria conta, só leitura. Os dados continuam limitados às permissões do usuário. ADMIN tem por padrão via `*`.",
+    actions: [
+      { action: "connect", label: "Conectar assistentes de IA à própria conta" },
+      { action: "manage", label: "Ativar MCP na organização, definir escopos e revogar conexões de todos" },
+    ],
+  },
+  {
     resource: "keep",
     label: "Bwipo Keeps",
     description: "Notas pessoais do usuário na organização (texto, listas, anexos).",
