@@ -85,13 +85,25 @@ Configuração por organização em `organization_settings` (chave `mcp.config`)
 
 Permissões novas no catálogo: `mcp:connect`, `mcp:manage` (ADMIN tem via `*`).
 
+## Multi-tenant (`{slug}.bwipo.com`)
+
+- **Uma URL de MCP para todas as organizações** (`MCP_PUBLIC_URL`). A organização vem do
+  login de quem autoriza, nunca do host; a tela de consentimento mostra o nome da org.
+- **`MCP_CONSENT_URL` deve apontar para o apex** (`https://bwipo.com/oauth/consent`), não para
+  o subdomínio de uma org. O middleware do frontend leva quem está logado no apex para
+  `{slug}.bwipo.com/oauth/consent?…` (mantém a query) e, sem sessão, o login carrega o
+  `callbackUrl` até o subdomínio escolhido. Um subdomínio fixo mandaria usuários de outras
+  orgs para `/login?error=tenant_mismatch`.
+- Ambientes de host único (ex.: EasyPanel DEV `crm-dev-frontend…easypanel.host`) usam o
+  próprio host do frontend.
+
 ## Variáveis de ambiente
 
 | Variável | Onde | Default | Uso |
 |---|---|---|---|
 | `APP_MODE=mcp` | serviço mcp | — | sobe o processo MCP |
 | `MCP_PUBLIC_URL` | **api e mcp** | origem do pedido | issuer OAuth e recurso (`<url>/mcp`). Obrigatória em produção. |
-| `MCP_CONSENT_URL` | mcp | `<APP_URL>/oauth/consent` | tela de consentimento no frontend |
+| `MCP_CONSENT_URL` | mcp | `<APP_URL>/oauth/consent` | tela de consentimento no frontend — em produção multi-tenant, o **apex** (`https://bwipo.com/oauth/consent`) |
 | `MCP_ACCESS_TOKEN_TTL_SEC` | mcp | 3600 | validade do access token (300–86400) |
 | `MCP_REFRESH_TOKEN_TTL_DAYS` | mcp | 30 | validade do refresh token (1–180) |
 | `MCP_RATE_LIMIT_RPM` | mcp | 60 | chamadas por conexão/min (10–600) |
@@ -107,7 +119,7 @@ são as mesmas da API. `DATABASE_POOL_MAX` pode ser menor (ex.: 5).
    (ou deixe o boot do serviço `api` aplicar, se `RUN_MIGRATIONS_ON_BOOT` estiver ligado).
 2. **Serviço novo** `crm-mcp`: duplique o serviço `api-public` (mesma imagem/branch).
    - Ambiente: copie o da API e troque `APP_MODE=mcp`; adicione `MCP_PUBLIC_URL=https://mcp.<domínio>`
-     e `MCP_CONSENT_URL=https://<app>/oauth/consent`.
+     e `MCP_CONSENT_URL=https://bwipo.com/oauth/consent` (apex — ver Multi-tenant).
    - Domínio: `mcp.<domínio>` → porta do container (3000), HTTPS ligado.
    - Health check: `/api/health` (o `scripts/healthcheck.mjs` já reconhece `mcp`).
    - Sem volume e sem worker. Pode ter réplicas (stateless).
