@@ -191,6 +191,10 @@ export async function listLeads(env: ToolEnv, args: ListLeadsArgs) {
 
 export async function getLead(env: ToolEnv, args: { id: string }) {
   const { user } = env;
+  // Número fora do int4 estoura no Prisma (getDealById não limita).
+  if (/^\d+$/.test(args.id) && Number(args.id) > 2_147_483_647) {
+    throw new ToolError("not_found", "Lead não encontrado.");
+  }
   const deal = await getDealById(args.id);
   if (!deal) throw new ToolError("not_found", "Lead não encontrado.");
   const pipelineId = deal.stage.pipeline?.id ?? "";
