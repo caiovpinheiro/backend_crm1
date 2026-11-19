@@ -554,4 +554,25 @@ describe.skipIf(!LOCAL)("MCP integration (Postgres local)", () => {
     const all = await prismaBase.mcpAuditLog.findMany({ where: { organizationId: ids.orgA } });
     expect(JSON.stringify(all)).not.toMatch(/bwmcp_|orçamento/);
   });
+
+  it("retenção: apaga tokens expirados e histórico antigo, preserva CODE e dados recentes", async () => {
+    const { prismaBase } = await import("@/lib/prisma-base");
+    const { purgeMcpData } = await import("@/services/mcp/retention");
+    const { access, connectionId } = await connect(ids.adminA, ids.orgA);
+    const old = new Date(Date.now() - 3 * 24 * 3600 * 1000);
+    await prismaBase.mcpToken.updateMany({ where: { connectionId }, data: { expiresAt: old } });
+    await prismaBase.mcpAuditLog.create({
+      data: { organizationId: ids.orgA, connectionId, tool: "list_leads", status: "ok", createdAt: new Date(Date.now() - 400 * 24 * 3600 * 1000) },
+    });
+    const recent = await prismaBase.mcpAuditLog.create({
+      data: { organizationId: ids.orgA, connectionId, tool: "list_leads", status: "ok" },
+    });
+    const r = await purgeMcpData();
+    expect(r.tokens).toBeGreaterThanOrEqual(2);
+    expect(r.audit).toBeGreaterThanOrEqual(1);
+    const kinds = (await prismaBase.mcpToken.findMany({ where: { connectionId }, select: { kind: true } })).map((t) => t.kind);
+    expect(kinds).toEqual(["CODE"]);
+    expect(await prismaBase.mcpAuditLog.findUnique({ where: { id: recent.id } })).not.toBeNull();
+    expect((await rpc(access, "tools/list")).status).toBe(401);
+  });
 });

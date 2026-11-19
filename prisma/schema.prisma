@@ -4969,6 +4969,8 @@ model McpAuditLog {
 
   @@index([organizationId, createdAt])
   @@index([connectionId, createdAt])
+  /// Retenção por data (`services/mcp/retention.ts`).
+  @@index([createdAt])
   @@map("mcp_audit_logs")
 }
 
