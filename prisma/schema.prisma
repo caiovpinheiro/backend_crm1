@@ -4894,6 +4894,9 @@ model McpConnection {
   clientId       String
   client         McpOAuthClient @relation(fields: [clientId], references: [id], onDelete: Cascade)
   scopes         String[]
+  /// `User.sessionVersion` no consentimento: troca de senha / "sair de
+  /// todos os dispositivos" sobe a versão e a conexão cai junto.
+  userSessionVersion Int?
   lastUsedAt     DateTime?
   lastError      String?
   lastErrorAt    DateTime?

@@ -357,8 +357,22 @@ describe.skipIf(!LOCAL)("MCP integration (Postgres local)", () => {
     if (!v.ok) throw new Error("validate");
     const ap = await oauth.approveAuthorization({ id: ids.adminA, organizationId: ids.orgA }, v.value, v.value.requestedScopes);
     const code = new URL(ap.redirectTo).searchParams.get("code")!;
-    const wrong = await tokenRequest({ grant_type: "authorization_code", client_id: conn.clientId, code, code_verifier: pkcePair().verifier });
+    const noRedirect = await tokenRequest({ grant_type: "authorization_code", client_id: conn.clientId, code, code_verifier: pkcePair().verifier });
+    expect(noRedirect.body.error).toBe("invalid_grant");
+    const v2 = await oauth.validateAuthorizeRequest({
+      response_type: "code", client_id: conn.clientId,
+      redirect_uri: "https://chatgpt.com/connector_platform_oauth_redirect",
+      code_challenge: pkcePair().challenge, code_challenge_method: "S256",
+    });
+    if (!v2.ok) throw new Error("validate");
+    const ap2 = await oauth.approveAuthorization({ id: ids.adminA, organizationId: ids.orgA }, v2.value, v2.value.requestedScopes);
+    const code2 = new URL(ap2.redirectTo).searchParams.get("code")!;
+    const wrong = await tokenRequest({
+      grant_type: "authorization_code", client_id: conn.clientId, code: code2,
+      code_verifier: pkcePair().verifier, redirect_uri: "https://chatgpt.com/connector_platform_oauth_redirect",
+    });
     expect(wrong.body.error).toBe("invalid_grant");
+    expect(wrong.body.error_description).toContain("code_verifier");
   });
 
   it("refresh rotaciona; reuso do refresh antigo derruba a família", async () => {
@@ -574,5 +588,56 @@ describe.skipIf(!LOCAL)("MCP integration (Postgres local)", () => {
     expect(kinds).toEqual(["CODE"]);
     expect(await prismaBase.mcpAuditLog.findUnique({ where: { id: recent.id } })).not.toBeNull();
     expect((await rpc(access, "tools/list")).status).toBe(401);
+  });
+
+  it("escopo só desconhecido (ex.: openid) não quebra: pede todos e o usuário escolhe", async () => {
+    const oauth = await import("@/services/mcp/oauth");
+    const c = await oauth.registerClient({ client_name: "Teste MCP", redirect_uris: ["https://ok.example/cb"] }, null);
+    const v = await oauth.validateAuthorizeRequest({
+      response_type: "code", client_id: c.client_id, redirect_uri: "https://ok.example/cb",
+      code_challenge: pkcePair().challenge, code_challenge_method: "S256", scope: "openid offline_access",
+    });
+    expect(v.ok).toBe(true);
+    if (v.ok) expect(v.value.requestedScopes).toContain("leads:read");
+  });
+
+  it("get_lead com número fora do int4 é 'não encontrado', não erro interno", async () => {
+    const { access } = await connect(ids.adminA, ids.orgA);
+    const r = await callTool(access, "get_lead", { id: "99999999999" });
+    expect(r.isError).toBe(true);
+    expect(r.content[0].text).toContain("não encontrado");
+  });
+
+  it("troca de senha / sair de todos os dispositivos derruba a conexão MCP", async () => {
+    const { prismaBase } = await import("@/lib/prisma-base");
+    const a = await connect(ids.adminA, ids.orgA);
+    expect((await rpc(a.access, "tools/list")).status).toBe(200);
+    await prismaBase.user.update({ where: { id: ids.adminA }, data: { sessionVersion: { increment: 1 } } });
+    expect((await rpc(a.access, "tools/list")).status).toBe(401);
+    const conn = await prismaBase.mcpConnection.findUnique({ where: { id: a.connectionId } });
+    expect(conn?.revokedAt).not.toBeNull();
+    const ref = await tokenRequest({ grant_type: "refresh_token", client_id: a.clientId, refresh_token: a.refresh });
+    expect(ref.body.error).toBe("invalid_grant");
+    // Revogação feita pelo sistema aparece no histórico do dono da conexão.
+    const log = await prismaBase.mcpAuditLog.findFirst({ where: { connectionId: a.connectionId, tool: "oauth.revoke" } });
+    expect(log?.userId).toBe(ids.adminA);
+    // Reconectar depois funciona (nova versão gravada).
+    const b = await connect(ids.adminA, ids.orgA);
+    expect((await rpc(b.access, "tools/list")).status).toBe(200);
+  });
+
+  it("usuário anonimizado (LGPD) perde o acesso e não consegue reconectar", async () => {
+    const { prismaBase } = await import("@/lib/prisma-base");
+    const { updateMcpOrgConfig } = await import("@/services/mcp/settings");
+    await updateMcpOrgConfig(ids.orgA, ids.adminA, { allowAllUsers: true });
+    const m = await connect(ids.memberA, ids.orgA);
+    expect((await rpc(m.access, "tools/list")).status).toBe(200);
+    await prismaBase.user.update({ where: { id: ids.memberA }, data: { isErased: true } });
+    expect((await rpc(m.access, "tools/list")).status).toBe(401);
+    const ref = await tokenRequest({ grant_type: "refresh_token", client_id: m.clientId, refresh_token: m.refresh });
+    expect(ref.body.error).toBe("invalid_grant");
+    await expect(connect(ids.memberA, ids.orgA)).rejects.toMatchObject({ error: "access_denied" });
+    await prismaBase.user.update({ where: { id: ids.memberA }, data: { isErased: false } });
+    await updateMcpOrgConfig(ids.orgA, ids.adminA, { allowAllUsers: false });
   });
 });
