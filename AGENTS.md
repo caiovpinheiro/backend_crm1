@@ -68,6 +68,7 @@ Job de worker: payload com `organizationId` + `runWithContext` antes de `prisma`
 | Permissions | `src/lib/authz/permissions.ts` |
 | `can` / cache | `src/lib/authz/index.ts` |
 | Auth HTTP | `src/lib/auth-helpers.ts` |
+| Trocar de organização (vínculo entre contas do mesmo e-mail + ticket no `update()`) | `src/lib/auth/org-switch.ts` |
 | Prisma tenant | `src/lib/prisma.ts` |
 | Contexto | `src/lib/request-context.ts` |
 | IDs numéricos | `src/lib/public-id.ts` |

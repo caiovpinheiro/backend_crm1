@@ -133,6 +133,12 @@ export const RATE_LIMIT_PROFILES = {
    * só deixa de enviar (o login responde igual).
    */
   "auth.verify-resend": { points: 3, durationSec: 3600 },
+  /**
+   * "Trocar de organização" (`/api/me/organizations/switch`), por usuário da
+   * sessão. A senha da conta de destino ainda passa pelo lockout por e-mail;
+   * este teto barra o flood de bcrypt/tickets a partir de uma sessão.
+   */
+  "auth.org-switch": { points: 10, durationSec: 60 },
   /** Convites: previne enumeration. 30 tentativas/hora/IP. */
   "auth.invite": { points: 30, durationSec: 3600 },
   /** Bulk-ops (import contatos, export). 5/min/org. */

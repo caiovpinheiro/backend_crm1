@@ -36,6 +36,7 @@ import {
 } from "./auth/session-renewal";
 import { isRevokedToken, revokedSession, revokedToken } from "./auth/revoked-session";
 import { isSessionIdleExpired, touchSessionActivity } from "./auth/session-activity";
+import { consumeOrgSwitch, orgSwitchTicketFrom } from "./auth/org-switch";
 import { getClientIp, withRateLimit } from "./rate-limit";
 import { runInBackground } from "@/lib/background";
 import { resendVerificationOnLogin } from "@/services/email-verification";
@@ -491,6 +492,37 @@ const nextAuth = NextAuth({
           )
         ) {
           return revokedToken(userId, "session_revoked");
+        }
+        // Trocar de organização: só aqui, DEPOIS de a sessão atual passar
+        // por todas as checagens acima (um token revogado não troca). O
+        // `update()` traz apenas um ticket de uso único emitido por
+        // `/api/me/organizations/switch`; as claims vêm do banco
+        // (`consumeOrgSwitch`). Ticket recusado = token intacto.
+        if (trigger === "update") {
+          const ticket = orgSwitchTicketFrom(updateData);
+          if (ticket) {
+            const next = await consumeOrgSwitch({
+              ticket,
+              userId,
+              sid: typeof token.sid === "string" ? token.sid : null,
+            });
+            if (next) {
+              token.id = next.id;
+              token.sub = next.id;
+              token.name = next.name;
+              token.email = next.email;
+              token.role = next.role;
+              token.organizationId = next.organizationId;
+              token.organizationSlug = next.organizationSlug;
+              token.isSuperAdmin = false;
+              token.picture = next.picture;
+              token.sessionVersion = next.sessionVersion;
+              setCachedSessionVersion(next.id, next.sessionVersion);
+              // Sessão nova para a inatividade (a troca é atividade real).
+              token.sid = crypto.randomUUID();
+              await touchSessionActivity({ userId: next.id, sid: token.sid });
+            }
+          }
         }
       }
       return token;
