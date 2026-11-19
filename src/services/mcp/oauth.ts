@@ -793,12 +793,4 @@ export async function validateAccessToken(
   };
 }
 
-/** Limpeza oportunista de credenciais expiradas há mais de 7 dias. */
-export async function purgeExpiredMcpTokens(): Promise<number> {
-  const res = await prismaBase.mcpToken.deleteMany({
-    where: { expiresAt: { lt: new Date(Date.now() - 7 * 24 * 3600 * 1000) } },
-  });
-  return res.count;
-}
-
 export { getMcpOrgConfig };
