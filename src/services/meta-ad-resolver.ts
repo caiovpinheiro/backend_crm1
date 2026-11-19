@@ -462,6 +462,45 @@ export function __resetAdCacheForTests(): void {
   adCache.clear();
 }
 
+/** UTMs fixas de lead Click-to-WhatsApp quando a Graph não trouxe `url_tags`. */
+export const CTWA_DEFAULT_UTM_SOURCE = "Meta";
+export const CTWA_DEFAULT_UTM_MEDIUM = "whatsapp_ads";
+
+/**
+ * Sem leitura do anúncio (falta `ads_read`, erro, ou anúncio sem
+ * `url_tags`), o lead ainda veio de um anúncio Meta: marca
+ * `utm_source=Meta` / `utm_medium=whatsapp_ads` e usa o título do anúncio
+ * (`referral.headline`) como `utm_content`. Quando a Graph devolve
+ * `utm_source`, o `url_tags` real prevalece e nada é inventado.
+ */
+export function withCtwaDefaultUtms(
+  data: ResolvedAd | null,
+  headline: string | null | undefined,
+): ResolvedAd {
+  const base: ResolvedAd = data ?? {
+    adId: null,
+    adName: null,
+    adsetId: null,
+    adsetName: null,
+    campaignId: null,
+    campaignName: null,
+    ...EMPTY_TRACKING,
+  };
+  if (base.utmSource) return base;
+  return {
+    ...base,
+    utmSource: CTWA_DEFAULT_UTM_SOURCE,
+    utmMedium: base.utmMedium || CTWA_DEFAULT_UTM_MEDIUM,
+    utmContent: base.utmContent || headline?.trim() || null,
+  };
+}
+
+const EXISTING_UTM_SELECT = {
+  adUtmSource: true,
+  adUtmMedium: true,
+  adUtmContent: true,
+} as const;
+
 /**
  * Função pública — chame com `void` no handler do webhook para não
  * bloquear a resposta 200 à Meta. Faz cache lookup primeiro; se cache
@@ -479,6 +518,8 @@ export async function resolveAdAndPersistAsync(args: {
   accessToken: string | null;
   /** URL do referral (source_url) — preenche referrer/UTMs se vierem na query. */
   sourceUrl?: string | null;
+  /** Título do anúncio (`referral.headline`) — vira `utm_content` sem `url_tags`. */
+  headline?: string | null;
 }): Promise<void> {
   const { contactId, organizationId, sourceId, accessToken } = args;
   const sourceType = (args.sourceType ?? "").toLowerCase();
@@ -535,10 +576,16 @@ export async function resolveAdAndPersistAsync(args: {
   }
 
   if (!accessToken) {
+    const existingUtm = await prisma.contact
+      .findUnique({ where: { id: contactId }, select: EXISTING_UTM_SELECT })
+      .catch(() => null);
     await prisma.contact
       .update({
         where: { id: contactId },
         data: {
+          ...trackingPatchFromResolved(withCtwaDefaultUtms(null, args.headline), {
+            fillEmptyOnly: (existingUtm ?? {}) as Record<string, string | null>,
+          }),
           adResolveStatus: "no_access",
           adResolveError: "accessToken indisponível",
           adResolvedAt: new Date(),
@@ -581,7 +628,7 @@ export async function resolveAdAndPersistAsync(args: {
       .update({
         where: { id: contactId },
         data: {
-          ...trackingPatchFromResolved(cached, {
+          ...trackingPatchFromResolved(withCtwaDefaultUtms(cached, args.headline), {
             fillEmptyOnly: (existing ?? {}) as Record<string, string | null>,
           }),
           adResolvedAt: new Date(),
@@ -643,7 +690,7 @@ export async function resolveAdAndPersistAsync(args: {
         }
       : null;
 
-  const data = result.data ?? fallbackAd;
+  const data = withCtwaDefaultUtms(result.data ?? fallbackAd, args.headline);
   if (result.status === "ok" && result.data) {
     storeCache(organizationId, sourceId, result.data);
   }

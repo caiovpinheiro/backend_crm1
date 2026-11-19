@@ -3162,6 +3162,7 @@ export async function processMetaWebhookPayload(
                     sourceType: ref.sourceType,
                     accessToken: token,
                     sourceUrl: ref.sourceUrl,
+                    headline: ref.headline,
                   });
                 }
               } else if (ref.sourceUrl) {

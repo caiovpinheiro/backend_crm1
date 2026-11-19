@@ -114,3 +114,60 @@ describe("meta-ad-resolver CTWA", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("UTMs padrão de lead CTWA (sem url_tags)", () => {
+  const PERM_ERROR = () =>
+    new Response(
+      JSON.stringify({ error: { message: "missing permissions", code: 100, error_subcode: 33 } }),
+      { status: 400 },
+    );
+
+  it("sem permissão: Meta / whatsapp_ads / título do anúncio", async () => {
+    fetchMock.mockResolvedValue(PERM_ERROR());
+    await resolveAdAndPersistAsync({ ...args("c1"), headline: "Óptica e Optometria: R$535/mês" });
+    const d = lastUpdateData();
+    expect(d.adResolveStatus).toBe("no_access");
+    expect(d.adUtmSource).toBe("Meta");
+    expect(d.adUtmMedium).toBe("whatsapp_ads");
+    expect(d.adUtmContent).toBe("Óptica e Optometria: R$535/mês");
+    expect(d.adUtmCampaign).toBeUndefined();
+  });
+
+  it("sem token: também marca como Meta", async () => {
+    await resolveAdAndPersistAsync({ ...args("c1"), accessToken: null, headline: "Pedagogia" });
+    const d = lastUpdateData();
+    expect(d.adResolveStatus).toBe("no_access");
+    expect(d.adUtmSource).toBe("Meta");
+    expect(d.adUtmContent).toBe("Pedagogia");
+  });
+
+  it("não sobrescreve UTM que o contato já tem", async () => {
+    contactFindUnique.mockResolvedValue({ adUtmSource: "google_cruzeiroead", adUtmMedium: "adsforms" });
+    fetchMock.mockResolvedValue(PERM_ERROR());
+    await resolveAdAndPersistAsync({ ...args("c1"), headline: "Fono" });
+    const d = lastUpdateData();
+    expect(d.adUtmSource).toBeUndefined();
+    expect(d.adUtmMedium).toBeUndefined();
+    expect(d.adUtmContent).toBe("Fono");
+  });
+
+  it("com url_tags da Graph, o url_tags prevalece", async () => {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify(AD_JSON), { status: 200 }));
+    await resolveAdAndPersistAsync({ ...args("c1"), headline: "Título do anúncio" });
+    const d = lastUpdateData();
+    expect(d.adUtmSource).toBe("Meta");
+    expect(d.adUtmContent).toBe("Ciência da Computação: R$169/mês");
+  });
+
+  it("Graph ok mas anúncio sem url_tags: usa o padrão", async () => {
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ ...AD_JSON, url_tags: undefined }), { status: 200 }),
+    );
+    await resolveAdAndPersistAsync({ ...args("c1"), headline: "Título" });
+    const d = lastUpdateData();
+    expect(d.adResolveStatus).toBe("ok");
+    expect(d.adUtmSource).toBe("Meta");
+    expect(d.adUtmMedium).toBe("whatsapp_ads");
+    expect(d.adUtmContent).toBe("Título");
+  });
+});
