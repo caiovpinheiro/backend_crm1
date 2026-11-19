@@ -15,6 +15,7 @@ import {
 } from "@/lib/mcp/http";
 import { handleMcpHttp } from "@/lib/mcp/server";
 import { validateAccessToken } from "@/services/mcp/oauth";
+import { maybePurgeMcpData } from "@/services/mcp/retention";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -34,6 +35,7 @@ function unauthorized(request: Request, error?: string): NextResponse {
 async function handle(request: Request): Promise<Response> {
   const blocked = rejectIfNotMcpProcess();
   if (blocked) return blocked;
+  maybePurgeMcpData();
   const header = request.headers.get("authorization") ?? "";
   const m = header.match(/^Bearer\s+(\S+)$/i);
   if (!m) return unauthorized(request);
