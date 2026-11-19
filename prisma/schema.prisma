@@ -616,6 +616,8 @@ model User {
   fieldLayoutConfigs             FieldLayoutConfig[]
   preferences                    UserPreference?
   mfaBackupCodes                 UserMfaBackupCode[]
+  accountLinksA                  UserAccountLink[]         @relation("UserAccountLinkA")
+  accountLinksB                  UserAccountLink[]         @relation("UserAccountLinkB")
   loginAttempts                  LoginAttempt[]
   passwordResetTokens            PasswordResetToken[]
   emailVerificationTokens        EmailVerificationToken[]
@@ -713,6 +715,36 @@ model UserMfaBackupCode {
 
   @@index([userId])
   @@map("user_mfa_backup_codes")
+}
+
+/// Vínculo entre duas contas (User) do MESMO e-mail em organizações
+/// diferentes — base do "Trocar de organização" sem nova senha
+/// (`src/lib/auth/org-switch.ts`). Criado só depois de a pessoa provar a
+/// identidade na conta de destino (senha + MFA dela) estando logada na de
+/// origem; coincidência de e-mail sozinha nunca autoriza a troca.
+///
+/// O vínculo vale enquanto: os dois lados existem, não foram apagados
+/// (erase), continuam com o mesmo e-mail e com a MESMA `sessionVersion`
+/// gravada aqui — troca de senha, "sair de todos os dispositivos" ou
+/// revogação pelo admin em qualquer um dos lados invalidam o vínculo e a
+/// próxima troca volta a pedir senha/MFA. Não é tenant-scoped (atravessa
+/// orgs por definição): só `prismaBase`.
+model UserAccountLink {
+  id           String    @id @default(cuid())
+  /// Par canônico: `userAId < userBId` (ordem de string) — um vínculo por par.
+  userAId      String
+  userA        User      @relation("UserAccountLinkA", fields: [userAId], references: [id], onDelete: Cascade)
+  userBId      String
+  userB        User      @relation("UserAccountLinkB", fields: [userBId], references: [id], onDelete: Cascade)
+  /// `users.sessionVersion` de cada lado no momento da validação.
+  userAVersion Int
+  userBVersion Int
+  createdAt    DateTime  @default(now())
+  lastUsedAt   DateTime?
+
+  @@unique([userAId, userBId])
+  @@index([userBId])
+  @@map("user_account_links")
 }
 
 /// Preferencias pessoais do usuario (por-usuario, NAO por-organizacao).
