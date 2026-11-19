@@ -76,11 +76,17 @@ personalizados não saem. Páginas: máx. 50 itens.
 - `redirect_uri`: https, http só em loopback (CLIs), esquema privado de app
   (`cursor://…`); sem fragmento/credenciais. PKCE S256 obrigatório.
 - Logs: nenhum token, código ou conteúdo de mensagem é logado.
+- Conexão cai sozinha quando o usuário troca a senha / "sai de todos os dispositivos"
+  (`User.sessionVersion` mudou desde o consentimento), é anonimizado (LGPD), sai da org
+  ou a org é suspensa.
+- Retenção: tokens expirados há mais de 1 dia e histórico além de
+  `MCP_AUDIT_RETENTION_DAYS` são apagados em lotes pelo processo MCP (até 1x/hora).
 
 ## Banco
 
-Migration `prisma/migrations/20261118120000_mcp_integration` (idempotente, só tabelas novas):
-`mcp_oauth_clients`, `mcp_connections`, `mcp_tokens`, `mcp_audit_logs`.
+Migrations (idempotentes, só tabelas novas do MCP):
+- `20261118120000_mcp_integration` — `mcp_oauth_clients`, `mcp_connections`, `mcp_tokens`, `mcp_audit_logs`;
+- `20261119120000_mcp_hardening` — índice de retenção do histórico e `mcp_connections.userSessionVersion`.
 Configuração por organização em `organization_settings` (chave `mcp.config`).
 
 Permissões novas no catálogo: `mcp:connect`, `mcp:manage` (ADMIN tem via `*`).
@@ -107,6 +113,7 @@ Permissões novas no catálogo: `mcp:connect`, `mcp:manage` (ADMIN tem via `*`).
 | `MCP_ACCESS_TOKEN_TTL_SEC` | mcp | 3600 | validade do access token (300–86400) |
 | `MCP_REFRESH_TOKEN_TTL_DAYS` | mcp | 30 | validade do refresh token (1–180) |
 | `MCP_RATE_LIMIT_RPM` | mcp | 60 | chamadas por conexão/min (10–600) |
+| `MCP_AUDIT_RETENTION_DAYS` | mcp | 180 | histórico de consultas guardado (mín. 7) |
 | `MCP_ALLOW_ON_MAIN_API` | api | — | `1` serve MCP na API principal (só diagnóstico) |
 
 As demais (`DATABASE_URL`, `REDIS_URL`, `AUTH_SECRET`/`NEXTAUTH_SECRET`, `TRUSTED_PROXY_HOPS`…)

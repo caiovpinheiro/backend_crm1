@@ -311,8 +311,10 @@ export async function validateAuthorizeRequest(
   if (p.resource && !isAcceptedResource(p.resource, request)) {
     return fail("invalid_target", "resource inválido para este servidor.");
   }
-  const requested = p.scope ? parseScopeParam(p.scope) : [...MCP_SCOPES];
-  if (p.scope && requested.length === 0) return fail("invalid_scope", "Nenhum escopo válido.");
+  // Escopos desconhecidos (ex.: `openid`) são ignorados; sem nenhum nosso,
+  // pede todos — o usuário escolhe na tela de consentimento.
+  const parsed = parseScopeParam(p.scope);
+  const requested = parsed.length > 0 ? parsed : [...MCP_SCOPES];
   return {
     ok: true,
     value: {
@@ -365,6 +367,13 @@ export async function approveAuthorization(
     throw new OAuthError("invalid_scope", "Selecione ao menos uma permissão.", 400);
   }
 
+  const dbUser = await prismaBase.user.findUnique({
+    where: { id: user.id },
+    select: { sessionVersion: true, isErased: true, organizationId: true },
+  });
+  if (!dbUser || dbUser.isErased || dbUser.organizationId !== orgId) {
+    throw new OAuthError("access_denied", "MCP indisponível para este usuário.", 403);
+  }
   const existing = await prismaBase.mcpConnection.findFirst({
     where: { organizationId: orgId, userId: user.id, clientId: v.client.id, revokedAt: null },
     select: { id: true },
@@ -372,11 +381,17 @@ export async function approveAuthorization(
   const connection = existing
     ? await prismaBase.mcpConnection.update({
         where: { id: existing.id },
-        data: { scopes, lastError: null, lastErrorAt: null },
+        data: { scopes, lastError: null, lastErrorAt: null, userSessionVersion: dbUser.sessionVersion },
         select: { id: true },
       })
     : await prismaBase.mcpConnection.create({
-        data: { organizationId: orgId, userId: user.id, clientId: v.client.id, scopes },
+        data: {
+          organizationId: orgId,
+          userId: user.id,
+          clientId: v.client.id,
+          scopes,
+          userSessionVersion: dbUser.sessionVersion,
+        },
         select: { id: true },
       });
 
@@ -493,6 +508,19 @@ async function revokeConnectionTokens(connectionId: string): Promise<void> {
   });
 }
 
+/**
+ * Troca de senha / "sair de todos os dispositivos" / erase sobem
+ * `User.sessionVersion` (`lib/auth/session-revocation.ts`). Conexão
+ * autorizada numa versão anterior cai junto. `null` = conexão antiga, sem
+ * versão gravada (não derruba).
+ */
+export function sessionsRevokedSinceConsent(
+  consentVersion: number | null,
+  currentVersion: number,
+): boolean {
+  return consentVersion !== null && currentVersion !== consentVersion;
+}
+
 async function assertConnectionUsable(connectionId: string): Promise<{
   organizationId: string;
   userId: string;
@@ -505,12 +533,28 @@ async function assertConnectionUsable(connectionId: string): Promise<{
       userId: true,
       scopes: true,
       revokedAt: true,
-      user: { select: { organizationId: true, organization: { select: { status: true } } } },
+      userSessionVersion: true,
+      user: {
+        select: {
+          organizationId: true,
+          isErased: true,
+          sessionVersion: true,
+          organization: { select: { status: true } },
+        },
+      },
     },
   });
   if (!conn || conn.revokedAt) throw new OAuthError("invalid_grant", "Conexão revogada.");
-  if (conn.user.organizationId !== conn.organizationId || conn.user.organization?.status !== "ACTIVE") {
+  if (
+    conn.user.organizationId !== conn.organizationId ||
+    conn.user.organization?.status !== "ACTIVE" ||
+    conn.user.isErased
+  ) {
     throw new OAuthError("invalid_grant", "Usuário sem acesso à organização.");
+  }
+  if (sessionsRevokedSinceConsent(conn.userSessionVersion, conn.user.sessionVersion)) {
+    await revokeConnection(conn.organizationId, connectionId, null, conn.userId);
+    throw new OAuthError("invalid_grant", "Sessões do usuário foram encerradas. Conecte de novo.");
   }
   const elig = await canUserConnectMcp({ id: conn.userId, organizationId: conn.organizationId });
   if (!elig.ok) throw new OAuthError("invalid_grant", "MCP desativado ou sem permissão.");
@@ -558,7 +602,7 @@ export async function exchangeAuthorizationCode(args: {
     throw new OAuthError("invalid_grant", "Código já utilizado.");
   }
   if (row.expiresAt.getTime() < Date.now()) throw new OAuthError("invalid_grant", "Código expirado.");
-  if (row.redirectUri && args.redirectUri !== null && args.redirectUri !== row.redirectUri) {
+  if (row.redirectUri && args.redirectUri !== row.redirectUri) {
     throw new OAuthError("invalid_grant", "redirect_uri diferente da autorização.");
   }
   if (!row.codeChallenge || !verifyPkce(args.codeVerifier, row.codeChallenge)) {
@@ -670,6 +714,7 @@ export async function revokeConnection(
   organizationId: string,
   connectionId: string,
   actorId: string | null,
+  ownerUserId?: string,
 ): Promise<boolean> {
   const res = await prismaBase.mcpConnection.updateMany({
     where: { id: connectionId, organizationId, revokedAt: null },
@@ -685,9 +730,20 @@ export async function revokeConnection(
         data: {
           organizationId,
           connectionId,
-          userId: actorId,
+          // Dono da conexão: a revogação aparece no histórico de quem perdeu
+          // o acesso; quem revogou vai em `args`.
+          userId:
+            ownerUserId ??
+            (
+              await prismaBase.mcpConnection.findUnique({
+                where: { id: connectionId },
+                select: { userId: true },
+              })
+            )?.userId ??
+            actorId,
           tool: "oauth.revoke",
           status: "ok",
+          args: { revokedBy: actorId ?? "cliente" },
         },
       })
       .catch(() => {});
@@ -737,6 +793,7 @@ export async function validateAccessToken(
           revokedAt: true,
           scopes: true,
           organizationId: true,
+          userSessionVersion: true,
           client: { select: { clientName: true } },
           user: {
             select: {
@@ -745,6 +802,8 @@ export async function validateAccessToken(
               email: true,
               role: true,
               organizationId: true,
+              isErased: true,
+              sessionVersion: true,
               organization: { select: { status: true } },
             },
           },
@@ -761,6 +820,12 @@ export async function validateAccessToken(
   // Usuário mudou de org / org suspensa: nunca atravessa organizações.
   if (conn.user.organizationId !== conn.organizationId) return { ok: false, reason: "user_left_org" };
   if (conn.user.organization?.status !== "ACTIVE") return { ok: false, reason: "org_inactive" };
+  // Anonimizado (LGPD): mesma regra do login.
+  if (conn.user.isErased) return { ok: false, reason: "user_erased" };
+  if (sessionsRevokedSinceConsent(conn.userSessionVersion, conn.user.sessionVersion)) {
+    await revokeConnection(conn.organizationId, conn.id, null, conn.user.id);
+    return { ok: false, reason: "sessions_revoked" };
+  }
 
   const elig = await canUserConnectMcp({ id: conn.user.id, organizationId: conn.organizationId });
   if (!elig.ok) return { ok: false, reason: elig.reason };
