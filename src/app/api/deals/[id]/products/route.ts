@@ -5,6 +5,8 @@ import { NextResponse } from "next/server";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { requirePermissionForUser } from "@/lib/authz/resource-policy";
+import { isRegisteredPrice, readPriceOptions } from "@/services/deal-product-price-sync";
 import { createDealEvent, getDealById } from "@/services/deals";
 import { formatCourseDuration, formatCourseMode } from "@/services/product-messages";
 
@@ -150,7 +152,12 @@ export async function POST(request: Request, context: RouteContext) {
 
     const product = await prisma.product.findUnique({
       where: { id: productId },
-      select: { price: true, type: true, kind: true },
+      select: {
+        price: true,
+        type: true,
+        kind: true,
+        courseConfig: { select: { pricingOptions: true } },
+      },
     });
     if (!product) {
       return NextResponse.json({ message: "Produto não encontrado." }, { status: 404 });
@@ -203,6 +210,21 @@ export async function POST(request: Request, context: RouteContext) {
               : defaultDiscount,
           ),
         );
+
+    // Preço/desconto livres só com `product:edit_deal_price`.
+    // Sem ela: valores padrão ou uma das cotas cadastradas.
+    const customPrice =
+      body.unitPrice !== undefined || body.discount !== undefined
+        ? !isRegisteredPrice(
+            readPriceOptions(product.price, product.courseConfig?.pricingOptions),
+            unitPrice,
+            discount,
+          ) && !(unitPrice === basePrice && discount === defaultDiscount)
+        : false;
+    if (customPrice) {
+      const denied = await requirePermissionForUser(session.user, "product:edit_deal_price");
+      if (denied) return denied;
+    }
 
     const item = (await prisma.dealProduct.create({
       data: withOrgFromCtx({ dealId, productId, quantity, unitPrice, discount }),

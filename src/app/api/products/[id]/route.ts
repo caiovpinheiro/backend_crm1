@@ -12,6 +12,14 @@ import {
 } from "@/lib/capabilities";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { getLogger } from "@/lib/logger";
+import {
+  diffPriceChanges,
+  readPriceOptions,
+  syncOpenDealPrices,
+} from "@/services/deal-product-price-sync";
+
+const priceSyncLog = getLogger("api/products/[id]/price-sync");
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -246,7 +254,12 @@ export async function PUT(request: Request, context: RouteContext) {
     // aplicar a política de override nas capabilities enviadas.
     const current = await prisma.product.findUnique({
       where: { id },
-      select: { id: true, catalogId: true },
+      select: {
+        id: true,
+        catalogId: true,
+        price: true,
+        courseConfig: { select: { pricingOptions: true } },
+      },
     });
     if (!current) {
       return NextResponse.json({ message: "Produto não encontrado." }, { status: 404 });
@@ -546,7 +559,27 @@ export async function PUT(request: Request, context: RouteContext) {
         },
       },
     });
-    return NextResponse.json({ product });
+
+    // Valor novo vale também para os cards ABERTOS que ainda estão com o
+    // valor antigo da cota. Ganhos/perdidos ficam como estão (histórico).
+    let priceSync = { items: 0, deals: 0 };
+    if (product) {
+      const changes = diffPriceChanges(
+        readPriceOptions(current.price, current.courseConfig?.pricingOptions),
+        readPriceOptions(product.price, product.courseConfig?.pricingOptions),
+      );
+      try {
+        priceSync = await syncOpenDealPrices({
+          productId: id,
+          productName: product.name,
+          changes,
+          userId: authResult.user.id,
+        });
+      } catch (err) {
+        priceSyncLog.error({ err, productId: id }, "falha ao atualizar preço nos negócios");
+      }
+    }
+    return NextResponse.json({ product, priceSync });
   });
 }
 
