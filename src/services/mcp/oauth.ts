@@ -770,6 +770,8 @@ export type McpPrincipal = {
   scopes: McpScope[];
   user: { id: string; name: string; email: string; role: string };
   exposeContactPii: boolean;
+  /** Campos personalizados liberados pela org (`custom_fields:read`). */
+  customFieldIds: string[];
 };
 
 const lastUsedTouch = new Map<string, number>();
@@ -854,6 +856,7 @@ export async function validateAccessToken(
         role: String(conn.user.role),
       },
       exposeContactPii: elig.config.exposeContactPii,
+      customFieldIds: elig.config.customFieldIds,
     },
   };
 }

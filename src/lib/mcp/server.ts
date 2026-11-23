@@ -19,19 +19,24 @@ import { MCP_TOOL_REQUIREMENTS, type McpToolName } from "@/lib/mcp/scopes";
 import {
   countOf,
   getCampaignResults,
-  getConversationMessages,
   getLead,
   getPipelineMetrics,
   getSalesMetrics,
-  getTeamPerformance,
   isMcpOwnScopeOnly,
-  listConversations,
   listLeads,
   listVisiblePipelines,
   ToolError,
   type ToolEnv,
   type ToolUser,
 } from "@/lib/mcp/tools";
+import {
+  EVENT_CATEGORIES,
+  getConversationEvents,
+  getConversationMessages,
+  getQueueStatus,
+  getTeamPerformance,
+  listConversations,
+} from "@/lib/mcp/tools-conversations";
 import { consumeRateLimit } from "@/lib/rate-limit";
 import { runWithContext } from "@/lib/request-context";
 import type { McpPrincipal } from "@/services/mcp/oauth";
@@ -132,7 +137,13 @@ export async function runGuardedTool(
       try {
         // Papel lido a cada chamada: promover/rebaixar vale na hora.
         const ownOnly = isMcpOwnScopeOnly({ role: user.role, isAdmin: authz.isAdmin });
-        const result = await exec({ user, exposeContactPii: principal.exposeContactPii, ownOnly });
+        const result = await exec({
+          user,
+          exposeContactPii: principal.exposeContactPii,
+          ownOnly,
+          scopes: principal.scopes,
+          customFieldIds: principal.customFieldIds,
+        });
         await audit("ok", { resultCount: countOf(result) });
         return textResult(result);
       } catch (err) {
@@ -216,16 +227,29 @@ export function buildMcpServer(principal: McpPrincipal): McpServer {
     (env, args) => getLead(env, args),
   );
 
+  const dateArg = z.string().max(40).optional();
   reg(
     "list_conversations",
     "Listar conversas",
-    "Lista conversas da inbox que o usuário pode ver (sem conteúdo das mensagens). Paginação por cursor (nextCursor).",
+    "Lista conversas que o usuário pode ver (sem o conteúdo das mensagens), uma linha por conversa (não agrupa tickets do mesmo contato). Traz departamento, atendente, datas, tabulação e quem encerrou. Filtros de período aceitam YYYY-MM-DD (dia inteiro, horário de Brasília) ou ISO-8601. Paginação por cursor: repita a consulta com nextCursor até hasMore=false.",
     {
       status: z.enum(["OPEN", "RESOLVED", "PENDING", "SNOOZED"]).optional(),
       channel: z.string().max(40).optional().describe("Tipo de canal, ex.: whatsapp, instagram, email."),
-      ownerId: id.optional().describe("ID do atendente, ou 'me'."),
+      channelId: id.optional().describe("ID do canal (número/conta)."),
+      departmentId: id.optional().describe("Departamento/fila; 'none' = sem departamento."),
+      assignedToId: id.optional().describe("Atendente: ID, 'me' ou 'none' (sem responsável)."),
+      ownerId: id.optional().describe("Alias de assignedToId."),
+      tabulationId: id.optional(),
       contactId: id.optional(),
-      search: z.string().max(100).optional(),
+      search: z.string().max(100).optional().describe("Nome ou telefone do contato."),
+      createdFrom: dateArg,
+      createdTo: dateArg,
+      updatedFrom: dateArg,
+      updatedTo: dateArg,
+      closedFrom: dateArg,
+      closedTo: dateArg,
+      sort: z.enum(["createdAt", "updatedAt", "closedAt"]).optional().describe("Padrão createdAt."),
+      order: z.enum(["asc", "desc"]).optional().describe("Padrão desc."),
       cursor: z.string().max(500).optional(),
       perPage: z.number().int().min(1).max(50).optional(),
     },
@@ -235,7 +259,7 @@ export function buildMcpServer(principal: McpPrincipal): McpServer {
   reg(
     "get_conversation_messages",
     "Mensagens da conversa",
-    "Mensagens de uma conversa que o usuário pode acessar (sem notas internas), da mais antiga para a mais recente. Use nextBefore para páginas anteriores.",
+    "Mensagens de uma conversa que o usuário pode acessar (sem notas internas), da mais antiga para a mais recente, com data/hora e tipo de quem enviou (contato, atendente, agente_ia, automacao, sistema). Áudios trazem a transcrição quando existir e a organização liberar. Use nextBefore para páginas anteriores.",
     {
       conversationId: id.describe("ID interno ou número público da conversa."),
       before: z.string().max(40).optional().describe("ISO-8601: mensagens anteriores a este instante."),
@@ -255,8 +279,13 @@ export function buildMcpServer(principal: McpPrincipal): McpServer {
   reg(
     "get_team_performance",
     "Desempenho da equipe",
-    "Resultados por vendedor no período (leads, ganhos, perdidos, conversão, receita). Restrito a gestores e administradores.",
-    { ...periodShape, pipelineId: id.optional() },
+    "Por atendente no período: conversas atendidas e finalizadas, mediana da 1ª resposta, tempo de atendimento e transferências (enviadas/recebidas); e por vendedor: leads, ganhos, perdidos, conversão e receita. Período máximo de 90 dias. Restrito a gestores e administradores.",
+    {
+      ...periodShape,
+      departmentIds: z.array(id).max(50).optional().describe("Departamentos ('none' = sem departamento)."),
+      clock: z.enum(["business", "elapsed"]).optional().describe("business (padrão) = só horário de atendimento."),
+      pipelineId: id.optional().describe("Funil para os resultados de vendas."),
+    },
     (env, args) => getTeamPerformance(env, args),
   );
 
@@ -280,6 +309,27 @@ export function buildMcpServer(principal: McpPrincipal): McpServer {
     "Métricas por etapa de um funil: estoque aberto, valor, entradas, saídas, ganhos, perdidos, conversão e negócios parados.",
     { ...periodShape, pipelineId: id.describe("ID ou número do funil (use list_leads para ver os funis).") },
     (env, args) => getPipelineMetrics(env, args),
+  );
+
+  reg(
+    "get_conversation_events",
+    "Linha do tempo da conversa",
+    "Eventos de uma conversa em ordem cronológica: abertura/reabertura, atribuição e troca de atendente, retomada pela IA e devolução ao humano, distribuição, transferência de departamento, entrada e saída da fila, tabulação e encerramento (com quem encerrou: pessoa, ia, automacao, massa, inatividade, sistema). Paginação por cursor.",
+    {
+      conversationId: id.describe("ID interno ou número público da conversa."),
+      categories: z.array(z.enum(EVENT_CATEGORIES)).max(EVENT_CATEGORIES.length).optional(),
+      cursor: z.string().max(500).optional(),
+      limit: z.number().int().min(1).max(100).optional(),
+    },
+    (env, args) => getConversationEvents(env, args),
+  );
+
+  reg(
+    "get_queue_status",
+    "Situação das filas",
+    "Agora, por departamento: conversas aguardando resposta (e quantas sem responsável), espera mais antiga em minutos e atendentes online. Agregado, sem dados pessoais. Restrito a gestores e administradores.",
+    {},
+    (env) => getQueueStatus(env),
   );
 
   return server;

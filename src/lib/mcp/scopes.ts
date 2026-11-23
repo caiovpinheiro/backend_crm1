@@ -15,9 +15,28 @@ export const MCP_SCOPES = [
   "metrics:read",
   "team:read",
   "campaigns:read",
+  // Recursos de 2026-11 — desligados por padrão (`MCP_DEFAULT_ORG_SCOPES`).
+  "events:read",
+  "queue:read",
+  "custom_fields:read",
+  "audio:read",
 ] as const;
 
 export type McpScope = (typeof MCP_SCOPES)[number];
+
+/**
+ * Escopos que a org libera sem configurar nada. Os recursos novos
+ * (eventos, fila, campos personalizados, transcrição de áudio) ficam de fora:
+ * o admin liga um a um em /settings/mcp.
+ */
+export const MCP_DEFAULT_ORG_SCOPES: readonly McpScope[] = [
+  "leads:read",
+  "conversations:read",
+  "messages:read",
+  "metrics:read",
+  "team:read",
+  "campaigns:read",
+];
 
 export const MCP_SCOPE_INFO: Record<McpScope, { label: string; description: string }> = {
   "leads:read": {
@@ -44,6 +63,22 @@ export const MCP_SCOPE_INFO: Record<McpScope, { label: string; description: stri
     label: "Campanhas",
     description: "Campanhas e seus indicadores de envio, leitura e resposta.",
   },
+  "events:read": {
+    label: "Linha do tempo das conversas",
+    description: "Atribuições, transferências, filas, IA/humano e encerramentos (com tabulação e quem encerrou).",
+  },
+  "queue:read": {
+    label: "Situação das filas",
+    description: "Por departamento: quantos esperam, espera mais antiga e atendentes online (sem dado pessoal).",
+  },
+  "custom_fields:read": {
+    label: "Campos personalizados",
+    description: "Só os campos que a organização liberar na lista desta tela.",
+  },
+  "audio:read": {
+    label: "Transcrição de áudios",
+    description: "Texto transcrito dos áudios das conversas, quando existir.",
+  },
 };
 
 export type McpToolName =
@@ -54,7 +89,9 @@ export type McpToolName =
   | "get_sales_metrics"
   | "get_team_performance"
   | "get_campaign_results"
-  | "get_pipeline_metrics";
+  | "get_pipeline_metrics"
+  | "get_conversation_events"
+  | "get_queue_status";
 
 export const MCP_TOOL_REQUIREMENTS: Record<
   McpToolName,
@@ -68,6 +105,8 @@ export const MCP_TOOL_REQUIREMENTS: Record<
   get_team_performance: { scope: "team:read", permissions: ["report:view"] },
   get_campaign_results: { scope: "campaigns:read", permissions: ["campaign:view"] },
   get_pipeline_metrics: { scope: "metrics:read", permissions: ["report:view", "pipeline:view"] },
+  get_conversation_events: { scope: "events:read", permissions: ["conversation:view"] },
+  get_queue_status: { scope: "queue:read", permissions: ["conversation:view", "report:view"] },
 };
 
 export function isMcpScope(value: string): value is McpScope {
