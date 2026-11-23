@@ -71,7 +71,7 @@
   "src/services/distribution/pending-drain.ts|TS2345|Argument of type 'string | null | undefined' is not assignable to parameter of type 'string'.": 1,
   "src/services/distribution/pending-drain.ts|TS7006|Parameter 'e' implicitly has an 'any' type.": 1,
   "src/services/pipelines.ts|TS2321|Excessive stack depth comparing types 'DynamicClientExtensionThis<TypeMap<InternalArgs & { result: {}; model: {}; query: {}; client: {}; }, {}>, TypeMapCb<PrismaClientOptions>, { result: {}; model: {}; query: {}; client: {}; }>' and 'TransactionClient'.": 1,
-  "src/services/pipelines.ts|TS2321|Excessive stack depth comparing types 'StageFindFirstArgs<InternalArgs & { result: {}; model: {}; query: {}; client: {}; }>' and 'StageFindFirstArgs<DefaultArgs>'.": 1,
+  "src/services/contacts.ts|TS2321|Excessive stack depth comparing types 'Contact$assignedToArgs<DefaultArgs>' and 'Contact$assignedToArgs<InternalArgs & { result: {}; model: {}; query: {}; client: {}; }>'.": 1,
   "src/services/pipelines.ts|TS2345|Argument of type 'Omit<DynamicClientExtensionThis<TypeMap<InternalArgs & { result: {}; model: {}; query: {}; client: {}; }, {}>, TypeMapCb<PrismaClientOptions>, { result: {}; model: {}; query: {}; client: {}; }>, \"$connect\" | ... 3 more ... | \"$extends\">' is not assignable to parameter of type 'TransactionClient'.": 2,
   "src/services/pipelines.ts|TS2349|This expression is not callable.": 1,
   "src/services/quota.test.ts|TS2783|'id' is specified more than once, so this usage will be overwritten.": 1,
@@ -80,5 +80,5 @@
   "src/services/team-chat-work-items.ts|TS2322|Type '{ value: string | null; error?: undefined; status?: undefined; } | { error: string; status: 400; value?: undefined; }' is not assignable to type 'WorkItemCommandResult'.": 2,
   "src/services/whatsapp-conversation.ts|TS2561|Object literal may only specify known properties, but 'channelId' does not exist in type 'ConversationUpdateInput'. Did you mean to write 'channel'?": 1,
   "src/services/whatsapp-flow-definitions.ts|TS2322|Type 'Omit<MetaFlowListItem, \"alreadyImported\" | \"crmFlowDefinitionId\">[]' is not assignable to type 'MetaFlowListItem[]'.": 1,
-  "src/workers/baileys/message-handler.ts|TS2367|This comparison appears to be unintentional because the types '\"call\" | \"questionMessage\" | \"chat\" | \"contactMessage\" | \"reactionMessage\" | \"viewOnceMessage\" | \"viewOnceMessageV2\" | \"viewOnceMessageV2Extension\" | \"senderKeyDistributionMessage\" | ... 80 more ... | \"pollResultSnapshotMessageV3\"' and '\"ptt\"' have no overlap.": 1
+  "src/workers/baileys/message-handler.ts|TS2367|This comparison appears to be unintentional because the types '\"call\" | \"chat\" | \"questionMessage\" | \"contactMessage\" | \"reactionMessage\" | \"viewOnceMessage\" | \"viewOnceMessageV2\" | \"viewOnceMessageV2Extension\" | \"senderKeyDistributionMessage\" | ... 80 more ... | \"pollResultSnapshotMessageV3\"' and '\"ptt\"' have no overlap.": 1
 }
