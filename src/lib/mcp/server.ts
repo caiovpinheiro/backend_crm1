@@ -24,6 +24,7 @@ import {
   getPipelineMetrics,
   getSalesMetrics,
   getTeamPerformance,
+  isMcpOwnScopeOnly,
   listConversations,
   listLeads,
   listVisiblePipelines,
@@ -129,7 +130,9 @@ export async function runGuardedTool(
         );
       }
       try {
-        const result = await exec({ user, exposeContactPii: principal.exposeContactPii });
+        // Papel lido a cada chamada: promover/rebaixar vale na hora.
+        const ownOnly = isMcpOwnScopeOnly({ role: user.role, isAdmin: authz.isAdmin });
+        const result = await exec({ user, exposeContactPii: principal.exposeContactPii, ownOnly });
         await audit("ok", { resultCount: countOf(result) });
         return textResult(result);
       } catch (err) {
@@ -164,7 +167,7 @@ const periodShape = {
 export function buildMcpServer(principal: McpPrincipal): McpServer {
   const server = new McpServer(MCP_SERVER_INFO, {
     instructions:
-      "CRM Bwipo (somente leitura). 'Lead' é um negócio (deal) no funil. Os dados retornados já respeitam as permissões do usuário conectado. Use list_leads/list_conversations com paginação; IDs aceitam o número público (#123) ou o ID interno.",
+      "CRM Bwipo (somente leitura). 'Lead' é um negócio (deal) no funil. Os dados retornados já respeitam as permissões do usuário conectado; para operadores (scope = own), só os negócios em que ele é o responsável e as conversas dele. Use list_leads/list_conversations com paginação; IDs aceitam o número público (#123) ou o ID interno.",
   });
 
   const reg = <S extends z.ZodRawShape>(

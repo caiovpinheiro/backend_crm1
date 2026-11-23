@@ -59,6 +59,7 @@ import {
 import { InvalidListCursorError } from "@/services/conversation-list-cursor";
 import { getDashboard, type DashboardFilters } from "@/services/dashboard";
 import { getDealById, getDeals } from "@/services/deals";
+import type { Prisma } from "@prisma/client";
 import { computePainelRange } from "@/services/painel-period";
 
 export type ToolUser = {
@@ -70,7 +71,25 @@ export type ToolUser = {
   isSuperAdmin: false;
 };
 
-export type ToolEnv = { user: ToolUser; exposeContactPii: boolean };
+/**
+ * `ownOnly`: operador (quem não é admin nem gestor) só enxerga, pelo MCP, o
+ * que é dele — negócios em que é o responsável e as conversas atribuídas a
+ * ele ou de contatos desses negócios. Vale mesmo que a org libere ao papel
+ * "ver todos" ou o pool sem responsável na UI. Admin e gestor seguem a
+ * visibilidade que já têm no CRM.
+ */
+export type ToolEnv = { user: ToolUser; exposeContactPii: boolean; ownOnly: boolean };
+
+export { isMcpOwnScopeOnly } from "@/lib/mcp/scopes";
+
+/** Conversas "do operador": atribuídas a ele ou de contato com negócio dele. */
+function ownConversationWhere(userId: string): Prisma.ConversationWhereInput {
+  return {
+    OR: [{ assignedToId: userId }, { contact: { deals: { some: { ownerId: userId } } } }],
+  };
+}
+
+const OWN_ONLY_DENIED = "Disponível só para gestores e administradores. Pelo assistente você consulta os seus negócios e conversas.";
 
 /** Erro de negócio esperado (acesso negado, não encontrado, filtro inválido). */
 export class ToolError extends Error {
@@ -160,11 +179,16 @@ export async function listLeads(env: ToolEnv, args: ListLeadsArgs) {
     search: args.search?.slice(0, 100),
     page,
     perPage,
-    visibilityWhere: andDealWhere(visibility.dealWhere, funnelDealWhere(authz)),
+    // Operador: só negócios em que é o responsável (sem pool nem "ver todos").
+    visibilityWhere: andDealWhere(
+      env.ownOnly ? { ownerId: user.id } : visibility.dealWhere,
+      funnelDealWhere(authz),
+    ),
     allowedPipelineIds,
     advancedFilters: createdAt ? { createdAt } : undefined,
   });
   return {
+    scope: env.ownOnly ? "own" : "visible",
     page: result.page,
     perPage: result.perPage,
     total: result.total,
@@ -205,7 +229,11 @@ export async function getLead(env: ToolEnv, args: { id: string }) {
     getVisibilityFilter(user),
   ]);
   if (stageDenied || pipelineDenied) throw new ToolError("forbidden", "Sem acesso a este lead.");
-  if (
+  if (env.ownOnly) {
+    if (deal.ownerId !== user.id) {
+      throw new ToolError("forbidden", "Este lead não está sob sua responsabilidade.");
+    }
+  } else if (
     !canSeeDealByOwner(visibility, user.id, deal.ownerId ?? null) &&
     !(await hasAssignedConversationWithContact(user.id, deal.contactId))
   ) {
@@ -326,11 +354,14 @@ export async function listConversations(env: ToolEnv, args: ListConversationsArg
   const memberTabs: InboxCategoryTab[] =
     categoryTabs.length > 0 ? categoryTabs : ["esperando", "respondidas"];
 
+  // Operador: só as conversas dele (sem filas sem responsável).
   const conversationWhere = andConversationWhere(
-    withInboxQueueVisibility(visibility.conversationWhere, {
-      permissions: inboxPerms,
-      includeUnassigned: visibility.includeUnassigned,
-    }),
+    env.ownOnly
+      ? ownConversationWhere(user.id)
+      : withInboxQueueVisibility(visibility.conversationWhere, {
+          permissions: inboxPerms,
+          includeUnassigned: visibility.includeUnassigned,
+        }),
     conversationFunnelWhere(authz),
   );
 
@@ -356,6 +387,7 @@ export async function listConversations(env: ToolEnv, args: ListConversationsArg
     throw err;
   }
   return {
+    scope: env.ownOnly ? "own" : "visible",
     hasMore: result.hasMore,
     nextCursor: result.nextCursor,
     items: result.items.map((c) => ({
@@ -385,7 +417,16 @@ export async function getConversationMessages(
   if (!conversationId) throw new ToolError("not_found", "Conversa não encontrada.");
   const conv = await prisma.conversation.findFirst({
     where: { id: conversationId },
-    select: { id: true, number: true, channel: true, channelId: true, status: true, contact: { select: { id: true, name: true, email: true, phone: true } } },
+    select: {
+      id: true,
+      number: true,
+      channel: true,
+      channelId: true,
+      status: true,
+      assignedToId: true,
+      contactId: true,
+      contact: { select: { id: true, name: true, email: true, phone: true } },
+    },
   });
   if (!conv) throw new ToolError("not_found", "Conversa não encontrada.");
   // Mesma decisão do inbox (dono, deal do contato, fila/visibilidade + canal,
@@ -394,6 +435,13 @@ export async function getConversationMessages(
     (await userHasConversationAccess(user, conv.id)) &&
     (await canDoChannelAction(user, "view", conv.channelId));
   if (!allowed) throw new ToolError("forbidden", "Sem acesso a esta conversa.");
+  if (env.ownOnly && conv.assignedToId !== user.id) {
+    const ownsDeal = await prisma.deal.findFirst({
+      where: { contactId: conv.contactId, ownerId: user.id },
+      select: { id: true },
+    });
+    if (!ownsDeal) throw new ToolError("forbidden", "Esta conversa não está sob sua responsabilidade.");
+  }
 
   let before: Date | undefined;
   if (args.before) {
@@ -478,6 +526,7 @@ export function resolvePeriod(args: PeriodArgs): { from: Date; to: Date } {
 async function scopedDashboardFilters(
   user: ToolUser,
   pipelineId: string,
+  ownOnly: boolean,
 ): Promise<Omit<DashboardFilters, "from" | "to" | "pipelineId"> | null> {
   const [authz, visibility, allowedPipelineIds] = await Promise.all([
     authzOf(user),
@@ -495,7 +544,7 @@ async function scopedDashboardFilters(
     excludePipelineIds: [...excludePipelineIds],
     excludeStageIds: funnel?.denyStageIds,
     allowStageIds: funnel?.allowStageIds ?? undefined,
-    ownerIds: visibility.canSeeAll ? undefined : [user.id],
+    ownerIds: visibility.canSeeAll && !ownOnly ? undefined : [user.id],
   };
 }
 
@@ -516,7 +565,7 @@ export async function getSalesMetrics(env: ToolEnv, args: PeriodArgs & { pipelin
   if (pipelineId && (await requirePipelineScope(user, "view", pipelineId))) {
     throw new ToolError("forbidden", "Sem acesso a este funil.");
   }
-  const scoped = await scopedDashboardFilters(user, pipelineId);
+  const scoped = await scopedDashboardFilters(user, pipelineId, env.ownOnly);
   if (!scoped) throw new ToolError("forbidden", "Sem acesso a este funil.");
   const data = await getDashboard({ from: range.from, to: range.to, pipelineId, ...scoped });
   return {
@@ -534,15 +583,15 @@ export async function getSalesMetrics(env: ToolEnv, args: PeriodArgs & { pipelin
 export async function getTeamPerformance(env: ToolEnv, args: PeriodArgs & { pipelineId?: string }) {
   const { user } = env;
   // Mesmo gate do Painel de equipe: gestor ou administrador.
-  if (user.role !== "ADMIN" && user.role !== "MANAGER") {
-    throw new ToolError("forbidden", "Desempenho da equipe é restrito a gestores e administradores.");
+  if (env.ownOnly || (user.role !== "ADMIN" && user.role !== "MANAGER")) {
+    throw new ToolError("forbidden", OWN_ONLY_DENIED);
   }
   const range = resolvePeriod(args);
   const pipelineId = await resolvePipelineArg(args.pipelineId);
   if (pipelineId && (await requirePipelineScope(user, "view", pipelineId))) {
     throw new ToolError("forbidden", "Sem acesso a este funil.");
   }
-  const scoped = await scopedDashboardFilters(user, pipelineId);
+  const scoped = await scopedDashboardFilters(user, pipelineId, env.ownOnly);
   if (!scoped) throw new ToolError("forbidden", "Sem acesso a este funil.");
   const data = await getDashboard({ from: range.from, to: range.to, pipelineId, ...scoped });
   return {
@@ -570,7 +619,7 @@ export async function getPipelineMetrics(env: ToolEnv, args: PeriodArgs & { pipe
   if (await requirePipelineScope(user, "view", pipelineId)) {
     throw new ToolError("forbidden", "Sem acesso a este funil.");
   }
-  const scoped = await scopedDashboardFilters(user, pipelineId);
+  const scoped = await scopedDashboardFilters(user, pipelineId, env.ownOnly);
   if (!scoped) throw new ToolError("forbidden", "Sem acesso a este funil.");
   const data = await getDashboard({ from: range.from, to: range.to, pipelineId, ...scoped });
   return {
@@ -620,6 +669,8 @@ export async function getCampaignResults(
   env: ToolEnv,
   args: { campaignId?: string; status?: string; search?: string; page?: number; perPage?: number },
 ) {
+  // Campanha é da org inteira, não de um vendedor.
+  if (env.ownOnly) throw new ToolError("forbidden", OWN_ONLY_DENIED);
   if (args.campaignId) {
     const campaign = await getCampaignById(args.campaignId);
     if (!campaign) throw new ToolError("not_found", "Campanha não encontrada.");

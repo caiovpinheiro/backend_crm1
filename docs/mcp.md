@@ -61,6 +61,14 @@ O contexto Prisma roda com `isSuperAdmin: false` — nem super-admin atravessa o
 | `get_campaign_results` | `campaigns:read` | `campaign:view` | `getCampaigns` / `getCampaignStats` |
 | `get_pipeline_metrics` | `metrics:read` | `report:view` + `pipeline:view` | `getDashboard.funnel` |
 
+**Operador x gestor/admin.** Admin e gestor (papel legado `ADMIN`/`MANAGER`, ou admin pelo
+authz) recebem o que já veem no CRM. Qualquer outro usuário (operador) recebe pelo MCP só o
+que é dele, mesmo que a org libere ao papel "ver todos" ou o pool sem responsável:
+negócios em que é o responsável (`ownerId`); conversas atribuídas a ele ou de contatos
+desses negócios (sem filas sem dono); métricas de vendas/funil só dos negócios dele;
+equipe e campanhas bloqueadas. As respostas trazem `scope: "own" | "visible"`. O papel é
+lido a cada chamada (`isMcpOwnScopeOnly`, `src/lib/mcp/scopes.ts`).
+
 Restrições extras (mais estritas que a UI): métricas de quem não vê todos os negócios saem
 só com os próprios; histórico do lead não traz eventos de mensagem; notas internas
 (`isPrivate`) nunca saem; telefone/e-mail mascarados salvo opção da organização; campos
