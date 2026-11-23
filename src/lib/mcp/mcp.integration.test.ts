@@ -640,4 +640,92 @@ describe.skipIf(!LOCAL)("MCP integration (Postgres local)", () => {
     await prismaBase.user.update({ where: { id: ids.memberA }, data: { isErased: false } });
     await updateMcpOrgConfig(ids.orgA, ids.adminA, { allowAllUsers: false });
   });
+
+  it("operador só vê o que é dele, mesmo com a org liberando 'ver todos' e o pool sem responsável", async () => {
+    const { prismaBase } = await import("@/lib/prisma-base");
+    const { runWithContext } = await import("@/lib/request-context");
+    const { setVisibilityForRole, setUnassignedForRole } = await import("@/lib/visibility");
+    const { updateMcpOrgConfig } = await import("@/services/mcp/settings");
+    const asOrgA = <T,>(fn: () => Promise<T>) =>
+      runWithContext({ organizationId: ids.orgA, userId: ids.adminA, isSuperAdmin: false }, fn);
+    // Configuração mais aberta possível para o papel do operador na UI.
+    await asOrgA(() => setVisibilityForRole("MEMBER", "all"));
+    await asOrgA(() => setUnassignedForRole("MEMBER", true));
+    await updateMcpOrgConfig(ids.orgA, ids.adminA, { allowAllUsers: true });
+
+    const stage = await prismaBase.stage.findFirst({ where: { pipelineId: ids.pipelineA }, select: { id: true } });
+    const memberDeal = await prismaBase.deal.findUnique({ where: { id: ids.dealMember }, select: { contactId: true } });
+    const poolContact = await prismaBase.contact.create({
+      data: { organizationId: ids.orgA, number: 50, name: "Pool Sem Dono", phone: "5511900000050" },
+      select: { id: true },
+    });
+    const poolDeal = await prismaBase.deal.create({
+      data: { organizationId: ids.orgA, number: 50, title: "Negócio Sem Dono", value: 10, stageId: stage!.id, contactId: poolContact.id },
+      select: { id: true },
+    });
+    const queueConv = await prismaBase.conversation.create({
+      data: { organizationId: ids.orgA, channel: "whatsapp", contactId: poolContact.id, status: "OPEN", number: 50, lastMessageAt: new Date() },
+      select: { id: true },
+    });
+    await prismaBase.message.create({
+      data: { organizationId: ids.orgA, conversationId: queueConv.id, content: "fila sem dono", direction: "in" },
+    });
+    // Conversa do contato do negócio do operador, mas atendida pelo admin.
+    const ownDealConv = await prismaBase.conversation.create({
+      data: { organizationId: ids.orgA, channel: "whatsapp", contactId: memberDeal!.contactId!, assignedToId: ids.adminA, status: "OPEN", number: 51, lastMessageAt: new Date() },
+      select: { id: true },
+    });
+    await prismaBase.message.create({
+      data: { organizationId: ids.orgA, conversationId: ownDealConv.id, content: "mensagem do lead do operador", direction: "in" },
+    });
+
+    try {
+      const { access } = await connect(ids.memberA, ids.orgA);
+
+      const leads = await callTool(access, "list_leads", {});
+      expect(leads.structuredContent!.scope).toBe("own");
+      expect((leads.structuredContent!.items as { title: string }[]).map((d) => d.title)).toEqual(["Negócio do Membro"]);
+      // Pedir os negócios de outro responsável não abre nada.
+      const other = await callTool(access, "list_leads", { ownerId: ids.adminA });
+      expect((other.structuredContent!.items as unknown[]).length).toBe(0);
+
+      expect((await callTool(access, "get_lead", { id: ids.dealMember })).isError).toBeFalsy();
+      expect((await callTool(access, "get_lead", { id: ids.dealAdmin })).isError).toBe(true);
+      expect((await callTool(access, "get_lead", { id: poolDeal.id })).isError).toBe(true);
+
+      const convs = await callTool(access, "list_conversations", {});
+      const convIds = (convs.structuredContent!.items as { id: string }[]).map((c) => c.id);
+      expect(convIds).toContain(ownDealConv.id);
+      expect(convIds).not.toContain(queueConv.id);
+      expect(convIds).not.toContain(ids.convA);
+
+      const ownMsgs = await callTool(access, "get_conversation_messages", { conversationId: ownDealConv.id });
+      expect(ownMsgs.isError).toBeFalsy();
+      expect((await callTool(access, "get_conversation_messages", { conversationId: queueConv.id })).isError).toBe(true);
+      expect((await callTool(access, "get_conversation_messages", { conversationId: ids.convA })).isError).toBe(true);
+
+      const sales = await callTool(access, "get_sales_metrics", {});
+      expect(sales.structuredContent!.onlyOwnDeals).toBe(true);
+      const funnel = await callTool(access, "get_pipeline_metrics", { pipelineId: ids.pipelineA });
+      expect(funnel.structuredContent!.onlyOwnDeals).toBe(true);
+      const open = (funnel.structuredContent!.stages as { openCount: number }[]).reduce((a, s) => a + s.openCount, 0);
+      expect(open).toBe(1);
+
+      expect((await callTool(access, "get_team_performance", {})).isError).toBe(true);
+      expect((await callTool(access, "get_campaign_results", {})).isError).toBe(true);
+
+      // Admin continua vendo o pool e os negócios de todos.
+      const adminConn = await connect(ids.adminA, ids.orgA);
+      const adminLeads = await callTool(adminConn.access, "list_leads", {});
+      expect(adminLeads.structuredContent!.scope).toBe("visible");
+      expect((adminLeads.structuredContent!.items as { title: string }[]).map((d) => d.title)).toContain("Negócio Sem Dono");
+    } finally {
+      await asOrgA(() => setVisibilityForRole("MEMBER", "own"));
+      await asOrgA(() => setUnassignedForRole("MEMBER", false));
+      await updateMcpOrgConfig(ids.orgA, ids.adminA, { allowAllUsers: false });
+      await prismaBase.message.deleteMany({ where: { conversationId: { in: [queueConv.id, ownDealConv.id] } } });
+      await prismaBase.conversation.deleteMany({ where: { id: { in: [queueConv.id, ownDealConv.id] } } });
+      await prismaBase.deal.delete({ where: { id: poolDeal.id } });
+    }
+  }, 60_000);
 });

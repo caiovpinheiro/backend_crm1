@@ -11,7 +11,8 @@ import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { getLogger } from "@/lib/logger";
-import { MCP_SCOPE_INFO } from "@/lib/mcp/scopes";
+import { loadAuthzContext } from "@/lib/authz";
+import { isMcpOwnScopeOnly, MCP_SCOPE_INFO } from "@/lib/mcp/scopes";
 import { prismaBase } from "@/lib/prisma-base";
 import {
   approveAuthorization,
@@ -48,6 +49,18 @@ export async function GET(request: Request) {
       const user = { id: session.user.id, organizationId: session.user.organizationId };
       const elig = await canUserConnectMcp(user);
       const allowed = new Set(elig.config.allowedScopes);
+      const authz = session.user.organizationId
+        ? await loadAuthzContext({
+            userId: session.user.id,
+            organizationId: session.user.organizationId,
+            isSuperAdmin: false,
+          })
+        : null;
+      // "own" = operador: o assistente só vê os negócios e conversas dele.
+      const accessLevel =
+        authz && !isMcpOwnScopeOnly({ role: String(session.user.role ?? "MEMBER"), isAdmin: authz.isAdmin })
+          ? "full"
+          : "own";
       const org = session.user.organizationId
         ? await prismaBase.organization.findUnique({
             where: { id: session.user.organizationId },
@@ -64,6 +77,7 @@ export async function GET(request: Request) {
         user: { name: session.user.name ?? null, email: session.user.email ?? null },
         organization: org?.name ?? null,
         canConnect: elig.ok,
+        accessLevel,
         cannotConnectReason: elig.ok ? null : elig.reason,
         scopes: v.value.requestedScopes.map((s) => ({
           id: s,
