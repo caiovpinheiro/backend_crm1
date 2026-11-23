@@ -95,3 +95,12 @@ export function intersectScopes(a: readonly string[], b: readonly string[]): Mcp
   const setB = new Set(b);
   return MCP_SCOPES.filter((s) => a.includes(s) && setB.has(s));
 }
+
+/**
+ * Operador no MCP: quem não é admin (kill switch do authz ou papel legado)
+ * nem gestor. Só vê os negócios em que é o responsável e as conversas dele.
+ */
+export function isMcpOwnScopeOnly(args: { role: string; isAdmin: boolean }): boolean {
+  if (args.isAdmin) return false;
+  return args.role !== "ADMIN" && args.role !== "MANAGER";
+}
