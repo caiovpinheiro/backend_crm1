@@ -34,8 +34,12 @@ const fetchMock = vi.fn();
 const AD_JSON = {
   id: "ad_1",
   name: "Ciência da Computação: R$169/mês",
-  url_tags:
-    "utm_source=Meta&utm_medium=whatsapp_ads&utm_campaign=cs.grad.whats.0826.ciencia-computacao&utm_content={{ad.name}}&utm_term={{campaign.name}}",
+  // Formato real da Graph: url_tags vive no criativo, não no Ad.
+  creative: {
+    id: "cr_1",
+    url_tags:
+      "utm_source=Meta&utm_medium=whatsapp_ads&utm_campaign=cs.grad.whats.0826.ciencia-computacao&utm_content={{ad.name}}&utm_term={{campaign.name}}",
+  },
   adset: { id: "as_1", name: "Conjunto", campaign: { id: "cp_1", name: "Campanha CC" } },
 };
 
@@ -76,6 +80,9 @@ describe("meta-ad-resolver CTWA", () => {
     expect(d.adUtmTerm).toBe("Campanha CC");
     expect(d.adResolvedCampaignName).toBe("Campanha CC");
     expect(d.adResolveStatus).toBe("ok");
+    const fields = new URL(String(fetchMock.mock.calls[0][0])).searchParams.get("fields");
+    expect(fields).toContain("creative{url_tags}");
+    expect(fields).not.toMatch(/(^|,)url_tags/);
   });
 
   it("cache reusa só o anúncio — não lê nem copia rastreio de outro contato", async () => {
@@ -161,7 +168,7 @@ describe("UTMs padrão de lead CTWA (sem url_tags)", () => {
 
   it("Graph ok mas anúncio sem url_tags: usa o padrão", async () => {
     fetchMock.mockResolvedValue(
-      new Response(JSON.stringify({ ...AD_JSON, url_tags: undefined }), { status: 200 }),
+      new Response(JSON.stringify({ ...AD_JSON, creative: { id: "cr_1" } }), { status: 200 }),
     );
     await resolveAdAndPersistAsync({ ...args("c1"), headline: "Título" });
     const d = lastUpdateData();
