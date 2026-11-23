@@ -57,7 +57,7 @@ export const MANAGER_PERMISSIONS: readonly string[] = [
   "tag:view", "tag:create", "tag:edit", "tag:delete",
   "segment:view", "segment:create", "segment:edit", "segment:delete",
   "product:view", "product:create", "product:edit", "product:delete",
-  "product:manage_offers", "product:manage_stakeholders",
+  "product:manage_offers", "product:manage_stakeholders", "product:edit_deal_price",
   // Inventário / Vagas / Unidades — Gestor tem tudo
   "inventory:view", "inventory:adjust",
   "job_opening:view", "job_opening:manage", "job_opening:close",

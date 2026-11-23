@@ -4,6 +4,8 @@ import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/prisma";
+import { requirePermissionForUser } from "@/lib/authz/resource-policy";
+import { isRegisteredPrice, readPriceOptions } from "@/services/deal-product-price-sync";
 import { createDealEvent, getDealById } from "@/services/deals";
 
 type RouteContext = { params: Promise<{ id: string; itemId: string }> };
@@ -53,7 +55,11 @@ export async function PUT(request: Request, context: RouteContext) {
 
     const existing = await prisma.dealProduct.findUnique({
       where: { id: itemId, dealId },
-      include: { product: { select: { type: true } } },
+      include: {
+        product: {
+          select: { type: true, price: true, courseConfig: { select: { pricingOptions: true } } },
+        },
+      },
     });
     if (!existing) return NextResponse.json({ message: "Item não encontrado." }, { status: 404 });
 
@@ -70,6 +76,27 @@ export async function PUT(request: Request, context: RouteContext) {
       if (typeof body.discount === "number" || typeof body.discount === "string") {
         data.discount = Math.min(100, Math.max(0, Number(body.discount) || 0));
       }
+    }
+
+    // Sem `product:edit_deal_price`: só trocar entre as cotas cadastradas
+    // (preço + desconto de uma cota), sem mexer na quantidade.
+    const nextPrice = data.unitPrice !== undefined ? Number(data.unitPrice) : Number(existing.unitPrice);
+    const nextDiscount = data.discount !== undefined ? Number(data.discount) : Number(existing.discount);
+    const qtyChanged =
+      data.quantity !== undefined && Number(data.quantity) !== Number(existing.quantity);
+    const priceChanged =
+      (data.unitPrice !== undefined || data.discount !== undefined) &&
+      (nextPrice !== Number(existing.unitPrice) || nextDiscount !== Number(existing.discount));
+    const freePrice =
+      priceChanged &&
+      !isRegisteredPrice(
+        readPriceOptions(existing.product.price, existing.product.courseConfig?.pricingOptions),
+        nextPrice,
+        nextDiscount,
+      );
+    if (qtyChanged || freePrice) {
+      const denied = await requirePermissionForUser(session.user, "product:edit_deal_price");
+      if (denied) return denied;
     }
 
     try {
