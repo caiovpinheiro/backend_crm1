@@ -189,6 +189,18 @@ function isGraphPermissionError(body: string): boolean {
 }
 
 /**
+ * `url_tags` é campo do criativo (AdCreative), não do Ad: pedir `url_tags`
+ * direto no Ad faz a Graph responder "(#100) Tried accessing nonexisting field".
+ */
+const AD_FIELDS = "id,name,creative{url_tags},adset{id,name,campaign{id,name}}";
+
+function adUrlTags(ad: Record<string, unknown>): string | null {
+  const creative = ad.creative as Record<string, unknown> | undefined;
+  const tags = creative?.url_tags;
+  return typeof tags === "string" && tags.trim() ? tags : null;
+}
+
+/**
  * Endpoint principal: GET /{post_id}/promotion_info — retorna metadados
  * do anúncio que promove o post (ad_id, ad_object_story_id, etc.).
  * Documentação: https://developers.facebook.com/docs/graph-api/reference/post/
@@ -206,7 +218,7 @@ async function fetchAdFromPost(
   const url = new URL(`${GRAPH_BASE}/${encodeURIComponent(postId)}`);
   url.searchParams.set(
     "fields",
-    "id,promotion_info{ad_id,ad_object_story_id},ads{id,name,url_tags,adset{id,name,campaign{id,name}}}",
+    "id,promotion_info{ad_id,ad_object_story_id},ads{id,name,creative{url_tags},adset{id,name,campaign{id,name}}}",
   );
 
   let res: Response;
@@ -280,7 +292,7 @@ async function fetchAdFromPost(
 
   if (adFromList) {
     if (typeof adFromList.name === "string") adName = adFromList.name;
-    if (typeof adFromList.url_tags === "string") urlTagsStr = adFromList.url_tags;
+    urlTagsStr = adUrlTags(adFromList);
     const adset = adFromList.adset as Record<string, unknown> | undefined;
     if (adset) {
       if (typeof adset.id === "string") adsetId = adset.id;
@@ -295,12 +307,12 @@ async function fetchAdFromPost(
     // Enriquecer via /{ad_id}
     try {
       const adUrl = new URL(`${GRAPH_BASE}/${encodeURIComponent(adId)}`);
-      adUrl.searchParams.set("fields", "id,name,url_tags,adset{id,name,campaign{id,name}}");
+      adUrl.searchParams.set("fields", AD_FIELDS);
       const r = await fetch(adUrl.toString(), graphFetchInit(accessToken));
       if (r.ok) {
         const a = (await r.json()) as Record<string, unknown>;
         if (typeof a.name === "string") adName = a.name;
-        if (typeof a.url_tags === "string") urlTagsStr = a.url_tags;
+        urlTagsStr = adUrlTags(a);
         const adset = a.adset as Record<string, unknown> | undefined;
         if (adset) {
           if (typeof adset.id === "string") adsetId = adset.id;
@@ -334,7 +346,7 @@ async function fetchAdById(
 ): Promise<ResolutionResult> {
   try {
     const adUrl = new URL(`${GRAPH_BASE}/${encodeURIComponent(adId)}`);
-    adUrl.searchParams.set("fields", "id,name,url_tags,adset{id,name,campaign{id,name}}");
+    adUrl.searchParams.set("fields", AD_FIELDS);
     const r = await fetch(adUrl.toString(), graphFetchInit(accessToken));
     if (r.status === 401 || r.status === 403) {
       return { status: "no_access", error: `HTTP ${r.status}`, data: null };
@@ -363,7 +375,7 @@ async function fetchAdById(
     let adsetName: string | null = null;
     let campaignId: string | null = null;
     let campaignName: string | null = null;
-    const urlTagsStr = typeof a.url_tags === "string" ? a.url_tags : null;
+    const urlTagsStr = adUrlTags(a);
     const adset = a.adset as Record<string, unknown> | undefined;
     if (adset) {
       if (typeof adset.id === "string") adsetId = adset.id;
