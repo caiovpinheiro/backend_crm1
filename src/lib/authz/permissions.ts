@@ -213,6 +213,12 @@ export const PERMISSION_CATALOG: ResourceDef[] = [
       { action: "delete", label: "Excluir produto", destructive: true },
       { action: "manage_offers", label: "Gerenciar ofertas por unidade" },
       { action: "manage_stakeholders", label: "Gerenciar stakeholders do produto" },
+      {
+        action: "edit_deal_price",
+        label: "Editar preço/desconto do produto no negócio",
+        description:
+          "Sem esta permissão, no card só dá para adicionar, enviar, remover e trocar entre as cotas cadastradas.",
+      },
     ],
   },
   {

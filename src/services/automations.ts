@@ -1177,6 +1177,16 @@ export async function getAutomationLogs(automationId: string, params: GetAutomat
                 adUtmCampaign: true,
                 adUtmContent: true,
                 adUtmTerm: true,
+                // Rastreio genérico (Google/TikTok/UTM extra) — seção
+                // "Rastreio" da inspeção de sessão.
+                utmId: true,
+                utmReferrer: true,
+                referrer: true,
+                gclid: true,
+                fbclid: true,
+                googleClientId: true,
+                ttadId: true,
+                ttadName: true,
               },
             }),
         dealIds.length === 0
