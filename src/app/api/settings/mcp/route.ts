@@ -8,6 +8,7 @@ import { withOrgContext } from "@/lib/auth-helpers";
 import { getLogger } from "@/lib/logger";
 import { isMcpPublicUrlConfigured, mcpResourceUrl } from "@/lib/mcp/config";
 import { MCP_SCOPE_INFO, MCP_SCOPES } from "@/lib/mcp/scopes";
+import { prismaBase } from "@/lib/prisma-base";
 import { getMcpStatus } from "@/services/mcp/connections";
 import { canUserConnectMcp, getMcpOrgConfig, updateMcpOrgConfig } from "@/services/mcp/settings";
 
@@ -36,6 +37,8 @@ export async function GET() {
         configError: isMcpPublicUrlConfigured() ? null : "mcp_public_url_missing",
         scopes: MCP_SCOPES.map((s) => ({ id: s, ...MCP_SCOPE_INFO[s] })),
         status: viewer.canManage ? await getMcpStatus(viewer.organizationId) : null,
+        // Opções da lista "campos personalizados liberados" (só para quem configura).
+        customFields: viewer.canManage ? await listOrgCustomFields(viewer.organizationId) : [],
       });
     } catch (err) {
       log.error({ err }, "GET falhou");
@@ -58,7 +61,16 @@ export async function PATCH(request: Request) {
       } catch {
         return NextResponse.json({ message: "JSON inválido." }, { status: 400 });
       }
+      // Só ids de campos de negócio/contato desta org entram na lista.
+      let customFieldIds: string[] | undefined;
+      if (Array.isArray(body.customFieldIds)) {
+        const asked = body.customFieldIds.filter((v): v is string => typeof v === "string");
+        const valid = await listOrgCustomFields(viewer.organizationId);
+        const ok = new Set(valid.map((f) => f.id));
+        customFieldIds = asked.filter((id) => ok.has(id));
+      }
       const config = await updateMcpOrgConfig(viewer.organizationId, viewer.id, {
+        customFieldIds,
         enabled: typeof body.enabled === "boolean" ? body.enabled : undefined,
         allowAllUsers: typeof body.allowAllUsers === "boolean" ? body.allowAllUsers : undefined,
         exposeContactPii: typeof body.exposeContactPii === "boolean" ? body.exposeContactPii : undefined,
@@ -69,5 +81,15 @@ export async function PATCH(request: Request) {
       log.error({ err }, "PATCH falhou");
       return NextResponse.json({ message: "Erro ao salvar a configuração." }, { status: 500 });
     }
+  });
+}
+
+/** Campos personalizados de negócio e contato da org (para a lista liberada). */
+async function listOrgCustomFields(organizationId: string) {
+  return prismaBase.customField.findMany({
+    where: { organizationId, entity: { in: ["deal", "contact"] } },
+    orderBy: [{ entity: "asc" }, { label: "asc" }],
+    select: { id: true, name: true, label: true, entity: true },
+    take: 500,
   });
 }

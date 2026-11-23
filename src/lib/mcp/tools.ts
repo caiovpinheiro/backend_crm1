@@ -24,39 +24,21 @@
  * Prisma escopado injeta a organização da conexão em toda consulta.
  */
 import { loadAuthzContext, canViewStage } from "@/lib/authz";
+import { andDealWhere, funnelDealWhere, funnelScopeOf } from "@/lib/authz/funnel-visibility";
 import {
-  andConversationWhere,
-  andDealWhere,
-  conversationFunnelWhere,
-  funnelDealWhere,
-  funnelScopeOf,
-} from "@/lib/authz/funnel-visibility";
-import { scopeGrantsOnce } from "@/lib/authz/request-prechecks";
-import {
-  canDoChannelAction,
-  listAllowedChannelIds,
+  canViewFieldForUser,
   listAllowedPipelineIds,
   requirePipelineScope,
   requireStageScope,
 } from "@/lib/authz/resource-policy";
-import { canSeeInboxTab } from "@/lib/authz/scope-grants";
-import { resolveConversationId, userHasConversationAccess } from "@/lib/conversation-access";
 import { maskEmail, maskPhone } from "@/lib/pii-mask";
 import { prisma } from "@/lib/prisma";
-import { createRequestMemo } from "@/lib/request-memo";
 import {
   canSeeDealByOwner,
   getVisibilityFilter,
   hasAssignedConversationWithContact,
-  withInboxQueueVisibility,
 } from "@/lib/visibility";
 import { getCampaignById, getCampaignStats, getCampaigns } from "@/services/campaigns";
-import {
-  getConversations,
-  INBOX_CATEGORY_TABS,
-  type InboxCategoryTab,
-} from "@/services/conversations";
-import { InvalidListCursorError } from "@/services/conversation-list-cursor";
 import { getDashboard, type DashboardFilters } from "@/services/dashboard";
 import { getDealById, getDeals } from "@/services/deals";
 import type { Prisma } from "@prisma/client";
@@ -78,18 +60,27 @@ export type ToolUser = {
  * "ver todos" ou o pool sem responsável na UI. Admin e gestor seguem a
  * visibilidade que já têm no CRM.
  */
-export type ToolEnv = { user: ToolUser; exposeContactPii: boolean; ownOnly: boolean };
+export type ToolEnv = {
+  user: ToolUser;
+  exposeContactPii: boolean;
+  ownOnly: boolean;
+  /** Escopos efetivos da chamada (conexão ∩ org): liga recursos opcionais. */
+  scopes: readonly McpScope[];
+  /** Campos personalizados liberados pela org (`custom_fields:read`). */
+  customFieldIds: readonly string[];
+};
 
 export { isMcpOwnScopeOnly } from "@/lib/mcp/scopes";
+import type { McpScope } from "@/lib/mcp/scopes";
 
 /** Conversas "do operador": atribuídas a ele ou de contato com negócio dele. */
-function ownConversationWhere(userId: string): Prisma.ConversationWhereInput {
+export function ownConversationWhere(userId: string): Prisma.ConversationWhereInput {
   return {
     OR: [{ assignedToId: userId }, { contact: { deals: { some: { ownerId: userId } } } }],
   };
 }
 
-const OWN_ONLY_DENIED = "Disponível só para gestores e administradores. Pelo assistente você consulta os seus negócios e conversas.";
+export const OWN_ONLY_DENIED = "Disponível só para gestores e administradores. Pelo assistente você consulta os seus negócios e conversas.";
 
 /** Erro de negócio esperado (acesso negado, não encontrado, filtro inválido). */
 export class ToolError extends Error {
@@ -101,19 +92,19 @@ export class ToolError extends Error {
   }
 }
 
-function num(v: unknown): number {
+export function num(v: unknown): number {
   if (v === null || v === undefined) return 0;
   const n = typeof v === "number" ? v : Number(String(v));
   return Number.isFinite(n) ? n : 0;
 }
 
-function iso(d: Date | string | null | undefined): string | null {
+export function iso(d: Date | string | null | undefined): string | null {
   if (!d) return null;
   const date = d instanceof Date ? d : new Date(d);
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
-function contactOut(
+export function contactOut(
   env: ToolEnv,
   c: { id: string; name?: string | null; email?: string | null; phone?: string | null } | null | undefined,
 ) {
@@ -126,17 +117,86 @@ function contactOut(
   };
 }
 
-function truncate(text: string | null | undefined, max: number): string | null {
+export function truncate(text: string | null | undefined, max: number): string | null {
   if (!text) return null;
   return text.length > max ? `${text.slice(0, max)}…` : text;
 }
 
-async function authzOf(user: ToolUser) {
+export async function authzOf(user: ToolUser) {
   return loadAuthzContext({
     userId: user.id,
     organizationId: user.organizationId,
     isSuperAdmin: false,
   });
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Campos personalizados (escopo `custom_fields:read` + lista da org)
+// ──────────────────────────────────────────────────────────────────────
+
+export type CustomFieldOut = { field: string; entity: "deal" | "contact"; value: string };
+
+/**
+ * Valores dos campos personalizados liberados pela org para os negócios
+ * pedidos. `null` = recurso desligado (sem escopo ou lista vazia).
+ * Campo que o papel do usuário não pode ver (máscara por papel) não sai;
+ * telefone/e-mail seguem o toggle de PII da org.
+ */
+export async function loadAllowedCustomFields(
+  env: ToolEnv,
+  deals: { id: string; contactId: string | null }[],
+): Promise<Map<string, CustomFieldOut[]> | null> {
+  if (!env.scopes.includes("custom_fields:read") || env.customFieldIds.length === 0) return null;
+  const out = new Map<string, CustomFieldOut[]>();
+  if (deals.length === 0) return out;
+  const fields = await prisma.customField.findMany({
+    where: { id: { in: [...env.customFieldIds] }, entity: { in: ["deal", "contact"] } },
+    select: { id: true, label: true, name: true, entity: true, type: true },
+  });
+  const visible: typeof fields = [];
+  for (const f of fields) {
+    if (await canViewFieldForUser(env.user, f.entity as "deal" | "contact", f.id)) visible.push(f);
+  }
+  if (visible.length === 0) return out;
+  const byId = new Map(visible.map((f) => [f.id, f]));
+  const dealFieldIds = visible.filter((f) => f.entity === "deal").map((f) => f.id);
+  const contactFieldIds = visible.filter((f) => f.entity === "contact").map((f) => f.id);
+  const contactIds = [...new Set(deals.map((d) => d.contactId).filter((v): v is string => Boolean(v)))];
+  const [dealValues, contactValues] = await Promise.all([
+    dealFieldIds.length
+      ? prisma.dealCustomFieldValue.findMany({
+          where: { dealId: { in: deals.map((d) => d.id) }, customFieldId: { in: dealFieldIds } },
+          select: { dealId: true, customFieldId: true, value: true },
+        })
+      : Promise.resolve([]),
+    contactFieldIds.length && contactIds.length
+      ? prisma.contactCustomFieldValue.findMany({
+          where: { contactId: { in: contactIds }, customFieldId: { in: contactFieldIds } },
+          select: { contactId: true, customFieldId: true, value: true },
+        })
+      : Promise.resolve([]),
+  ]);
+  const shown = (fieldId: string, raw: string): CustomFieldOut | null => {
+    const f = byId.get(fieldId);
+    if (!f || !raw?.trim()) return null;
+    let value = raw.length > 1000 ? `${raw.slice(0, 1000)}…` : raw;
+    if (!env.exposeContactPii && f.type === "PHONE") value = maskPhone(value);
+    if (!env.exposeContactPii && f.type === "EMAIL") value = maskEmail(value);
+    return { field: f.label || f.name, entity: f.entity as "deal" | "contact", value };
+  };
+  const contactMap = new Map<string, CustomFieldOut[]>();
+  for (const v of contactValues) {
+    const o = shown(v.customFieldId, v.value);
+    if (o) contactMap.set(v.contactId, [...(contactMap.get(v.contactId) ?? []), o]);
+  }
+  for (const d of deals) {
+    const own = dealValues
+      .filter((v) => v.dealId === d.id)
+      .map((v) => shown(v.customFieldId, v.value))
+      .filter((v): v is CustomFieldOut => v !== null);
+    out.set(d.id, [...own, ...(d.contactId ? (contactMap.get(d.contactId) ?? []) : [])]);
+  }
+  return out;
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -187,6 +247,10 @@ export async function listLeads(env: ToolEnv, args: ListLeadsArgs) {
     allowedPipelineIds,
     advancedFilters: createdAt ? { createdAt } : undefined,
   });
+  const custom = await loadAllowedCustomFields(
+    env,
+    result.items.map((d) => ({ id: d.id, contactId: d.contactId ?? null })),
+  );
   return {
     scope: env.ownOnly ? "own" : "visible",
     page: result.page,
@@ -209,6 +273,7 @@ export async function listLeads(env: ToolEnv, args: ListLeadsArgs) {
       lostReason: d.lostReason ?? null,
       createdAt: iso(d.createdAt),
       updatedAt: iso(d.updatedAt),
+      ...(custom ? { customFields: custom.get(d.id) ?? [] } : {}),
     })),
   };
 }
@@ -297,6 +362,10 @@ export async function getLead(env: ToolEnv, args: { id: string }) {
     tags: ((deal as { tags?: { tag: { name: string } }[] }).tags ?? []).map((t) => t.tag.name),
     createdAt: iso(deal.createdAt),
     updatedAt: iso(deal.updatedAt),
+    ...(await (async () => {
+      const custom = await loadAllowedCustomFields(env, [{ id: deal.id, contactId: deal.contactId ?? null }]);
+      return custom ? { customFields: custom.get(deal.id) ?? [] } : {};
+    })()),
     conversations: conversations.slice(0, 10).map((c) => ({
       id: c.id,
       number: c.number ?? null,
@@ -326,173 +395,8 @@ export async function getLead(env: ToolEnv, args: { id: string }) {
 // Conversas
 // ──────────────────────────────────────────────────────────────────────
 
-export type ListConversationsArgs = {
-  status?: "OPEN" | "RESOLVED" | "PENDING" | "SNOOZED";
-  channel?: string;
-  ownerId?: string;
-  search?: string;
-  contactId?: string;
-  cursor?: string;
-  perPage?: number;
-};
-
-export async function listConversations(env: ToolEnv, args: ListConversationsArgs) {
-  const { user } = env;
-  const memo = createRequestMemo();
-  const [grants, allowedChannelIds, authz, visibility] = await Promise.all([
-    scopeGrantsOnce(memo, user.organizationId),
-    listAllowedChannelIds(user, memo),
-    authzOf(user),
-    getVisibilityFilter(user, { memo }),
-  ]);
-  const inboxPerms: ReadonlySet<string> = authz.isAdmin ? new Set(["*"]) : authz.permissions;
-  // Mesma regra da aba "Todos" da inbox: MEMBER só vê as filas liberadas.
-  const canTodos = canSeeInboxTab({ grants, role: user.role, tab: "todos", permissions: inboxPerms });
-  const categoryTabs = INBOX_CATEGORY_TABS.filter((t) =>
-    canSeeInboxTab({ grants, role: user.role, tab: t, permissions: inboxPerms }),
-  ) as InboxCategoryTab[];
-  const memberTabs: InboxCategoryTab[] =
-    categoryTabs.length > 0 ? categoryTabs : ["esperando", "respondidas"];
-
-  // Operador: só as conversas dele (sem filas sem responsável).
-  const conversationWhere = andConversationWhere(
-    env.ownOnly
-      ? ownConversationWhere(user.id)
-      : withInboxQueueVisibility(visibility.conversationWhere, {
-          permissions: inboxPerms,
-          includeUnassigned: visibility.includeUnassigned,
-        }),
-    conversationFunnelWhere(authz),
-  );
-
-  let result;
-  try {
-    result = await getConversations({
-      status: args.status,
-      channel: args.channel,
-      ownerId: args.ownerId === "me" ? user.id : args.ownerId,
-      contactId: args.contactId,
-      search: args.search?.slice(0, 100),
-      tab: canTodos ? "todos" : memberTabs,
-      todosCategoryTabs: canTodos && user.role === "MEMBER" ? memberTabs : undefined,
-      cursor: args.cursor,
-      perPage: Math.min(50, Math.max(1, args.perPage ?? 20)),
-      visibilityWhere: conversationWhere,
-      allowedChannelIds,
-    });
-  } catch (err) {
-    if (err instanceof InvalidListCursorError) {
-      throw new ToolError("invalid_argument", "cursor inválido.");
-    }
-    throw err;
-  }
-  return {
-    scope: env.ownOnly ? "own" : "visible",
-    hasMore: result.hasMore,
-    nextCursor: result.nextCursor,
-    items: result.items.map((c) => ({
-      id: c.id,
-      number: c.number,
-      status: c.status,
-      channel: c.channel,
-      unreadCount: c.unreadCount,
-      contact: contactOut(env, c.contact),
-      assignedTo: c.assignedTo ? { id: c.assignedTo.id, name: c.assignedTo.name } : null,
-      department: c.department ? c.department.name : null,
-      lastMessageAt: iso(c.lastMessageAt),
-      lastMessageDirection: c.lastMessageDirection ?? null,
-      createdAt: iso(c.createdAt),
-      closedAt: iso(c.closedAt),
-      tags: (c.tags ?? []).map((t) => t.name),
-    })),
-  };
-}
-
-export async function getConversationMessages(
-  env: ToolEnv,
-  args: { conversationId: string; before?: string; limit?: number },
-) {
-  const { user } = env;
-  const conversationId = await resolveConversationId(args.conversationId);
-  if (!conversationId) throw new ToolError("not_found", "Conversa não encontrada.");
-  const conv = await prisma.conversation.findFirst({
-    where: { id: conversationId },
-    select: {
-      id: true,
-      number: true,
-      channel: true,
-      channelId: true,
-      status: true,
-      assignedToId: true,
-      contactId: true,
-      contact: { select: { id: true, name: true, email: true, phone: true } },
-    },
-  });
-  if (!conv) throw new ToolError("not_found", "Conversa não encontrada.");
-  // Mesma decisão do inbox (dono, deal do contato, fila/visibilidade + canal,
-  // funil) e o escopo de leitura do canal.
-  const allowed =
-    (await userHasConversationAccess(user, conv.id)) &&
-    (await canDoChannelAction(user, "view", conv.channelId));
-  if (!allowed) throw new ToolError("forbidden", "Sem acesso a esta conversa.");
-  if (env.ownOnly && conv.assignedToId !== user.id) {
-    const ownsDeal = await prisma.deal.findFirst({
-      where: { contactId: conv.contactId, ownerId: user.id },
-      select: { id: true },
-    });
-    if (!ownsDeal) throw new ToolError("forbidden", "Esta conversa não está sob sua responsabilidade.");
-  }
-
-  let before: Date | undefined;
-  if (args.before) {
-    before = new Date(args.before);
-    if (Number.isNaN(before.getTime())) throw new ToolError("invalid_argument", "before inválido (ISO-8601).");
-  }
-  const limit = Math.min(50, Math.max(1, args.limit ?? 30));
-  const rows = await prisma.message.findMany({
-    where: {
-      conversationId: conv.id,
-      isPrivate: false,
-      ...(before ? { createdAt: { lt: before } } : {}),
-    },
-    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-    take: limit + 1,
-    select: {
-      id: true,
-      direction: true,
-      messageType: true,
-      content: true,
-      authorType: true,
-      senderName: true,
-      sendStatus: true,
-      createdAt: true,
-    },
-  });
-  const hasMore = rows.length > limit;
-  const page = rows.slice(0, limit);
-  return {
-    conversation: {
-      id: conv.id,
-      number: conv.number,
-      channel: conv.channel,
-      status: conv.status,
-      contact: contactOut(env, conv.contact),
-    },
-    hasMore,
-    nextBefore: hasMore ? iso(page[page.length - 1]?.createdAt) : null,
-    // Ordem cronológica (mais antiga primeiro) — leitura natural para o modelo.
-    messages: page.reverse().map((m) => ({
-      id: m.id,
-      at: iso(m.createdAt),
-      direction: m.direction,
-      author: m.direction === "in" ? "contato" : (m.senderName ?? String(m.authorType)),
-      authorType: String(m.authorType),
-      type: m.messageType,
-      text: m.messageType === "text" || m.content.length < 4000 ? truncate(m.content, 4000) : `[${m.messageType}]`,
-      status: m.sendStatus,
-    })),
-  };
-}
+// list_conversations, get_conversation_messages, get_conversation_events,
+// get_queue_status e get_team_performance: `tools-conversations.ts`.
 
 // ──────────────────────────────────────────────────────────────────────
 // Métricas (dashboard)
@@ -523,7 +427,7 @@ export function resolvePeriod(args: PeriodArgs): { from: Date; to: Date } {
  *   - quem não vê todos os negócios só recebe os próprios.
  * `null` = nada visível (funil pedido está fora do escopo).
  */
-async function scopedDashboardFilters(
+export async function scopedDashboardFilters(
   user: ToolUser,
   pipelineId: string,
   ownOnly: boolean,
@@ -548,7 +452,7 @@ async function scopedDashboardFilters(
   };
 }
 
-async function resolvePipelineArg(pipelineId: string | undefined): Promise<string> {
+export async function resolvePipelineArg(pipelineId: string | undefined): Promise<string> {
   if (!pipelineId) return "";
   const p = await prisma.pipeline.findFirst({
     where: /^\d+$/.test(pipelineId) ? { number: Number(pipelineId), archivedAt: null } : { id: pipelineId, archivedAt: null },
@@ -577,37 +481,6 @@ export async function getSalesMetrics(env: ToolEnv, args: PeriodArgs & { pipelin
     bySource: data.bySource.slice(0, 20),
     lossReasons: data.lossReasons.slice(0, 20),
     dailyEvolution: data.dailyEvolution,
-  };
-}
-
-export async function getTeamPerformance(env: ToolEnv, args: PeriodArgs & { pipelineId?: string }) {
-  const { user } = env;
-  // Mesmo gate do Painel de equipe: gestor ou administrador.
-  if (env.ownOnly || (user.role !== "ADMIN" && user.role !== "MANAGER")) {
-    throw new ToolError("forbidden", OWN_ONLY_DENIED);
-  }
-  const range = resolvePeriod(args);
-  const pipelineId = await resolvePipelineArg(args.pipelineId);
-  if (pipelineId && (await requirePipelineScope(user, "view", pipelineId))) {
-    throw new ToolError("forbidden", "Sem acesso a este funil.");
-  }
-  const scoped = await scopedDashboardFilters(user, pipelineId, env.ownOnly);
-  if (!scoped) throw new ToolError("forbidden", "Sem acesso a este funil.");
-  const data = await getDashboard({ from: range.from, to: range.to, pipelineId, ...scoped });
-  return {
-    period: { from: iso(range.from), to: iso(range.to) },
-    pipelineId: pipelineId || "all",
-    onlyOwnDeals: Boolean(scoped.ownerIds),
-    sellers: data.byOwner.map((o) => ({
-      id: o.id,
-      name: o.name,
-      leads: o.leads,
-      open: o.open,
-      won: o.won,
-      lost: o.lost,
-      conversion: o.conversion,
-      wonValue: o.wonValue,
-    })),
   };
 }
 
@@ -736,7 +609,7 @@ export async function getCampaignResults(
 export function countOf(result: unknown): number | null {
   if (!result || typeof result !== "object") return null;
   const r = result as Record<string, unknown>;
-  for (const k of ["items", "messages", "sellers", "stages"]) {
+  for (const k of ["items", "messages", "events", "attendants", "departments", "sellers", "stages"]) {
     if (Array.isArray(r[k])) return (r[k] as unknown[]).length;
   }
   return 1;
