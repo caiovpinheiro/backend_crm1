@@ -54,10 +54,12 @@ O contexto Prisma roda com `isSuperAdmin: false` — nem super-admin atravessa o
 |---|---|---|---|
 | `list_leads` | `leads:read` | `deal:view` | `getDeals` + filtros de `GET /api/deals` |
 | `get_lead` | `leads:read` | `deal:view` | `getDealById` + checagens de `GET /api/deals/[id]` |
-| `list_conversations` | `conversations:read` | `conversation:view` | `getConversations` + filtros de `GET /api/conversations` |
-| `get_conversation_messages` | `messages:read` | `conversation:view` | `userHasConversationAccess` + escopo de canal |
+| `list_conversations` | `conversations:read` | `conversation:view` | consulta própria com a visibilidade de `GET /api/conversations` (não colapsa tickets) |
+| `get_conversation_messages` | `messages:read` (+ `audio:read` p/ transcrição) | `conversation:view` | `userHasConversationAccess` + escopo de canal |
+| `get_conversation_events` | `events:read` | `conversation:view` | `activity_events` + `distribution_pending` |
+| `get_queue_status` | `queue:read` | `conversation:view` + `report:view` + gestor/admin | `groupBy` com as regras do "Agora" do painel |
 | `get_sales_metrics` | `metrics:read` | `report:view` | `getDashboard` |
-| `get_team_performance` | `team:read` | `report:view` + papel gestor/admin | `getDashboard.byOwner` |
+| `get_team_performance` | `team:read` | `report:view` + papel gestor/admin | `getPainelTeam` + `getPainelService(attendants)` + `getDashboard.byOwner` |
 | `get_campaign_results` | `campaigns:read` | `campaign:view` | `getCampaigns` / `getCampaignStats` |
 | `get_pipeline_metrics` | `metrics:read` | `report:view` + `pipeline:view` | `getDashboard.funnel` |
 
@@ -73,6 +75,67 @@ Restrições extras (mais estritas que a UI): métricas de quem não vê todos o
 só com os próprios; histórico do lead não traz eventos de mensagem; notas internas
 (`isPrivate`) nunca saem; telefone/e-mail mascarados salvo opção da organização; campos
 personalizados não saem. Páginas: máx. 50 itens.
+
+### Escopos
+
+| Escopo | Libera | Padrão da org |
+|---|---|---|
+| `leads:read` | `list_leads`, `get_lead` | ligado |
+| `conversations:read` | `list_conversations` | ligado |
+| `messages:read` | `get_conversation_messages` | ligado |
+| `metrics:read` | `get_sales_metrics`, `get_pipeline_metrics` | ligado |
+| `team:read` | `get_team_performance` | ligado |
+| `campaigns:read` | `get_campaign_results` | ligado |
+| `events:read` | `get_conversation_events` | **desligado** |
+| `queue:read` | `get_queue_status` | **desligado** |
+| `custom_fields:read` | campos personalizados em `list_leads`/`get_lead` (só os da lista da org) | **desligado** |
+| `audio:read` | transcrição de áudio em `get_conversation_messages` | **desligado** |
+
+Escopo desligado: a ferramenta responde erro ("Esta conexão não tem a permissão…"); nos
+recursos opcionais o campo simplesmente não sai (`customFields` ausente, áudio como
+`[áudio]`). Ligar um escopo novo na org **não** amplia conexões já autorizadas: o usuário
+reconecta o assistente para consentir o recurso novo.
+
+### Ferramentas de atendimento
+
+- **`list_conversations`** — uma linha por conversa (não agrupa tickets do contato).
+  Filtros: `status`, `channel`, `channelId`, `departmentId` (`none` = sem departamento),
+  `assignedToId` (`me`, `none` ou id), `tabulationId`, `contactId`, `search`,
+  `createdFrom/To`, `updatedFrom/To`, `closedFrom/To` (`YYYY-MM-DD` = dia inteiro em
+  Brasília, ou ISO-8601). Ordem `sort` = `createdAt` (padrão) | `updatedAt` | `closedAt`,
+  `order` = `desc` | `asc`. Cursor keyset (campo de ordem + id): repita com `nextCursor`
+  até `hasMore=false` — sem perder nem repetir linha, inclusive com datas iguais. Cada
+  item traz departamento, atendente (humano/IA), datas, `tabulation { id, path }` e
+  `closedBy { type, name, at }`.
+- **`closedBy.type`** (do último `CONVERSATION_CLOSED`): `pessoa`, `ia`, `automacao`,
+  `massa` (humano + `meta.source = bulk-sync`), `inatividade` (`idle_inbound`), `sistema`,
+  `integracao`. IA e fechamento em massa passam pelo mesmo `resolveConversationsInline`;
+  só o `actorType` os separa.
+- **`get_conversation_messages`** — `at` (data/hora), `senderType` = `contato` |
+  `atendente` | `agente_ia` | `automacao` (inclui campanha) | `sistema`, `senderName`.
+  Áudio: transcrição de `ai_simple_media_texts` (só existe para áudio que a IA processou),
+  com `audio:read`; sem ela, `[áudio]`. O cabeçalho da conversa traz tabulação e quem
+  encerrou.
+- **`get_conversation_events`** — cronológico, cursor, filtro `categories`:
+  `abertura`, `reabertura`, `status`, `retorno_agendado`, `atribuicao`, `retomada_ia`,
+  `devolucao_humano` (troca de responsável em que um lado é usuário do tipo IA — não há
+  evento próprio), `distribuicao`, `distribuicao_falhou`, `transferencia_departamento`,
+  `entrada_fila`/`saida_fila` (`distribution_pending`), `encerramento` (com `closedBy` e
+  tabulação) e `tabulacao`. Só campos explícitos — nunca o `meta` cru.
+- **`get_queue_status`** — agora, por departamento: `waiting` (aguardando resposta:
+  `OPEN`, sem retorno agendado, última mensagem do cliente, sem erro), `waitingUnassigned`,
+  `oldestWaitMinutes` (pelo `lastInboundAt`) e `onlineAttendants` (`agent_statuses`
+  `ONLINE` + `department_members`). Só contagens e nomes de departamento. Gestor com
+  departamentos restritos (`AgentPermission.allowedDepartmentIds`) vê só os dele.
+- **`get_team_performance`** — período (`period` ou `custom` com `startDate`/`endDate`,
+  máx. 90 dias), `departmentIds`, `clock` (`business` padrão | `elapsed`). Por atendente:
+  `attended`, `finished`, `firstResponseMedianMinutes`, `serviceMeanMinutes`,
+  `serviceMedianMinutes`, `transferredOut`, `transferredIn`; mais `sellers` (vendas por
+  vendedor). A 1ª resposta vem do painel de atendimento, que não filtra por departamento.
+- **Campos personalizados** — `customFields: [{ field, entity, value }]` em
+  `list_leads`/`get_lead` só com `custom_fields:read` **e** campo marcado na lista da org
+  (`mcp.config.customFieldIds`, vazia por padrão). Respeita a máscara de campo por papel
+  (`canViewFieldForUser`) e mascara campos do tipo telefone/e-mail conforme o toggle de PII.
 
 ### Proteções
 
@@ -160,7 +223,11 @@ novas não afetam o restante do CRM.
 - `src/lib/mcp/mcp.integration.test.ts` (Postgres local; `DATABASE_URL` remota = skip):
   OAuth completo, 8 ferramentas com dados controlados, escopos, RBAC, isolamento entre
   organizações, revogação, auditoria.
-- `src/lib/mcp/oauth-unit.test.ts`, `src/lib/mcp/middleware-mcp.test.ts`.
+- `src/lib/mcp/mcp-conversations.integration.test.ts` (Postgres local): filtros e cursor do
+  `list_conversations`, tabulação e quem encerrou, remetente e transcrição, linha do tempo,
+  fila, equipe, campos personalizados, escopos desligados e isolamento entre orgs.
+- `src/lib/mcp/oauth-unit.test.ts`, `src/lib/mcp/middleware-mcp.test.ts`,
+  `src/lib/mcp/tools-conversations.test.ts`.
 
 ```bash
 DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/crm_test REDIS_URL=redis://127.0.0.1:6379 \

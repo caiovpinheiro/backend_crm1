@@ -394,7 +394,7 @@ describe.skipIf(!LOCAL)("MCP integration (Postgres local)", () => {
   });
 
   // ── Ferramentas (dados controlados) ───────────────────────────────────
-  it("initialize + tools/list expõem as 8 ferramentas somente leitura", async () => {
+  it("initialize + tools/list expõem as 10 ferramentas somente leitura", async () => {
     const conn = await connect(ids.adminA, ids.orgA);
     const init = await rpc(conn.access, "initialize", {
       protocolVersion: "2025-06-18",
@@ -406,8 +406,9 @@ describe.skipIf(!LOCAL)("MCP integration (Postgres local)", () => {
     const list = await rpc(conn.access, "tools/list");
     const names = (list.body.result.tools as { name: string; annotations?: { readOnlyHint?: boolean } }[]);
     expect(names.map((t) => t.name).sort()).toEqual([
-      "get_campaign_results", "get_conversation_messages", "get_lead", "get_pipeline_metrics",
-      "get_sales_metrics", "get_team_performance", "list_conversations", "list_leads",
+      "get_campaign_results", "get_conversation_events", "get_conversation_messages", "get_lead",
+      "get_pipeline_metrics", "get_queue_status", "get_sales_metrics", "get_team_performance",
+      "list_conversations", "list_leads",
     ]);
     expect(names.every((t) => t.annotations?.readOnlyHint === true)).toBe(true);
   });
