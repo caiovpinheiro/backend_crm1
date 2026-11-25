@@ -88,6 +88,8 @@ const SCOPED_MODELS = new Set<Prisma.ModelName>([
   "DiscountQuota",
   "ProductMessageTemplate",
   "QuotaConsumptionPolicy",
+  // Agenda de envios automáticos do agente v2 (o worker usa prismaBase).
+  "AIV2ScheduledSend",
   "DealQuota",
   // Empresas vinculadas ao negócio.
   "DealCompany",

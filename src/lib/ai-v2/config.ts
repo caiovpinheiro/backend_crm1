@@ -242,6 +242,71 @@ const inactivitySchema = z.object({
   followUps: followUpStepsSchema.optional(),
 }).optional();
 
+/** Modelo da Meta para envio automático fora das 24 h. */
+const autoSendTemplateSchema = z.object({
+  name: z.string().trim().min(1),
+  language: optionalText,
+  variables: z.array(z.string()).max(10).optional(),
+  purpose: optionalText,
+});
+
+const autoSendTemplatesSchema = z.preprocess(
+  (v) => (Array.isArray(v) ? v.filter((t) => t && typeof t === "object" && typeof (t as { name?: unknown }).name === "string" && (t as { name: string }).name.trim()).slice(0, 10) : undefined),
+  z.array(autoSendTemplateSchema).optional(),
+);
+
+/** Regras comuns dos envios automáticos. Sem a chave: nada muda. */
+const autoSendSchema = z.object({
+  sendWindow: z.array(z.object({
+    day: z.number().int().min(0).max(6),
+    start: z.string(),
+    end: z.string(),
+  })).max(21).optional(),
+  maxPerDay: z.coerce.number().int().min(1).max(5).optional().default(2),
+  templates: autoSendTemplatesSchema,
+  autoPickTemplates: z.boolean().optional().default(true),
+  noTemplate: z.enum(["task", "handoff", "skip"]).optional().default("task"),
+  optOutTerms: z.array(z.string()).max(30).optional(),
+  optOutDays: z.coerce.number().int().min(1).max(365).optional().default(30),
+}).optional();
+
+const schedulingSchema = z.object({
+  enabled: z.boolean().optional().default(false),
+  maxDaysAhead: z.coerce.number().int().min(1).max(30).optional().default(7),
+  laterDefaultHours: z.coerce.number().int().min(1).max(24).optional().default(3),
+  fallbackMessage: optionalText,
+  stopOnStageChange: z.boolean().optional().default(false),
+}).optional();
+
+/** Réguas de follow-up por etapa: até 10, cada uma com até 5 passos. */
+const followUpSequencesSchema = z.preprocess(
+  (v) => (Array.isArray(v) ? v.filter((s) => s && typeof s === "object").slice(0, 10) : undefined),
+  z.array(z.object({
+    id: z.string().trim().min(1),
+    name: z.string().optional().default(""),
+    enabled: z.boolean().optional().default(true),
+    dealStages: z.array(z.string()).optional().default([]),
+    steps: z.preprocess(
+      (v) => (Array.isArray(v) ? v.filter((s) => s && typeof s === "object" && Number((s as { after?: unknown }).after) > 0).slice(0, 5) : []),
+      z.array(z.object({
+        after: z.coerce.number().int().min(10).max(60 * 24 * 30),
+        mode: z.enum(["fixed", "generated"]).optional().default("fixed"),
+        message: optionalText,
+        templates: autoSendTemplatesSchema,
+      })),
+    ),
+    stopOnStageChange: z.boolean().optional().default(true),
+    onEnd: z.object({
+      action: z.enum(["none", "close", "handoff", "move_stage", "add_tag"]).optional().default("none"),
+      after: z.coerce.number().int().min(10).max(60 * 24 * 30).optional(),
+      stageId: optionalText,
+      tag: optionalText,
+      destination: destinationSchema.optional(),
+      message: optionalText,
+    }).optional(),
+  })).optional(),
+);
+
 // Réguas de similaridade são opções com nome; os números ficam no motor
 // (services/ai-v2/similarity-presets).
 const themeRecognitionSchema = z.object({
@@ -580,6 +645,9 @@ export const v2AgentConfigSchema = z.object({
    */
   useDispatchText: z.boolean().optional().default(false),
   inactivity: inactivitySchema,
+  autoSend: autoSendSchema,
+  scheduling: schedulingSchema,
+  followUpSequences: followUpSequencesSchema,
   tabulation: tabulationSchema,
   themeRecognition: themeRecognitionSchema,
   knowledgeSearch: z.object({ preset: z.enum(["all", "related", "close"]).optional() }).optional(),

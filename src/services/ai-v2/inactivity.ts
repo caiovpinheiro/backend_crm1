@@ -212,6 +212,10 @@ type IdleRow = {
   has_state?: boolean;
   /** Ticket novo depois de um encerramento: o agente perguntou se é algo novo e espera. */
   post_close_asked?: boolean;
+  /** Agenda do v2: há retomada/passo de régua aberto para a conversa. */
+  agenda_open?: boolean;
+  /** Agenda do v2: a última mensagem saiu da agenda (pelo id gravado). */
+  last_out_is_agenda?: boolean;
 };
 
 const db = prismaBase as unknown as {
@@ -225,7 +229,14 @@ const db = prismaBase as unknown as {
  * entre o primeiro lembrete e o encerramento). Fica de fora quem está na fila
  * ou encerrado.
  */
-async function listIdleV2(now: Date): Promise<IdleRow[]> {
+async function listIdleV2(now: Date, withAgenda = false): Promise<IdleRow[]> {
+  // Colunas da agenda só com a tabela no banco (código no ar antes da migration).
+  const agendaCols = withAgenda
+    ? `EXISTS (SELECT 1 FROM "ai_v2_scheduled_sends" x
+                WHERE x."conversationId" = c."id" AND x."status" IN ('PENDING','SENDING')) AS agenda_open,
+       EXISTS (SELECT 1 FROM "ai_v2_scheduled_sends" x
+                WHERE x."conversationId" = c."id" AND x."sentMessageId" = last_out."id") AS last_out_is_agenda,`
+    : "";
   return db.$queryRawUnsafe<IdleRow[]>(
     `SELECT c."id" AS conversation_id, c."organizationId" AS organization_id, c."contactId" AS contact_id,
             ct."name" AS contact_name, c."assignedToId" AS assigned_to_id, a."id" AS agent_config_id,
@@ -245,6 +256,7 @@ async function listIdleV2(now: Date): Promise<IdleRow[]> {
                 AND m2."aiAgentUserId" = c."assignedToId"
                 AND c."lastInboundAt" IS NOT NULL AND m2."createdAt" > c."lastInboundAt") AS first_out_since_inbound,
             s."counters"->'idleFollowUp' AS idle_follow_up,
+            ${agendaCols}
             (s."id" IS NOT NULL) AS has_state,
             (s."stage" = 'closed' AND s."counters"->>'postCloseAsked' = 'true') AS post_close_asked
        FROM "conversations" c
@@ -254,7 +266,7 @@ async function listIdleV2(now: Date): Promise<IdleRow[]> {
        LEFT JOIN "channels" ch ON ch."id" = c."channelId"
        LEFT JOIN "ai_simple_conversation_states" s ON s."conversationId" = c."id"
        JOIN LATERAL (
-         SELECT m."content", m."createdAt", m."aiAgentUserId" FROM "messages" m
+         SELECT m."id", m."content", m."createdAt", m."aiAgentUserId" FROM "messages" m
           WHERE m."conversationId" = c."id" AND m."direction" = 'out'
             AND COALESCE(m."isPrivate", false) = false AND m."messageType" <> 'note'
           ORDER BY m."createdAt" DESC LIMIT 1
@@ -404,9 +416,30 @@ async function writeFollowUp(config: V2AgentConfig, agentConfigId: string, conve
   }
 }
 
+/** Uma régua de follow-up do agente vale para a etapa do negócio desta conversa? */
+async function followUpSequenceCovers(config: V2AgentConfig, dealId: string | null): Promise<boolean> {
+  if (!dealId || (config.followUpSequences ?? []).length === 0) return false;
+  try {
+    const [deal] = await db.$queryRawUnsafe<Array<{ stage_id: string | null; stage_name: string | null; pipeline_name: string | null; status: string | null }>>(
+      `SELECT d."stageId" AS stage_id, st."name" AS stage_name, p."name" AS pipeline_name, d."status"::text AS status
+         FROM "deals" d
+         LEFT JOIN "stages" st ON st."id" = d."stageId"
+         LEFT JOIN "pipelines" p ON p."id" = st."pipelineId"
+        WHERE d."id" = $1`,
+      dealId,
+    );
+    if (!deal || deal.status !== "OPEN") return false;
+    const { matchSequence } = await import("./agenda");
+    return matchSequence(config, { stageId: deal.stage_id, stageName: deal.stage_name, pipelineName: deal.pipeline_name }) != null;
+  } catch {
+    return false;
+  }
+}
+
 /** Uma passada: manda lembretes e encerra o que venceu. */
 export async function processIdleV2(now: Date = new Date()): Promise<{ nudged: number; closed: number }> {
-  const rows = await listIdleV2(now);
+  const withAgenda = await import("./agenda-worker").then((m) => m.agendaTableReady()).catch(() => false);
+  const rows = await listIdleV2(now, withAgenda);
   let nudged = 0;
   let closed = 0;
   let transferred = 0;
@@ -427,7 +460,13 @@ export async function processIdleV2(now: Date = new Date()): Promise<{ nudged: n
     }
     // Assunto da conversa com regra própria de "cliente sem responder".
     const theme = getV2ThemeById(config, row.theme_id ?? undefined);
-    const inactivity = effectiveInactivity(config.inactivity, theme);
+    const baseInactivity = effectiveInactivity(config.inactivity, theme);
+    // Agenda do v2 cuida desta conversa (retomada combinada, régua da etapa,
+    // ou a última mensagem saiu dela): sem lembrete; o encerramento segue no
+    // prazo, sem mensagem e sem mexer no negócio.
+    const agendaHold = withAgenda && !row.post_close_asked && !!baseInactivity?.enabled
+      && (row.agenda_open === true || row.last_out_is_agenda === true || (await followUpSequenceCovers(config, row.deal_id)));
+    const inactivity = agendaHold && baseInactivity ? { ...baseInactivity, followUps: [], nudgeAfter: 0 } : baseInactivity;
     const idleConfig: V2AgentConfig = inactivity === config.inactivity ? config : { ...config, inactivity };
     // Pergunta pós-encerramento sem resposta: o atendimento anterior já foi
     // encerrado (com despedida); no prazo de encerramento, só fecha o ticket
@@ -568,11 +607,11 @@ export async function processIdleV2(now: Date = new Date()): Promise<{ nudged: n
             });
             return;
           } else {
-            traceStep("inatividade", `Cliente sem responder há ${inactivity?.closeAfter} min → encerramento`);
-            const closeText = inactivity?.closeMessage?.trim() ? renderMessage(inactivity.closeMessage, vars, defaultFormatter()) : "";
+            traceStep("inatividade", `Cliente sem responder há ${inactivity?.closeAfter} min → encerramento${agendaHold ? " sem mensagem (envio automático agendado ou régua de follow-up da etapa)" : ""}`);
+            const closeText = !agendaHold && inactivity?.closeMessage?.trim() ? renderMessage(inactivity.closeMessage, vars, defaultFormatter()) : "";
             const canText = !!row.last_inbound_at && now.getTime() - new Date(row.last_inbound_at).getTime() < WINDOW_24H;
             if (closeText && canText && (await send(closeText)).sent) reply = closeText;
-            lostMove = await loseIdleDeal(config, row.deal_id, row.contact_id);
+            lostMove = agendaHold ? null : await loseIdleDeal(config, row.deal_id, row.contact_id);
             if (lostMove) {
               traceStep("inatividade", `Negócio movido para perdido${lostMove.lostReason ? ` · motivo ${lostMove.lostReason}` : ""}`);
             }

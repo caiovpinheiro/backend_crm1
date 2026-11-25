@@ -3,7 +3,8 @@
  *
  * A cada tick: aviso e encerramento por falta de resposta conforme a
  * configuração de cada agente (motor v2, "Começo e fim › Cliente sem
- * responder") e a rede de segurança de inbound parado (conversa com
+ * responder"), a agenda do v2 (retomada agendada e follow-up por etapa) e a
+ * rede de segurança de inbound parado (conversa com
  * responsável IA sem resposta há muito tempo vai para a distribuição).
  */
 
@@ -53,6 +54,16 @@ export async function tickOnce(now: Date = new Date()): Promise<void> {
     .catch((err) =>
       log.warn({ err: err instanceof Error ? err.message : err }, "[ai-inactivity] v2 falhou"),
     );
+
+  // Agenda do v2 (retomada agendada e follow-up por etapa): sem nada
+  // configurado, não há linha e a passada não faz nada.
+  if (process.env.AI_V2_AGENDA_WORKER !== "0") {
+    await import("@/services/ai-v2/agenda-worker")
+      .then(({ processAgendaV2 }) => processAgendaV2(now))
+      .catch((err) =>
+        log.warn({ err: err instanceof Error ? err.message : err }, "[ai-inactivity] agenda v2 falhou"),
+      );
+  }
 
   try {
     const queued = await enqueueDistributionStuckInbound({

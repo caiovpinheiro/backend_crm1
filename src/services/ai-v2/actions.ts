@@ -58,6 +58,8 @@ export interface V2ActionContext {
   setSurveyPending?: (pending: boolean) => void;
   /** Mensagem do cliente no turno (para adaptar mensagem pronta). */
   userMessage?: string;
+  /** Id do turno (chave de idempotência da retomada agendada). */
+  turnId?: string;
 }
 
 async function executeHandoff(action: V2Action, ctx: V2ActionContext): Promise<V2ActionResult> {
@@ -803,20 +805,55 @@ async function executeSendWhatsappTemplate(action: V2Action, ctx: V2ActionContex
   const templateName = typeof action.templateName === "string" ? action.templateName : "";
   const languageCode = typeof action.languageCode === "string" ? action.languageCode : "pt_BR";
   const bodyVariables = Array.isArray(action.bodyVariables) ? action.bodyVariables.map(String) : [];
-  if (!templateName) return { action, ok: false, error: "Missing templateName" };
-  if (!ctx.contactId || !ctx.conversationId) return { action, ok: false, error: "No contact/conversation" };
+  const res = await sendV2WhatsappTemplate({
+    conversationId: ctx.conversationId,
+    contactId: ctx.contactId,
+    agentUserId: ctx.agentUserId,
+    templateName,
+    languageCode,
+    bodyVariables,
+  });
+  return res.ok
+    ? { action, ok: true, templateName, externalId: res.externalId, messageId: res.messageId }
+    : { action, ok: false, error: res.error };
+}
+
+/**
+ * Envia um modelo aprovado da Meta em nome do agente e grava a mensagem na
+ * conversa. Usado pela ação do modelo/atalho e pela agenda (envio fora das
+ * 24 h). Passa pela allowlist de telefones da IA, como o texto do agente —
+ * antes o modelo saía mesmo com a allowlist restrita.
+ */
+export async function sendV2WhatsappTemplate(args: {
+  conversationId: string;
+  contactId?: string;
+  agentUserId: string;
+  templateName: string;
+  languageCode?: string;
+  bodyVariables?: string[];
+}): Promise<{ ok: true; externalId: string | null; messageId: string } | { ok: false; error: string }> {
+  const templateName = args.templateName;
+  const languageCode = args.languageCode || "pt_BR";
+  const bodyVariables = args.bodyVariables ?? [];
+  if (!templateName) return { ok: false, error: "Missing templateName" };
+  if (!args.contactId || !args.conversationId) return { ok: false, error: "No contact/conversation" };
+  const ctx = { conversationId: args.conversationId, contactId: args.contactId, agentUserId: args.agentUserId };
   try {
+    const { isContactAllowedForAi } = await import("@/services/ai/phone-allowlist");
+    if (!(await isContactAllowedForAi(ctx.contactId).catch(() => false))) {
+      return { ok: false, error: "phone_allowlist" };
+    }
     const conv = await prisma.conversation.findUnique({
       where: { id: ctx.conversationId },
       select: { organizationId: true, channelRef: { select: { config: true } } },
     });
-    if (!conv) return { action, ok: false, error: "Conversation not found" };
+    if (!conv) return { ok: false, error: "Conversation not found" };
     const channelConfig = (conv.channelRef?.config as Record<string, unknown> | null) ?? {};
     const metaClient = metaClientFromConfig(channelConfig);
-    if (!metaClient.configured) return { action, ok: false, error: "Meta channel not configured" };
+    if (!metaClient.configured) return { ok: false, error: "Meta channel not configured" };
 
     const contact = await prisma.contact.findUnique({ where: { id: ctx.contactId }, select: { phone: true } });
-    if (!contact?.phone) return { action, ok: false, error: "Contact without phone" };
+    if (!contact?.phone) return { ok: false, error: "Contact without phone" };
 
     const tplConfig = await prisma.whatsAppTemplateConfig.findFirst({
       where: { metaTemplateName: templateName },
@@ -872,7 +909,62 @@ async function executeSendWhatsappTemplate(action: V2Action, ctx: V2ActionContex
       content: saved.content,
       timestamp: saved.createdAt,
     });
-    return { action, ok: true, templateName, externalId };
+    return { ok: true, externalId, messageId: saved.id };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
+ * "Me manda amanhã": grava a retomada na agenda (uma pendente por conversa;
+ * a nova substitui a anterior). O envio é do worker da agenda, que confere
+ * tudo de novo na hora.
+ */
+async function executeScheduleMessage(action: V2Action, ctx: V2ActionContext): Promise<V2ActionResult> {
+  if (!ctx.contactId) return { action, ok: false, error: "No contact" };
+  // Replay: a conversa de sandbox é apagada no fim; nada vai para a agenda.
+  const { isReplaySandboxActive, recordBlockedEffect } = await import("@/services/ai/replay-sandbox");
+  if (isReplaySandboxActive()) {
+    recordBlockedEffect("outbound_send", `schedule_message:${ctx.conversationId}`);
+    return { action, ok: false, error: "schedule_sandbox" };
+  }
+  const { agendaTimezone, formatWhen, normalizeSchedule } = await import("./agenda");
+  const { createScheduledSend } = await import("./agenda-store");
+  const now = new Date();
+  const norm = normalizeSchedule({ at: action.at, now, config: ctx.config });
+  if (!norm.ok) return { action, ok: false, error: `schedule_${norm.why}` };
+  const reason = typeof action.reason === "string" ? action.reason.trim().slice(0, 300) : "";
+  const resume = typeof action.resume === "string" ? action.resume.trim().slice(0, 500) : "";
+  try {
+    const created = await createScheduledSend({
+      organizationId: ctx.organizationId,
+      conversationId: ctx.conversationId,
+      contactId: ctx.contactId,
+      agentId: ctx.agentId,
+      agentUserId: ctx.agentUserId,
+      dealId: ctx.dealId ?? null,
+      dueAt: norm.dueAt,
+      requestedAt: norm.requestedAt,
+      reason,
+      resumeContext: resume,
+      turnKey: ctx.turnId || String(now.getTime()),
+    });
+    if (!created.ok) return { action, ok: false, error: created.error };
+    const whenText = formatWhen(norm.dueAt, now, agendaTimezone(ctx.config));
+    traceStep("agenda", `Retomada agendada para ${whenText}${norm.adjusted ? " (hora ajustada ao horário permitido)" : ""}${reason ? ` — ${reason}` : ""}`);
+    return { action, ok: true, scheduledId: created.id, dueAt: norm.dueAt.toISOString(), adjusted: norm.adjusted, whenText };
+  } catch (err) {
+    return { action, ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** Cliente desistiu do retorno combinado. */
+async function executeCancelScheduled(action: V2Action, ctx: V2ActionContext): Promise<V2ActionResult> {
+  const { cancelOpenScheduledSends } = await import("./agenda-store");
+  try {
+    const n = await cancelOpenScheduledSends(ctx.conversationId, "model_cancelled");
+    if (n > 0) traceStep("agenda", "Retomada agendada cancelada a pedido do cliente");
+    return { action, ok: true, cancelled: n };
   } catch (err) {
     return { action, ok: false, error: err instanceof Error ? err.message : String(err) };
   }
@@ -921,6 +1013,8 @@ const EXECUTORS: Partial<Record<V2ActionType, (action: V2Action, ctx: V2ActionCo
   send_whatsapp_template: executeSendWhatsappTemplate,
   send_whatsapp_flow: executeSendWhatsappFlow,
   send_material_attachment: executeSendMaterialAttachment,
+  schedule_message: executeScheduleMessage,
+  cancel_scheduled: executeCancelScheduled,
 };
 
 export async function executeV2Actions(
