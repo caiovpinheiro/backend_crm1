@@ -325,6 +325,7 @@ async function listDue(now: Date): Promise<AgendaRow[]> {
 type ConvRow = {
   status: string;
   assigned_to_id: string | null;
+  assigned_to_type?: string | null;
   last_inbound_at: Date | null;
   channel: string | null;
   provider: string | null;
@@ -341,11 +342,12 @@ function channelKindOf(conv: Pick<ConvRow, "channel" | "provider">): "meta" | "b
 
 async function loadSnapshotData(row: AgendaRow, optOutDays: number) {
   const [conv] = await db.$queryRawUnsafe<ConvRow[]>(
-    `SELECT c."status", c."assignedToId" AS assigned_to_id, c."lastInboundAt" AS last_inbound_at, c."channel",
+    `SELECT c."status", c."assignedToId" AS assigned_to_id, u."type"::text AS assigned_to_type, c."lastInboundAt" AS last_inbound_at, c."channel",
             ch."provider", ct."name" AS contact_name, ct."phone" AS contact_phone
        FROM "conversations" c
        LEFT JOIN "channels" ch ON ch."id" = c."channelId"
        LEFT JOIN "contacts" ct ON ct."id" = c."contactId"
+       LEFT JOIN "users" u ON u."id" = c."assignedToId"
       WHERE c."id" = $1 AND c."organizationId" = $2`,
     row.conversationId,
     row.organizationId,
@@ -366,12 +368,27 @@ async function loadSnapshotData(row: AgendaRow, optOutDays: number) {
     row.organizationId,
     since,
   );
+  // Pessoa da equipe que escreveu depois da última mensagem do agente (sem
+  // mensagem do agente, depois da criação da linha).
   const [human] = await db.$queryRawUnsafe<Array<{ n: number }>>(
     `SELECT COUNT(*)::int AS n FROM "messages"
       WHERE "conversationId" = $1 AND "direction" = 'out' AND "authorType" = 'human'
-        AND COALESCE("isPrivate", false) = false AND "createdAt" > $2`,
+        AND COALESCE("isPrivate", false) = false
+        AND "createdAt" > COALESCE(
+          (SELECT MAX(a."createdAt") FROM "messages" a
+            WHERE a."conversationId" = $1 AND a."direction" = 'out' AND a."authorType" = 'bot' AND a."aiAgentUserId" = $3),
+          $2)`,
     row.conversationId,
     row.createdAt,
+    row.agentUserId,
+  );
+  // Automações e campanhas (robô sem agente de IA) também contam no teto do dia.
+  const [automation] = await db.$queryRawUnsafe<Array<{ n: number }>>(
+    `SELECT COUNT(*)::int AS n FROM "messages"
+      WHERE "conversationId" = $1 AND "direction" = 'out' AND "authorType" = 'bot' AND "aiAgentUserId" IS NULL
+        AND COALESCE("isPrivate", false) = false AND "messageType" <> 'note' AND "createdAt" > $2`,
+    row.conversationId,
+    new Date(Date.now() - DAY_MS),
   );
   const [deal] = row.dealId
     ? await db.$queryRawUnsafe<Array<{ status: string | null; stageId: string | null }>>(
@@ -391,7 +408,7 @@ async function loadSnapshotData(row: AgendaRow, optOutDays: number) {
     row.agentId,
     row.organizationId,
   );
-  return { conv: conv ?? null, state: state ?? null, inbound, humanCount: human?.n ?? 0, deal: deal ?? null, sentLast24h: sent?.n ?? 0, agent: agent ?? null };
+  return { conv: conv ?? null, state: state ?? null, inbound, humanCount: human?.n ?? 0, automationLast24h: automation?.n ?? 0, deal: deal ?? null, sentLast24h: sent?.n ?? 0, agent: agent ?? null };
 }
 
 /** Número dentro da lista de teste do agente (vazia = qualquer um). */
@@ -554,7 +571,8 @@ export async function dispatchAgendaRow(row: AgendaRow, now: Date): Promise<Disp
     configured,
     state: data.state,
     inboundSinceCreated: data.inbound.filter((m) => new Date(m.createdAt).getTime() > createdAt.getTime()).map((m) => m.content ?? ""),
-    humanOutboundSinceCreated: data.humanCount > 0,
+    humanOutboundAfterAgent: data.humanCount > 0,
+    assignedToOtherAi: !!data.conv?.assigned_to_id && data.conv.assigned_to_id !== row.agentUserId && data.conv.assigned_to_type === "AI",
     deal: data.deal,
     dealStageIdAtCreate: row.dealStageIdAtCreate,
     stopOnStageChange: row.kind === "followup" ? seq?.stopOnStageChange !== false : config?.scheduling?.stopOnStageChange === true,
@@ -562,6 +580,7 @@ export async function dispatchAgendaRow(row: AgendaRow, now: Date): Promise<Disp
     optedOut: data.inbound.some((m) => isOptOut(m.content, config?.autoSend?.optOutTerms)),
     // O "no fim" não conta no teto de envios.
     sentLast24h: isEnd ? 0 : data.sentLast24h,
+    automationSentLast24h: isEnd ? 0 : data.automationLast24h,
     maxPerDay: config?.autoSend?.maxPerDay ?? 2,
     window: config?.autoSend?.sendWindow,
     timeZone: config ? agendaTimezone(config) : "America/Sao_Paulo",
@@ -602,6 +621,8 @@ export async function dispatchAgendaRow(row: AgendaRow, now: Date): Promise<Disp
       channel,
       autonomyMode: autonomy(config!),
       humanBehavior: v2HumanBehavior(config!),
+      // Responsável humano que ainda não falou não barra o passo.
+      bypassAssignee: data.conv!.assigned_to_id !== row.agentUserId,
     });
   };
   const turnLog = (reply: string | undefined, executed: Array<{ action: { type: string; [k: string]: unknown }; ok: boolean }>, extra: { handoff?: boolean; closed?: boolean; owner?: "agente" | "pessoa" } = {}) =>

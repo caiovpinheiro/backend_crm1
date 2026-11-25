@@ -13,6 +13,7 @@ type Db = {
   state: Record<string, unknown> | null;
   inbound: Array<{ content: string; createdAt: Date }>;
   human: number;
+  automation?: number;
   deal: Record<string, unknown> | null;
   sent24h: number;
   templates: Array<Record<string, unknown>>;
@@ -43,6 +44,7 @@ function queryRaw(sql: string): unknown[] {
   if (sql.includes(`FROM "ai_simple_conversation_states"`)) return d.state ? [d.state] : [];
   if (sql.includes(`m."direction" = 'in'`)) return d.inbound;
   if (sql.includes(`"authorType" = 'human'`)) return [{ n: d.human }];
+  if (sql.includes(`"aiAgentUserId" IS NULL`)) return [{ n: d.automation ?? 0 }];
   if (sql.includes(`FROM "deals" WHERE "id"`)) return d.deal ? [d.deal] : [];
   if (sql.includes(`COUNT(*)::int AS n FROM "ai_v2_scheduled_sends"`)) return [{ n: d.sent24h }];
   if (sql.includes(`FROM "whatsapp_template_configs"`)) return d.templates;
@@ -210,7 +212,7 @@ describe("worker da agenda", () => {
   it("pessoa assumiu, negócio ganho, pedido para parar, agente desligado: cancela sem enviar", async () => {
     const cases: Array<[Partial<Db>, string]> = [
       [{ human: 1 }, "human"],
-      [{ conv: { ...mocks.db.conv!, assigned_to_id: "pessoa-1" } }, "human"],
+      [{ conv: { ...mocks.db.conv!, assigned_to_id: "ai-2", assigned_to_type: "AI" } }, "other_agent"],
       [{ deal: { status: "WON", stageId: "st-9" } }, "deal_closed"],
       [{ inbound: [{ content: "pare de mandar mensagem", createdAt: ago(5 * 24 * HOUR) }] }, "opt_out"],
       [{ config: { ...CONFIG, scheduling: { enabled: false } } }, "agent_off"],
@@ -233,6 +235,27 @@ describe("worker da agenda", () => {
     await processAgendaV2(NOW);
     expect(mocks.sendText).not.toHaveBeenCalled();
     expect(lastFinish()).toMatchObject({ status: "CANCELLED", outcome: "not_allowed" });
+  });
+
+  it("conversa com responsável humano que ainda não falou depois do agente: o passo sai (sem a trava de responsável)", async () => {
+    setDb({ conv: { ...mocks.db.conv!, assigned_to_id: "pessoa-1", assigned_to_type: "HUMAN" }, state: { owner: "pessoa", stage: "active", closeReason: null } });
+    await processAgendaV2(NOW);
+    expect(mocks.sendText).toHaveBeenCalledTimes(1);
+    expect(mocks.sendText.mock.calls[0][0]).toMatchObject({ bypassAssignee: true });
+    expect(lastFinish()).toMatchObject({ status: "SENT" });
+    // A consulta de "pessoa falou" conta só o que veio depois da última mensagem do agente.
+    const { prismaBase } = await import("@/lib/prisma-base");
+    const sqls = (prismaBase.$queryRawUnsafe as unknown as { mock: { calls: unknown[][] } }).mock.calls.map((c) => String(c[0]));
+    expect(sqls.find((q) => q.includes(`"authorType" = 'human'`))).toContain(`a."aiAgentUserId" = $3`);
+  });
+
+  it("automações e campanhas contam no teto do dia: o passo fica para o dia seguinte, não é cancelado", async () => {
+    setDb({ sent24h: 1, automation: 1 });
+    await processAgendaV2(NOW);
+    expect(mocks.sendText).not.toHaveBeenCalled();
+    const resched = mocks.exec.find((e) => e.sql.includes(`SET "status" = 'PENDING', "dueAt" = $2`));
+    expect(resched).toBeDefined();
+    expect((resched!.params[1] as Date).getTime()).toBeGreaterThanOrEqual(NOW.getTime() + 24 * HOUR);
   });
 
   it("teto de envios automáticos em 24 h", async () => {
