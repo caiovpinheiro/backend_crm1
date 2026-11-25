@@ -51,6 +51,7 @@ import { CONFUSION_PROMPT } from "./confusion";
 import { MAIN_SOURCE_SIMILARITY, WEAK_MATCH_SIMILARITY, knowledgeMinSimilarity } from "./similarity-presets";
 import { checkClaimsWithModel, clientDocumentTexts, sameClaim, worthClaimCheck } from "./claim-check";
 import { activeNotices, noticesForTurn, noticesPromptSection } from "./notices";
+import { testCorrectionSources, testCorrectionsPromptSection, type V2TurnCorrection } from "./corrections";
 import { brHolidayName, isBrazilTimezone, nextBrBusinessDay } from "@/lib/br-holidays";
 import { isMutilated, onlyKeptSentences, prescribedReplyMatching, trimDroppedTheAnswer, trimUnsupportedSentences } from "./reply-trim";
 import { MATERIAL_ATTACHMENT_LIMITS, attachmentsForDocs, attachmentsPromptSection } from "./material-attachments";
@@ -1347,6 +1348,8 @@ export async function callV2LLM(args: {
   transparentTransfer?: boolean;
   /** Trecho "Resposta por áudio" do prompt, quando o turno pode ir por voz. */
   voiceSection?: string;
+  /** Correções de quem testa (`#corrigir`) em vigor. Só o turno de teste manda. */
+  testCorrections?: V2TurnCorrection[];
 }): Promise<{
   output: V2LLMOutput;
   inputTokens: number;
@@ -1469,7 +1472,7 @@ export async function callV2LLM(args: {
     ? [{ toolName: "knowledge_search", args: { query: prefetch.query, prefetch: true }, result: { query: prefetch.query, chunks: prefetch.chunks } }]
     : [];
 
-  const system = buildV2SystemPrompt(
+  const baseSystem = buildV2SystemPrompt(
     args.config,
     args.context,
     args.stage,
@@ -1493,6 +1496,8 @@ export async function callV2LLM(args: {
     args.voiceSection ?? "",
     askedQuestionsSection(args.config, args.previousMessages),
   );
+  // Correções de quem testa: no fim do prompt, com prioridade sobre o resto.
+  const system = [baseSystem, testCorrectionsPromptSection(args.testCorrections)].filter(Boolean).join("\n\n");
 
   const messages: Array<{ role: "user" | "assistant"; content: string }> = [
     ...previousMessages,
@@ -1755,6 +1760,8 @@ export async function callV2LLM(args: {
       currentDateLine(args.config.businessHours?.timezone),
       // O que um aviso temporário em vigor afirma é fonte.
       noticesPromptSection(activeNotices(args.config), args.config),
+      // O que uma correção de quem testa afirma também (só em turno de teste).
+      ...testCorrectionSources(args.testCorrections),
     ];
     // Fontes de fato: sem as mensagens da conversa (o que o cliente diz não
     // prova que a coisa existe).
@@ -1796,6 +1803,7 @@ export async function callV2LLM(args: {
       businessHoursText(args.config),
       currentDateLine(args.config.businessHours?.timezone),
       noticesPromptSection(activeNotices(args.config), args.config),
+      ...testCorrectionSources(args.testCorrections),
       ...args.config.variables.map((v) => `${v.key}: ${v.value}`),
       args.themeInstructions ?? "",
       ...args.config.globalRules,

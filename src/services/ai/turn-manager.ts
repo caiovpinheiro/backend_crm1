@@ -431,6 +431,25 @@ export async function onInboundMessageForAi(
     if (consumed) return;
   }
 
+  // `#corrigir` (motor v2): quem testa aponta o erro da resposta anterior.
+  // Mesmo ponto e mesmo sigilo do `#reset`: fora das listas de números de
+  // teste a mensagem segue o fluxo normal, e webchat fica de fora.
+  const { isV2CorrectCommand } = await import("@/services/ai-v2/correct");
+  if (input.channel !== "webchat" && isV2CorrectCommand(input.userMessage)) {
+    const { handleV2CorrectCommand } = await import("@/services/ai-v2/correct");
+    const consumed = await handleV2CorrectCommand({
+      conversationId: input.conversationId,
+      contactId: input.contactId,
+      messageId: input.messageId,
+      channel: input.channel,
+      userMessage: input.userMessage ?? "",
+    }).catch((err) => {
+      log.error({ err }, "[ai-v2] #corrigir falhou");
+      return false;
+    });
+    if (consumed) return;
+  }
+
   if (input.userMessage?.trim()) {
     try {
       const { shouldSkipNewAiForIdleInbound } = await import(

@@ -38,6 +38,8 @@ import { executeV2Actions, sendV2TextMessage, applyV2ClosureFieldUpdates, v2Huma
 import { findInheritablePostCloseState, getV2ConversationState, upsertV2ConversationState } from "./state";
 import { logV2Turn } from "./log";
 import { noteV2Fact, peekV2Fact, runWithV2Trace, traceStep, v2TraceWasLogged } from "./trace";
+import { isV2CorrectCommand, isV2CorrectReply } from "./correct";
+import { correctionsForTestTurn, type V2TurnCorrection } from "./corrections";
 import { evaluateV2StopLimits, parseV2Counters, shouldStopStalled, type V2Counters } from "./limits";
 import { answerToPostCloseQuestion, classifyPostCloseMessage, getPostCloseBehavior, isGreetingOnlyMessage, keepOpenOnNewRequest, postCloseHandoffMessage, postCloseQuestion, postCloseShortReply, isExplicitResolution } from "./closure";
 import { isConfusionMessage, rephraseAfterConfusion } from "./confusion";
@@ -771,6 +773,23 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   });
   if (!convOrg) return { handoff: false, closed: false, error: "Conversation not found" };
   const orgId = convOrg.organizationId;
+
+  // Correções de quem testa (`#corrigir`): só entram em turno de teste —
+  // agente com lista de números e telefone dentro dela. `null` = turno de
+  // cliente real, que nunca vê correção nem o filtro de histórico do comando.
+  const isTestTurn = (config.allowedPhoneNumbers ?? []).length > 0;
+  const testRun: { corrections: V2TurnCorrection[] } | null = isTestTurn
+    ? {
+        corrections: await correctionsForTestTurn({ organizationId: orgId, agentId: resolved.agentConfigId, config, phone }).catch((err) => {
+          log.warn({ err }, "[ai-v2] correções de teste não carregadas");
+          return [] as V2TurnCorrection[];
+        }),
+      }
+    : null;
+  if (testRun && testRun.corrections.length > 0) {
+    traceStep("correções em teste", `${testRun.corrections.length} correção(ões) de quem testa valendo neste turno: ${testRun.corrections.map((c) => `nº ${c.number}`).join(", ")}`);
+    noteV2Fact("testCorrections", testRun.corrections.map((c) => c.text));
+  }
 
   // Nova tentativa do mesmo turno depois de uma falha: se a anterior já tinha
   // respondido (o erro veio depois do envio), não responde de novo — o
@@ -2015,7 +2034,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     // `onboardingActive` ficava true sem LLM e todo turno virava handoff.
     if (step) {
       onboardingActive = true;
-      const llmForStep = await callLLMWithTheme(config, context, input, resolved, themeId, collectedVariables, rule, owner, stage, false, priorSummary, transparentTransfer, voiceSection);
+      const llmForStep = await callLLMWithTheme(config, context, input, resolved, themeId, collectedVariables, rule, owner, stage, false, priorSummary, transparentTransfer, voiceSection, testRun);
       llmOutput = llmForStep.llmOutput;
       prompt = llmForStep.prompt;
       inputTokens = llmForStep.inputTokens;
@@ -2144,7 +2163,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
         actions: [],
       };
     } else {
-      const llmResult = await callLLMWithTheme(config, context, input, resolved, themeId, collectedVariables, rule, owner, stage, humanRequestWithSubject, priorSummary, transparentTransfer, voiceSection);
+      const llmResult = await callLLMWithTheme(config, context, input, resolved, themeId, collectedVariables, rule, owner, stage, humanRequestWithSubject, priorSummary, transparentTransfer, voiceSection, testRun);
       llmOutput = llmResult.llmOutput;
       prompt = llmResult.prompt;
       inputTokens = llmResult.inputTokens;
@@ -3269,6 +3288,8 @@ async function callLLMWithTheme(
   priorSummary: Awaited<ReturnType<typeof loadPriorV2Summary>> = null,
   transparentTransfer = false,
   voiceSection = "",
+  /** Turno de teste: correções de quem testa em vigor. `null` = cliente real. */
+  testRun: { corrections: V2TurnCorrection[] } | null = null,
 ): Promise<{
   llmOutput?: V2LLMOutput;
   prompt: string;
@@ -3310,6 +3331,9 @@ async function callLLMWithTheme(
     const mediaRows = rows.filter((m) => m.direction === "in" && understoodKindOf(m.messageType));
     const mediaTexts = mediaRows.length > 0 ? await getMediaTexts(mediaRows[0].organizationId, mediaRows.map((m) => m.id)) : new Map<string, string>();
     for (const m of rows.reverse()) {
+      // `#corrigir` e a confirmação dele são conversa de quem testa com o
+      // motor, não do cliente com o agente: ficam fora do que o modelo lê.
+      if (testRun && (m.direction === "out" ? isV2CorrectReply(m.content) : isV2CorrectCommand(m.content))) continue;
       const role = m.direction === "out" || m.authorType === "bot" ? "assistant" : "user";
       const kind = understoodKindOf(m.messageType);
       const understood = kind ? mediaTexts.get(m.id) : undefined;
@@ -3351,6 +3375,7 @@ async function callLLMWithTheme(
       humanRequestWithQuestion,
       transparentTransfer,
       voiceSection,
+      testCorrections: testRun?.corrections ?? [],
     });
     return {
       llmOutput: result.output,
