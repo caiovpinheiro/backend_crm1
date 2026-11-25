@@ -1,9 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { callV2LLM, buildV2ToolSet, knowledgePrefetchQuery } from "../llm";
+import { asksForLaterContact, callV2LLM, buildV2ToolSet, knowledgePrefetchQuery, schedulingConfirmationSentences } from "../llm";
 import { generateWithTools } from "@/services/ai/provider";
 import { getAgentApiKey } from "@/services/ai/agent-key";
 import {
+  findV2ProductsNamedIn,
   searchV2Products,
   searchV2CrmRecords,
   searchV2Knowledge,
@@ -35,6 +36,7 @@ vi.mock("../material-attachments", async (importOriginal) => ({
 }));
 
 vi.mock("../tools", () => ({
+  findV2ProductsNamedIn: vi.fn(async () => []),
   searchV2Products: vi.fn(),
   searchV2CrmRecords: vi.fn(),
   searchV2Knowledge: vi.fn(),
@@ -1674,5 +1676,64 @@ describe("callV2LLM — avisos temporários", () => {
     (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(makeLLMResponse(JSON.stringify({ reply, actions: [] })));
     const without = await run(baseConfig({ groundingCheck: "rules" } as Partial<V2AgentConfig>), "o sistema caiu, e o desconto?");
     expect(without.output.reply).not.toContain("3 dias úteis");
+  });
+});
+
+describe("conferência × retorno combinado, cartão já enviado e produto citado (bateria 25/11)", () => {
+  const PED = { id: "ped", name: "Pedagogia, Licenciatura", sku: null, type: "SERVICE", unit: "mês", price: 212.45, priceFormatted: "R$ 212,45", listPrice: 303.5, listPriceFormatted: "R$ 303,50", discountPercent: 30, description: null, customFields: [] };
+  beforeEach(() => {
+    vi.clearAllMocks();
+    (findV2ProductsNamedIn as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+  });
+
+  it("pedido de retorno e frase que confirma quando o agente volta", () => {
+    expect(asksForLaterContact("me chama amanhã de manhã")).toBe(true);
+    expect(asksForLaterContact("quero Administração mas agora tô dirigindo, me chama depois das 18h?")).toBe(true);
+    expect(asksForLaterContact("quero Pedagogia")).toBe(false);
+    expect(schedulingConfirmationSentences("Combinado! Te chamo amanhã às 9h. A mensalidade é R$ 212,45.")).toEqual(["Te chamo amanhã às 9h."]);
+    expect(schedulingConfirmationSentences("O curso dura 8 semestres.")).toEqual([]);
+  });
+
+  it("R16: \"me chama amanhã de manhã\" → a confirmação do horário agendado não é cortada", async () => {
+    (generateWithTools as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: "Combinado! Te chamo amanhã às 9h.", actions: [{ type: "schedule_message", at: "2026-11-26T09:00", reason: "pediu amanhã de manhã" }] })))
+      .mockResolvedValue(makeLLMResponse('{"unsupported": ["Te chamo amanhã às 9h"]}'));
+    const config = baseConfig({ groundingCheck: "model", fallback: { noSource: { message: "Te confirmo na inscrição." } } } as Partial<V2AgentConfig>);
+    const r = await callV2LLM({ agentId: "agent-1", config, context: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields }, userMessage: "me chama amanhã de manhã", stage: "active" });
+    expect(r.output.reply).toBe("Combinado! Te chamo amanhã às 9h.");
+    expect(r.output.actions.some((a) => a.type === "schedule_message")).toBe(true);
+    expect(r.output.handoff).toBeFalsy();
+  });
+
+  it("R01: \"quanto fica?\" logo depois do cartão → o valor do produto já enviado conta como fonte", async () => {
+    (findV2ProductsNamedIn as ReturnType<typeof vi.fn>).mockImplementation(async (a: { message: string }) => (/pedagogia/i.test(a.message) ? [PED] : []));
+    (generateWithTools as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: "No primeiro semestre fica R$ 212,45 por mês, com a bolsa.", actions: [] })))
+      // O checador só sustenta o valor quando o catálogo está nas fontes.
+      .mockImplementation(async (a: { messages: Array<{ content: string }> }) =>
+        makeLLMResponse(String(a.messages[0]?.content ?? "").includes("R$ 303,50") ? '{"unsupported": []}' : '{"unsupported": ["fica R$ 212,45 por mês"]}'),
+      );
+    const config = baseConfig({ groundingCheck: "model", productPolicy: { enabled: true }, fallback: { noSource: { message: "Te confirmo na inscrição." } } } as Partial<V2AgentConfig>);
+    const r = await callV2LLM({
+      agentId: "agent-1", config, context: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields },
+      userMessage: "quanto fica?", stage: "active",
+      previousMessages: [
+        { role: "user", content: "quero Pedagogia" },
+        { role: "assistant", content: "Pedagogia, Licenciatura • Semi-Presencial • 8 semestres. Matrícula isenta. De R$ 303,50 por R$ 212,45 ao mês." },
+      ],
+    });
+    expect(r.output.reply).toBe("No primeiro semestre fica R$ 212,45 por mês, com a bolsa.");
+  });
+
+  it("R08: \"quero Pedagogia\" com busca nos materiais vazia → os dados do produto vão ao prompt, sem o aviso de \"sem material\"", async () => {
+    (searchV2Knowledge as ReturnType<typeof vi.fn>).mockResolvedValue({ query: "x", chunks: [] });
+    (findV2ProductsNamedIn as ReturnType<typeof vi.fn>).mockResolvedValue([PED]);
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(makeLLMResponse(JSON.stringify({ reply: "Pedagogia é uma ótima escolha!", actions: [] })));
+    const config = baseConfig({ allowedKnowledgeDocIds: ["doc-1"], productPolicy: { enabled: true } } as Partial<V2AgentConfig>);
+    const r = await callV2LLM({ agentId: "agent-1", config, context: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields }, userMessage: "quero Pedagogia", stage: "active" });
+    expect(r.systemPrompt).toContain("# Produtos do catálogo citados na mensagem");
+    expect(r.systemPrompt).toContain('"id":"ped"');
+    expect(r.systemPrompt).not.toContain("# Sem material para esta mensagem");
+    expect(r.toolCalls.some((c) => c.toolName === "search_products")).toBe(true);
   });
 });
