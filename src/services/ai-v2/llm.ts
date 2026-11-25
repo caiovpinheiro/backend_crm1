@@ -39,7 +39,7 @@ import {
 import { knowledgeDocTitleMapByIds } from "@/services/ai/knowledge-docs";
 import { describeV2MessageModels, type V2MessageModelSummary } from "./tools";
 import { knowledgeDocIdsFor } from "./themes";
-import { asksBackOwnData, echoesClientText, clientNamesBoundToFacts, hasSearchableQuestion, admittedMissingInstructions, isNearDuplicateReply, repeatFallback, knowledgeChunkTexts, lookupResultTexts, moneyDerivations, unsupportedFacts, unsupportedFigures, unsupportedHedges, unsupportedMenuPaths, unsupportedQuotedTerms } from "./ground-reply";
+import { asksBackOwnData, echoesClientText, clientNamesBoundToFacts, hasSearchableQuestion, admittedMissingInstructions, isNearDuplicateReply, repeatFallback, knowledgeChunkTexts, lookupResultTexts, moneyDerivations, percentDerivations, unsupportedFacts, unsupportedFigures, unsupportedHedges, unsupportedMenuPaths, unsupportedQuotedTerms } from "./ground-reply";
 import { noteV2Fact, traceStep } from "./trace";
 import { SensitiveVault } from "./sensitive";
 import { boldInstruction, breakInlineSteps } from "./reply-format";
@@ -1836,7 +1836,7 @@ export async function callV2LLM(args: {
       // Documento/imagem do cliente é fonte sobre o caso dele; conta certa
       // com valores das fontes ("documento menos desconto") vai conferida.
       const clientDocuments = clientDocumentTexts(clientTexts);
-      const derivedAmounts = moneyDerivations(output.reply, sources).map((d) => `${d.token} = ${d.expr}`);
+      const derivedAmounts = [...moneyDerivations(output.reply, sources), ...percentDerivations(output.reply, sources)].map((d) => `${d.token} = ${d.expr}`);
       if (derivedAmounts.length > 0) traceStep("verificação", `Conta conferida: ${derivedAmounts.join("; ")}`);
       const checkArgs = { model: v2FastAuxModel(args.config.model), apiKey, reply: output.reply, sources: claimSources, clientTexts, agentHistory, citableValues, clientDocuments, derivedAmounts };
       let res = await checkClaimsWithModel(checkArgs);
