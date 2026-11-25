@@ -149,6 +149,84 @@ export interface V2FollowUpStep {
   questionMessage?: string;
 }
 
+/** Modelo aprovado da Meta usado quando o envio automático sai fora das 24 h. */
+export interface V2AutoSendTemplate {
+  /** `metaTemplateName`. */
+  name: string;
+  language?: string;
+  /** Valores das variáveis do corpo, em ordem (@firstName, @name, variável do agente ou texto fixo). */
+  variables?: string[];
+  /** Para que serve (ajuda o motor a escolher entre vários). */
+  purpose?: string;
+}
+
+/**
+ * Envios automáticos (retomada agendada e follow-up por etapa): regras
+ * comuns. Sem `sendWindow` = a qualquer hora (o agente atende 24 h).
+ */
+export interface V2AutoSendConfig {
+  /** Horários em que pode sair envio automático (fuso do agente). Vazio = qualquer hora. */
+  sendWindow?: V2BusinessHoursSlot[];
+  /** Envios automáticos por conversa em 24 h (as duas frentes somadas). */
+  maxPerDay?: number;
+  /** Modelos candidatos fora das 24 h; o motor escolhe o mais adequado ao envio. */
+  templates?: V2AutoSendTemplate[];
+  /** Sem candidato: escolhe entre os modelos liberados para agente sem variáveis. Padrão: sim. */
+  autoPickTemplates?: boolean;
+  /** Fora das 24 h sem modelo possível: tarefa para a equipe (padrão), transferir ou só registrar. */
+  noTemplate?: "task" | "handoff" | "skip";
+  /** Frases do cliente que param todos os envios automáticos ao contato. */
+  optOutTerms?: string[];
+  /** Por quantos dias o pedido de parar vale. */
+  optOutDays?: number;
+}
+
+/** "Me manda amanhã": o agente agenda a retomada. */
+export interface V2SchedulingConfig {
+  enabled?: boolean;
+  /** Até quantos dias à frente pode agendar. */
+  maxDaysAhead?: number;
+  /** "Mais tarde" sem hora: daqui a N horas. */
+  laterDefaultHours?: number;
+  /** Texto de reserva da retomada (quando o texto escrito pelo agente não serve). */
+  fallbackMessage?: string;
+  /** Cancela a retomada se o negócio mudou de etapa. Padrão: não. */
+  stopOnStageChange?: boolean;
+}
+
+export interface V2FollowUpSequenceStep {
+  /** Minutos desde a última mensagem do agente que ficou sem resposta. */
+  after: number;
+  /** "generated": o agente escreve com o contexto (sem dado novo), com `message` de reserva. */
+  mode?: "fixed" | "generated";
+  message?: string;
+  /** Modelos para este passo fora das 24 h; vazio = os de `autoSend.templates`. */
+  templates?: V2AutoSendTemplate[];
+}
+
+/** Régua de follow-up: começa quando o negócio está numa das etapas e o cliente não responde. */
+export interface V2FollowUpSequence {
+  id: string;
+  name: string;
+  enabled?: boolean;
+  /** Ids de etapa (aceita também nome ou "Funil > Etapa", como o atalho de etapa). */
+  dealStages: string[];
+  steps: V2FollowUpSequenceStep[];
+  /** Para se o negócio mudar de etapa. Padrão: sim. */
+  stopOnStageChange?: boolean;
+  /** Depois do último passo sem resposta. */
+  onEnd?: {
+    action: "none" | "close" | "handoff" | "move_stage" | "add_tag";
+    /** Minutos depois do último passo. */
+    after?: number;
+    stageId?: string;
+    tag?: string;
+    destination?: V2Destination;
+    /** Mensagem antes de encerrar/transferir (só dentro das 24 h). */
+    message?: string;
+  };
+}
+
 /** Como o assunto da conversa é reconhecido e trocado (opção com nome). */
 export interface V2ThemeRecognitionConfig {
   /** "strict" rígido, "balanced" equilibrado (padrão), "loose" flexível. */
@@ -786,6 +864,12 @@ export interface V2AgentConfig {
   useDispatchText?: boolean;
   /** Inatividade do cliente. */
   inactivity?: V2InactivityConfig;
+  /** Regras comuns dos envios automáticos (retomada e follow-up). */
+  autoSend?: V2AutoSendConfig;
+  /** Retomada agendada a pedido do cliente. */
+  scheduling?: V2SchedulingConfig;
+  /** Réguas de follow-up por etapa do negócio. */
+  followUpSequences?: V2FollowUpSequence[];
   /** Tabulação ao encerrar/transferir. */
   tabulation?: V2TabulationConfig;
   themeRecognition?: V2ThemeRecognitionConfig;
@@ -821,7 +905,9 @@ export type V2ActionType =
   | "record_knowledge_gap"
   | "start_survey"
   | "send_message"
-  | "no_reply";
+  | "no_reply"
+  | "schedule_message"
+  | "cancel_scheduled";
 
 export interface V2Action {
   type: V2ActionType;

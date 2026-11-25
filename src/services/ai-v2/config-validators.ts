@@ -620,6 +620,35 @@ function validateFollowUps(c: V2AgentConfig, add: (f: Omit<ValidationFinding, "a
   });
 }
 
+/** Retomada agendada e réguas de follow-up: o que nunca sai ou só a primeira régua usa. */
+function validateAgenda(c: V2AgentConfig, add: (f: Omit<ValidationFinding, "agentId">) => void): void {
+  const hasTemplates = (c.autoSend?.templates ?? []).length > 0 || c.autoSend?.autoPickTemplates !== false;
+  if (c.scheduling?.enabled && !hasTemplates) {
+    add({ code: "retomada_sem_modelo", severity: "avisa", path: "autoSend.templates", message: "Retomada agendada ligada sem modelo da Meta e com a escolha automática desligada: retomada que cair fora das 24 h não sai (vira tarefa, transferência ou só registro, conforme Envios automáticos)." });
+  }
+  const seenStage = new Map<string, string>();
+  (c.followUpSequences ?? []).forEach((seq, i) => {
+    const path = `followUpSequences[${i}]`;
+    const name = seq.name?.trim() || `régua ${i + 1}`;
+    if (seq.enabled === false) return;
+    if ((seq.dealStages ?? []).length === 0) add({ code: "regua_sem_etapa", severity: "avisa", path: `${path}.dealStages`, message: `Follow-up ${q(name)} sem etapa: nunca começa.` });
+    if ((seq.steps ?? []).length === 0) add({ code: "regua_sem_passo", severity: "avisa", path: `${path}.steps`, message: `Follow-up ${q(name)} sem passos: nada é enviado.` });
+    (seq.steps ?? []).forEach((st, si) => {
+      if (st.after >= 24 * 60 && (st.templates ?? []).length === 0 && !hasTemplates) {
+        add({ code: "regua_passo_sem_modelo", severity: "avisa", path: `${path}.steps[${si}]`, message: `Passo ${si + 1} de ${q(name)} sai depois de 24 h sem modelo da Meta: em canal oficial ele não é enviado.` });
+      }
+    });
+    const end = seq.onEnd;
+    if (end?.action === "move_stage" && !end.stageId) add({ code: "regua_fim_sem_etapa", severity: "avisa", path: `${path}.onEnd.stageId`, message: `No fim de ${q(name)}: mover de etapa sem etapa escolhida — nada acontece.` });
+    if (end?.action === "add_tag" && !end.tag) add({ code: "regua_fim_sem_etiqueta", severity: "avisa", path: `${path}.onEnd.tag`, message: `No fim de ${q(name)}: etiquetar sem etiqueta escolhida — nada acontece.` });
+    for (const st of seq.dealStages ?? []) {
+      const prev = seenStage.get(st);
+      if (prev) add({ code: "regua_etapa_repetida", severity: "avisa", path: `${path}.dealStages`, message: `A etapa já está no follow-up ${q(prev)}: vale só o primeiro da lista.`, evidence: st });
+      else seenStage.set(st, name);
+    }
+  });
+}
+
 function validateCalendar(c: V2AgentConfig, now: Date, add: (f: Omit<ValidationFinding, "agentId">) => void): void {
   const events = c.calendar?.events ?? [];
   if (events.length === 0) return;
@@ -853,6 +882,7 @@ export function validateAgentConfig(agentId: string, data: ConfigValidationData)
   validateNotices(agent.config, data.now ?? new Date(), add);
   validateTeamClosures(agent.config, data.now ?? new Date(), add);
   validateFollowUps(agent.config, add);
+  validateAgenda(agent.config, add);
   validateFields(agent.config, add);
   validateTabulation(agent.config, data, add);
   validateAutomations(data, add);

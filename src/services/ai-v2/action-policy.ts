@@ -97,7 +97,25 @@ export function allowedActionTypes(config: V2AgentConfig, theme: Theme): Set<str
   // Anexo de material: só chega aqui o que veio dos materiais liberados e
   // lidos no turno (o motor monta a ação; o modelo não a devolve em actions).
   allowed.add("send_material_attachment");
+  // Retomada agendada ("me manda amanhã"): só com a opção ligada.
+  if (config.scheduling?.enabled) {
+    allowed.add("schedule_message");
+    allowed.add("cancel_scheduled");
+  }
   return allowed;
+}
+
+const WEEKDAY_SHORT = ["dom", "seg", "ter", "qua", "qui", "sex", "sáb"];
+
+/** O que o modelo precisa saber para agendar: teto de dias, "mais tarde" e horário permitido. */
+export function schedulingGuideOptions(config: V2AgentConfig): { maxDaysAhead: number; laterDefaultHours: number; window: string } | undefined {
+  const sch = config.scheduling;
+  if (!sch?.enabled) return undefined;
+  const slots = config.autoSend?.sendWindow ?? [];
+  const window = slots.length === 0
+    ? ""
+    : [...slots].sort((a, b) => a.day - b.day || a.start.localeCompare(b.start)).map((s) => `${WEEKDAY_SHORT[s.day] ?? s.day} ${s.start}–${s.end}`).join("; ");
+  return { maxDaysAhead: sch.maxDaysAhead ?? 7, laterDefaultHours: sch.laterDefaultHours ?? 3, window };
 }
 
 /**
@@ -147,7 +165,7 @@ export function writableFieldsForGuide(config: V2AgentConfig): Array<{ entity: "
   return out;
 }
 
-export function actionsGuide(allowed: Set<string>, options: { tags: string[]; stages: Array<{ id: string; name: string; lost?: boolean }>; lossReasons?: string[]; fields?: Array<{ entity: string; key: string; label: string }> }): string {
+export function actionsGuide(allowed: Set<string>, options: { tags: string[]; stages: Array<{ id: string; name: string; lost?: boolean }>; lossReasons?: string[]; fields?: Array<{ entity: string; key: string; label: string }>; scheduling?: { maxDaysAhead: number; laterDefaultHours: number; window: string } }): string {
   const lines: string[] = [];
   if (allowed.has("ask_with_options")) {
     lines.push('- Perguntar com botões: {"type":"ask_with_options","options":["Opção 1","Opção 2"]}. A pergunta vai na reply; de 2 a 3 opções curtas. Use quando o cliente precisa escolher entre caminhos definidos.');
@@ -179,6 +197,11 @@ export function actionsGuide(allowed: Set<string>, options: { tags: string[]; st
   }
   if (allowed.has("add_note")) {
     lines.push('- Anotação interna: {"type":"add_note","content":"resumo do que o cliente informou"}. O cliente não vê.');
+  }
+  if (allowed.has("schedule_message") && options.scheduling) {
+    const sch = options.scheduling;
+    lines.push(`- Agendar a retomada quando o cliente pedir para falar depois ("me manda mais tarde", "amanhã", "segunda", "depois das 18h"): {"type":"schedule_message","at":"AAAA-MM-DDTHH:mm","reason":"o que o cliente pediu","resume":"o que retomar"}. at é data e hora locais (veja "Data de hoje"); sem hora definida ("mais tarde"), omita at e vale daqui a ${sch.laterDefaultHours} h. Até ${sch.maxDaysAhead} dias à frente.${sch.window ? ` Só sai nestes horários: ${sch.window}; fora deles, escolha o próximo horário permitido.` : ""} Na reply, confirme quando vai voltar. Um retorno por conversa: agendar de novo troca o anterior.`);
+    lines.push('- Cancelar a retomada combinada, se o cliente desistir dela: {"type":"cancel_scheduled"}.');
   }
   if (lines.length === 0) return "";
   return [

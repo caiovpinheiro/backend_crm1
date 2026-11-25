@@ -32,6 +32,7 @@ export const ACTION_EVENT_TYPES = [
   "start_survey",
   "record_knowledge_gap",
   "no_reply",
+  "schedule_message",
   "failure",
 ] as const;
 export type ActionEventType = (typeof ACTION_EVENT_TYPES)[number];
@@ -56,6 +57,7 @@ export const ACTION_EVENT_LABEL: Record<ActionEventType, string> = {
   start_survey: "Enviou pesquisa",
   record_knowledge_gap: "Registrou dúvida sem resposta",
   no_reply: "Não respondeu",
+  schedule_message: "Agendou retomada",
   failure: "Falha técnica",
 };
 

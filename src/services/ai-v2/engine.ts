@@ -36,6 +36,7 @@ import { isDeferralText, isShortAckText } from "@/lib/ai-agents/tabulation-class
 import { isCourtesyOnlyInbound } from "@/services/post-close-return";
 import { executeV2Actions, sendV2TextMessage, applyV2ClosureFieldUpdates, v2HumanBehavior } from "./actions";
 import { findInheritablePostCloseState, getV2ConversationState, upsertV2ConversationState } from "./state";
+import { scheduleReplyNote } from "./agenda";
 import { logV2Turn } from "./log";
 import { noteV2Fact, peekV2Fact, runWithV2Trace, traceStep, v2TraceWasLogged } from "./trace";
 import { evaluateV2StopLimits, parseV2Counters, shouldStopStalled, type V2Counters } from "./limits";
@@ -2548,6 +2549,8 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       .join(", "));
   }
   executedActions = actionRes.results;
+  // Retomada agendada: a resposta só promete o retorno que ficou gravado.
+  replyText = scheduleReplyNote(replyText, actionRes.results);
   if (actionRes.results.some((r) => r.ok && ["send_message_model", "send_product", "send_material_attachment"].includes(r.action.type))) {
     counters.guidanceGiven = true;
   }
@@ -3622,5 +3625,6 @@ function buildActionCtx(
     autonomyMode,
     setSurveyPending,
     userMessage: input.userMessage,
+    turnId: input.turnId,
   };
 }
