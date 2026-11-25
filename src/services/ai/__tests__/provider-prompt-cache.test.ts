@@ -22,7 +22,8 @@ const mockFor = (provider: string) =>
     },
   });
 
-vi.mock("@ai-sdk/openai", () => ({ createOpenAI: () => () => mockFor("openai") }));
+const holder = vi.hoisted(() => ({ override: null as unknown }));
+vi.mock("@ai-sdk/openai", () => ({ createOpenAI: () => () => holder.override ?? mockFor("openai") }));
 vi.mock("@ai-sdk/anthropic", () => ({ createAnthropic: () => () => mockFor("anthropic") }));
 
 import { generateWithTools } from "../provider";
@@ -58,5 +59,45 @@ describe("cache de prompt", () => {
       expect(systems[0].content).toBe(stripSystemCacheBreak(system));
       expect(String(systems[0].content)).not.toContain("⁣");
     }
+  });
+});
+
+describe("ferramentas cortadas no meio do turno", () => {
+  it("stopToolsWhen verdadeiro: o passo seguinte vai com toolChoice none", async () => {
+    const choices: unknown[] = [];
+    let step = 0;
+    const model = new MockLanguageModelV3({
+      doGenerate: async (options) => {
+        choices.push(options.toolChoice);
+        step++;
+        return {
+          content: step === 1
+            ? [{ type: "tool-call", toolCallId: "t1", toolName: "busca", input: "{}" }]
+            : [{ type: "text", text: "{}" }],
+          finishReason: step === 1 ? { unified: "tool-calls", raw: "tool_use" } : { unified: "stop", raw: "stop" },
+          usage: { inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 1, text: 1, reasoning: 0 } },
+          warnings: [],
+        } as any;
+      },
+    });
+    const { tool } = await import("ai");
+    const { z } = await import("zod");
+    let denied = false;
+    holder.override = model;
+    try {
+      await generateWithTools({
+        model: "gpt-4.1-mini",
+        apiKey: "k",
+        system: "s",
+        messages: [{ role: "user", content: "oi" }],
+        tools: { busca: tool({ description: "b", inputSchema: z.object({}), execute: async () => { denied = true; return { ok: false }; } }) },
+        maxSteps: 3,
+        stopToolsWhen: () => denied,
+      });
+    } finally {
+      holder.override = null;
+    }
+    expect(choices[0]).not.toEqual({ type: "none" });
+    expect(choices[1]).toEqual({ type: "none" });
   });
 });

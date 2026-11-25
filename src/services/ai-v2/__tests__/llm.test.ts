@@ -635,6 +635,28 @@ describe("buildV2ToolSet governor", () => {
     expect(governor.stats().limitHit).toBe(true);
   });
 
+  it("governador recusou uma consulta: o passo seguinte do modelo sai sem ferramentas", async () => {
+    const seen: boolean[] = [];
+    (generateWithTools as ReturnType<typeof vi.fn>).mockImplementation(async (a: { tools: Record<string, { execute: (i: unknown, o: unknown) => Promise<unknown> }>; stopToolsWhen?: () => boolean }) => {
+      // O modelo insiste em search_products com consultas diferentes.
+      for (const q of ["a", "b", "c"]) {
+        seen.push(a.stopToolsWhen?.() ?? false);
+        await a.tools.search_products.execute({ query: q }, {});
+      }
+      seen.push(a.stopToolsWhen?.() ?? false);
+      return makeLLMResponse(JSON.stringify({ reply: "Não achei esse curso no catálogo.", actions: [] }));
+    });
+    await callV2LLM({
+      agentId: "agent-1",
+      config: baseConfig({ toolGovernor: { maxCallsPerTurn: 6, maxRepeatsPerTool: 2 }, productPolicy: { enabled: true } } as Partial<V2AgentConfig>),
+      context: { contact: null, deals: [], selectedDeal: null, fields: { contact: [], deal: [] } },
+      userMessage: "tem o curso de astronomia?",
+      stage: "active",
+    });
+    // Duas consultas passam; a terceira é recusada e daí em diante sem ferramentas.
+    expect(seen).toEqual([false, false, false, true]);
+  });
+
   it("disponibiliza knowledge_search mesmo sem tema quando há materiais permitidos", async () => {
     const config = baseConfig({
       enabledTools: [],

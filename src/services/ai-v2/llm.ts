@@ -1539,6 +1539,10 @@ export async function callV2LLM(args: {
           maxOutputTokens,
           maxSteps: hasTools ? (args.config.toolGovernor?.maxCallsPerTurn ?? 6) + 1 : 1,
           jsonMode: json,
+          // O governador recusou uma consulta (teto de chamadas ou de
+          // repetição): o passo seguinte sai sem ferramentas. Antes o modelo
+          // seguia chamando até acabar os passos e o último ficava sem texto.
+          ...(hasTools ? { stopToolsWhen: () => governor.stats().denials > 0 } : {}),
         });
       if (!jsonMode) return call(false);
       try {

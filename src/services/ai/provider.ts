@@ -136,6 +136,9 @@ export type GenerateArgs = {
   jsonMode?: boolean;
   /// Limite por tentativa (ms). Padrão: AI_LLM_TIMEOUT_MS (60 s).
   timeoutMs?: number;
+  /// Consultado antes de cada passo: true = o passo seguinte sai sem
+  /// ferramentas (toolChoice "none") e o modelo responde com o que tem.
+  stopToolsWhen?: () => boolean;
 };
 
 export type GenerateResult = {
@@ -194,6 +197,9 @@ export async function generateWithTools(
         abortSignal,
         maxRetries: 0,
         ...(args.toolChoice ? { toolChoice: args.toolChoice } : {}),
+        ...(args.stopToolsWhen
+          ? { prepareStep: () => (args.stopToolsWhen!() ? { toolChoice: "none" as const } : undefined) }
+          : {}),
       }),
     { label: `generateText ${args.model}`, ...(args.timeoutMs ? { timeoutMs: args.timeoutMs } : {}) },
   );
