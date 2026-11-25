@@ -20,6 +20,7 @@ export const MCP_SCOPES = [
   "queue:read",
   "custom_fields:read",
   "audio:read",
+  "tracking:read",
 ] as const;
 
 export type McpScope = (typeof MCP_SCOPES)[number];
@@ -74,6 +75,10 @@ export const MCP_SCOPE_INFO: Record<McpScope, { label: string; description: stri
   "custom_fields:read": {
     label: "Campos personalizados",
     description: "Só os campos que a organização liberar na lista desta tela.",
+  },
+  "tracking:read": {
+    label: "Rastreio de campanhas",
+    description: "UTMs, campanha e anúncio de origem dos leads (só gestores e administradores).",
   },
   "audio:read": {
     label: "Transcrição de áudios",
