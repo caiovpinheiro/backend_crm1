@@ -1976,6 +1976,39 @@ describe("processV2Turn — correções do motor", () => {
     expect(mocks.sendText.mock.calls.map((c) => c[0].text as string).join("|")).not.toContain("assistente virtual");
   });
 
+  it("só cumprimento, mas o negócio já traz o curso (campo configurado e preenchido) ou a mensagem veio de anúncio: sem boas-vindas fixas", async () => {
+    const config = baseConfig({
+      entry: { confirmContact: false, onDealNotFound: "ask_identification", openingEnabled: true, openingMessage: "Oi! Qual curso você tá pensando em fazer?" },
+      contextFields: { contact: [], deal: [{ key: "stage", permissions: ["read"] }, { key: "cf-curso", label: "curso_de_inscricao", permissions: ["read", "cite"] }] },
+    } as unknown as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.getState.mockResolvedValue(makeState("idle"));
+    mocks.loadContext.mockResolvedValue({ ...CONTEXT_WITH_DEAL, contactId: "contact-1", selectedDealRaw: { id: "deal-1", title: "Inscrição", stage: "Novo", "cf-curso": "Enfermagem" } });
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "Oi! Vi que você se interessou por Enfermagem. Quer que eu te mostre a condição de hoje?" }));
+    await run("Oi");
+    expect(mocks.callLLM).toHaveBeenCalled();
+    expect(mocks.sendText.mock.calls.map((c) => c[0].text as string).join("|")).not.toContain("Qual curso você tá pensando");
+
+    // Campo vazio e mensagem sem anúncio: as boas-vindas saem.
+    mocks.sendText.mockClear();
+    mocks.callLLM.mockClear();
+    mocks.loadContext.mockResolvedValue({ ...CONTEXT_WITH_DEAL, contactId: "contact-1", selectedDealRaw: { id: "deal-1", title: "Inscrição", stage: "Novo", "cf-curso": "" } });
+    await run("Oi", { messageIds: ["m-1"] });
+    expect(mocks.callLLM).not.toHaveBeenCalled();
+    expect(mocks.sendText.mock.calls.map((c) => c[0].text as string)).toEqual(["Oi! Qual curso você tá pensando em fazer?"]);
+
+    // Mensagem que chegou com o referral do anúncio: sem boas-vindas.
+    mocks.sendText.mockClear();
+    mocks.messageFindMany.mockImplementation(async (args: { where?: { id?: { in?: string[] } }; select?: { referral?: boolean } }) =>
+      args?.select?.referral ? [{ referral: { source_id: "ad-1", headline: "Enfermagem EAD" } }] : [],
+    );
+    await run("Oi", { messageIds: ["m-2"] });
+    expect(mocks.callLLM).toHaveBeenCalled();
+    expect(mocks.sendText.mock.calls.map((c) => c[0].text as string).join("|")).not.toContain("Qual curso você tá pensando");
+    mocks.messageFindMany.mockReset();
+    mocks.messageFindMany.mockResolvedValue([]);
+  });
+
   it("fecho vai depois da mensagem pronta, não na apresentação", async () => {
     const config = baseConfig({
       allowedMessageModelIds: ["mm-1"],

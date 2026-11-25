@@ -598,6 +598,42 @@ async function queuedSince(conversationId: string, since: Date | undefined): Pro
   }
 }
 
+/** Campos nativos do negócio: não dizem o que a pessoa quer (curso, produto, plano). */
+const NATIVE_DEAL_CONTEXT_KEYS = new Set([
+  "id", "number", "title", "value", "status", "stage", "stageId", "stageName", "pipeline", "pipelineId",
+  "owner", "ownerId", "ownerName", "expectedClose", "lostReason", "source", "createdAt", "updatedAt",
+]);
+
+/**
+ * Campo personalizado do negócio, configurado em "Dados do negócio" e já
+ * preenchido (ex.: curso de inscrição vindo do formulário): a pessoa já
+ * disse o que quer. Devolve o rótulo do primeiro, ou null.
+ */
+export function knownInterestFromDeal(config: V2AgentConfig, dealRaw: Record<string, unknown> | null | undefined): string | null {
+  if (!dealRaw) return null;
+  for (const f of config.contextFields?.deal ?? []) {
+    if (NATIVE_DEAL_CONTEXT_KEYS.has(f.key)) continue;
+    if (!f.permissions?.includes("read") && !f.permissions?.includes("cite")) continue;
+    const v = dealRaw[f.key];
+    if (v != null && String(v).trim()) return f.label || f.key;
+  }
+  return null;
+}
+
+/** A mensagem chegou de um anúncio Click-to-WhatsApp (referral da Meta): o assunto já vem do anúncio. */
+async function inboundCameFromAd(messageIds: string[] | undefined): Promise<boolean> {
+  if (!messageIds?.length) return false;
+  try {
+    const rows = (await prisma.message.findMany({
+      where: { id: { in: messageIds } },
+      select: { referral: true },
+    })) as Array<{ referral?: unknown }> | undefined;
+    return (rows ?? []).some((r) => r?.referral != null && typeof r.referral === "object");
+  } catch {
+    return false;
+  }
+}
+
 /** Devolve a conversa à fila: sem responsável IA, como no handoff. */
 async function releaseToQueue(conversationId: string): Promise<void> {
   await (prisma as unknown as {
@@ -1947,6 +1983,12 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
           traceStep("entrada", "O agente já respondeu nesta conversa (atalho) → segue sem as boas-vindas");
         } else if (!isGreetingOnlyMessage(input.userMessage)) {
           traceStep("entrada", "Primeira mensagem já traz o pedido → responde direto, sem as boas-vindas");
+        } else if (knownInterestFromDeal(config, context.selectedDealRaw)) {
+          // As boas-vindas perguntam o que a pessoa quer; o negócio já diz
+          // (formulário, importação). O modelo cumprimenta e segue dali.
+          traceStep("entrada", `O negócio já traz "${knownInterestFromDeal(config, context.selectedDealRaw)}" → responde direto, sem as boas-vindas`);
+        } else if (await inboundCameFromAd(input.messageIds)) {
+          traceStep("entrada", "A mensagem veio de um anúncio (o assunto já é conhecido) → responde direto, sem as boas-vindas");
         } else {
           const superseded = await newerInboundArrived(input.conversationId, input.messageIds);
           const rendered = superseded ? "" : renderMessage(config.entry.openingMessage, vars, defaultFormatter());
