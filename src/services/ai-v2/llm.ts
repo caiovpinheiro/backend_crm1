@@ -57,7 +57,7 @@ import { MATERIAL_ATTACHMENT_LIMITS, attachmentsForDocs, attachmentsPromptSectio
 import { humanRequestTerms } from "@/lib/ai-v2/config";
 import { defaultV2Counters } from "./limits";
 import { voicePromptSection } from "./voice";
-import { actionsGuide, allowedActionTypes, allowedFlowIdsFor, allowedMessageModelIdsFor, queryToolRestriction, repairMessageModelId, themeToolRestriction, writableFieldsForGuide } from "./action-policy";
+import { actionsGuide, allowedActionTypes, allowedFlowIdsFor, allowedMessageModelIdsFor, queryToolRestriction, repairMessageModelId, schedulingGuideOptions, themeToolRestriction, writableFieldsForGuide } from "./action-policy";
 import { getLogger } from "@/lib/logger";
 import { askedQuestionsSection, bubblesPromptLine, memoryPromptSection, profileAllowsOpinion, profilePromptSection } from "./conversation-profile";
 
@@ -383,6 +383,8 @@ const v2ActionSchema: z.ZodType<V2Action> = z.object({
     "set_variable",
     "record_knowledge_gap",
     "start_survey",
+    "schedule_message",
+    "cancel_scheduled",
   ]),
 }).passthrough();
 
@@ -1256,6 +1258,7 @@ function buildV2SystemPrompt(
     stages: actionStages,
     lossReasons,
     fields: writableFieldsForGuide(config),
+    scheduling: schedulingGuideOptions(config),
   });
   if (actions) lines.push(actions);
   if (voiceSection) lines.push(voiceSection);
