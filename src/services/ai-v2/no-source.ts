@@ -171,6 +171,27 @@ export function isEmpathyOnly(sentence: string): boolean {
   return /^(?:entendo|entendi|compreendo|imagino|sinto muito|poxa|que pena|tudo bem|claro|certo|perfeito|ok|obrigad[oa]|sem problemas?)\b/i.test(s);
 }
 
+/**
+ * Frase de "sem fonte": o campo da tela ("Se não achar a informação nos
+ * materiais", `fallback.noSource.message`) vale para as duas conferências —
+ * material vazio e afirmação sem fonte. Agente antigo que só tem o campo
+ * escondido (`groundingFallbackMessage` com `groundingFallback="answer"`)
+ * continua com ele. Vazio = nenhuma frase configurada.
+ */
+export function noSourceReplyMessage(config: Pick<V2AgentConfig, "fallback" | "groundingFallback" | "groundingFallbackMessage">): string {
+  const screen = config.fallback?.noSource?.message?.trim();
+  if (screen) return screen;
+  return config.groundingFallback === "answer" ? config.groundingFallbackMessage?.trim() ?? "" : "";
+}
+
+/**
+ * A conferência de afirmações responde (sem transferir) quando há frase de
+ * "sem fonte" na tela; sem ela, vale o modo antigo (padrão: transferir).
+ */
+export function groundingAnswersWithoutHandoff(config: Pick<V2AgentConfig, "fallback" | "groundingFallback">): boolean {
+  return !!config.fallback?.noSource?.message?.trim() || config.groundingFallback === "answer";
+}
+
 export type V2PrefetchFact = { searched?: boolean; found?: number; bestSimilarity?: number | null };
 
 /** Nada relevante nos materiais para esta mensagem (buscou e não achou). */
@@ -220,7 +241,7 @@ export function applyNoSourceGuard(args: {
     return { applied: true, handoff: true, explanationDropped: true };
   }
   if (!legacy && !invented) return { applied: false, handoff: false };
-  const noSourceMessage = config.fallback?.noSource?.message?.trim();
+  const noSourceMessage = noSourceReplyMessage(config);
   if (noSourceMessage) {
     output.handoff = false;
     output.reply = noSourceMessage;

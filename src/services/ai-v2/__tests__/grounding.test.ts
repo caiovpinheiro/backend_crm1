@@ -67,6 +67,13 @@ describe("guarda 'sem material'", () => {
     expect(applyNoSourceGuard({ config: cfg(), output: o, context: ctx({ Nome: "Ana" }), toolCalls: [], queriedEmpty: false, prefetch: nothing })).toEqual({ applied: true, handoff: true });
   });
 
+  it("agente antigo só com a frase escondida (groundingFallbackMessage) responde com ela, sem transferir", () => {
+    const o = out("O prazo é de 5 dias.");
+    const r = applyNoSourceGuard({ config: cfg({ groundingFallback: "answer", groundingFallbackMessage: "Te confirmo já já." }), output: o, context: ctx({ Nome: "Ana" }), toolCalls: [], queriedEmpty: false, prefetch: nothing });
+    expect(r).toEqual({ applied: true, handoff: false });
+    expect(o.reply).toBe("Te confirmo já já.");
+  });
+
   it("modelo já transfere e a explicação afirma fato sem material → só o aviso configurado sai", () => {
     const o = { ...out("O prazo de análise é de 5 dias úteis. Vou chamar alguém da equipe."), handoff: true };
     const r = applyNoSourceGuard({ config: cfg(), output: o, context: ctx({ Nome: "Ana" }), toolCalls: [], queriedEmpty: false, prefetch: nothing });

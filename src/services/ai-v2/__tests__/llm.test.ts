@@ -723,6 +723,60 @@ describe("buildV2SystemPrompt — Tom, tamanho e regras", () => {
     expect(r.output.reason).toContain("Menu Secreto");
   });
 
+  it("frase sem fonte com o campo da tela preenchido: responde com ele, sem transferir", async () => {
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeLLMResponse(JSON.stringify({ reply: 'Clique em "Menu Secreto".', actions: [] })),
+    );
+    const config = baseConfig({ fallback: { noSource: { message: "Esse detalhe eu te confirmo, tá?" } } } as Partial<V2AgentConfig>);
+    const r = await callV2LLM({
+      agentId: "agent-1",
+      config,
+      context: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields },
+      userMessage: "onde clico?",
+      stage: "active",
+    });
+    expect(r.output.handoff).toBeFalsy();
+    expect(r.output.reply).toBe("Esse detalhe eu te confirmo, tá?");
+  });
+
+  it("frase sem fonte: o campo da tela vence o campo antigo escondido; agente só com o antigo continua com ele", async () => {
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeLLMResponse(JSON.stringify({ reply: 'Clique em "Menu Secreto".', actions: [] })),
+    );
+    const ctx = { contact: null, deals: [], selectedDeal: null, fields: baseConfig().contextFields };
+    const both = await callV2LLM({
+      agentId: "agent-1",
+      config: baseConfig({
+        groundingFallback: "answer",
+        groundingFallbackMessage: "Já deixei anotado.",
+        fallback: { noSource: { message: "Te confirmo na inscrição." } },
+      } as Partial<V2AgentConfig>),
+      context: ctx,
+      userMessage: "onde clico?",
+      stage: "active",
+    });
+    expect(both.output.reply).toBe("Te confirmo na inscrição.");
+
+    const legacy = await callV2LLM({
+      agentId: "agent-1",
+      config: baseConfig({ groundingFallback: "answer", groundingFallbackMessage: "Confirmo e te falo." } as Partial<V2AgentConfig>),
+      context: ctx,
+      userMessage: "onde clico?",
+      stage: "active",
+    });
+    expect(legacy.output.handoff).toBeFalsy();
+    expect(legacy.output.reply).toBe("Confirmo e te falo.");
+
+    const legacyDefault = await callV2LLM({
+      agentId: "agent-1",
+      config: baseConfig({ groundingFallback: "answer" } as Partial<V2AgentConfig>),
+      context: ctx,
+      userMessage: "onde clico?",
+      stage: "active",
+    });
+    expect(legacyDefault.output.reply).not.toMatch(/anotado/i);
+  });
+
   it("nome entre aspas que veio da conversa não é invenção", async () => {
     (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(
       makeLLMResponse(JSON.stringify({ reply: 'Entendi, a opção "Relatório anual" não aparece para você.', actions: [] })),
@@ -1042,7 +1096,7 @@ describe("escopo e repetição", () => {
     expect((generateWithTools as ReturnType<typeof vi.fn>).mock.calls[1][0].system).toContain("repete quase igual");
   });
 
-  it("checagem por modelo: afirmação sem fonte pede reescrita; persistindo, transfere", async () => {
+  it("checagem por modelo: afirmação sem fonte pede reescrita; persistindo, responde com a frase de \"sem fonte\" da tela, sem transferir", async () => {
     (generateWithTools as ReturnType<typeof vi.fn>)
       .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: "Pode ficar tranquilo, a instalação é gratuita para todos os planos.", actions: [] })))
       .mockResolvedValueOnce(makeLLMResponse('{"unsupported": ["a instalação é gratuita para todos os planos"]}'))
@@ -1059,7 +1113,7 @@ describe("escopo e repetição", () => {
     expect(calls[1][0].system).toContain("sustentada pelas fontes");
     expect(calls[2][0].system).toContain("sustentada pelas fontes");
     expect(calls[3][0].system).toContain("a instalação é gratuita para todos os planos");
-    expect(r.output.handoff).toBe(true);
+    expect(r.output.handoff).toBeFalsy();
     expect(r.output.reply).toBe("Essa informação eu não tenho por aqui.");
   });
 

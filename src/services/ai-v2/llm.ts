@@ -9,7 +9,7 @@ import { tool, type ToolSet } from "ai";
 import { generateWithTools } from "@/services/ai/provider";
 import { getAgentApiKey, getAgentChatKey } from "@/services/ai/agent-key";
 import { v2AuxModel, v2FastAuxModel } from "@/lib/ai-v2/models";
-import { answersBeforeHandoff, statesProcedure } from "./no-source";
+import { answersBeforeHandoff, groundingAnswersWithoutHandoff, noSourceReplyMessage, statesProcedure } from "./no-source";
 import { businessHoursText } from "./rules";
 import { getRequestContext, runWithContext } from "@/lib/request-context";
 import { behaviorToTemperature } from "@/lib/ai-v2/response-behavior";
@@ -64,7 +64,8 @@ import { askedQuestionsSection, bubblesPromptLine, memoryPromptSection, profileA
 const log = getLogger("ai-v2.llm");
 
 /** Frase padrão quando a conferência tira o ponto pedido e o agente responde sem transferir. */
-export const GROUNDING_FALLBACK_DEFAULT = "Esse ponto eu prefiro confirmar antes de te passar, tá? Já deixei anotado.";
+/** Sem promessa de ação ("já deixei anotado"): o agente não anotou nada. */
+export const GROUNDING_FALLBACK_DEFAULT = "Esse ponto eu prefiro confirmar antes de te passar, tá?";
 
 type PrefetchedChunk = { docId: string; docTitle: string; content: string; distance: number; priority?: boolean };
 /** Trecho do material do assunto vai inteiro (o comum é cortado em PREFETCH_CHUNK_CHARS). */
@@ -2114,8 +2115,10 @@ export async function callV2LLM(args: {
     // Responder com o que foi conferido, em vez de transferir: tira as
     // frases sem fonte e, se o que a pessoa pediu saiu junto, diz que vai
     // confirmar. Nada sem fonte vai ao cliente; a conversa não cai.
-    if (args.config.groundingFallback === "answer" && !output.handoff) {
-      const unconfirmed = args.config.groundingFallbackMessage?.trim() || GROUNDING_FALLBACK_DEFAULT;
+    // A frase é a do campo da tela ("Se não achar a informação"); com ela
+    // preenchida, a conferência responde em vez de transferir.
+    if (groundingAnswersWithoutHandoff(args.config) && !output.handoff) {
+      const unconfirmed = noSourceReplyMessage(args.config) || GROUNDING_FALLBACK_DEFAULT;
       const trimmed = textsOf(flags).length === flags.length ? trimUnsupportedSentences(output.reply, textsOf(flags)) : null;
       const kept = trimmed && unsupportedOf(trimmed.reply, output.reason).length === 0 ? trimmed.reply.trim() : "";
       const droppedAnswer = !kept || trimDroppedTheAnswer(userMessage, output.reply, kept);

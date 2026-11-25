@@ -42,7 +42,7 @@ import { noteV2Fact, peekV2Fact, runWithV2Trace, traceStep, v2TraceWasLogged } f
 import { evaluateV2StopLimits, parseV2Counters, shouldStopStalled, type V2Counters } from "./limits";
 import { answerToPostCloseQuestion, classifyPostCloseMessage, getPostCloseBehavior, isGreetingOnlyMessage, keepOpenOnNewRequest, postCloseHandoffMessage, postCloseQuestion, postCloseShortReply, isExplicitResolution } from "./closure";
 import { isConfusionMessage, rephraseAfterConfusion } from "./confusion";
-import { announcesTransfer, answersBeforeHandoff, applyNoSourceGuard, conditionalHandoff, handoffExplanation, type V2PrefetchFact } from "./no-source";
+import { announcesTransfer, answersBeforeHandoff, applyNoSourceGuard, conditionalHandoff, handoffExplanation, noSourceReplyMessage, type V2PrefetchFact } from "./no-source";
 import { NONSENSE_LIMIT_REASON } from "./limits";
 import { applyV2Tabulation } from "./tabulation";
 import { withoutChoiceQuestionAfterSteps, applyReplyEnding, asksClient, classifyReply, effectiveReplyEnding, isGreetingOnlyReply, replyEndingButtons, replyEndingPhrases, withoutReplyEndings } from "./reply-ending";
@@ -2202,7 +2202,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     !context.contact &&
     !context.selectedDeal
   ) {
-    const noSourceMessage = config.fallback?.noSource?.message?.trim();
+    const noSourceMessage = noSourceReplyMessage(config);
     if (noSourceMessage) {
       noSourceApplied = true;
       llmOutput.handoff = false;
@@ -3026,7 +3026,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     // (a checagem barrou ou nada nos materiais cobre a mensagem). Antes a
     // mesma situação saía de três jeitos diferentes.
     const fallbackOnly = cause === "verification" || cause === "no_source";
-    const noSourceMsg = fallbackOnly ? config.fallback?.noSource?.message?.trim() ?? "" : "";
+    const noSourceMsg = fallbackOnly ? noSourceReplyMessage(config) : "";
     // Só quando a resposta do modelo é uma explicação de verdade (transferiu
     // por decisão, cliente irritado, anexo que não chega, pedido de pessoa);
     // "segue o material:" de uma mensagem pronta barrada não é explicação.
