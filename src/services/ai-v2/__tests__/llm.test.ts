@@ -1458,6 +1458,81 @@ describe("saída ilegível do modelo", () => {
   });
 });
 
+describe("resposta do modelo fora do formato (JSON inválido virava transferência)", () => {
+  beforeEach(() => vi.clearAllMocks());
+  const ctx = (config: V2AgentConfig) => ({ contact: null, deals: [], selectedDeal: null, fields: config.contextFields });
+  const gen = generateWithTools as ReturnType<typeof vi.fn>;
+
+  it("modelo esgota as consultas sem escrever a resposta: pede a resposta final sem ferramentas em vez de transferir", async () => {
+    // Caso real (25/11, "Quero fazer pedagogia"): o modelo repetiu
+    // search_products até o limite e o último passo veio sem texto.
+    const loop = Array.from({ length: 7 }, () => ({ toolName: "search_products", args: { query: "Pedagogia" }, result: { total: 0, items: [] } }));
+    gen.mockImplementation(async (a: { system: string; tools?: unknown }) => {
+      if (a.system.includes("# RESPOSTA FINAL")) return makeLLMResponse(JSON.stringify({ reply: "Temos Pedagogia, sim! Quer que eu te passe como funciona?", actions: [] }));
+      if (a.tools) return { ...makeLLMResponse("", loop), finishReason: "tool-calls" };
+      return makeLLMResponse('{"queries": []}');
+    });
+    const config = baseConfig();
+    const r = await callV2LLM({ agentId: "agent-1", config, context: ctx(config), userMessage: "Quero fazer pedagogia", stage: "active" });
+    expect(r.output.handoff).toBe(false);
+    expect(r.output.reply).toContain("Pedagogia");
+    const final = gen.mock.calls.find((c) => (c[0].system as string).includes("# RESPOSTA FINAL"))![0];
+    expect(final.tools).toBeUndefined();
+    expect(final.maxSteps).toBe(1);
+    // As consultas repetidas entram uma vez só.
+    expect((final.system as string).match(/search_products \{"query":"Pedagogia"\}/g)).toHaveLength(1);
+    // O trace mantém as consultas da primeira chamada.
+    expect(r.toolCalls.filter((t) => t.toolName === "search_products")).toHaveLength(7);
+  });
+
+  it("JSON cercado de texto, com um {nome} solto antes, é lido", async () => {
+    gen.mockResolvedValue(makeLLMResponse('Claro, {nome}! Segue a resposta:\n{"reply": "Oi! Posso ajudar com a inscrição.", "actions": []}\nQualquer coisa, me avise.'));
+    const config = baseConfig();
+    const r = await callV2LLM({ agentId: "agent-1", config, context: ctx(config), userMessage: "oi", stage: "active" });
+    expect(r.output.handoff).toBe(false);
+    expect(r.output.reply).toBe("Oi! Posso ajudar com a inscrição.");
+  });
+
+  it("JSON num bloco ```json no meio da resposta é lido", async () => {
+    gen.mockResolvedValue(makeLLMResponse('Aqui está:\n```json\n{"reply": "A inscrição não tem custo.", "actions": []}\n```'));
+    const config = baseConfig();
+    const r = await callV2LLM({ agentId: "agent-1", config, context: ctx(config), userMessage: "a inscrição é paga?", stage: "active" });
+    expect(r.output.reply).toBe("A inscrição não tem custo.");
+    expect(r.output.handoff).toBe(false);
+  });
+
+  it("quando cai no fallback, a saída bruta vai para o log do turno", async () => {
+    gen.mockResolvedValue({ ...makeLLMResponse('{"reply": "Oi, tud'), finishReason: "length" });
+    const config = baseConfig();
+    const r = await callV2LLM({ agentId: "agent-1", config, context: ctx(config), userMessage: "oie", stage: "active" });
+    expect(r.output.handoff).toBe(true);
+    expect(r.output.rawOutput).toMatchObject({ text: '{"reply": "Oi, tud', length: 18, finishReason: "length" });
+  });
+
+  it("saída vazia sem consultas também registra como terminou", async () => {
+    gen.mockResolvedValue({ ...makeLLMResponse(""), finishReason: "stop" });
+    const config = baseConfig();
+    const r = await callV2LLM({ agentId: "agent-1", config, context: ctx(config), userMessage: "oie", stage: "active" });
+    expect(r.output.handoff).toBe(true);
+    expect(r.output.rawOutput).toMatchObject({ text: "", length: 0, finishReason: "stop", toolCalls: 0 });
+  });
+});
+
+describe("parseV2ModelJson", () => {
+  it("lê JSON puro, com fence, com texto em volta e prefere o objeto com reply", async () => {
+    const { parseV2ModelJson } = await import("../llm");
+    expect(parseV2ModelJson('{"reply":"a"}')).toEqual({ reply: "a" });
+    expect(parseV2ModelJson('```json\n{"reply":"a"}\n```')).toEqual({ reply: "a" });
+    expect(parseV2ModelJson('json {"reply":"a"}')).toEqual({ reply: "a" });
+    expect(parseV2ModelJson('Nota: {"x":1} e a resposta {"reply":"b","actions":[]} fim')).toEqual({ reply: "b", actions: [] });
+    expect(parseV2ModelJson('Olá {cliente}, {"reply":"c"}')).toEqual({ reply: "c" });
+    expect(parseV2ModelJson('{"reply": "chave } dentro da string"}')).toEqual({ reply: "chave } dentro da string" });
+    expect(parseV2ModelJson("só texto")).toBeUndefined();
+    expect(parseV2ModelJson("")).toBeUndefined();
+    expect(parseV2ModelJson('{"reply": "cortad')).toBeUndefined();
+  });
+});
+
 describe("checagem de nomes inventados", () => {
   beforeEach(() => vi.clearAllMocks());
 

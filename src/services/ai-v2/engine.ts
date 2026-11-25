@@ -608,6 +608,48 @@ async function releaseToQueue(conversationId: string): Promise<void> {
   }).catch(() => undefined);
 }
 
+/**
+ * "Responder enquanto espera na fila" com a conversa sem responsável: o
+ * agente pega a conversa só se ninguém pegou (o envio confere o responsável).
+ */
+async function claimQueuedConversationForTurn(conversationId: string, agentUserId: string): Promise<boolean> {
+  try {
+    const res = await (prisma as unknown as {
+      conversation: { updateMany: (args: unknown) => Promise<{ count: number }> };
+    }).conversation.updateMany({
+      where: { id: conversationId, assignedToId: null },
+      data: { assignedToId: agentUserId },
+    });
+    return res.count > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Fim do turno que respondeu com a conversa na fila: ela volta para a fila
+ * (sem responsável IA) e o dono continua "pessoa". Se uma pessoa pegou a
+ * conversa durante o turno, nada muda; se o turno encerrou o atendimento, o
+ * estado de encerramento fica como está.
+ */
+export async function returnQueuedConversationAfterTurn(conversationId: string): Promise<void> {
+  const db = prisma as unknown as {
+    conversation: { findUnique: (args: unknown) => Promise<{ closedAt: Date | null } | null> };
+    aISimpleConversationState: { updateMany: (args: unknown) => Promise<unknown> };
+  };
+  try {
+    const conv = await db.conversation.findUnique({ where: { id: conversationId }, select: { closedAt: true } });
+    if (conv?.closedAt) return;
+    await db.aISimpleConversationState.updateMany({
+      where: { conversationId, owner: "agente", stage: { not: "closed" } },
+      data: { owner: "pessoa" },
+    });
+  } catch (err) {
+    log.warn({ err: err instanceof Error ? err.message : err, conversationId }, "[ai-v2] dono da conversa na fila não voltou para pessoa");
+  }
+  await releaseToQueue(conversationId);
+}
+
 /** Aviso do "avisar e silenciar". Usa a mensagem de escopo quando configurada. */
 function stopWarning(config: V2AgentConfig, reason: string): string {
   if (reason === "loop detectado") return systemMessage(config, "loopWarning");
@@ -663,7 +705,14 @@ function messageVariables(config: V2AgentConfig, context: V2CRMContext): Record<
 export async function processV2Turn(input: V2TurnInput): Promise<V2TurnResult> {
   return runWithV2Trace(async () => {
     traceStep("entrada", `Mensagem recebida (${input.messageType ?? "texto"})`);
-    const result = await processV2TurnInner(input);
+    let result: V2TurnResult;
+    try {
+      result = await processV2TurnInner(input);
+    } finally {
+      // Respondeu com a conversa na fila: ela volta para a fila mesmo se o
+      // turno falhou no meio.
+      if (peekV2Fact("answerWhileQueued")) await returnQueuedConversationAfterTurn(input.conversationId);
+    }
     if (result.error && !v2TraceWasLogged()) {
       traceStep("parada", `Turno encerrado sem resposta: ${result.error}`);
       await logTurnWithoutResponse(input, result.error).catch(() => {});
@@ -954,16 +1003,44 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // assistente (o modelo é instruído a não se apresentar).
   const transparentTransfer = handedByAnotherAgent && config.entry.onAiTransfer === "continue";
   if (transparentTransfer) traceStep("agente", "Transferência transparente: segue o atendimento sem se apresentar");
-  const waitingInQueue = owner === "pessoa" && !handedByAnotherAgent && (await isWaitingInQueue(input.conversationId));
-  // Conversa na fila sem responsável: o agente só manda o aviso de fila (não
-  // assume nem responde, porque a conversa não é dele).
-  const queueMode = resolved?.queueOnly ? "notify" : config.handoff.whileQueued ?? "notify";
+  // Na fila: pendência de distribuição aberta, ou conversa transferida para
+  // pessoas e sem responsável (o resolver só devolve `queueOnly` nesse caso —
+  // com a distribuição desligada a transferência não abre pendência e a
+  // conversa espera na Entrada do mesmo jeito).
+  const waitingInQueue = owner === "pessoa" && !handedByAnotherAgent && (resolved?.queueOnly === true || (await isWaitingInQueue(input.conversationId)));
+  // "Chamar a equipe › Enquanto espera na fila" vale também para a conversa
+  // sem responsável. Antes ela era forçada a "só avisar": com "responder"
+  // configurado, o cliente na fila nunca tinha a pergunta respondida.
+  const queueMode = config.handoff.whileQueued ?? "notify";
   if (resolved?.queueOnly && !(waitingInQueue && owner === "pessoa")) {
     traceStep("fila", "Conversa não está mais na fila esperando a equipe → nada a fazer");
     return { handoff: false, closed: false };
   }
-  if (waitingInQueue) traceStep("fila", `Conversa transferida voltou ao agente com o cliente na fila → "${queueMode === "notify" ? "só avisar" : "responder"}"`);
-  if (owner === "pessoa" && !(waitingInQueue && queueMode === "notify")) {
+  if (waitingInQueue) traceStep("fila", resolved?.queueOnly
+    ? `Cliente escreveu com a conversa na fila, sem responsável → "${queueMode === "notify" ? "só avisar" : "responder enquanto espera"}"`
+    : `Conversa transferida voltou ao agente com o cliente na fila → "${queueMode === "notify" ? "só avisar" : "responder"}"`);
+  // Responder enquanto espera, com a conversa sem responsável: o agente pega
+  // a conversa só durante o turno (o envio exige que ela esteja com ele) e,
+  // no fim, ela volta para a fila com o dono "pessoa" (ver processV2Turn).
+  if (resolved?.queueOnly && waitingInQueue && queueMode === "answer") {
+    const claimed = await claimQueuedConversationForTurn(input.conversationId, resolved.userId);
+    if (!claimed) {
+      traceStep("fila", "Uma pessoa pegou a conversa antes do agente responder → sem resposta");
+      await logV2Turn({
+        organizationId: orgId, conversationId: input.conversationId, agentId: resolved.agentConfigId, turnId: input.turnId,
+        inboundText: input.userMessage,
+        crmContext: { contact: null, deals: [], selectedDeal: null, fields: { contact: [], deal: [] } },
+        prompt: "", executedActions: [], discardedActions: [{ type: "no_reply", reason: "human assigned" } as any],
+        handoff: false, latencyMs: Date.now() - startedAt,
+        inputTokens: 0, outputTokens: 0, owner, stage, versionId,
+      });
+      return { handoff: false, closed: false };
+    }
+    noteV2Fact("answerWhileQueued", { organizationId: orgId, agentId: resolved.agentConfigId, agentUserId: resolved.userId });
+    traceStep("fila", "O agente responde com a conversa na fila; no fim do turno ela volta para a fila");
+    // O estado no banco continua "pessoa": a conversa segue da equipe.
+    owner = "agente";
+  } else if (owner === "pessoa" && !(waitingInQueue && queueMode === "notify")) {
     owner = "agente";
     await upsertV2ConversationState({
       organizationId: orgId,
