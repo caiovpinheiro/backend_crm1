@@ -44,6 +44,15 @@ import { getDealById, getDeals } from "@/services/deals";
 import type { Prisma } from "@prisma/client";
 import { computePainelRange } from "@/services/painel-period";
 
+import {
+  canSeeTracking,
+  hasTrackingFilter,
+  loadTracking,
+  salesByCampaign,
+  trackingDealWhere,
+  type TrackingFilterArgs,
+} from "./tools-tracking";
+
 export type ToolUser = {
   id: string;
   name: string;
@@ -213,9 +222,16 @@ export type ListLeadsArgs = {
   createdTo?: string;
   page?: number;
   perPage?: number;
-};
+} & TrackingFilterArgs;
+
+const TRACKING_DENIED =
+  "Filtros e dados de rastreio (UTM, campanha, anúncio) são só para gestores e administradores, com a permissão \"tracking:read\" liberada na conexão.";
 
 export async function listLeads(env: ToolEnv, args: ListLeadsArgs) {
+  // Rastreio é só de admin/gestor com o escopo: operador nunca filtra por campanha.
+  if (hasTrackingFilter(args) && !canSeeTracking(env)) {
+    throw new ToolError("forbidden", TRACKING_DENIED);
+  }
   const { user } = env;
   const [visibility, authz] = await Promise.all([getVisibilityFilter(user), authzOf(user)]);
   if (args.pipelineId && (await requirePipelineScope(user, "view", args.pipelineId))) {
@@ -241,16 +257,22 @@ export async function listLeads(env: ToolEnv, args: ListLeadsArgs) {
     perPage,
     // Operador: só negócios em que é o responsável (sem pool nem "ver todos").
     visibilityWhere: andDealWhere(
-      env.ownOnly ? { ownerId: user.id } : visibility.dealWhere,
-      funnelDealWhere(authz),
+      andDealWhere(
+        env.ownOnly ? { ownerId: user.id } : visibility.dealWhere,
+        funnelDealWhere(authz),
+      ),
+      trackingDealWhere(args),
     ),
     allowedPipelineIds,
     advancedFilters: createdAt ? { createdAt } : undefined,
   });
-  const custom = await loadAllowedCustomFields(
-    env,
-    result.items.map((d) => ({ id: d.id, contactId: d.contactId ?? null })),
-  );
+  const [custom, tracking] = await Promise.all([
+    loadAllowedCustomFields(
+      env,
+      result.items.map((d) => ({ id: d.id, contactId: d.contactId ?? null })),
+    ),
+    loadTracking(env, result.items.map((d) => d.contactId)),
+  ]);
   return {
     scope: env.ownOnly ? "own" : "visible",
     page: result.page,
@@ -274,6 +296,7 @@ export async function listLeads(env: ToolEnv, args: ListLeadsArgs) {
       createdAt: iso(d.createdAt),
       updatedAt: iso(d.updatedAt),
       ...(custom ? { customFields: custom.get(d.id) ?? [] } : {}),
+      ...(tracking ? { tracking: (d.contactId ? tracking.get(d.contactId) : null) ?? null } : {}),
     })),
   };
 }
@@ -365,6 +388,10 @@ export async function getLead(env: ToolEnv, args: { id: string }) {
     ...(await (async () => {
       const custom = await loadAllowedCustomFields(env, [{ id: deal.id, contactId: deal.contactId ?? null }]);
       return custom ? { customFields: custom.get(deal.id) ?? [] } : {};
+    })()),
+    ...(await (async () => {
+      const tracking = await loadTracking(env, [deal.contactId]);
+      return tracking ? { tracking: (deal.contactId ? tracking.get(deal.contactId) : null) ?? null } : {};
     })()),
     conversations: conversations.slice(0, 10).map((c) => ({
       id: c.id,
@@ -471,7 +498,13 @@ export async function getSalesMetrics(env: ToolEnv, args: PeriodArgs & { pipelin
   }
   const scoped = await scopedDashboardFilters(user, pipelineId, env.ownOnly);
   if (!scoped) throw new ToolError("forbidden", "Sem acesso a este funil.");
-  const data = await getDashboard({ from: range.from, to: range.to, pipelineId, ...scoped });
+  const [data, campaigns] = await Promise.all([
+    getDashboard({ from: range.from, to: range.to, pipelineId, ...scoped }),
+    // Campanha/anúncio: só admin/gestor com `tracking:read`.
+    canSeeTracking(env)
+      ? salesByCampaign(user.organizationId, range, pipelineId, scoped)
+      : Promise.resolve(null),
+  ]);
   return {
     period: { from: iso(range.from), to: iso(range.to) },
     pipelineId: pipelineId || "all",
@@ -479,6 +512,9 @@ export async function getSalesMetrics(env: ToolEnv, args: PeriodArgs & { pipelin
     summary: data.summary,
     newDeals: data.newDeals,
     bySource: data.bySource.slice(0, 20),
+    ...(campaigns
+      ? { byCampaign: campaigns.byCampaign, byAd: campaigns.byAd, byCampaignBasis: "negócios criados no período" }
+      : {}),
     lossReasons: data.lossReasons.slice(0, 20),
     dailyEvolution: data.dailyEvolution,
   };
