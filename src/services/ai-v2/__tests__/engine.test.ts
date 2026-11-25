@@ -1800,6 +1800,22 @@ describe("processV2Turn — correções do motor", () => {
     const texts = mocks.sendText.mock.calls.map((c) => c[0].text as string);
     expect(texts).toContain("Aguarde na fila, por favor.");
     expect(texts).not.toContain("Vou transferir.");
+    // Já está na fila: não transfere de novo, só devolve à fila.
+    expect(mocks.simpleHandoff).not.toHaveBeenCalled();
+    expect(mocks.conversationUpdateMany).toHaveBeenCalled();
+  });
+
+  it("cliente na fila, modo responder: o modelo pede transferência de novo → responde o que explicou, sem o \"já chamei\" e sem transferir", async () => {
+    const config = baseConfig({ handoff: { defaultDestination: { type: "department" }, message: "Vou transferir.", humanRequestKeywords: [], whileQueued: "answer", queuedMessage: "Aguarde na fila, por favor." } } as unknown as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.getState.mockResolvedValue(makeState("active", "pessoa"));
+    mocks.pendingFindFirst.mockResolvedValueOnce({ id: "pend-1" });
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "Sua solicitação segue em análise pela secretaria, na ordem de chegada. Já chamei o time pra te ajudar.", handoff: true }));
+    const r = await run("E aí, alguma novidade?");
+    const texts = mocks.sendText.mock.calls.map((c) => c[0].text as string);
+    expect(texts).toEqual(["Sua solicitação segue em análise pela secretaria, na ordem de chegada."]);
+    expect(mocks.simpleHandoff).not.toHaveBeenCalled();
+    expect(r.handoff).toBe(false);
   });
 
   it("cliente manda só \"?\": refaz a pergunta em vez de transferir (padrão)", async () => {

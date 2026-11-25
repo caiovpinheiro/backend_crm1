@@ -46,7 +46,7 @@ import { announcesTransfer, answersBeforeHandoff, applyNoSourceGuard, conditiona
 import { NONSENSE_LIMIT_REASON } from "./limits";
 import { applyV2Tabulation } from "./tabulation";
 import { withoutChoiceQuestionAfterSteps, applyReplyEnding, asksClient, classifyReply, effectiveReplyEnding, isGreetingOnlyReply, replyEndingButtons, replyEndingPhrases, withoutReplyEndings } from "./reply-ending";
-import { hasSearchableQuestion, knowledgeChunkTexts, lookupResultTexts, repeatFallback } from "./ground-reply";
+import { hasSearchableQuestion, isNearDuplicateReply, knowledgeChunkTexts, lookupResultTexts, repeatFallback } from "./ground-reply";
 import { splitReplyBubbles } from "./conversation-profile";
 import { voiceModelInfo } from "./voice-provider";
 import { loadPriorV2Summary, summaryEnabled, updateRunningSummary, writeV2Summary, SUMMARY_MESSAGE_TYPE } from "./summary";
@@ -3025,6 +3025,26 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
 
   // Handoff: aviso + transferência, uma vez. Destino: o pedido na ação >
   // o do assunto ativo > o padrão da config.
+  // Já está na fila da equipe (modo "responder enquanto espera"): transferir
+  // de novo só repetia o mesmo aviso fixo a cada mensagem. Responde o que o
+  // cliente disse (sem o anúncio de transferência) e devolve à fila. Destino
+  // outro agente de IA continua transferindo.
+  const queuedDestination = requestedDestination ?? activeTheme?.handoffDestination ?? config.handoff.defaultDestination;
+  if (anyHandoff && !anyClose && waitingInQueue && queuedDestination?.type !== "ai_agent") {
+    const cause = peekV2Fact("handoffCause");
+    const fallbackOnly = cause === "verification" || cause === "no_source";
+    const answer = fallbackOnly ? noSourceReplyMessage(config) : handoffExplanation(replyText);
+    const text = answer || renderMessage(queuedMessageFor(config.handoff.queuedMessage, isWithinV2BusinessHours(config), systemMessage(config, "queueOutsideHours")), vars, defaultFormatter());
+    if (text && (await sendReply(text)).sent) sentReply = sentReply ? `${sentReply}\n${text}` : text;
+    traceStep("fila", answer
+      ? "Conversa já está na fila da equipe → não transfere de novo; responde e devolve à fila"
+      : "Conversa já está na fila da equipe → não transfere de novo; só o aviso de fila");
+    await releaseToQueue(input.conversationId);
+    owner = "pessoa";
+    anyHandoff = false;
+    llmOutput.handoff = false;
+  }
+
   if (anyHandoff && !anyClose) {
     // Citava algo sem fonte: vale a mensagem "sem material" configurada (o
     // modelo já a montou), não a de transferência padrão.
@@ -3040,7 +3060,13 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     // por decisão, cliente irritado, anexo que não chega, pedido de pessoa);
     // "segue o material:" de uma mensagem pronta barrada não é explicação.
     const explains = cause === "model" || cause === "sentiment" || cause === "media_failed" || cause === "human_request" || (cause === "limit" && stalledStop);
-    const explanation = explains && !fallbackOnly && !waitingInQueue ? handoffExplanation(replyText) : "";
+    let explanation = explains && !fallbackOnly && !waitingInQueue ? handoffExplanation(replyText) : "";
+    // A explicação diz o mesmo que o aviso que vem logo depois: sai só o aviso.
+    const upcomingNotice = renderMessage((requestedDestination ?? activeTheme?.handoffDestination)?.message?.trim() || config.handoff.message, vars, defaultFormatter());
+    if (explanation && upcomingNotice && isNearDuplicateReply(explanation, upcomingNotice)) {
+      traceStep("resposta", "A explicação repetia o aviso de transferência → sai só o aviso");
+      explanation = "";
+    }
     if (explanation) {
       const answered = await sendReply(explanation);
       if (answered.sent) {

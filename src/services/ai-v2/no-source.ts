@@ -136,7 +136,7 @@ export function handoffExplanation(reply: string): string {
     .map((line) =>
       line
         .split(/(?<=[.!?])\s+/)
-        .map((s) => withoutTransferClause(s))
+        .map((s) => withoutTransferClause(withoutTransferDoneClause(s)))
         .filter((s) => s.trim() && !isEmpathyOnly(s))
         .join(" ")
         .trim(),
@@ -144,6 +144,26 @@ export function handoffExplanation(reply: string): string {
     .filter(Boolean);
   const text = lines.join("\n").trim();
   return text.split(/\s+/).filter(Boolean).length >= 4 ? text : "";
+}
+
+/**
+ * Anúncio no passado ou no presente: "já chamei o time", "já avisei",
+ * "passei pra consultora", "tô vendo isso aqui", "estou chamando alguém".
+ * A mensagem configurada de transferência sai logo em seguida e diz o mesmo
+ * — antes a frase saía duas vezes, às vezes idêntica.
+ */
+const TRANSFER_DONE_CLAUSE = /,?\s*(?:e\s+)?(?:por isso|ent[ãa]o|assim)?\s*,?\s*(?:eu\s+)?(?:j[áa]\s+)?(?:(?:chamei|passei|encaminhei|transferi|pedi|direcionei|repassei)\b(?=[^.!?]*\b(?:time|equipe|setor|pessoal|consultor|consultora|algu[eé]m|atendente|respons[áa]vel|especialista|colega|coordena|suporte|financeiro|secretaria))|(?:avisei|acionei|sinalizei|notifiquei)\b|(?:t[ôo]|to|estou|j[áa] estou)\s+(?:chamando|passando|encaminhando|transferindo|acionando|avisando)\b)[^.!?]*[.!?]?\s*$/i;
+/** Frase só de "estou vendo isso" ("Tô vendo isso aqui pra você."): sem conteúdo, anuncia que alguém vai ver. */
+const LOOKING_INTO_IT = /^\s*(?:[\p{L}]+,\s*)?(?:j[áa]\s+)?(?:t[ôo]|to|estou|vou)\s+(?:vendo|verificando|checando|olhando|ver|verificar|checar|olhar)\s+(?:isso|isto|aqui|esse ponto|essa quest[ãa]o)(?:\s+(?:aqui|pra voc[eê]|para voc[eê]|agora|j[áa]|com (?:o|a) (?:time|equipe)))*\s*[.!]?\s*$/iu;
+
+/** Tira a oração que diz que a transferência já foi feita ou está sendo feita (frase que é só isso sai inteira). */
+export function withoutTransferDoneClause(sentence: string): string {
+  const s = sentence.trim();
+  if (LOOKING_INTO_IT.test(s)) return "";
+  if (!TRANSFER_DONE_CLAUSE.test(s)) return s;
+  const cut = standaloneClause(s.replace(TRANSFER_DONE_CLAUSE, "").trim().replace(/[,;:\s]+$/, ""));
+  if (!cut || cut.split(/\s+/).length < 3) return "";
+  return /[.!?]$/.test(cut) ? cut : `${cut}.`;
 }
 
 /** Oração que anuncia a transferência, ligada por vírgula/conector ("…, então vou chamar a equipe"). */
