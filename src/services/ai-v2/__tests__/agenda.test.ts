@@ -193,6 +193,8 @@ describe("decisão na hora do envio", () => {
     expect(d.action).toBe("reschedule");
     expect(d.action === "reschedule" && d.at.getTime()).toBeGreaterThanOrEqual(NOW.getTime() + 24 * HOUR);
     expect(decideAgendaSend(baseSnap({ sentLast24h: 0, automationSentLast24h: 1 })).action).toBe("send");
+    // Adiar tem prazo: passo criado há mais de 10 dias desiste.
+    expect(decideAgendaSend(baseSnap({ sentLast24h: 1, automationSentLast24h: 1, createdAt: ago(11 * 24 * HOUR) }))).toEqual({ action: "cancel", outcome: "daily_cap" });
   });
 
   it("retomada: \"ok, obrigado\" depois de agendar não cancela; no follow-up, qualquer resposta para", () => {

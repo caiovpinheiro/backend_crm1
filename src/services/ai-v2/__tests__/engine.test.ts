@@ -1818,6 +1818,16 @@ describe("processV2Turn — correções do motor", () => {
     expect(r.handoff).toBe(false);
   });
 
+  it("cliente na fila, modo responder: transferência para outro setor continua sendo transferência", async () => {
+    const config = baseConfig({ handoff: { defaultDestination: { type: "department" }, message: "Vou transferir.", humanRequestKeywords: [], whileQueued: "answer", queuedMessage: "Aguarde na fila, por favor." } } as unknown as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.getState.mockResolvedValue(makeState("active", "pessoa"));
+    mocks.pendingFindFirst.mockResolvedValueOnce({ id: "pend-1" });
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "Isso é com o financeiro.", handoff: true, actions: [{ type: "handoff", destination: { type: "department", id: "dep-fin" } }] as any }));
+    await run("Quero negociar meu boleto atrasado");
+    expect(mocks.simpleHandoff).toHaveBeenCalledWith(expect.objectContaining({ destination: expect.objectContaining({ id: "dep-fin" }) }));
+  });
+
   it("cliente manda só \"?\": refaz a pergunta em vez de transferir (padrão)", async () => {
     const config = baseConfig();
     mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });

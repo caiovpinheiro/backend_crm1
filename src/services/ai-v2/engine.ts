@@ -598,6 +598,16 @@ async function queuedSince(conversationId: string, since: Date | undefined): Pro
   }
 }
 
+/** Departamento atual da conversa (fila em que ela espera). */
+async function conversationDepartmentId(conversationId: string): Promise<string | null> {
+  try {
+    const row = await prisma.conversation.findUnique({ where: { id: conversationId }, select: { departmentId: true } }) as { departmentId?: string | null } | null;
+    return row?.departmentId ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /** Campos nativos do negócio: não dizem o que a pessoa quer (curso, produto, plano). */
 const NATIVE_DEAL_CONTEXT_KEYS = new Set([
   "id", "number", "title", "value", "status", "stage", "stageId", "stageName", "pipeline", "pipelineId",
@@ -2212,6 +2222,8 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // afirma fatos (número, prazo, passo, caminho, link) que não vêm do
   // cadastro do cliente. Aplica a saída configurada.
   let noSourceApplied = false;
+  // A conferência respondeu só com a frase de "sem fonte": sem fecho nem anexo do material.
+  if ((peekV2Fact("verification") as { onlyFallback?: boolean } | undefined)?.onlyFallback) noSourceApplied = true;
   if (llmOutput) {
     const guarded = applyNoSourceGuard({
       config,
@@ -3072,7 +3084,12 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // cliente disse (sem o anúncio de transferência) e devolve à fila. Destino
   // outro agente de IA continua transferindo.
   const queuedDestination = requestedDestination ?? activeTheme?.handoffDestination ?? config.handoff.defaultDestination;
-  if (anyHandoff && !anyClose && waitingInQueue && queuedDestination?.type !== "ai_agent") {
+  // Só vira resposta quando o destino é a mesma fila (departamento sem id ou
+  // o departamento atual da conversa). Outro setor, uma pessoa ou outro
+  // agente de IA: transfere, senão a conversa ficava na fila errada.
+  const sameQueue = anyHandoff && !anyClose && waitingInQueue && queuedDestination?.type === "department" &&
+    (!queuedDestination.id || queuedDestination.id === (await conversationDepartmentId(input.conversationId)));
+  if (sameQueue) {
     const cause = peekV2Fact("handoffCause");
     const fallbackOnly = cause === "verification" || cause === "no_source";
     const answer = fallbackOnly ? noSourceReplyMessage(config) : handoffExplanation(replyText);

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { asksForLaterContact, callV2LLM, buildV2ToolSet, knowledgePrefetchQuery, schedulingConfirmationSentences } from "../llm";
+import { callV2LLM, buildV2ToolSet, knowledgePrefetchQuery, schedulingConfirmationSentences } from "../llm";
 import { generateWithTools } from "@/services/ai/provider";
 import { getAgentApiKey } from "@/services/ai/agent-key";
 import {
@@ -1716,11 +1716,37 @@ describe("conferência × retorno combinado, cartão já enviado e produto citad
   });
 
   it("pedido de retorno e frase que confirma quando o agente volta", () => {
-    expect(asksForLaterContact("me chama amanhã de manhã")).toBe(true);
-    expect(asksForLaterContact("quero Administração mas agora tô dirigindo, me chama depois das 18h?")).toBe(true);
-    expect(asksForLaterContact("quero Pedagogia")).toBe(false);
     expect(schedulingConfirmationSentences("Combinado! Te chamo amanhã às 9h. A mensalidade é R$ 212,45.")).toEqual(["Te chamo amanhã às 9h."]);
     expect(schedulingConfirmationSentences("O curso dura 8 semestres.")).toEqual([]);
+    // Palavra genérica não basta; hora diferente da agendada também não.
+    expect(schedulingConfirmationSentences("Combinado, a matrícula fecha amanhã.")).toEqual([]);
+    expect(schedulingConfirmationSentences("Te chamo amanhã às 10h.", "2026-11-26T09:00")).toEqual([]);
+    expect(schedulingConfirmationSentences("Te chamo amanhã às 9h.", "2026-11-26T09:00")).toEqual(["Te chamo amanhã às 9h."]);
+  });
+
+  it("sem schedule_message a promessa de retorno continua conferida (não há agendamento por trás)", async () => {
+    (generateWithTools as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: "Te chamo amanhã às 9h.", actions: [] })))
+      .mockResolvedValue(makeLLMResponse('{"unsupported": ["Te chamo amanhã às 9h"]}'));
+    const config = baseConfig({ groundingCheck: "model", fallback: { noSource: { message: "Te confirmo na inscrição." } } } as Partial<V2AgentConfig>);
+    const r = await callV2LLM({ agentId: "agent-1", config, context: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields }, userMessage: "me chama amanhã de manhã", stage: "active" });
+    expect(r.output.reply).toBe("Te confirmo na inscrição.");
+  });
+
+  it("frase de \"sem fonte\" igual à anterior não é reescrita sem conferência; os anexos do material não acompanham", async () => {
+    (generateWithTools as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: 'Clique em "Menu Secreto".', actions: [], attachments: ["att-1"] })))
+      .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: 'Clique em "Menu Secreto".', actions: [] })))
+      .mockResolvedValue(makeLLMResponse(JSON.stringify({ reply: "Texto novo inventado pela reescrita.", actions: [] })));
+    const config = baseConfig({ fallback: { noSource: { message: "Esse detalhe eu te confirmo, tá?" } } } as Partial<V2AgentConfig>);
+    const r = await callV2LLM({
+      agentId: "agent-1", config, context: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields },
+      userMessage: "e onde clico?", stage: "active",
+      previousMessages: [{ role: "user", content: "onde clico?" }, { role: "assistant", content: "Esse detalhe eu te confirmo, tá?" }],
+    });
+    expect(r.output.reply).toBe("Esse detalhe eu te confirmo, tá?");
+    expect(r.output.attachments ?? []).toEqual([]);
+    expect((generateWithTools as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(2);
   });
 
   it("R16: \"me chama amanhã de manhã\" → a confirmação do horário agendado não é cortada", async () => {
@@ -1762,7 +1788,9 @@ describe("conferência × retorno combinado, cartão já enviado e produto citad
     const r = await callV2LLM({ agentId: "agent-1", config, context: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields }, userMessage: "quero Pedagogia", stage: "active" });
     expect(r.systemPrompt).toContain("# Produtos do catálogo citados na mensagem");
     expect(r.systemPrompt).toContain('"id":"ped"');
-    expect(r.systemPrompt).not.toContain("# Sem material para esta mensagem");
+    // O aviso continua (vale para o resto), com a exceção do produto citado.
+    expect(r.systemPrompt).toContain("# Sem material para esta mensagem");
+    expect(r.systemPrompt).toContain("Exceção: se a mensagem pede um dos produtos");
     expect(r.toolCalls.some((c) => c.toolName === "search_products")).toBe(true);
   });
 });

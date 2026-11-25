@@ -76,10 +76,18 @@ export async function findV2ProductsNamedIn(args: {
   const rows: Array<{ id: string; name: string }> = await prisma.product.findMany({
     where: { organizationId: orgId, isActive: true, ...(allowedIds ? { id: { in: allowedIds } } : {}) },
     select: { id: true, name: true },
+    take: 2000,
   });
-  const matched = rows.filter((r) =>
-    normalizeSearch(r.name).split(" ").some((w) => w.length >= 5 && !GENERIC_PRODUCT_WORDS.has(w) && words.has(w)),
-  );
+  // Todas as palavras distintivas do nome têm de estar na mensagem:
+  // "quero Administração" casa "Administração", não "Administração Pública".
+  const distinctive = (name: string) => [...new Set(normalizeSearch(name).split(" ").filter((w) => w.length >= 5 && !GENERIC_PRODUCT_WORDS.has(w)))];
+  const scored = rows
+    .map((r) => ({ r, d: distinctive(r.name) }))
+    .filter(({ d }) => d.length > 0 && d.every((w) => words.has(w)));
+  // Um nome contido em outro também citado ("Gestão" e "Gestão Comercial"): fica o mais específico.
+  const matched = scored
+    .filter(({ d }) => !scored.some((o) => o.d.length > d.length && d.every((w) => o.d.includes(w))))
+    .map(({ r }) => r);
   const max = args.max ?? 3;
   if (matched.length === 0 || matched.length > max) return [];
   const found = await searchV2Products({

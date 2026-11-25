@@ -249,6 +249,17 @@ describe("worker da agenda", () => {
     expect(sqls.find((q) => q.includes(`"authorType" = 'human'`))).toContain(`a."aiAgentUserId" = $3`);
   });
 
+  it("planejamento da régua: o agente vem da última mensagem enviada; responsável humano não exclui, outro agente de IA sim", async () => {
+    setDb({ due: [] });
+    await processAgendaV2(NOW);
+    const { prismaBase } = await import("@/lib/prisma-base");
+    const planSql = (prismaBase.$queryRawUnsafe as unknown as { mock: { calls: unknown[][] } }).mock.calls.map((c) => String(c[0])).find((q) => q.includes("followUpSequences"));
+    expect(planSql).toBeDefined();
+    expect(planSql).toContain(`JOIN "users" u ON u."id" = last_out."aiAgentUserId"`);
+    expect(planSql).toContain(`assignee."type" IS DISTINCT FROM 'AI'`);
+    expect(planSql).not.toContain(`s."owner" <> 'pessoa'`);
+  });
+
   it("automações e campanhas contam no teto do dia: o passo fica para o dia seguinte, não é cancelado", async () => {
     setDb({ sent24h: 1, automation: 1 });
     await processAgendaV2(NOW);

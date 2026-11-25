@@ -226,7 +226,11 @@ export function hasContentBeyondQuestion(reply: string): boolean {
     .filter((s) => s && !s.endsWith("?") && !isEmpathyOnly(s));
   if (statements.length === 0) return false;
   const text = statements.join(" ");
-  return /\d/.test(text) || text.split(/\s+/).filter(Boolean).length >= 8;
+  // Fato (valor, data, prazo, percentual, passo, link) é avanço. Sem fato,
+  // só explicação de verdade: duas frases e 20+ palavras — uma abertura
+  // longa ("Entendo, muita gente passa por isso…") não zera o contador.
+  if (statesFacts(text)) return true;
+  return statements.length >= 2 && text.split(/\s+/).filter(Boolean).length >= 20;
 }
 
 /** Tira a(s) pergunta(s) do fim: o que sobra é a parte que informa ("" se só havia pergunta). */

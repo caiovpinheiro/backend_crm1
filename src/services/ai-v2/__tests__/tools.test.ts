@@ -273,6 +273,18 @@ describe("findV2ProductsNamedIn — produto citado pelo nome na mensagem", () =>
     expect(await findV2ProductsNamedIn({ message: "quanto fica?" })).toEqual([]);
   });
 
+  it("nome com mais palavras precisa de todas; o mais específico vence o contido nele", async () => {
+    const more = [
+      ...catalog,
+      { id: "admp", name: "Administração Pública, Tecnólogo", sku: null, type: "SERVICE", unit: "mês", price: 150, description: null, customValues: [], courseConfig: null },
+    ];
+    (prisma.product.findMany as ReturnType<typeof vi.fn>).mockImplementation(async (a: { where?: { id?: { in?: string[] } } }) =>
+      a?.where?.id?.in ? more.filter((p) => a.where!.id!.in!.includes(p.id)) : more,
+    );
+    expect((await findV2ProductsNamedIn({ message: "quero Administração" })).map((p) => p.id)).toEqual(["adm"]);
+    expect((await findV2ProductsNamedIn({ message: "quero Administração Pública" })).map((p) => p.id)).toEqual(["admp"]);
+  });
+
   it("vários produtos citados voltam todos; acima do teto é ambíguo e não volta nenhum", async () => {
     mockCatalog();
     expect((await findV2ProductsNamedIn({ message: "pedagogia ou letras?" })).map((p) => p.id).sort()).toEqual(["let", "ped"]);

@@ -115,7 +115,10 @@ describe("troca sem avanço: pergunta pura × resposta que informa", () => {
     expect(hasContentBeyondQuestion("A rotina corrida pesa mesmo. Essa flexibilidade poderia ajudar?")).toBe(false);
     expect(hasContentBeyondQuestion("Qual curso você quer?")).toBe(false);
     expect(hasContentBeyondQuestion("O curso custa R$ 199. Vamos garantir?")).toBe(true);
-    expect(hasContentBeyondQuestion("As aulas são online e você assiste quando puder, no seu ritmo. O que achou?")).toBe(true);
+    expect(hasContentBeyondQuestion("A matrícula é isenta e o primeiro pagamento é em 25/02/2027. O que achou?")).toBe(true);
+    expect(hasContentBeyondQuestion("As aulas são online e você assiste quando puder, no seu ritmo, de qualquer lugar. A prova é pelo celular, curtinha, e o resultado sai na hora. O que achou?")).toBe(true);
+    // Abertura longa, sem fato, numa frase só: continua sendo pergunta pura.
+    expect(hasContentBeyondQuestion("Entendo totalmente, muita gente passa por isso no começo e é super normal ficar em dúvida. Qual curso você quer?")).toBe(false);
   });
 
   it("tira só a pergunta do fim", () => {

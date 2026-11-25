@@ -326,6 +326,9 @@ export function planFollowUp(args: {
   };
 }
 
+/** Até quando um passo adiado pelo teto (somando automações) espera, contado da criação. */
+export const AUTOMATION_DEFER_MAX_DAYS = 10;
+
 export type AgendaSnapshot = {
   kind: AgendaKind;
   now: Date;
@@ -401,6 +404,11 @@ export function decideAgendaSend(s: AgendaSnapshot): AgendaDecision {
   // Automações e campanhas também falaram com o cliente hoje: somadas, batem
   // o teto. O passo não morre — fica para o dia seguinte.
   if (s.sentLast24h + (s.automationSentLast24h ?? 0) >= s.maxPerDay) {
+    // Adiar tem prazo: passo criado há mais de AUTOMATION_DEFER_MAX_DAYS
+    // desiste (automação que fala todo dia não segura o passo para sempre).
+    if (s.now.getTime() - s.createdAt.getTime() > AUTOMATION_DEFER_MAX_DAYS * 24 * 60 * 60 * 1000) {
+      return { action: "cancel", outcome: "daily_cap" };
+    }
     return { action: "reschedule", at: nextAllowedSlot(new Date(s.now.getTime() + 24 * 60 * 60 * 1000), s.window, s.timeZone) };
   }
   const slot = nextAllowedSlot(s.now, s.window, s.timeZone);

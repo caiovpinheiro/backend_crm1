@@ -574,6 +574,8 @@ export async function simulateV2Turn(
   const emptyQueries = allQueryToolResultsEmpty(llmResult.toolCalls);
   const governorBlind = llmResult.governorStats?.limitHit && (!llmResult.toolCalls?.length || emptyQueries);
   let noSourceApplied = false;
+  // A conferência respondeu só com a frase de "sem fonte": sem fecho nem anexo do material.
+  if ((peekV2Fact("verification") as { onlyFallback?: boolean } | undefined)?.onlyFallback) noSourceApplied = true;
   output = { ...output };
   const guarded = applyNoSourceGuard({
     config,

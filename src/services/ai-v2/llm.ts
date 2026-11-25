@@ -69,23 +69,39 @@ const log = getLogger("ai-v2.llm");
 /** Sem promessa de ação ("já deixei anotado"): o agente não anotou nada. */
 export const GROUNDING_FALLBACK_DEFAULT = "Esse ponto eu prefiro confirmar antes de te passar, tá?";
 
-/** A pessoa pede para falar depois: "me chama às 18h", "amanhã de manhã", "mais tarde". */
-const LATER_CONTACT = /(?<![\p{L}\p{N}])(?:me\s+(?:chama|chame|liga|ligue|manda|mande|escreve|escreva|procura|procure|lembra|lembre)|fala\s+comigo|chama\s+depois|pode\s+me\s+chamar|mais\s+tarde|depois\s+d[aeo]s?\s+\d{1,2}(?:\s?h|:\d{2})?|amanh[ãa]|semana\s+que\s+vem|outro\s+dia|(?:segunda|ter[çc]a|quarta|quinta|sexta)(?:-feira)?|s[áa]bado|domingo|[àa]s?\s+\d{1,2}\s?(?:h|:\d{2}))(?![\p{L}\p{N}])/iu;
-
-export function asksForLaterContact(message: string): boolean {
-  return LATER_CONTACT.test(message);
-}
-
-const RETURN_PROMISE = /(?<![\p{L}\p{N}])(?:te\s+(?:chamo|chamar|mando|mandar|escrevo|escrever|ligo|procuro|aviso|retorno)|volto\s+a\s+(?:falar|te)|retomo|retomamos|falo\s+com\s+voc[eê]|falamos|entro\s+em\s+contato|combinad[oa]|fechado|agendad[oa]|agendei|marquei|anotei)(?![\p{L}\p{N}])/iu;
+const RETURN_PROMISE = /(?<![\p{L}\p{N}])(?:te\s+(?:chamo|chamar|mando|mandar|escrevo|escrever|ligo|procuro|retorno)|volto\s+a\s+(?:falar|te\s+chamar|te\s+escrever)|retomo|retomamos|falo\s+com\s+voc[eê]|falamos|entro\s+em\s+contato)(?![\p{L}\p{N}])/iu;
 const WHEN_WORDS = /(?<![\p{L}\p{N}])(?:\d{1,2}\s?h(?:\d{2})?|\d{1,2}:\d{2}|amanh[ãa]|hoje|manh[ãa]|tarde|noite|segunda|ter[çc]a|quarta|quinta|sexta|s[áa]bado|domingo|\d{1,2}\/\d{1,2}|daqui\s+a)(?![\p{L}\p{N}])/iu;
 
-/** Frases da resposta que só confirmam quando o agente volta a falar ("Combinado, te chamo amanhã às 9h!"). */
-export function schedulingConfirmationSentences(reply: string): string[] {
+/**
+ * Frases da resposta que só confirmam quando o agente volta a falar ("Te
+ * chamo amanhã às 9h."). Curtas, com verbo de retorno e marca de tempo, sem
+ * valor, percentual, link ou telefone. Com o horário agendado (`at`), a hora
+ * e a data citadas têm de ser as dele.
+ */
+export function schedulingConfirmationSentences(reply: string, at?: string | null): string[] {
+  const when = at && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(at) ? { hour: Number(at.slice(11, 13)), min: Number(at.slice(14, 16)), day: Number(at.slice(8, 10)), month: Number(at.slice(5, 7)) } : null;
+  const matchesAt = (s: string): boolean => {
+    if (!when) return true;
+    for (const m of s.matchAll(/(?<![\d/])(\d{1,2})\s?(?:h|:)(\d{2})?(?![\d/])/g)) {
+      if (Number(m[1]) !== when.hour || (m[2] && Number(m[2]) !== when.min)) return false;
+    }
+    for (const m of s.matchAll(/(?<!\d)(\d{1,2})\/(\d{1,2})(?![\d/])/g)) {
+      if (Number(m[1]) !== when.day || Number(m[2]) !== when.month) return false;
+    }
+    return true;
+  };
   return reply
     .split(/\n+/)
     .flatMap((l) => l.split(/(?<=[.!?])\s+/))
     .map((s) => s.trim())
-    .filter((s) => s && RETURN_PROMISE.test(s) && WHEN_WORDS.test(s) && !/R\$|\d+\s?%/.test(s));
+    .filter((s) =>
+      s &&
+      s.split(/\s+/).length <= 14 &&
+      RETURN_PROMISE.test(s) &&
+      WHEN_WORDS.test(s) &&
+      !/R\$|\d+\s?%|https?:\/\/|\d{8,}|\d{4,}[-\s]\d{4}/.test(s) &&
+      matchesAt(s),
+    );
 }
 
 type PrefetchedChunk = { docId: string; docTitle: string; content: string; distance: number; priority?: boolean };
@@ -1243,6 +1259,10 @@ function buildV2SystemPrompt(
   if (nothingRelevant) {
     // Sem trecho que responda, o modelo completava com conhecimento geral.
     lines.push("# Sem material para esta mensagem");
+    // Produto citado pelo nome: o catálogo responde por ele. O aviso continua
+    // para o resto ("tenho direito a desconto?" não é pergunta sobre o curso
+    // de Direito só porque a palavra casou).
+    if (catalogSection) lines.push("Exceção: se a mensagem pede um dos produtos de \"Produtos do catálogo citados na mensagem\" (o curso, o valor, o cartão), responda com os dados dele e envie o cartão; não transfira por falta de material.");
     lines.push("A busca nos materiais não achou trecho que responda a esta mensagem (os que aparecem acima, se houver, só se parecem com ela). Se ela pede informação sobre produto, serviço, preço, prazo, regra, política ou como fazer algo, não responda com conhecimento geral nem com o que parece óbvio: diga com naturalidade que não tem essa informação e marque handoff=true se o cliente precisa dela para seguir. Cumprimento, agradecimento, confirmação e perguntas sobre os dados do próprio cliente você responde normalmente.");
   }
   if (messageModels.length > 0) {
@@ -1495,6 +1515,8 @@ export async function callV2LLM(args: {
       .map((x) => `"${x.name}" (material "${docTitleOf.get(x.docId) ?? "?"}" ${(docSimilarity.get(x.docId) ?? 0).toFixed(2)}; ${x.autoSend ? "enviar sempre" : "o agente decide"}${x.description ? "" : "; sem “quando enviar”"})`)
       .join(", ")}`);
   }
+  /** Saídas montadas pela conferência com a frase de "sem fonte" (não passam pela reescrita anti-repetição). */
+  const fallbackOutputs = new WeakSet<object>();
   const prefetchCalls: Array<{ toolName: string; args: unknown; result: unknown }> = prefetch.chunks.length > 0
     ? [{ toolName: "knowledge_search", args: { query: prefetch.query, prefetch: true }, result: { query: prefetch.query, chunks: prefetch.chunks } }]
     : [];
@@ -1558,7 +1580,7 @@ export async function callV2LLM(args: {
     messageModels,
     mediaUnderstandingNote(args.config, userMessage),
     actionStages,
-    prefetch.searched && (prefetch.chunks.length === 0 || (prefetch.best ?? 0) < WEAK_MATCH_SIMILARITY) && !catalogMatches?.length,
+    prefetch.searched && (prefetch.chunks.length === 0 || (prefetch.best ?? 0) < WEAK_MATCH_SIMILARITY),
     attachmentsPromptSection(offeredAttachments),
     args.humanRequestWithQuestion === true,
     flows,
@@ -1853,13 +1875,23 @@ export async function callV2LLM(args: {
     // 18h", "amanhã de manhã") ou o modelo agendou a retomada. A frase que
     // confirma quando o agente volta não é afirmação sobre a empresa — era
     // cortada como "sem fonte" e saía a frase de escape no lugar.
-    const schedulingTurn = asksForLaterContact(userMessage) || (r.output.actions ?? []).some((a) => a.type === "schedule_message");
+    // Só com a retomada agendada de fato: prometer voltar sem agendar não
+    // é confirmação, é promessa sem lastro.
+    const scheduleAction = (r.output.actions ?? []).find((a) => a.type === "schedule_message") as { at?: string } | undefined;
     const withoutSchedulingConfirmations = (reply: string, list: Unsupported[]): Unsupported[] => {
-      if (!schedulingTurn || list.length === 0) return list;
-      const confirmations = schedulingConfirmationSentences(reply);
+      if (!scheduleAction || list.length === 0) return list;
+      const confirmations = schedulingConfirmationSentences(reply, scheduleAction.at ?? null);
       if (confirmations.length === 0) return list;
       const bare = (t: string) => t.trim().replace(/[.!?]+$/, "").trim();
-      const kept = list.filter((u) => !(u.text && !/R\$|%/.test(u.text) && confirmations.some((c) => bare(c).includes(bare(u.text)) || bare(u.text).includes(bare(c)))));
+      // A marcação tem de caber na frase de confirmação; uma marcação maior
+      // só passa se o que sobra fora dela é curto e sem número.
+      const covered = (u: Unsupported) => confirmations.some((c) => {
+        if (bare(c).includes(bare(u.text))) return true;
+        if (!bare(u.text).includes(bare(c))) return false;
+        const rest = bare(u.text).replace(bare(c), " ").trim();
+        return rest.split(/\s+/).filter(Boolean).length <= 2 && !/\d/.test(rest);
+      });
+      const kept = list.filter((u) => !(u.text && !/R\$|%|https?:\/\//.test(u.text) && covered(u)));
       if (kept.length < list.length) traceStep("verificação", `Confirmação do retorno combinado não passa pela conferência: ${confirmations.map((c) => `"${c}"`).join(", ")}`);
       return kept;
     };
@@ -2236,8 +2268,11 @@ export async function callV2LLM(args: {
       const droppedAnswer = !kept || trimDroppedTheAnswer(userMessage, output.reply, kept);
       const reply = kept ? (droppedAnswer ? `${kept} ${unconfirmed}` : kept) : unconfirmed;
       traceStep("verificação", `A reescrita ainda cita ${list} — responde só com o que foi conferido${droppedAnswer ? " e diz que vai confirmar" : ""}, sem transferir`);
-      noteV2Fact("verification", { unsupported: labelsOf(flags), rewritten: true, trimmed: kept ? [] : undefined, forcedHandoff: false, answeredWithConfirmed: true });
-      r.output = { ...output, reply, speech: undefined };
+      noteV2Fact("verification", { unsupported: labelsOf(flags), rewritten: true, trimmed: kept ? [] : undefined, forcedHandoff: false, answeredWithConfirmed: true, ...(kept ? {} : { onlyFallback: true }) });
+      // Só a frase de "sem fonte": os anexos do material que a resposta
+      // apresentava não acompanham (o motor também não põe o fecho).
+      r.output = { ...output, reply, speech: undefined, ...(kept ? {} : { attachments: [] }) };
+      fallbackOutputs.add(r.output);
       return;
     }
     traceStep("verificação", "A reescrita ainda cita o que não está no material — transferindo");
@@ -2259,6 +2294,13 @@ export async function callV2LLM(args: {
   async function avoidRepeat(r: Awaited<ReturnType<typeof attempt>>): Promise<void> {
     const last = [...previousMessages].reverse().find((m) => m.role === "assistant")?.content;
     if (!last || r.output.handoff || !isNearDuplicateReply(r.output.reply, last)) return;
+    // Resposta montada pela conferência (o conferido + a frase de "sem
+    // fonte"): reescrever aqui, sem nova conferência, podia trazer de volta
+    // o que acabou de ser cortado.
+    if (fallbackOutputs.has(r.output)) {
+      traceStep("verificação", "A frase de \"sem fonte\" repetiria a anterior — sai como está, sem reescrita não conferida");
+      return;
+    }
     traceStep("verificação", "Resposta repetiria a anterior — pedindo outra forma");
     const reviewSystem = [
       system,

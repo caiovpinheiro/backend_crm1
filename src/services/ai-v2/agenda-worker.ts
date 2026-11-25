@@ -172,18 +172,18 @@ type PlanCandidate = {
 /**
  * Conversas em que a régua pode andar: agente v2 com régua configurada, a
  * última mensagem é do agente, o cliente não respondeu depois, o ticket
- * está com o agente (aberto, ou encerrado pelo próprio agente) e é o ticket
- * mais recente do contato. Sem passo aberto (PENDING/SENDING).
+ * está aberto (com o agente, sem responsável ou com uma pessoa que ainda
+ * não escreveu depois dele — a última mensagem é do agente) ou encerrado
+ * pelo próprio agente, e é o ticket mais recente do contato. Outro agente
+ * de IA com a conversa: fora. Sem passo aberto (PENDING/SENDING).
  */
 async function listPlanCandidates(now: Date): Promise<PlanCandidate[]> {
   return db.$queryRawUnsafe<PlanCandidate[]>(
     `SELECT c."id" AS conversation_id, c."organizationId" AS organization_id, c."contactId" AS contact_id,
-            c."assignedToId" AS agent_user_id, a."id" AS agent_config_id, a."simpleConfig" AS simple_config,
+            last_out."aiAgentUserId" AS agent_user_id, a."id" AS agent_config_id, a."simpleConfig" AS simple_config,
             c."lastInboundAt" AS last_inbound_at, last_out."id" AS last_out_id, last_out."createdAt" AS last_out_at,
             d."id" AS deal_id, d."stageId" AS deal_stage_id, st."name" AS stage_name, p."name" AS pipeline_name
        FROM "conversations" c
-       JOIN "users" u ON u."id" = c."assignedToId" AND u."type" = 'AI'
-       JOIN "ai_agent_configs" a ON a."userId" = u."id" AND a."active" = true AND a."engine" = 'simple'
        LEFT JOIN "ai_simple_conversation_states" s ON s."conversationId" = c."id"
        JOIN LATERAL (
          SELECT m."id", m."createdAt", m."aiAgentUserId" FROM "messages" m
@@ -191,6 +191,9 @@ async function listPlanCandidates(now: Date): Promise<PlanCandidate[]> {
             AND COALESCE(m."isPrivate", false) = false AND m."messageType" <> 'note'
           ORDER BY m."createdAt" DESC LIMIT 1
        ) last_out ON true
+       JOIN "users" u ON u."id" = last_out."aiAgentUserId" AND u."type" = 'AI'
+       JOIN "ai_agent_configs" a ON a."userId" = u."id" AND a."active" = true AND a."engine" = 'simple'
+       LEFT JOIN "users" assignee ON assignee."id" = c."assignedToId"
        JOIN LATERAL (
          SELECT dd."id", dd."stageId" FROM "deals" dd
           WHERE dd."status" = 'OPEN' AND dd."organizationId" = c."organizationId"
@@ -203,10 +206,10 @@ async function listPlanCandidates(now: Date): Promise<PlanCandidate[]> {
       WHERE jsonb_typeof(a."simpleConfig"->'followUpSequences') = 'array'
         AND jsonb_array_length(a."simpleConfig"->'followUpSequences') > 0
         AND c."updatedAt" > $1::timestamptz - make_interval(days => ${PLAN_LOOKBACK_DAYS})
-        AND last_out."aiAgentUserId" = c."assignedToId"
+        AND (c."assignedToId" IS NULL OR c."assignedToId" = last_out."aiAgentUserId" OR assignee."type" IS DISTINCT FROM 'AI')
         AND (c."lastInboundAt" IS NULL OR c."lastInboundAt" <= last_out."createdAt")
-        AND ((c."status" <> 'RESOLVED' AND (s."id" IS NULL OR s."owner" <> 'pessoa'))
-          OR (c."status" = 'RESOLVED' AND s."stage" = 'closed' AND s."closeReason" = ANY($2::text[])))
+        AND (c."status" <> 'RESOLVED'
+          OR (s."stage" = 'closed' AND s."closeReason" = ANY($2::text[])))
         AND NOT EXISTS (
           SELECT 1 FROM "ai_v2_scheduled_sends" x
            WHERE x."conversationId" = c."id" AND x."kind" = 'followup' AND x."status" IN ('PENDING','SENDING'))
