@@ -5850,6 +5850,58 @@ model AISimpleTurnLog {
   @@map("ai_simple_turn_logs")
 }
 
+/// Envio automático do agente v2: retomada pedida pelo cliente ("me manda
+/// amanhã", kind=scheduled) e passo de follow-up por etapa (kind=followup).
+/// Uma linha por envio, com chave única: a mensagem que saiu da agenda é
+/// reconhecida pelo id (`sentMessageId`), nunca pelo texto. SENDING parado
+/// vira FAILED — não volta a PENDING (no máximo uma vez). Índice único
+/// parcial (só na migration): no máximo um PENDING/SENDING por conversa e
+/// tipo (`ai_v2_scheduled_sends_one_open_idx`).
+model AIV2ScheduledSend {
+  id                  String    @id @default(cuid())
+  organizationId      String
+  conversationId      String
+  contactId           String
+  /// ai_agent_configs.id
+  agentId             String
+  agentUserId         String
+  /// scheduled | followup
+  kind                String
+  sequenceId          String?
+  /// Passo da régua; = nº de passos para o "no fim".
+  stepIndex           Int?
+  /// Mensagem do agente que ficou sem resposta e abriu a régua.
+  anchorMessageId     String?
+  anchorAt            DateTime?
+  dealId              String?
+  dealStageIdAtCreate String?
+  /// Hora final (já no horário permitido).
+  dueAt               DateTime
+  /// O que o cliente pediu, antes do ajuste.
+  requestedAt         DateTime?
+  reason              String?
+  resumeContext       String?
+  /// PENDING | SENDING | SENT | CANCELLED | SKIPPED | FAILED
+  status              String    @default("PENDING")
+  outcome             String?
+  /// text | template | action
+  sentVia             String?
+  templateName        String?
+  sentMessageId       String?
+  sentAt              DateTime?
+  cancelledAt         DateTime?
+  lastError           String?
+  idempotencyKey      String
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  @@unique([organizationId, idempotencyKey])
+  @@index([status, dueAt])
+  @@index([conversationId, status])
+  @@index([agentId, createdAt])
+  @@map("ai_v2_scheduled_sends")
+}
+
 // ──────────────────────────────────────────────
 // AI v2 pending interactive options
 // ──────────────────────────────────────────────

@@ -36,7 +36,7 @@ vi.mock("../handoff", () => ({ simpleHandoff: mocks.handoff, leadsHandoffOption:
 vi.mock("../tabulation", () => ({ applyV2Tabulation: mocks.tabulation }));
 vi.mock("../summary", () => ({ writeV2Summary: mocks.summary }));
 vi.mock("../state", () => ({ upsertV2ConversationState: mocks.upsertState }));
-vi.mock("../rules", () => ({ outsideHoursNote: () => "" }));
+vi.mock("../rules", async (importOriginal) => ({ ...(await importOriginal<typeof import("../rules")>()), outsideHoursNote: () => "" }));
 
 import { effectiveInactivity, NUDGE_MESSAGE_DEFAULT, processIdleV2 } from "../inactivity";
 
@@ -430,5 +430,66 @@ describe("lembrete não pode virar loop", () => {
     mocks.queryRaw.mockResolvedValueOnce([{ createdAt: NOW }]);
     expect(await processIdleV2(NOW)).toEqual({ nudged: 1, closed: 0 });
     expect(mocks.send.mock.calls[0][0].text).toBe(LEMBRETE);
+  });
+});
+
+describe("convivência com a agenda (retomada agendada e follow-up por etapa)", () => {
+  const withTable = (rows: unknown[]) =>
+    mocks.queryRaw.mockImplementation(async (sql: string) => (sql.includes("to_regclass") ? [{ ok: true }] : rows));
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    mocks.send.mockResolvedValue({ sent: true });
+    const { resetAgendaTableCheckForTest } = await import("../agenda-worker");
+    resetAgendaTableCheckForTest();
+  });
+
+  it("retomada agendada aberta: sem lembrete", async () => {
+    withTable([row({ agenda_open: true })]);
+    expect(await processIdleV2(NOW)).toEqual({ nudged: 0, closed: 0 });
+    expect(mocks.send).not.toHaveBeenCalled();
+  });
+
+  it("última mensagem saiu da agenda: sem lembrete; no prazo, encerra sem mensagem", async () => {
+    const config = { name: "Agente", tone: "Objetivo", autonomyMode: "auto", inactivity: { enabled: true, nudgeAfter: 30, closeAfter: 60, closeMessage: "Vou encerrar por aqui." } };
+    withTable([row({ simple_config: config, last_out_is_agenda: true, last_out_at: minutesAgo(45) })]);
+    expect(await processIdleV2(NOW)).toEqual({ nudged: 0, closed: 0 });
+    expect(mocks.send).not.toHaveBeenCalled();
+
+    vi.clearAllMocks();
+    withTable([row({ simple_config: config, last_out_is_agenda: true, last_out_at: minutesAgo(61), last_inbound_at: minutesAgo(70) })]);
+    expect(await processIdleV2(NOW)).toEqual({ nudged: 0, closed: 1 });
+    expect(mocks.send).not.toHaveBeenCalled();
+    expect(mocks.closeState).toHaveBeenCalledTimes(1);
+  });
+
+  it("régua de follow-up para a etapa do negócio: substitui os lembretes", async () => {
+    const config = {
+      name: "Agente", tone: "Objetivo", autonomyMode: "auto",
+      inactivity: { enabled: true, nudgeAfter: 30, closeAfter: 1440 },
+      followUpSequences: [{ id: "seq-1", name: "Inscrição", dealStages: ["st-insc"], steps: [{ after: 120 }] }],
+    };
+    mocks.queryRaw.mockImplementation(async (sql: string) => {
+      if (sql.includes("to_regclass")) return [{ ok: true }];
+      if (sql.includes(`d."stageId" AS stage_id`)) return [{ stage_id: "st-insc", stage_name: "Inscrição", pipeline_name: "Funil", status: "OPEN" }];
+      return [row({ simple_config: config })];
+    });
+    expect(await processIdleV2(NOW)).toEqual({ nudged: 0, closed: 0 });
+    expect(mocks.send).not.toHaveBeenCalled();
+  });
+
+  it("régua de outra etapa: o lembrete de sempre sai", async () => {
+    const config = {
+      name: "Agente", tone: "Objetivo", autonomyMode: "auto",
+      inactivity: { enabled: true, nudgeAfter: 30, closeAfter: 1440 },
+      followUpSequences: [{ id: "seq-1", name: "Inscrição", dealStages: ["st-insc"], steps: [{ after: 120 }] }],
+    };
+    mocks.queryRaw.mockImplementation(async (sql: string) => {
+      if (sql.includes("to_regclass")) return [{ ok: true }];
+      if (sql.includes(`d."stageId" AS stage_id`)) return [{ stage_id: "st-outra", stage_name: "Outra", pipeline_name: "Funil", status: "OPEN" }];
+      if (sql.includes(`SELECT m."createdAt" FROM "messages"`)) return [{ createdAt: NOW }];
+      return [row({ simple_config: config })];
+    });
+    expect(await processIdleV2(NOW)).toEqual({ nudged: 1, closed: 0 });
   });
 });
