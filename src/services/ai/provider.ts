@@ -139,6 +139,8 @@ export type GenerateArgs = {
   /// Consultado antes de cada passo: true = o passo seguinte sai sem
   /// ferramentas (toolChoice "none") e o modelo responde com o que tem.
   stopToolsWhen?: () => boolean;
+  /// Chamado no começo de cada tentativa (inclusive as do retry por tempo).
+  onAttempt?: () => void;
 };
 
 export type GenerateResult = {
@@ -184,8 +186,9 @@ export async function generateWithTools(
   // O retry fica AQUI, antes de qualquer envio: o runner só recebe o texto
   // final, então retentar nunca duplica mensagem para o cliente.
   const result = await callLlmWithRetry(
-    (abortSignal) =>
-      generateText({
+    (abortSignal) => {
+      args.onAttempt?.();
+      return generateText({
         model,
         system: systemForModel(args.model, args.system),
         messages: args.messages,
@@ -200,7 +203,8 @@ export async function generateWithTools(
         ...(args.stopToolsWhen
           ? { prepareStep: () => (args.stopToolsWhen!() ? { toolChoice: "none" as const } : undefined) }
           : {}),
-      }),
+      });
+    },
     { label: `generateText ${args.model}`, ...(args.timeoutMs ? { timeoutMs: args.timeoutMs } : {}) },
   );
 

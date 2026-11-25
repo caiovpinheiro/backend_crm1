@@ -513,6 +513,7 @@ export function buildV2ToolSet(args: {
         if (decision.action === "replay") {
           return replayPayload(toolName, decision.previousResult);
         }
+        if (decision.action === "reuse") return decision.previousResult;
         try {
           const realInput = args.restoreInput ? args.restoreInput(input) : input;
           const result = capturedCtx
@@ -1612,7 +1613,7 @@ export async function callV2LLM(args: {
           // O governador recusou uma consulta (teto de chamadas ou de
           // repetição): o passo seguinte sai sem ferramentas. Antes o modelo
           // seguia chamando até acabar os passos e o último ficava sem texto.
-          ...(hasTools ? { stopToolsWhen: () => governor.stats().denials > 0 } : {}),
+          ...(hasTools ? { stopToolsWhen: () => governor.deniedThisAttempt(), onAttempt: () => governor.startAttempt() } : {}),
         });
       if (!jsonMode) return call(false);
       try {

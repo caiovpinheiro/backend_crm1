@@ -78,6 +78,8 @@ function stableNormalize(value: unknown): string {
 export type GovernorDecision =
   | { action: "run" }
   | { action: "replay"; previousResult: unknown }
+  /// Resultado de uma tentativa anterior do mesmo turno: volta sem aviso.
+  | { action: "reuse"; previousResult: unknown }
   | { action: "deny"; reason: "tool_cap" | "run_cap" };
 
 export class ToolCallGovernor {
@@ -92,24 +94,55 @@ export class ToolCallGovernor {
   denials = 0;
   /// Algum teto foi estourado neste run.
   limitHit = false;
+  /// Recusas na tentativa atual (cada chamada ao modelo é uma tentativa).
+  private attemptDenials = 0;
+  /// Chamadas feitas em tentativas anteriores do mesmo turno.
+  private readonly earlier = new Set<string>();
 
   constructor(limits: ToolCallLimits) {
     this.limits = limits;
   }
 
+  /**
+   * Nova chamada ao modelo no mesmo turno (tempo esgotado, resposta
+   * cortada, formato ilegível): o modelo começa sem lembrar das consultas.
+   * Os tetos recomeçam; o que já foi consultado volta sem o aviso de
+   * repetição — antes a primeira consulta da nova tentativa recebia "você já
+   * chamou", o modelo trocava as palavras até o teto e ficava sem resultado.
+   */
+  startAttempt(): void {
+    for (const key of this.results.keys()) this.earlier.add(key);
+    this.total = 0;
+    this.perTool.clear();
+    this.attemptDenials = 0;
+  }
+
+  /** O governador já recusou alguma chamada nesta tentativa. */
+  deniedThisAttempt(): boolean {
+    return this.attemptDenials > 0;
+  }
+
   decide(toolName: string, args: unknown): GovernorDecision {
     const key = toolCallKey(toolName, args);
+    if (this.earlier.has(key)) {
+      this.earlier.delete(key);
+      this.perTool.set(toolName, (this.perTool.get(toolName) ?? 0) + 1);
+      this.total++;
+      return { action: "reuse", previousResult: this.results.get(key) };
+    }
     if (this.results.has(key)) {
       this.replays++;
       return { action: "replay", previousResult: this.results.get(key) };
     }
     if (this.total >= this.limits.maxToolCallsPerRun) {
       this.denials++;
+      this.attemptDenials++;
       this.limitHit = true;
       return { action: "deny", reason: "run_cap" };
     }
     if ((this.perTool.get(toolName) ?? 0) >= this.limits.maxRepeatsPerTool) {
       this.denials++;
+      this.attemptDenials++;
       this.limitHit = true;
       return { action: "deny", reason: "tool_cap" };
     }

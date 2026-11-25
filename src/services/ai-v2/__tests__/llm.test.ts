@@ -659,6 +659,35 @@ describe("buildV2ToolSet governor", () => {
     expect(seen).toEqual([false, false, false, true]);
   });
 
+  it("nova chamada ao modelo no mesmo turno: a consulta já feita volta sem o aviso de repetição e os tetos recomeçam", async () => {
+    (searchV2Products as ReturnType<typeof vi.fn>).mockResolvedValue({ total: 1, products: [{ id: "ped", name: "Pedagogia" }] });
+    const results: unknown[] = [];
+    let call = 0;
+    (generateWithTools as ReturnType<typeof vi.fn>).mockImplementation(async (a: { tools: Record<string, { execute: (i: unknown, o: unknown) => Promise<unknown> }>; stopToolsWhen?: () => boolean; onAttempt?: () => void }) => {
+      a.onAttempt?.();
+      call++;
+      results.push(await a.tools.search_products.execute({ query: "pedagogia" }, {}));
+      // Primeira tentativa cai (tempo esgotado); a segunda responde.
+      if (call === 1) {
+        await a.tools.search_products.execute({ query: "pedagogia licenciatura" }, {});
+        throw new Error("tempo esgotado");
+      }
+      results.push(a.stopToolsWhen?.());
+      return makeLLMResponse(JSON.stringify({ reply: "Pedagogia é ótima!", actions: [] }));
+    });
+    await callV2LLM({
+      agentId: "agent-1",
+      config: baseConfig({ toolGovernor: { maxCallsPerTurn: 6, maxRepeatsPerTool: 2 }, productPolicy: { enabled: true } } as Partial<V2AgentConfig>),
+      context: { contact: null, deals: [], selectedDeal: null, fields: { contact: [], deal: [] } },
+      userMessage: "quero Pedagogia",
+      stage: "active",
+    });
+    expect(results[1]).toEqual({ total: 1, products: [{ id: "ped", name: "Pedagogia" }] });
+    expect(JSON.stringify(results[1])).not.toContain("já chamou");
+    expect(results[2]).toBe(false);
+    expect(searchV2Products).toHaveBeenCalledTimes(2);
+  });
+
   it("disponibiliza knowledge_search mesmo sem tema quando há materiais permitidos", async () => {
     const config = baseConfig({
       enabledTools: [],
