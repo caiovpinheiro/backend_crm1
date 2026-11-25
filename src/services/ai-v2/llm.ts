@@ -7,6 +7,7 @@
 import { z } from "zod";
 import { tool, type ToolSet } from "ai";
 import { generateWithTools } from "@/services/ai/provider";
+import { stripSystemCacheBreak, SYSTEM_CACHE_BREAK } from "@/services/ai/prompt-cache";
 import { getAgentApiKey, getAgentChatKey } from "@/services/ai/agent-key";
 import { v2AuxModel, v2FastAuxModel } from "@/lib/ai-v2/models";
 import { answersBeforeHandoff, groundingAnswersWithoutHandoff, noSourceReplyMessage, statesProcedure } from "./no-source";
@@ -1095,9 +1096,6 @@ function buildV2SystemPrompt(
     // do modelo adivinhar.
     lines.push(`# Pedido de atendente\nSe o cliente pedir para ser atendido por uma pessoa (ex.: ${humanWords.map((w) => `"${w}"`).join(", ")}), marque handoff=true e diga que vai chamar alguém da equipe. Palavra solta no meio de outro assunto ("a pessoa que me atendeu disse…") não é pedido. Vale só o pedido feito na mensagem atual: pedido de uma mensagem anterior já foi tratado — se a conversa segue com você, responda o que o cliente perguntou agora. Se ele pede uma pessoa e faz uma pergunta na mesma mensagem, responda a pergunta com as fontes; marque handoff=true só se não conseguir responder.`);
   }
-  if (humanRequestWithQuestion) {
-    lines.push("# Nesta mensagem\nO cliente pediu uma pessoa e também fez uma pergunta ou disse o assunto. Responda a pergunta com as fontes (dados dele, trechos, informações fixas). Marque handoff=true só se não conseguir responder com o que tem.");
-  }
   lines.push(`# Fontes\n${SOURCES_GUIDE}`);
   lines.push(`# Como escrever\n${WRITING_GUIDE}`);
   const profileSection = profilePromptSection(config);
@@ -1110,6 +1108,15 @@ function buildV2SystemPrompt(
   lines.push(`# Emojis\n${emojiInstruction(config.emojis)}`);
   const bold = boldInstruction(config.bold);
   if (bold) lines.push(`# Negrito\n${bold}`);
+  if (config.variables.length > 0) {
+    lines.push(`# Informações fixas da empresa\n${config.variables.map((v) => `${v.key}: ${v.value}`).join("\n")}`);
+  }
+  // Até aqui o prompt é o mesmo em todo turno do agente (vai ao cache de
+  // prompt); daqui para baixo muda a cada turno (data, cliente, trechos).
+  lines.push(SYSTEM_CACHE_BREAK.trim());
+  if (humanRequestWithQuestion) {
+    lines.push("# Nesta mensagem\nO cliente pediu uma pessoa e também fez uma pergunta ou disse o assunto. Responda a pergunta com as fontes (dados dele, trechos, informações fixas). Marque handoff=true só se não conseguir responder com o que tem.");
+  }
   lines.push(`# Data de hoje\n${currentDateLine(config.businessHours?.timezone)}`);
   // Avisos temporários em vigor: logo depois da data, com prioridade sobre os materiais.
   const notices = noticesPromptSection(noticesForTurn(config, { themeId, message: userMessageForNotices }), config);
@@ -1165,11 +1172,6 @@ function buildV2SystemPrompt(
       lines.push(`${i + 1}. ${d.title ?? "Negócio sem título"} (${d.stageName ?? "sem etapa"})`);
     }
     lines.push("Pergunte ao cliente qual destes negócios ele quer tratar. Não responda sobre nenhum deles antes de saber a escolha.");
-  }
-
-  if (config.variables.length > 0) {
-    lines.push("# Informações fixas da empresa");
-    for (const v of config.variables) lines.push(`${v.key}: ${v.value}`);
   }
 
   if (themeInstructions) {
@@ -1843,26 +1845,44 @@ export async function callV2LLM(args: {
       const derivedAmounts = moneyDerivations(output.reply, sources).map((d) => `${d.token} = ${d.expr}`);
       if (derivedAmounts.length > 0) traceStep("verificação", `Conta conferida: ${derivedAmounts.join("; ")}`);
       const checkArgs = { model: v2FastAuxModel(args.config.model), apiKey, reply: output.reply, sources: claimSources, clientTexts, agentHistory, citableValues, clientDocuments, derivedAmounts };
-      let res = await checkClaimsWithModel(checkArgs);
-      r.inputTokens += res.inputTokens;
-      r.outputTokens += res.outputTokens;
-      // Checagem que falhou (erro ou tempo) tenta mais uma vez: sem ela, o
-      // passo a passo não conferido virava transferência.
-      if (!res.ok) {
+      // As duas leituras saem juntas (em paralelo): a segunda serve de nova
+      // tentativa quando a primeira falha e de confirmação quando ela marca
+      // algo. Em série, cada uma somava até 8 s à espera do cliente.
+      // AI_V2_CLAIM_CHECK_PARALLEL=0 volta à ordem antiga (uma por vez).
+      const parallelReads = process.env.AI_V2_CLAIM_CHECK_PARALLEL !== "0";
+      let res: Awaited<ReturnType<typeof checkClaimsWithModel>>;
+      let again: Awaited<ReturnType<typeof checkClaimsWithModel>> | undefined;
+      if (parallelReads) {
+        const [a, b] = await Promise.all([checkClaimsWithModel(checkArgs), checkClaimsWithModel(checkArgs)]);
+        r.inputTokens += a.inputTokens + b.inputTokens;
+        r.outputTokens += a.outputTokens + b.outputTokens;
+        res = a.ok ? a : b;
+        again = a.ok && b.ok ? b : undefined;
+      } else {
         res = await checkClaimsWithModel(checkArgs);
         r.inputTokens += res.inputTokens;
         r.outputTokens += res.outputTokens;
+        // Checagem que falhou (erro ou tempo) tenta mais uma vez: sem ela, o
+        // passo a passo não conferido virava transferência.
+        if (!res.ok) {
+          res = await checkClaimsWithModel(checkArgs);
+          r.inputTokens += res.inputTokens;
+          r.outputTokens += res.outputTokens;
+        }
       }
       // Segunda leitura quando a primeira marca algo: o checador varia de uma
       // chamada para outra e barrava, uma vez em cinco, o passo que o material
       // traz com outras palavras — a mesma pergunta ora respondia, ora
       // transferia. Fica marcado só o que as duas leituras apontam.
       if (res.ok && res.unsupported.length > 0) {
-        const again = await checkClaimsWithModel(checkArgs);
-        r.inputTokens += again.inputTokens;
-        r.outputTokens += again.outputTokens;
-        if (again.ok) {
-          const confirmed = res.unsupported.filter((c) => again.unsupported.some((d) => sameClaim(c, d)));
+        if (!again) {
+          again = await checkClaimsWithModel(checkArgs);
+          r.inputTokens += again.inputTokens;
+          r.outputTokens += again.outputTokens;
+        }
+        const second = again;
+        if (second?.ok) {
+          const confirmed = res.unsupported.filter((c) => second.unsupported.some((d) => sameClaim(c, d)));
           if (confirmed.length < res.unsupported.length) {
             traceStep("verificação", `Segunda leitura não confirmou ${res.unsupported.length - confirmed.length} marcação(ões) — ${res.unsupported.filter((c) => !confirmed.includes(c)).map((c) => `"${c}"`).join(", ")}`);
           }
@@ -2206,7 +2226,7 @@ export async function callV2LLM(args: {
         toolCalls: [...prefetchCalls, ...(r.toolCalls ?? [])],
         latencyMs: Date.now() - startedAt,
         governorStats: governor.stats(),
-        systemPrompt: system,
+        systemPrompt: stripSystemCacheBreak(system),
       } as any;
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));

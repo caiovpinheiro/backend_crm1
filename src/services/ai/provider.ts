@@ -18,10 +18,14 @@ import {
   wrapLanguageModel,
   type LanguageModel,
   type ModelMessage,
+  type SystemModelMessage,
   type ToolSet,
 } from "ai";
 
 import { callLlmWithRetry } from "@/services/ai/llm-retry";
+import { SYSTEM_CACHE_BREAK, stripSystemCacheBreak } from "@/services/ai/prompt-cache";
+
+export { SYSTEM_CACHE_BREAK, stripSystemCacheBreak };
 
 /**
  * Chave OpenAI: **sempre por agente** (`AIAgentConfig.openaiApiKeyEnc`).
@@ -95,6 +99,20 @@ function modelCallOptions(modelName: string, args: { temperature?: number; maxOu
   return { temperature, maxOutputTokens, jsonMode: args.jsonMode && !isClaude, providerOptions };
 }
 
+/** Claude: parte estável em bloco com `cache_control`; outros: o marcador some. */
+export function systemForModel(modelName: string, system: string): string | SystemModelMessage[] {
+  const at = system.indexOf(SYSTEM_CACHE_BREAK);
+  if (at < 0) return system;
+  const cacheOn = modelName.startsWith("claude-") && process.env.AI_ANTHROPIC_PROMPT_CACHE !== "0";
+  if (!cacheOn) return stripSystemCacheBreak(system);
+  const stable = system.slice(0, at);
+  const rest = stripSystemCacheBreak(system.slice(at + SYSTEM_CACHE_BREAK.length));
+  return [
+    { role: "system", content: stable, providerOptions: { anthropic: { cacheControl: { type: "ephemeral" } } } },
+    ...(rest.trim() ? [{ role: "system" as const, content: rest }] : []),
+  ];
+}
+
 export const DEFAULT_CHAT_MODEL =
   process.env.AI_DEFAULT_MODEL ?? "gpt-4o-mini";
 export const DEFAULT_EMBEDDING_MODEL =
@@ -124,6 +142,8 @@ export type GenerateResult = {
   text: string;
   inputTokens: number;
   outputTokens: number;
+  /// Tokens de entrada lidos do cache de prompt (já contados em inputTokens).
+  cacheReadTokens?: number;
   finishReason?: string;
   toolCalls: Array<{
     toolName: string;
@@ -164,7 +184,7 @@ export async function generateWithTools(
     (abortSignal) =>
       generateText({
         model,
-        system: args.system,
+        system: systemForModel(args.model, args.system),
         messages: args.messages,
         tools: args.tools,
         ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
@@ -202,6 +222,7 @@ export async function generateWithTools(
     text: result.text ?? "",
     inputTokens: result.usage?.inputTokens ?? 0,
     outputTokens: result.usage?.outputTokens ?? 0,
+    ...(result.totalUsage?.inputTokenDetails?.cacheReadTokens ? { cacheReadTokens: result.totalUsage.inputTokenDetails.cacheReadTokens } : {}),
     finishReason: result.finishReason,
     toolCalls,
     steps: result.steps.length,

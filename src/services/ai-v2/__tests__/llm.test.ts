@@ -11,6 +11,7 @@ import {
   knowledgeChunksContaining,
 } from "../tools";
 import type { V2AgentConfig } from "@/lib/ai-v2/types";
+import { SYSTEM_CACHE_BREAK } from "@/services/ai/prompt-cache";
 
 vi.mock("@/services/ai/provider", () => ({
   generateWithTools: vi.fn(),
@@ -689,6 +690,30 @@ describe("buildV2SystemPrompt — Tom, tamanho e regras", () => {
     expect((generateWithTools as ReturnType<typeof vi.fn>).mock.calls[0][0].jsonMode).toBe(true);
   });
 
+  it("prompt: tom, regras e informações fixas vêm antes do marcador de cache; data, cliente e trechos depois; o log não leva o marcador", async () => {
+    const config = baseConfig({ variables: [{ key: "Telefone", value: "0800 123" }] } as Partial<V2AgentConfig>);
+    const r = await callV2LLM({
+      agentId: "agent-1",
+      config,
+      context: { contact: { Nome: "Ana" }, deals: [], selectedDeal: null, fields: config.contextFields },
+      userMessage: "oi",
+      stage: "active",
+      humanRequestWithQuestion: true,
+    });
+    const system = (generateWithTools as ReturnType<typeof vi.fn>).mock.calls.at(-1)![0].system as string;
+    const [stable, turn] = system.split(SYSTEM_CACHE_BREAK);
+    expect(turn).toBeDefined();
+    expect(stable).toContain("# Tom de voz");
+    expect(stable).toContain("Não prometa retornar depois.");
+    expect(stable).toContain("Telefone: 0800 123");
+    expect(stable).not.toContain("# Data de hoje");
+    expect(stable).not.toContain("Ana");
+    expect(turn).toContain("# Data de hoje");
+    expect(turn).toContain("# Nesta mensagem");
+    expect(turn).toContain("Ana");
+    expect(r.systemPrompt).not.toContain(SYSTEM_CACHE_BREAK);
+  });
+
   it("nome entre aspas fora do material: pede reescrita e usa a versão corrigida", async () => {
     (generateWithTools as ReturnType<typeof vi.fn>)
       .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: 'Vá em "Fale Conosco".', actions: [] })))
@@ -1127,7 +1152,7 @@ describe("escopo e repetição", () => {
       userMessage: "como faço a troca?", stage: "active",
     });
     const calls = (generateWithTools as ReturnType<typeof vi.fn>).mock.calls;
-    expect(calls).toHaveLength(2);
+    expect(calls).toHaveLength(3); // resposta + as duas leituras da checagem, em paralelo
     expect(calls[1][0].system).toContain("sustentada pelas fontes");
     expect(r.output.reply).toBe("A troca é feita na loja com a nota fiscal. Leve também o documento com foto.");
     expect(r.output.handoff).toBe(false);
@@ -1246,7 +1271,7 @@ describe("escopo e repetição", () => {
       userMessage: "como faço o primeiro acesso?", stage: "active",
     });
     const calls = (generateWithTools as ReturnType<typeof vi.fn>).mock.calls;
-    expect(calls).toHaveLength(2);
+    expect(calls).toHaveLength(3); // resposta + as duas leituras da checagem, em paralelo
     expect((knowledgeChunksContaining as ReturnType<typeof vi.fn>).mock.calls[0][0].needles).toEqual(["https://painel.exemplo.com/entrar"]);
     expect(calls[1][0].messages[0].content).toContain("Acesso ao painel");
     expect(calls[1][0].messages[0].content).toContain("Endereços liberados pela empresa");
@@ -1264,7 +1289,7 @@ describe("escopo e repetição", () => {
       userMessage: "meu e-mail é ana.lima@exemplo.com, é esse que uso para entrar?", stage: "active",
     });
     const calls = (generateWithTools as ReturnType<typeof vi.fn>).mock.calls;
-    expect(calls).toHaveLength(2);
+    expect(calls).toHaveLength(3); // resposta + as duas leituras da checagem, em paralelo
     const checkInput = calls[1][0].messages[0].content as string;
     expect(checkInput).not.toContain("ana.lima@exemplo.com");
     expect(checkInput).toContain("\"E-mail\":\"[E-MAIL 1]\"");
@@ -1281,7 +1306,7 @@ describe("escopo e repetição", () => {
       userMessage: "tentei entrar com ana.lima@exemplo.com e não foi", stage: "active",
     });
     const calls = (generateWithTools as ReturnType<typeof vi.fn>).mock.calls;
-    expect(calls).toHaveLength(2);
+    expect(calls).toHaveLength(3); // resposta + as duas leituras da checagem, em paralelo
     expect(calls[1][0].messages[0].content as string).not.toContain("ana.lima@exemplo.com");
     expect(r.output.reply).toBe("Use o e-mail a***@exemplo.com para entrar no painel, com a senha que você cadastrou.");
     expect(r.output.handoff).toBe(false);
@@ -1368,6 +1393,41 @@ describe("escopo e repetição", () => {
     expect((generateWithTools as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1);
   });
 
+  it("checagem por modelo: as duas leituras saem em paralelo (não somam a espera); AI_V2_CLAIM_CHECK_PARALLEL=0 volta à ordem antiga", async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const checker = async () => {
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((r) => setTimeout(r, 30));
+      inFlight--;
+      return makeLLMResponse('{"unsupported": ["a instalação é gratuita para todos os planos"]}');
+    };
+    const mock = generateWithTools as ReturnType<typeof vi.fn>;
+    const config = baseConfig({ groundingCheck: "model", fallback: { noSource: { message: "Te confirmo." } } } as Partial<V2AgentConfig>);
+    const ctx = { contact: null, deals: [], selectedDeal: null, fields: baseConfig().contextFields };
+    const runOnce = async () => {
+      mock.mockReset();
+      maxInFlight = 0;
+      mock
+        .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: "Pode ficar tranquilo, a instalação é gratuita para todos os planos.", actions: [] })))
+        .mockImplementation(async (a: { system: string }) => (a.system.includes("sustentada pelas fontes") ? checker() : makeLLMResponse(JSON.stringify({ reply: "A instalação é gratuita para todos os planos.", actions: [] }))));
+      const started = Date.now();
+      await callV2LLM({ agentId: "agent-1", config, context: ctx, userMessage: "a instalação é paga?", stage: "active" });
+      return { maxInFlight, ms: Date.now() - started };
+    };
+    const parallel = await runOnce();
+    expect(parallel.maxInFlight).toBe(2);
+
+    process.env.AI_V2_CLAIM_CHECK_PARALLEL = "0";
+    try {
+      const serial = await runOnce();
+      expect(serial.maxInFlight).toBe(1);
+    } finally {
+      delete process.env.AI_V2_CLAIM_CHECK_PARALLEL;
+    }
+  });
+
   it("checagem por modelo: tudo sustentado, resposta segue; cortesia curta nem é conferida", async () => {
     (generateWithTools as ReturnType<typeof vi.fn>)
       .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: "Você pode trocar o produto direto na loja mais próxima.", actions: [] })))
@@ -1378,7 +1438,7 @@ describe("escopo e repetição", () => {
       userMessage: "qual o prazo?", stage: "active",
     });
     expect(r.output.reply).toContain("loja mais próxima");
-    expect((generateWithTools as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(2);
+    expect((generateWithTools as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(3); // resposta + as duas leituras da checagem, em paralelo
 
     (generateWithTools as ReturnType<typeof vi.fn>).mockReset();
     (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: "Por nada!", actions: [] })));
