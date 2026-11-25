@@ -90,6 +90,7 @@ personalizados não saem. Páginas: máx. 50 itens.
 | `queue:read` | `get_queue_status` | **desligado** |
 | `custom_fields:read` | campos personalizados em `list_leads`/`get_lead` (só os da lista da org) | **desligado** |
 | `audio:read` | transcrição de áudio em `get_conversation_messages` | **desligado** |
+| `tracking:read` | rastreio (UTM/campanha/anúncio) em `list_leads`/`get_lead`, filtros de rastreio e `byCampaign`/`byAd` em `get_sales_metrics` — **só admin e gestor** | **desligado** |
 
 Escopo desligado: a ferramenta responde erro ("Esta conexão não tem a permissão…"); nos
 recursos opcionais o campo simplesmente não sai (`customFields` ausente, áudio como
@@ -136,6 +137,21 @@ reconecta o assistente para consentir o recurso novo.
   `list_leads`/`get_lead` só com `custom_fields:read` **e** campo marcado na lista da org
   (`mcp.config.customFieldIds`, vazia por padrão). Respeita a máscara de campo por papel
   (`canViewFieldForUser`) e mascara campos do tipo telefone/e-mail conforme o toggle de PII.
+- **Rastreio (`tracking:read`)** — a "Informação rastreada" do contato do negócio
+  (`src/lib/mcp/tools-tracking.ts`). **Só admin e gestor**: operador nunca recebe o bloco
+  nem pode usar os filtros, mesmo com o escopo ligado e sendo o responsável do negócio
+  (filtro de rastreio do operador → erro). Em `list_leads`/`get_lead`:
+  `tracking { utm { source, medium, campaign, content, term, id, referrer }, referrer,
+  meta { headline, adId, sourceId, sourceType, adName, adsetId, adsetName, campaignId,
+  campaignName }, tiktok { adId, adName } }` (vazios omitidos). **Nunca saem** os
+  identificadores de clique por pessoa: `adCtwaClid`, `gclid`, `fbclid`, `googleClientId`.
+  Filtros de `list_leads` (igualdade, sem diferenciar maiúsculas): `utmSource`,
+  `utmMedium`, `utmCampaign`, `adId` (id resolvido ou de origem) e `adCampaign` (nome ou
+  id da campanha Meta). `get_sales_metrics` passa a trazer `byCampaign` e `byAd` (máx. 30
+  cada): negócios **criados no período** por campanha (nome Meta → `utm_campaign` →
+  `(sem campanha)`) e por anúncio (nome Meta → título → `utm_content` → `(sem anúncio)`),
+  com `deals`, `open`, `won`, `lost`, `wonValue`, `conversion` — mesmas travas de funil,
+  etapa e dono do painel.
 
 ### Proteções
 

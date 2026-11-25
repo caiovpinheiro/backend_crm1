@@ -201,7 +201,7 @@ export function buildMcpServer(principal: McpPrincipal): McpServer {
   reg(
     "list_leads",
     "Listar leads",
-    "Lista leads (negócios) do CRM com filtros por funil, etapa, status, responsável, busca e data de criação. Paginado (perPage máx. 50). Também devolve os funis visíveis quando pipelineId não é informado.",
+    "Lista leads (negócios) do CRM com filtros por funil, etapa, status, responsável, busca e data de criação. Paginado (perPage máx. 50). Também devolve os funis visíveis quando pipelineId não é informado. Gestores e administradores com a permissão de rastreio recebem também UTMs, campanha e anúncio de origem (tracking) e podem filtrar por utmSource, utmMedium, utmCampaign, adId e adCampaign.",
     {
       pipelineId: id.optional().describe("ID do funil."),
       stageId: id.optional().describe("ID da etapa."),
@@ -210,6 +210,11 @@ export function buildMcpServer(principal: McpPrincipal): McpServer {
       search: z.string().max(100).optional().describe("Busca por título, nome, e-mail ou telefone do contato."),
       createdFrom: day.optional(),
       createdTo: day.optional(),
+      utmSource: z.string().max(120).optional().describe("utm_source do lead (gestor/admin com tracking:read)."),
+      utmMedium: z.string().max(120).optional(),
+      utmCampaign: z.string().max(200).optional().describe("utm_campaign do lead."),
+      adId: z.string().max(64).optional().describe("ID do anúncio Meta."),
+      adCampaign: z.string().max(200).optional().describe("Nome ou ID da campanha Meta."),
       page: z.number().int().min(1).max(500).optional(),
       perPage: z.number().int().min(1).max(50).optional(),
     },
@@ -271,7 +276,7 @@ export function buildMcpServer(principal: McpPrincipal): McpServer {
   reg(
     "get_sales_metrics",
     "Resultados de vendas",
-    "Resultados comerciais no período: ganhos, perdidos, receita, ticket médio, taxa de conversão, origens e motivos de perda.",
+    "Resultados comerciais no período: ganhos, perdidos, receita, ticket médio, taxa de conversão, origens e motivos de perda. Para gestores e administradores com a permissão de rastreio, também por campanha e por anúncio (negócios criados no período).",
     { ...periodShape, pipelineId: id.optional().describe("Funil; vazio = todos os visíveis.") },
     (env, args) => getSalesMetrics(env, args),
   );
