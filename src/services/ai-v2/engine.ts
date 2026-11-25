@@ -42,7 +42,7 @@ import { noteV2Fact, peekV2Fact, runWithV2Trace, traceStep, v2TraceWasLogged } f
 import { evaluateV2StopLimits, parseV2Counters, shouldStopStalled, type V2Counters } from "./limits";
 import { answerToPostCloseQuestion, classifyPostCloseMessage, getPostCloseBehavior, isGreetingOnlyMessage, keepOpenOnNewRequest, postCloseHandoffMessage, postCloseQuestion, postCloseShortReply, isExplicitResolution } from "./closure";
 import { isConfusionMessage, rephraseAfterConfusion } from "./confusion";
-import { announcesTransfer, answersBeforeHandoff, applyNoSourceGuard, conditionalHandoff, handoffExplanation, noSourceReplyMessage, type V2PrefetchFact } from "./no-source";
+import { announcesTransfer, answersBeforeHandoff, applyNoSourceGuard, conditionalHandoff, handoffExplanation, hasContentBeyondQuestion, noSourceReplyMessage, withoutTrailingQuestion, type V2PrefetchFact } from "./no-source";
 import { NONSENSE_LIMIT_REASON } from "./limits";
 import { applyV2Tabulation } from "./tabulation";
 import { withoutChoiceQuestionAfterSteps, applyReplyEnding, asksClient, classifyReply, effectiveReplyEnding, isGreetingOnlyReply, replyEndingButtons, replyEndingPhrases, withoutReplyEndings } from "./reply-ending";
@@ -2737,9 +2737,13 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // do assunto (destino escolhido) ou encerra. Pergunta de esclarecimento
   // a uma pergunta do cliente não conta; orientação ou dado novo zera.
   if (themeId && themeId !== (stateRow?.themeId ?? undefined)) counters.stalledExchanges = 0;
+  // Terminar em "?" não basta: resposta que informa (valor, explicação) e
+  // fecha com pergunta avança a conversa — a regra de venda manda fechar
+  // quase toda resposta assim, e o limite transferia conversa de venda.
   const probingOnly =
     !anyHandoff && !anyClose && !stopLimits.blocksReply && replyText.trim().length > 0 &&
     (askOptions.length > 0 || coreReply.trimEnd().endsWith("?")) &&
+    !hasContentBeyondQuestion(coreReply) &&
     classifyReply(coreReply) !== "procedure" &&
     !materialFollows && outboundActions.length === 0 &&
     Object.keys(llmOutput.collected ?? {}).length === 0;
@@ -2747,12 +2751,17 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // mandou outra mensagem enquanto o agente pensava, envio barrado) não é
   // troca sem avanço — antes duas perguntas que nem chegaram estouravam o limite.
   let stallPending = false;
+  // Limite estourado: a resposta já gerada não é apagada — sai o que ela
+  // informa (sem a pergunta do fim, que ninguém do agente vai seguir) antes
+  // da transferência ou do encerramento.
+  let stalledStop = false;
   if (probingOnly && !asksClient(input.userMessage)) {
     if (shouldStopStalled(config, counters)) {
       const stalledAction = config.limits.stalledExchangesAction;
       traceStep("limites", `Limite de trocas sem avanço: ${counters.stalledExchanges} pergunta(s) seguida(s) sem resolver → ${stalledAction === "close" ? "encerra" : "sai pela saída do assunto, sem insistir"}`);
       counters.stalledExchanges = 0;
-      replyText = "";
+      stalledStop = true;
+      replyText = withoutTrailingQuestion(replyText);
       replyOptions = [];
       if (stalledAction === "close") {
         anyClose = true;
@@ -3030,7 +3039,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     // Só quando a resposta do modelo é uma explicação de verdade (transferiu
     // por decisão, cliente irritado, anexo que não chega, pedido de pessoa);
     // "segue o material:" de uma mensagem pronta barrada não é explicação.
-    const explains = cause === "model" || cause === "sentiment" || cause === "media_failed" || cause === "human_request";
+    const explains = cause === "model" || cause === "sentiment" || cause === "media_failed" || cause === "human_request" || (cause === "limit" && stalledStop);
     const explanation = explains && !fallbackOnly && !waitingInQueue ? handoffExplanation(replyText) : "";
     if (explanation) {
       const answered = await sendReply(explanation);
@@ -3038,6 +3047,8 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
         sentReply = explanation;
         traceStep("resposta", cause === "sentiment"
           ? "Cliente irritado: responde antes de transferir"
+          : cause === "limit"
+            ? "Limite de trocas sem avanço: a resposta gerada sai (sem a pergunta do fim) antes de transferir"
           : cause === "media_failed"
             ? "Explica que o anexo não está chegando e chama a equipe"
             : "Explica antes de transferir; a mensagem configurada vem em seguida");
@@ -3067,9 +3078,13 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // Encerramento
   if (anyClose) {
     const goodbye = config.closure.goodbyeMessage;
+    if (goodbye && !anyHandoff && stalledStop && replyText.trim()) {
+      if ((await sendReply(replyText)).sent) sentReply = replyText;
+      traceStep("encerramento", "Limite de trocas sem avanço: a resposta gerada sai (sem a pergunta do fim) antes da despedida");
+    }
     if (goodbye && !anyHandoff) {
       const goodbyeRendered = renderMessage(goodbye, vars, defaultFormatter());
-      if ((await sendReply(goodbyeRendered)).sent) sentReply = goodbyeRendered;
+      if ((await sendReply(goodbyeRendered)).sent) sentReply = sentReply ? `${sentReply}\n${goodbyeRendered}` : goodbyeRendered;
     } else if (!anyHandoff && replyText.trim()) {
       // Sem despedida configurada, sai a resposta do modelo ("Combinado!
       // Qualquer coisa, é só chamar."). Antes era descartada e o cliente

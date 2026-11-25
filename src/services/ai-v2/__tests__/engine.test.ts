@@ -2745,7 +2745,25 @@ describe("processV2Turn — correções do motor", () => {
       expect(result.handoff).toBe(true);
       expect(mocks.simpleHandoff).toHaveBeenCalledWith(expect.objectContaining({ destination: expect.objectContaining({ type: "department", id: "dep-dec" }) }));
       expect(sentTexts().join(" ")).toContain("Vou te passar para o setor responsável");
+      // A resposta gerada não é apagada: sai o que ela diz, sem a pergunta do fim.
+      expect(sentTexts()[0]).toBe("A rotina corrida pesa mesmo.");
       expect(sentTexts().join(" ")).not.toContain("poderia ajudar você a continuar?");
+    });
+
+    it("resposta que informa e termina em pergunta não conta como troca sem avanço, nem no limite", async () => {
+      const config = baseConfig({ themes: [PROBING_THEME as any], limits: { ...baseConfig().limits, maxStalledExchanges: 2, stalledExchangesAction: "handoff" } } as any);
+      mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+      mocks.getState.mockResolvedValue({ ...makeState("active", "agente", { stalledExchanges: 2 }), themeId: "t-dec" });
+      const reply = "Com a bolsa, a mensalidade fica em R$ 199 e o primeiro pagamento só vence em fevereiro. Vamos garantir sua vaga?";
+      mocks.callLLM.mockResolvedValue(llmOut({ reply, theme: "t-dec" }));
+
+      const result = await run("Achei interessante");
+
+      expect(result.handoff).toBe(false);
+      expect(mocks.simpleHandoff).not.toHaveBeenCalled();
+      expect(sentTexts().join(" ")).toContain("Vamos garantir sua vaga?");
+      const saved = mocks.upsertState.mock.calls.map((c) => c[0] as { counters?: { stalledExchanges?: number } }).filter((c) => c.counters).at(-1)?.counters?.stalledExchanges;
+      expect(saved).toBe(0);
     });
 
     it("pergunta que não chegou ao cliente não conta como troca sem avanço", async () => {

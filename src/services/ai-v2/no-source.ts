@@ -192,6 +192,33 @@ export function groundingAnswersWithoutHandoff(config: Pick<V2AgentConfig, "fall
   return !!config.fallback?.noSource?.message?.trim() || config.groundingFallback === "answer";
 }
 
+/**
+ * A resposta traz conteúdo além da pergunta do fim (informação, valor,
+ * explicação): "O curso custa R$ 199 com a bolsa. Vamos garantir?" não é
+ * troca sem avanço só por terminar em "?". Reconhecimento curto
+ * ("Entendo.", "A rotina pesa mesmo.") não conta como conteúdo.
+ */
+export function hasContentBeyondQuestion(reply: string): boolean {
+  const statements = reply
+    .split(/\n+/)
+    .flatMap((line) => line.split(/(?<=[.!?])\s+/))
+    .map((s) => s.trim())
+    .filter((s) => s && !s.endsWith("?") && !isEmpathyOnly(s));
+  if (statements.length === 0) return false;
+  const text = statements.join(" ");
+  return /\d/.test(text) || text.split(/\s+/).filter(Boolean).length >= 8;
+}
+
+/** Tira a(s) pergunta(s) do fim: o que sobra é a parte que informa ("" se só havia pergunta). */
+export function withoutTrailingQuestion(reply: string): string {
+  const sentences = reply
+    .trim()
+    .split(/\n+/)
+    .flatMap((line, i, all) => line.split(/(?<=[.!?])\s+/).map((s, j, parts) => (j === parts.length - 1 && i < all.length - 1 ? `${s}\n` : `${s} `)));
+  while (sentences.length > 0 && sentences[sentences.length - 1].trim().endsWith("?")) sentences.pop();
+  return sentences.join("").trim();
+}
+
 export type V2PrefetchFact = { searched?: boolean; found?: number; bestSimilarity?: number | null };
 
 /** Nada relevante nos materiais para esta mensagem (buscou e não achou). */

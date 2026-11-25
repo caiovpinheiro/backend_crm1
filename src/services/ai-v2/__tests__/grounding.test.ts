@@ -8,7 +8,7 @@ vi.mock("@/lib/prisma-base", () => ({ prismaBase: {} }));
 import type { V2AgentConfig, V2CRMContext, V2LLMOutput } from "@/lib/ai-v2/types";
 import { renderMessage } from "@/lib/ai-v2/message-render";
 import { unsupportedFacts, unsupportedMenuPaths, unsupportedQuotedTerms } from "../ground-reply";
-import { applyNoSourceGuard } from "../no-source";
+import { applyNoSourceGuard, hasContentBeyondQuestion, withoutTrailingQuestion } from "../no-source";
 import { classifyPostCloseMessage } from "../closure";
 import { selectV2Theme } from "../themes";
 
@@ -106,5 +106,21 @@ describe("pós-encerramento e assuntos", () => {
     ];
     expect(selectV2Theme(cfg({ themes }), "quero desmarcar a consulta")?.id).toBe("desmarcar");
     expect(selectV2Theme(cfg({ themes }), "quero marcar uma consulta")?.id).toBe("marcar");
+  });
+});
+
+describe("troca sem avanço: pergunta pura × resposta que informa", () => {
+  it("reconhecimento curto + pergunta é só pergunta; informação + pergunta não", () => {
+    expect(hasContentBeyondQuestion("Entendo. O que tem dificultado: tempo, acesso ou outra situação?")).toBe(false);
+    expect(hasContentBeyondQuestion("A rotina corrida pesa mesmo. Essa flexibilidade poderia ajudar?")).toBe(false);
+    expect(hasContentBeyondQuestion("Qual curso você quer?")).toBe(false);
+    expect(hasContentBeyondQuestion("O curso custa R$ 199. Vamos garantir?")).toBe(true);
+    expect(hasContentBeyondQuestion("As aulas são online e você assiste quando puder, no seu ritmo. O que achou?")).toBe(true);
+  });
+
+  it("tira só a pergunta do fim", () => {
+    expect(withoutTrailingQuestion("A rotina pesa mesmo. Isso ajudaria?")).toBe("A rotina pesa mesmo.");
+    expect(withoutTrailingQuestion("Você já tentou pelo aplicativo?")).toBe("");
+    expect(withoutTrailingQuestion("Linha um.\nLinha dois. E aí?")).toBe("Linha um.\nLinha dois.");
   });
 });
