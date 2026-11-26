@@ -248,7 +248,7 @@ export function explanationClosesTurn(text: string): boolean {
   const t = text.trim();
   if (!t) return false;
   if (/\?\s*(?:[\p{Extended_Pictographic}\uFE0F\u200D]\s*)*$/u.test(t)) return true;
-  return /(?<![\p{L}])(?:j[áa]\s+te\s+retorno|te\s+retorno|retorno\s+(?:por\s+aqui|j[áa]|em\s+breve)|volto\s+(?:a\s+falar|aqui|j[áa])|te\s+(?:chamo|aviso|respondo)\s+(?:por\s+aqui|aqui|j[áa]|em\s+breve)|a\s+equipe\s+(?:te\s+)?(?:responde|retorna|chama))(?![\p{L}])/iu.test(t);
+  return /(?<![\p{L}])(?:j[áa]\s+te\s+retorno|te\s+retorno|te\s+dou\s+(?:um\s+)?retorno|retorno\s+(?:por\s+aqui|j[áa]|em\s+breve)|volto\s+(?:a\s+falar|aqui|j[áa])|te\s+(?:chamo|aviso|respondo|confirmo)(?:\s+(?:por\s+aqui|aqui|j[áa]|em\s+breve))?|(?:eu\s+)?vejo\s+(?:isso|isto|o\s+\p{L}+|a\s+\p{L}+)?\s*com\s+voc[eê]|vejo\s+isso\s+(?:aqui|pra\s+voc[eê])|(?:a\s+)?equipe\s+(?:j[áa]\s+)?(?:te\s+)?(?:responde|retorna|chama|manda|fala\s+com\s+voc[eê])|algu[eé]m\s+(?:da\s+equipe\s+)?(?:j[áa]\s+)?(?:te\s+)?(?:chama|responde|retorna)|j[áa]\s+j[áa]\s+te\s+(?:chamam|chamo|respondem|respondo|retornam|retorno))(?![\p{L}])/iu.test(t);
 }
 
 export type V2PrefetchFact = { searched?: boolean; found?: number; bestSimilarity?: number | null };

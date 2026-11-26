@@ -145,5 +145,10 @@ describe("aviso de transferência depois de resposta que já fecha", () => {
     expect(explanationClosesTurn("Vale mostrar a proposta pra ele, combinado? 💙")).toBe(true);
     expect(explanationClosesTurn("Anotei aqui e já te retorno por aqui.")).toBe(true);
     expect(explanationClosesTurn("O boleto da taxa sai depois que você autoriza a matrícula.")).toBe(false);
+    // S06: promessa de retorno com outras palavras.
+    expect(explanationClosesTurn("Sinto muito pelo imprevisto, cuida de você primeiro. Eu vejo isso com você aqui.")).toBe(true);
+    expect(explanationClosesTurn("Anotei; a equipe te responde por aqui.")).toBe(true);
+    expect(explanationClosesTurn("Já já te chamam por aqui.")).toBe(true);
+    expect(explanationClosesTurn("Isso eu te confirmo aqui, tá.")).toBe(true);
   });
 });

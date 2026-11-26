@@ -9,6 +9,8 @@ import {
   memoryPromptSection,
   profileAllowsOpinion,
   productCardSlot,
+  promisesConfirmation,
+  withoutRepeatedQuestion,
   profilePromptSection,
   splitReplyBubbles,
 } from "../conversation-profile";
@@ -88,5 +90,21 @@ describe("posição do cartão de produto entre as bolhas", () => {
     expect(productCardSlot(["Boa escolha!", "A matrícula é isenta.", "O que achou? 😊"])).toBe(2);
     expect(productCardSlot(["Boa escolha!", "A matrícula é isenta."])).toBeNull();
     expect(productCardSlot(["Te mandei o curso aqui embaixo."])).toBeNull();
+  });
+});
+
+describe("pergunta repetida e promessa de confirmar", () => {
+  it("tira só a pergunta igual à anterior; sem sobrar conteúdo, fica como está", () => {
+    const last = "Sem problema! Que horas fica bom pra você fazer a prova?";
+    expect(withoutRepeatedQuestion("Combinado, amanhã então! Que horas fica bom pra você? Te mando o link nessa hora.", last))
+      .toBe("Combinado, amanhã então! Te mando o link nessa hora.");
+    expect(withoutRepeatedQuestion("Que horas fica bom pra você fazer a prova?", last)).toBe("Que horas fica bom pra você fazer a prova?");
+    expect(withoutRepeatedQuestion("Show! Você prefere pelo celular ou computador?", last)).toBe("Show! Você prefere pelo celular ou computador?");
+  });
+
+  it("reconhece a promessa de confirmar", () => {
+    expect(promisesConfirmation("Sobre trancamento, isso eu te confirmo aqui, tá?")).toBe(true);
+    expect(promisesConfirmation("Isso eu te confirmo na inscrição, tá?", "Isso eu te confirmo na inscrição, tá?")).toBe(true);
+    expect(promisesConfirmation("O cancelamento é sem multa.")).toBe(false);
   });
 });
