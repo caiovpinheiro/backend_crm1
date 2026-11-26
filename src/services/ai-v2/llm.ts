@@ -846,7 +846,7 @@ const MALFORMED_REASON = "LLM não retornou JSON válido — fallback de erro ap
 const RAW_OUTPUT_LOG_CHARS = 4000;
 
 /** Como a chamada terminou: entra no log do turno junto da saída bruta. */
-export type V2RawCallInfo = { finishReason?: string; steps?: number; toolCalls?: number };
+export type V2RawCallInfo = { finishReason?: string; steps?: number; toolCalls?: number; /** Por que a normalização (2ª chamada) não deu JSON. */ coerceWhy?: string };
 
 function rawOutputForLog(rawText: string, info: V2RawCallInfo = {}): NonNullable<V2LLMOutput["rawOutput"]> {
   return {
@@ -903,7 +903,9 @@ function buildInvalidJsonFallbackOutput(config: V2AgentConfig, rawText: string, 
     outOfScope: false,
     sentiment: "neutral",
     collected: {},
-    reason: "LLM devolveu texto livre — resposta usada como reply; schema ignorado.",
+    // O motivo vai na decisão do turno: as ações do turno se perdem aqui, e
+    // dá para ver se a 2ª chamada (normalização) falhou ou nem rodou.
+    reason: `LLM devolveu texto livre — resposta usada como reply; schema ignorado${info.coerceWhy ? `; ${info.coerceWhy}` : ""}.`,
     actions: [],
     rawOutput: rawOutputForLog(rawText, info),
   };
@@ -927,6 +929,8 @@ async function coerceV2OutputFromRawText(args: {
   output?: V2LLMOutput;
   inputTokens: number;
   outputTokens: number;
+  /** Por que a normalização não deu certo (ou o que ela descartou). */
+  why?: string;
 }> {
   const correctorSystem = [
     args.system,
@@ -954,11 +958,16 @@ async function coerceV2OutputFromRawText(args: {
     if (validated?.success) {
       return { output: validated.data as V2LLMOutput, inputTokens: result.inputTokens, outputTokens: result.outputTokens };
     }
-    return { inputTokens: result.inputTokens, outputTokens: result.outputTokens };
+    const issue = validated && !validated.success ? validated.error.issues[0] : undefined;
+    return {
+      inputTokens: result.inputTokens,
+      outputTokens: result.outputTokens,
+      why: !parsed ? "a 2ª chamada também não devolveu JSON" : `a 2ª chamada devolveu JSON fora do formato (${issue ? `${issue.path.join(".") || "raiz"}: ${issue.message}` : "?"})`,
+    };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     log.warn({ err: msg }, "[ai-v2] Falha na normalização de JSON");
-    return { inputTokens: 0, outputTokens: 0 };
+    return { inputTokens: 0, outputTokens: 0, why: `a 2ª chamada falhou (${msg.slice(0, 120)})` };
   }
 }
 
@@ -1820,6 +1829,7 @@ export async function callV2LLM(args: {
 
     let validated = parsed ? v2LLMOutputSchema.safeParse(parsed) : undefined;
     let correctorTokens = { input: finalized.input, output: finalized.output };
+    let coerceWhy = "";
 
     if (!validated?.success && text.trim()) {
       const coerced = await coerceV2OutputFromRawText({
@@ -1833,6 +1843,7 @@ export async function callV2LLM(args: {
         jsonMode,
       });
       correctorTokens = { input: correctorTokens.input + coerced.inputTokens, output: correctorTokens.output + coerced.outputTokens };
+      coerceWhy = coerced.why ?? "";
       if (coerced.output) {
         parsed = coerced.output;
         validated = v2LLMOutputSchema.safeParse(parsed);
@@ -1851,9 +1862,9 @@ export async function callV2LLM(args: {
           "[ai-v2] LLM devolveu JSON fora do schema",
         );
       }
-      const callInfo = { finishReason: result.finishReason, steps: result.steps, toolCalls: result.toolCalls.length };
+      const callInfo = { finishReason: result.finishReason, steps: result.steps, toolCalls: result.toolCalls.length, ...(coerceWhy ? { coerceWhy } : {}) };
       traceStep("llm", text
-        ? `Saída do modelo sem JSON utilizável (${text.length} caracteres, fim: ${result.finishReason ?? "?"}) — a saída bruta fica no log do turno`
+        ? `Saída do modelo sem JSON utilizável (${text.length} caracteres, fim: ${result.finishReason ?? "?"})${coerceWhy ? `; ${coerceWhy}` : ""} — o texto vale como resposta, sem ações; a saída bruta fica no log do turno`
         : `Saída do modelo vazia (fim: ${result.finishReason ?? "?"}, ${result.steps} passo(s), ${result.toolCalls.length} consulta(s))`);
       return {
         output: buildInvalidJsonFallbackOutput(args.config, text, callInfo),
