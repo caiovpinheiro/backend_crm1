@@ -42,7 +42,7 @@ import { knowledgeDocTitleMapByIds } from "@/services/ai/knowledge-docs";
 import { describeV2MessageModels, type V2MessageModelSummary } from "./tools";
 import { knowledgeDocIdsFor } from "./themes";
 import { asksBackOwnData, echoesClientText, clientNamesBoundToFacts, hasSearchableQuestion, admittedMissingInstructions, isNearDuplicateReply, repeatFallback, knowledgeChunkTexts, lookupResultTexts, moneyDerivations, percentDerivations, unsupportedFacts, unsupportedFigures, unsupportedHedges, unsupportedMenuPaths, unsupportedQuotedTerms } from "./ground-reply";
-import { noteV2Fact, sliceWholeChars, traceStep } from "./trace";
+import { noteV2Fact, peekV2Fact, sliceWholeChars, traceStep } from "./trace";
 import { SensitiveVault } from "./sensitive";
 import { boldInstruction, breakInlineSteps } from "./reply-format";
 import { markPastDates, tenseMismatches } from "./dates";
@@ -122,6 +122,11 @@ async function productCardTexts(productIds: string[], priceChannel?: string | nu
   }));
   return out;
 }
+
+/** Pergunta de preço: "quanto fica", "qto fica por mês", "valor", "mensalidade", "quanto custa". */
+const PRICE_QUESTION = /(?<![\p{L}])(?:quanto|qto|qnto|quantos?)\s+(?:fica|custa|sai|é|e|vou\s+pagar|pago|seria)|(?<![\p{L}])(?:valor|valores|mensalidade|pre[çc]o)(?![\p{L}])/iu;
+/** Resposta que foge do valor ("não tenho o valor da mensalidade aqui"). */
+const PRICE_DODGE = /n[ãa]o\s+(?:tenho|consigo|sei|posso)[^.!?]{0,50}(?:valor|mensalidade|pre[çc]o)/iu;
 
 type PrefetchedChunk = { docId: string; docTitle: string; content: string; distance: number; priority?: boolean };
 /** Trecho do material do assunto vai inteiro (o comum é cortado em PREFETCH_CHUNK_CHARS). */
@@ -2574,6 +2579,57 @@ export async function callV2LLM(args: {
     traceStep("catálogo", `A resposta não pediu o cartão de "${product.name}", citado pelo nome — o cartão vai junto`);
   }
 
+  /**
+   * Pergunta de preço ("qto fica por mês?") com o produto da conversa já
+   * resolvido e com valor (cartão enviado / produto citado): a resposta não
+   * pode virar "não tenho o valor" nem transferência por preço. Uma nova
+   * geração, com o cartão; se ainda assim não vier o valor, sai a linha de
+   * preço do próprio cartão (o mesmo que a pessoa vê). Nunca transfere por preço.
+   */
+  async function ensurePriceAnswer(r: Awaited<ReturnType<typeof attempt>>): Promise<void> {
+    if (!PRICE_QUESTION.test(userMessage)) return;
+    const pool = catalogMatches?.length ? catalogMatches : historyCatalog ?? [];
+    const product = pool.length === 1 && pool[0].priceFormatted ? pool[0] : null;
+    if (!product) return;
+    const o = r.output;
+    const dodges = o.handoff || PRICE_DODGE.test(o.reply) || !/R\$\s?\d/.test(o.reply);
+    if (!dodges) return;
+    const card = cardTexts.get(product.id) ?? "";
+    const priceOf = (t: string) => t.replace(/\s+/g, "").includes(String(product.priceFormatted).replace(/\s+/g, ""));
+    traceStep("verificação", `Pergunta de preço com o produto da conversa ("${product.name}", ${product.priceFormatted}) e a resposta ${o.handoff ? "transferia" : "não trazia o valor"} → gerando de novo com o cartão`);
+    try {
+      const res = await generateWithTools({
+        model: args.config.model,
+        apiKey: chatKey,
+        system: [
+          system,
+          "# REVISÃO",
+          `A pessoa perguntou o valor. O produto desta conversa é ${product.name}: ${product.priceFormatted}${product.listPriceFormatted ? ` (valor cheio ${product.listPriceFormatted})` : ""}.${card ? ` Cartão (o que ela vê): ${card.replace(/\s*\n\s*/g, " / ")}` : ""}`,
+          "Responda o valor pelo cartão, curto, e siga a conversa. Não transfira por causa de preço. Devolva o JSON completo no formato exigido.",
+        ].join("\n\n"),
+        messages: messages as any,
+        temperature: 0.3,
+        maxOutputTokens: responseLengthToMaxTokens(args.config.responseLength),
+        maxSteps: 1,
+        jsonMode,
+      });
+      r.inputTokens += res.inputTokens;
+      r.outputTokens += res.outputTokens;
+      const parsed = parseV2ModelJson(res.text);
+      const fixed = parsed ? v2LLMOutputSchema.safeParse(parsed) : undefined;
+      if (fixed?.success && !fixed.data.handoff && priceOf(fixed.data.reply)) {
+        r.output = { ...(fixed.data as V2LLMOutput), reply: breakInlineSteps(renderMessage(fixed.data.reply, renderVars) ?? fixed.data.reply) };
+        traceStep("verificação", "A nova geração respondeu o valor pelo cartão");
+        return;
+      }
+    } catch (err) {
+      log.warn({ err: err instanceof Error ? err.message : err }, "[ai-v2] nova geração para pergunta de preço falhou");
+    }
+    const line = card.split(/\n+/).map((l) => l.trim()).find((l) => /R\$\s?\d/.test(l)) ?? `${product.name}: ${product.priceFormatted}`;
+    r.output = { ...o, reply: line.replace(/[*_~]/g, ""), handoff: false, actions: (o.actions ?? []).filter((a) => a.type !== "handoff") };
+    traceStep("verificação", "A nova geração não trouxe o valor → sai a linha de preço do cartão, sem transferir");
+  }
+
   let lastError: Error | undefined;
   for (let i = 0; i < 2; i++) {
     try {
@@ -2584,9 +2640,18 @@ export async function callV2LLM(args: {
         traceStep("verificação", "O modelo devolveu um formato ilegível — tentando de novo");
         continue;
       }
+      const reasonBefore = r.output.reason;
+      const replyBefore = r.output.reply;
       await checkQuotedTerms(r);
       await avoidRepeat(r);
       ensureNamedProductCard(r);
+      await ensurePriceAnswer(r);
+      // "Por que respondeu isso?" descrevia a resposta do modelo antes da
+      // conferência; o cliente recebeu outra. Fica dito o que mudou.
+      if (r.output.reply !== replyBefore && r.output.reason === reasonBefore) {
+        const v = peekV2Fact("verification") as { unsupported?: string[] } | undefined;
+        r.output.reason = [reasonBefore, `A conferência mudou a resposta enviada${v?.unsupported?.length ? ` (tirou: ${v.unsupported.slice(0, 2).join("; ")})` : ""}.`].filter(Boolean).join(" · ");
+      }
       if (vault.size > 0) {
         r.output.collected = vault.restoreDeep(r.output.collected);
         r.output.actions = vault.restoreDeep(r.output.actions);

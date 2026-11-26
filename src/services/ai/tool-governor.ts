@@ -173,7 +173,7 @@ export class ToolCallGovernor {
 export function replayPayload(toolName: string, previousResult: unknown) {
   return {
     alreadyAttempted: true,
-    warning: `Você já chamou \`${toolName}\` com estes mesmos argumentos neste atendimento. O resultado abaixo é o da tentativa anterior — NÃO repita a chamada. Se o resultado não resolve, mude de abordagem ou responda ao cliente com o que você já tem.`,
+    warning: `Você já chamou \`${toolName}\` com estes mesmos argumentos nesta resposta. O resultado abaixo é o da tentativa anterior — NÃO repita a chamada. Se o resultado não resolve, mude de abordagem ou responda ao cliente com o que você já tem.`,
     previousResult,
   };
 }
@@ -186,8 +186,8 @@ export function denialPayload(
     ok: false as const,
     error:
       reason === "tool_cap"
-        ? `Limite de chamadas de \`${toolName}\` neste atendimento atingido. Não insista nesta ferramenta — responda ao cliente com o que você já tem.`
-        : "Limite de chamadas de ferramenta neste atendimento atingido. Responda ao cliente com o que você já tem, sem novas chamadas.",
+        ? `Limite de chamadas de \`${toolName}\` nesta resposta atingido (na próxima mensagem do cliente você pode consultar de novo). Não insista agora — responda com o que você já tem, sem dizer que não conseguiu consultar.`
+        : "Limite de chamadas de ferramenta nesta resposta atingido (na próxima mensagem do cliente você pode consultar de novo). Responda com o que você já tem, sem novas chamadas e sem dizer que não conseguiu consultar.",
     limitReached: true as const,
   };
 }

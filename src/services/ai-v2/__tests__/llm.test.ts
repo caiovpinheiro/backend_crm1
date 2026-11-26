@@ -2071,3 +2071,52 @@ describe("entradas e início das aulas no prompt", () => {
     expect(r.systemPrompt).toContain("Graduação: matrícula feita hoje entra na Turma 2027.1; as aulas começam em fevereiro de 2027; o primeiro pagamento vence em 25/02/2027");
   });
 });
+
+describe("apuração 26/11 — preço do produto da conversa e motivo depois da conferência", () => {
+  const ADM = { id: "adm", name: "Administração", sku: null, type: "SERVICE", unit: "mês", price: 121.45, priceFormatted: "R$ 121,45", listPrice: 173.5, listPriceFormatted: "R$ 173,50", description: null, customFields: [] };
+  const CARD = "🎓 Administração\nBacharelado • EAD • 8 semestres\n🎁 Matrícula isenta\n💰 De R$ 173,50 por R$ 121,45 ao mês";
+  const history = [{ role: "user" as const, content: "oi, quero saber de administração" }, { role: "assistant" as const, content: "Oi! Te mandei o curso de Administração 😊" }];
+  const cfg = () => baseConfig({ productPolicy: { enabled: true, sendCard: true } } as Partial<V2AgentConfig>);
+  const ctx = (c: V2AgentConfig) => ({ contact: null, deals: [], selectedDeal: null, fields: c.contextFields });
+  beforeEach(() => {
+    vi.clearAllMocks();
+    (findV2ProductsNamedIn as ReturnType<typeof vi.fn>).mockImplementation(async (a: { message: string }) => (/administra/i.test(a.message) ? [ADM] : []));
+    (buildV2ProductCard as ReturnType<typeof vi.fn>).mockImplementation(async () => ({ productId: "adm", name: "Administração", text: CARD, image: null }));
+  });
+
+  it("PRE2-01: \"qto fica por mês?\" e o modelo transfere dizendo que não tem o valor → nova geração com o cartão responde o valor", async () => {
+    (generateWithTools as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: "Não tenho o valor da mensalidade aqui.", handoff: true, actions: [] })))
+      .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: "Fica R$ 121,45 por mês no primeiro semestre, com a bolsa.", actions: [] })));
+    const c = cfg();
+    const r = await callV2LLM({ agentId: "agent-1", config: c, context: ctx(c), userMessage: "qto fica por mês?", stage: "active", previousMessages: history });
+    expect(r.output.handoff).toBeFalsy();
+    expect(r.output.reply).toBe("Fica R$ 121,45 por mês no primeiro semestre, com a bolsa.");
+    expect((generateWithTools as ReturnType<typeof vi.fn>).mock.calls[1][0].system).toContain("Não transfira por causa de preço");
+  });
+
+  it("se a nova geração ainda não traz o valor, sai a linha de preço do cartão, sem transferir", async () => {
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(makeLLMResponse(JSON.stringify({ reply: "Não tenho o valor da mensalidade aqui.", handoff: true, actions: [] })));
+    const c = cfg();
+    const r = await callV2LLM({ agentId: "agent-1", config: c, context: ctx(c), userMessage: "qto fica por mês?", stage: "active", previousMessages: history });
+    expect(r.output.handoff).toBe(false);
+    expect(r.output.reply).toBe("💰 De R$ 173,50 por R$ 121,45 ao mês");
+  });
+
+  it("resposta com o valor não é tocada", async () => {
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(makeLLMResponse(JSON.stringify({ reply: "Fica R$ 121,45 por mês.", actions: [] })));
+    const c = cfg();
+    const r = await callV2LLM({ agentId: "agent-1", config: c, context: ctx(c), userMessage: "qto fica por mês?", stage: "active", previousMessages: history });
+    expect(r.output.reply).toBe("Fica R$ 121,45 por mês.");
+    expect((generateWithTools as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1);
+  });
+
+  it("\"Por que respondeu isso?\": quando a conferência muda a resposta, o motivo diz isso", async () => {
+    (findV2ProductsNamedIn as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(makeLLMResponse(JSON.stringify({ reply: 'Clique em "Menu Secreto".', reason: "Explicou o caminho", actions: [] })));
+    const c = baseConfig({ fallback: { noSource: { message: "Te confirmo." } } } as Partial<V2AgentConfig>);
+    const r = await callV2LLM({ agentId: "agent-1", config: c, context: ctx(c), userMessage: "onde clico?", stage: "active" });
+    expect(r.output.reply).toBe("Te confirmo.");
+    expect(r.output.reason).toContain("A conferência mudou a resposta enviada");
+  });
+});
