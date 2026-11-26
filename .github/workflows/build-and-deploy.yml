@@ -35,6 +35,7 @@ name: Build & Deploy
 #     EASYPANEL_WEBHOOK_DO_WORKER_AUTOMATIONS   worker-automations (produção DO)
 #     EASYPANEL_WEBHOOK_DO_WORKER_META_WEBHOOK  worker-meta-webhook (produção DO)
 #     EASYPANEL_WEBHOOK_PROD_BAILEYS            worker-baileys (produção DO)
+#     WEBHOOK_DEPLOY_MCP                        crm-mcp / mcp.bwipo.com (produção DO)
 #     EASYPANEL_WEBHOOK_PROD*                   servidor antigo — NÃO disparado
 #     EASYPANEL_WEBHOOK_DEV                     serviço API (dev)
 #     EASYPANEL_WEBHOOK_DEV_API_PUBLIC          api-public Bearer/n8n (opcional)
@@ -46,6 +47,7 @@ name: Build & Deploy
 #     EASYPANEL_WEBHOOK_DEV_WORKER_AUTOMATIONS  worker-automations (dev)
 #     EASYPANEL_WEBHOOK_DEV_WORKER_META_WEBHOOK worker-meta-webhook (dev)
 #     EASYPANEL_WEBHOOK_DEV_BAILEYS             worker-baileys (WhatsApp QR, dev)
+#     EASYPANEL_WEBHOOK_DEV_MCP                 crm-mcp (dev, opcional)
 #
 #   Só a API é obrigatória. Webhooks de workers ausentes são ignorados —
 #   assim dá pra adotar o rollout por partes (cadastra o secret quando o
@@ -181,6 +183,8 @@ jobs:
           S_WEBHOOK_DO_ETL: ${{ secrets.EASYPANEL_WEBHOOK_DO_WORKER_ETL }}
           S_WEBHOOK_DO_AUTO: ${{ secrets.EASYPANEL_WEBHOOK_DO_WORKER_AUTOMATIONS }}
           S_WEBHOOK_DO_META: ${{ secrets.EASYPANEL_WEBHOOK_DO_WORKER_META_WEBHOOK }}
+          S_WEBHOOK_DO_MCP: ${{ secrets.WEBHOOK_DEPLOY_MCP }}
+          S_WEBHOOK_DEV_MCP: ${{ secrets.EASYPANEL_WEBHOOK_DEV_MCP }}
         run: |
           if [ "$BRANCH_REF" = "refs/heads/main" ]; then
             # Produção = DigitalOcean. Publica em DUAS tags (`latest` e
@@ -197,15 +201,15 @@ jobs:
             # rollback manual — só deixaram de ser chamadas automaticamente.
             TAG=latest
             EXTRA_TAG=digitalocean
-            WEBHOOKS="$S_WEBHOOK_DO $S_WEBHOOK_DO_PUBLIC $S_WEBHOOK_DO_WA $S_WEBHOOK_DO_LEADS $S_WEBHOOK_DO_CAMPAIGN $S_WEBHOOK_DO_DIST $S_WEBHOOK_DO_ETL $S_WEBHOOK_DO_AUTO $S_WEBHOOK_DO_META $S_WEBHOOK_PROD_BAILEYS"
+            WEBHOOKS="$S_WEBHOOK_DO $S_WEBHOOK_DO_PUBLIC $S_WEBHOOK_DO_WA $S_WEBHOOK_DO_LEADS $S_WEBHOOK_DO_CAMPAIGN $S_WEBHOOK_DO_DIST $S_WEBHOOK_DO_ETL $S_WEBHOOK_DO_AUTO $S_WEBHOOK_DO_META $S_WEBHOOK_PROD_BAILEYS $S_WEBHOOK_DO_MCP"
           elif [ "$BRANCH_REF" = "refs/heads/digitalocean" ]; then
             # Branch de migração DO: publica com a tag da branch e dispara o
             # redeploy dos serviços do EasyPanel da DO (API + workers).
             TAG=digitalocean
-            WEBHOOKS="$S_WEBHOOK_DO $S_WEBHOOK_DO_PUBLIC $S_WEBHOOK_DO_WA $S_WEBHOOK_DO_LEADS $S_WEBHOOK_DO_CAMPAIGN $S_WEBHOOK_DO_DIST $S_WEBHOOK_DO_ETL $S_WEBHOOK_DO_AUTO $S_WEBHOOK_DO_META $S_WEBHOOK_PROD_BAILEYS"
+            WEBHOOKS="$S_WEBHOOK_DO $S_WEBHOOK_DO_PUBLIC $S_WEBHOOK_DO_WA $S_WEBHOOK_DO_LEADS $S_WEBHOOK_DO_CAMPAIGN $S_WEBHOOK_DO_DIST $S_WEBHOOK_DO_ETL $S_WEBHOOK_DO_AUTO $S_WEBHOOK_DO_META $S_WEBHOOK_PROD_BAILEYS $S_WEBHOOK_DO_MCP"
           else
             TAG=dev
-            WEBHOOKS="$S_WEBHOOK_DEV $S_WEBHOOK_DEV_PUBLIC $S_WEBHOOK_DEV_WA $S_WEBHOOK_DEV_LEADS $S_WEBHOOK_DEV_CAMPAIGN $S_WEBHOOK_DEV_DIST $S_WEBHOOK_DEV_ETL $S_WEBHOOK_DEV_AUTO $S_WEBHOOK_DEV_META $S_WEBHOOK_DEV_BAILEYS"
+            WEBHOOKS="$S_WEBHOOK_DEV $S_WEBHOOK_DEV_PUBLIC $S_WEBHOOK_DEV_WA $S_WEBHOOK_DEV_LEADS $S_WEBHOOK_DEV_CAMPAIGN $S_WEBHOOK_DEV_DIST $S_WEBHOOK_DEV_ETL $S_WEBHOOK_DEV_AUTO $S_WEBHOOK_DEV_META $S_WEBHOOK_DEV_BAILEYS $S_WEBHOOK_DEV_MCP"
           fi
           TAG=$(printf '%s' "$TAG" | tr -d '\r\n')
           EXTRA_TAG=$(printf '%s' "${EXTRA_TAG:-}" | tr -d '\r\n')
