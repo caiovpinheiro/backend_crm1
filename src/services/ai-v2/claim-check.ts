@@ -14,7 +14,12 @@ const log = getLogger("ai-v2.claim-check");
 
 /** Tempo máximo da checagem: passou disso, a resposta segue (não trava o atendimento). */
 export const CLAIM_CHECK_TIMEOUT_MS = 8000;
-const MAX_SOURCE_CHARS = 20000;
+/**
+ * Fontes que vão ao checador. As fixas (calendário, regras gerais, tom,
+ * informações) vêm primeiro; com regras de ~29 mil caracteres o teto de 20
+ * mil cortava parte delas e o que a regra manda dizer era marcado "sem fonte".
+ */
+const MAX_SOURCE_CHARS = 45000;
 
 const CLAIM_CHECK_SYSTEM = `Você confere se a resposta de um atendente está sustentada pelas fontes da empresa.
 

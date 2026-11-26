@@ -104,6 +104,18 @@ describe("pedido de retomada (schedule_message)", () => {
     if (r.ok) expect(r.dueAt).toEqual(new Date("2026-11-26T11:00:00.000Z"));
   });
 
+  it("\"daqui a 2 horas\": dentro da janela fica nas 2 h; depois da meia-noite vai para a abertura seguinte", () => {
+    const window = { autoSend: { sendWindow: [3, 4].map((day) => ({ day, start: "08:00", end: "20:00" })) } } as Partial<V2AgentConfig>;
+    // 15:00 de quarta → 17:00, sem ajuste.
+    const day = normalizeSchedule({ at: "2026-11-25T17:00", now: NOW, config: cfg(window) });
+    expect(day).toMatchObject({ ok: true, adjusted: false });
+    if (day.ok) expect(day.dueAt).toEqual(ahead(2 * HOUR));
+    // 00:30 de quinta → 02:30 está fora da janela → 08:00.
+    const night = normalizeSchedule({ at: "2026-11-26T02:30", now: new Date("2026-11-26T03:30:00.000Z"), config: cfg(window) });
+    expect(night).toMatchObject({ ok: true, adjusted: true });
+    if (night.ok) expect(night.dueAt).toEqual(new Date("2026-11-26T11:00:00.000Z"));
+  });
+
   it("a resposta só promete o que ficou gravado", () => {
     const ok = { action: { type: "schedule_message" }, ok: true, adjusted: false, whenText: "amanhã às 9h" };
     expect(scheduleReplyNote("Combinado, te chamo amanhã às 9h!", [ok])).toBe("Combinado, te chamo amanhã às 9h!");
