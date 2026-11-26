@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("@/services/ai/provider", () => ({ generateWithTools: vi.fn() }));
 
-import { buildClaimCheckInput, notAFactClaim, parseClaimCheck, worthClaimCheck } from "../claim-check";
+import { buildClaimCheckInput, claimBackedByProductCard, notAFactClaim, parseClaimCheck, worthClaimCheck } from "../claim-check";
 
 describe("checagem por modelo — auxiliares", () => {
   it("só confere resposta com conteúdo", () => {
@@ -81,5 +81,17 @@ describe("checador recebe as regras inteiras", () => {
     const input = buildClaimCheckInput({ reply: "ok", sources: [...rules, "Sinto muito... Eu vejo o cancelamento com você aqui."], clientTexts: [] });
     expect(input).toContain("REGRA 29.");
     expect(input).toContain("Eu vejo o cancelamento com você aqui.");
+  });
+});
+
+describe("afirmação sustentada pelo cartão do produto", () => {
+  const cards = ["🎁 Matrícula isenta\nDe R$ 173,50 por R$ 121,45 ao mês", "Taxa de matrícula: *R$99,00*"];
+  it("isenção e valores do cartão passam; valor que o cartão não traz, não", () => {
+    expect(claimBackedByProductCard("a matrícula de Administração é isenta", cards)).toBe(true);
+    expect(claimBackedByProductCard("a taxa de matrícula é R$ 99,00", cards)).toBe(true);
+    expect(claimBackedByProductCard("fica R$ 121,45 por mês", cards)).toBe(true);
+    expect(claimBackedByProductCard("a taxa de matrícula é R$ 50,00", cards)).toBe(false);
+    expect(claimBackedByProductCard("a matrícula é isenta", ["Taxa de matrícula: *R$99,00*"])).toBe(false);
+    expect(claimBackedByProductCard("o curso dura 8 semestres", cards)).toBe(false);
   });
 });

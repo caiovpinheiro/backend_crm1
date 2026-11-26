@@ -351,6 +351,26 @@ export function claimBackedByCitableValues(claim: string, values: string[]): boo
   return !/\d|https?:\/\//.test(rest) && !/["“”]/.test(rest);
 }
 
+const foldCard = (t: string) => t.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[*_~]/g, "").replace(/r\$\s*/g, "r$ ");
+
+/**
+ * Afirmação sobre taxa de matrícula, isenção ou valor que o cartão do produto
+ * traz: "a matrícula é isenta" com "Matrícula isenta" no cartão; "a taxa é
+ * R$ 99,00" com "Taxa de matrícula: *R$99,00*". O checador às vezes não via
+ * o cartão (cortado no fim das fontes) e a resposta certa virava "não tenho
+ * essa informação". Valor em reais: todos os da frase têm de estar nos cartões.
+ */
+export function claimBackedByProductCard(claim: string, cards: string[]): boolean {
+  if (cards.length === 0) return false;
+  const pool = foldCard(cards.join("\n"));
+  const c = foldCard(claim);
+  const money = c.match(/r\$ \d{1,3}(?:\.\d{3})*(?:,\d{2})?/g) ?? [];
+  if (money.length > 0) return money.every((m) => pool.includes(m));
+  if (/\bisent[ao]s?\b|\bisencao\b/.test(c)) return /\bisent[ao]s?\b|\bisencao\b/.test(pool);
+  if (/\btaxa de matricula\b/.test(c) && /\bnao (?:tem|ha|existe|cobra)/.test(c)) return /\bisent[ao]\b/.test(pool);
+  return false;
+}
+
 /** Afirmações sem fonte segundo o modelo auxiliar. Falha ou demora: lista vazia. */
 export async function checkClaimsWithModel(args: {
   model: string;
@@ -365,6 +385,8 @@ export async function checkClaimsWithModel(args: {
   clientDocuments?: string[];
   /** Contas conferidas: "R$ 135,90 = R$ 795,61 − R$ 659,71". */
   derivedAmounts?: string[];
+  /** Texto dos cartões de produto da conversa (o que o cliente vê). */
+  productCards?: string[];
 }): Promise<{ unsupported: string[]; inputTokens: number; outputTokens: number; ok: boolean }> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -384,7 +406,7 @@ export async function checkClaimsWithModel(args: {
       }),
     ]);
     const flagged = parseClaimCheck(res.text, args.reply);
-    const unsupported = flagged.filter((c) => !notAFactClaim(c) && !claimEchoesClient(c, args.clientTexts) && !claimBackedByCitableValues(c, args.citableValues ?? []) && !claimFoundInSources(c, args.sources) && !claimBackedByArithmetic(c, args.derivedAmounts ?? [], args.clientDocuments ?? []));
+    const unsupported = flagged.filter((c) => !notAFactClaim(c) && !claimEchoesClient(c, args.clientTexts) && !claimBackedByCitableValues(c, args.citableValues ?? []) && !claimFoundInSources(c, args.sources) && !claimBackedByArithmetic(c, args.derivedAmounts ?? [], args.clientDocuments ?? []) && !claimBackedByProductCard(c, args.productCards ?? []));
     if (unsupported.length < flagged.length) {
       log.info(
         { descartadas: flagged.length - unsupported.length },
