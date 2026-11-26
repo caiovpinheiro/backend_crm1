@@ -176,3 +176,36 @@ export function productCardSlot(bubbles: string[]): number | null {
   const last = bubbles[bubbles.length - 1].trim();
   return /\?\s*(?:[\p{Extended_Pictographic}\uFE0F\u200D]\s*)*$/u.test(last) ? bubbles.length - 1 : null;
 }
+
+const foldWords = (t: string): string[] =>
+  t.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").split(/[^a-z0-9]+/).filter((w) => w.length >= 4);
+
+/**
+ * Tira da resposta a pergunta que repete a da mensagem anterior do agente
+ * ("Que horas fica bom pra você?" de novo a cada "Só amanhã", "Estou no
+ * trabalho"). Fica o resto (o acolhimento, o link); se só sobrava a
+ * pergunta, a resposta fica como está.
+ */
+export function withoutRepeatedQuestion(reply: string, lastAgent: string | null | undefined): string {
+  if (!lastAgent?.trim() || !reply.includes("?")) return reply;
+  const split = (t: string) => t.split(/(?<=[.!?])\s+/);
+  const previous = lastAgent.split(/\n+/).flatMap(split).filter((x) => x.trim().endsWith("?")).map(foldWords).filter((w) => w.length >= 2);
+  if (previous.length === 0) return reply;
+  const repeats = (sentence: string): boolean => {
+    const words = foldWords(sentence);
+    if (words.length < 2) return false;
+    return previous.some((p) => {
+      const shared = words.filter((w) => p.includes(w)).length;
+      return shared / Math.min(words.length, p.length) >= 0.75;
+    });
+  };
+  const lines = reply.split(/\n/).map((line) => split(line).filter((sent) => !(sent.trim().endsWith("?") && repeats(sent))).join(" ").trim());
+  const out = lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  return out.split(/\s+/).filter(Boolean).length >= 3 ? out : reply;
+}
+
+/** A resposta promete que alguém vai confirmar depois ("isso eu te confirmo aqui"). */
+export function promisesConfirmation(reply: string, noSourceMessage?: string): boolean {
+  if (noSourceMessage?.trim() && reply.includes(noSourceMessage.trim())) return true;
+  return /(?<![\p{L}])(?:te\s+confirmo|eu\s+confirmo|a\s+gente\s+confirma|vou\s+confirmar|confirmo\s+(?:com|pra|para)\s+voc[eê])(?![\p{L}])/iu.test(reply);
+}
