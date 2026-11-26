@@ -1667,7 +1667,7 @@ export async function callV2LLM(args: {
   // ("Sem material para esta mensagem") às vezes vencia, o modelo dizia que
   // não tinha a informação e transferia sem consultar o catálogo.
   const catalogOn = allowedToolNames.includes("search_products") || args.config.productPolicy?.enabled === true;
-  const catalogMatches = catalogOn
+  let catalogMatches = catalogOn
     ? await Promise.resolve()
         .then(() => findV2ProductsNamedIn({
           message: userMessage,
@@ -1676,6 +1676,17 @@ export async function callV2LLM(args: {
         }))
         .catch(() => [])
     : [];
+  // Mesmo nome-base em mais de um produto ("Administração" e "Administração
+  // 2.0"): fica o que tem o nome inteiro escrito. Os dois cartões juntos
+  // podiam dizer coisas diferentes (isenta × taxa) e a conferência barrava.
+  const preferExactName = <T extends { name: string }>(list: T[], text: string): T[] => {
+    if (list.length < 2) return list;
+    const fold = (t: string) => t.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, " ").trim();
+    const phrase = ` ${fold(text)} `;
+    const exact = list.filter((p) => phrase.includes(` ${fold(p.name)} `));
+    return exact.length > 0 ? exact : list;
+  };
+  catalogMatches = preferExactName(catalogMatches ?? [], userMessage);
   if (catalogMatches?.length) {
     const query = catalogMatches.map((p) => p.name).join("; ");
     traceStep("catálogo", `A mensagem cita produto(s) do catálogo: ${catalogMatches.map((p) => `"${p.name}"`).join(", ")} — dados no prompt`);
@@ -1691,7 +1702,7 @@ export async function callV2LLM(args: {
     .slice(-6)
     .map((m) => m.content)
     .join("\n");
-  const historyCatalog = catalogOn && recentHistory.trim()
+  let historyCatalog = catalogOn && recentHistory.trim()
     ? (await Promise.resolve()
         .then(() => findV2ProductsNamedIn({
           message: recentHistory,
@@ -1700,6 +1711,7 @@ export async function callV2LLM(args: {
         }))
         .catch(() => [])).filter((p) => !catalogMatches?.some((c) => c.id === p.id))
     : [];
+  historyCatalog = preferExactName(historyCatalog, recentHistory);
   const priceChannelForCards = args.config.productPolicy?.enabled ? args.config.productPolicy.priceChannel : undefined;
   const cardTexts = await productCardTexts([...(catalogMatches ?? []), ...(historyCatalog ?? [])].map((p) => p.id), priceChannelForCards).catch(() => new Map<string, string>());
   const catalogSourceTexts = [
@@ -2118,6 +2130,11 @@ export async function callV2LLM(args: {
     // checagem, o calendário ficava no fim e era cortado — a data certa do
     // calendário era barrada como "sem fonte" e o cliente, transferido.
     const fixedFirst = [
+      // Cartões de produto primeiro: curtos e o dado mais específico (taxa,
+      // isenção, parcelas). No fim, depois das regras e da busca, o teto de
+      // tamanho da checagem cortava o cartão.
+      ...[...cardTexts.values()],
+      ...turnCardTexts,
       calendarPromptSection(args.config.calendar?.events, new Date(), args.config.businessHours?.timezone || "America/Sao_Paulo"),
       businessHoursText(args.config),
       currentDateLine(args.config.businessHours?.timezone),
@@ -2131,8 +2148,7 @@ export async function callV2LLM(args: {
       ...linkedChunks.map((c) => `${c.docTitle}\n${c.content}`),
       ...messageModels.filter((m) => m.content?.trim()).map((m) => `${m.name}\n${m.content}`),
       ...lookupTexts,
-      ...catalogSourceTexts,
-      ...turnCardTexts,
+      ...catalogSourceTexts.filter((t) => ![...cardTexts.values()].includes(t)),
     ].filter((s) => s && s.trim());
     const claimSources = [...fixedFirst, ...factSources.filter((s) => !fixedFirst.includes(s))];
     const agentHistory = previousMessages.filter((m) => m.role === "assistant").map((m) => m.content);
@@ -2166,7 +2182,7 @@ export async function callV2LLM(args: {
       const clientDocuments = clientDocumentTexts(clientTexts);
       const derivedAmounts = [...moneyDerivations(output.reply, sources), ...percentDerivations(output.reply, sources)].map((d) => `${d.token} = ${d.expr}`);
       if (derivedAmounts.length > 0) traceStep("verificação", `Conta conferida: ${derivedAmounts.join("; ")}`);
-      const checkArgs = { model: v2FastAuxModel(args.config.model), apiKey, reply: output.reply, sources: claimSources, clientTexts, agentHistory, citableValues, clientDocuments, derivedAmounts };
+      const checkArgs = { model: v2FastAuxModel(args.config.model), apiKey, reply: output.reply, sources: claimSources, clientTexts, agentHistory, citableValues, clientDocuments, derivedAmounts, productCards: [...cardTexts.values(), ...turnCardTexts] };
       // As duas leituras saem juntas (em paralelo): a segunda serve de nova
       // tentativa quando a primeira falha e de confirmação quando ela marca
       // algo. Em série, cada uma somava até 8 s à espera do cliente.
