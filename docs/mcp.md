@@ -217,6 +217,9 @@ são as mesmas da API. `DATABASE_POOL_MAX` pode ser menor (ex.: 5).
    - Domínio: `mcp.<domínio>` → porta do container (3000), HTTPS ligado.
    - Health check: `/api/health` (o `scripts/healthcheck.mjs` já reconhece `mcp`).
    - Sem volume e sem worker. Pode ter réplicas (stateless).
+   - Redeploy automático: o webhook de deploy do serviço vai no secret do GitHub
+     `WEBHOOK_DEPLOY_MCP` (produção, push na `main`) e `EASYPANEL_WEBHOOK_DEV_MCP` (dev,
+     opcional). Sem o secret, faça o redeploy do `crm-mcp` à mão a cada versão.
 3. **Serviço `api`**: adicione `MCP_PUBLIC_URL` (mesmo valor) — usado no consentimento.
 4. **Frontend**: nenhum env novo; publique a versão com `/settings/mcp` e `/oauth/consent`.
 5. No CRM: **Configurações › Assistentes de IA (MCP)** → ligar a integração.
