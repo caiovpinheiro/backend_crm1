@@ -251,7 +251,7 @@ function matchesIdlePhrase(normalized: string): boolean {
 const DEFERRAL_VERBS =
   "(?:chamo|chamar|chamou|chama|ligo|ligar|falo|falar|vejo|ver|retorno|retornar|volto|voltar|respondo|responder|aviso|avisar|procuro|procurar|mando|mandar|te procuro|entro em contato)";
 const DEFERRAL_LATER =
-  "(?:depo\\w*|dps|mais tarde|outra hora|outro dia|amanha|em breve|a noite|de noite|semana que vem|quando der|quando puder)";
+  "(?:depo\\w*|dps|mais tarde|outra hora|outro dia|amanha|em breve|a noite|de noite|semana que vem|quando (?:eu )?der|quando (?:eu )?puder)";
 /** "chamo depois", "depois eu vejo", "amanhã te respondo", "agora não". */
 const DEFERRAL_STRONG: RegExp[] = [
   new RegExp(`\\b${DEFERRAL_VERBS}\\b[\\w\\s]{0,30}\\b${DEFERRAL_LATER}\\b`),
@@ -266,14 +266,37 @@ const DEFERRAL_WEAK: RegExp[] = [
 ];
 
 /**
+ * O cliente pede que o ATENDENTE o procure depois ("me chama mais tarde",
+ * "me liga amanhã", "pode me chamar à noite", "chama depois"). É o oposto
+ * de "eu te chamo depois": é pedido de retomada, não despedida — vai ao
+ * modelo (que agenda), nunca ao atalho que encerra.
+ */
+const ASKS_AGENT_TO_CONTACT: RegExp[] = [
+  /\bme (?:chama|chame|chamar|liga|ligue|ligar|manda|mande|mandar|escreve|escreva|escrever|procura|procure|avisa|avise|lembra|lembre|retorna|retorne|chamem|liguem)\b/,
+  /\b(?:pode|podem|consegue|da pra|dá pra) me (?:chamar|ligar|mandar|escrever|procurar|avisar|retornar)\b/,
+  /^(?:\w+ ){0,3}(?:chama|chame|liga|ligue|manda|mande|escreve|escreva) (?:depo\w*|dps|mais tarde|outra hora|outro dia|amanha|a noite|de noite|semana que vem|quando der|quando puder)\b/,
+];
+
+export function asksAgentToContactLater(text: string | null | undefined): boolean {
+  const words = tokenizePromptText((text ?? "").trim());
+  if (words.length === 0) return false;
+  const n = words.join(" ");
+  // "te chamo", "eu chamo", "te mando": quem age é o cliente.
+  if (/\b(?:eu|te|lhe|vos) (?:chamo|ligo|mando|escrevo|procuro|aviso|retorno)\b/.test(n)) return false;
+  return ASKS_AGENT_TO_CONTACT.some((re) => re.test(n));
+}
+
+/**
  * Adiamento: o cliente diz que vai falar depois / não pode agora. Não é
  * pedido nem agradecimento — é despedida temporária. Curto e sem pergunta.
+ * "Me chama mais tarde" não conta: é pedido para o atendente retomar.
  */
 export function isDeferralText(text: string | null | undefined): boolean {
   const raw = (text ?? "").trim();
   if (!raw || raw.includes("?")) return false;
   const words = tokenizePromptText(raw);
   if (words.length === 0 || words.length > 12) return false;
+  if (asksAgentToContactLater(raw)) return false;
   const n = words.join(" ");
   if (DEFERRAL_STRONG.some((re) => re.test(n))) return true;
   if (hasDemandHint(n)) return false;

@@ -2958,6 +2958,19 @@ describe("processV2Turn — correções do motor", () => {
       expect(mocks.resolveInline).toHaveBeenCalled();
     });
 
+    it("“me chama mais tarde” é pedido de retomada: vai ao modelo (que agenda), não encerra", async () => {
+      const config = baseConfig();
+      mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+      mocks.getState.mockResolvedValue(makeState("active", "agente"));
+      mocks.callLLM.mockResolvedValue(llmOut({ reply: "Combinado, te chamo mais tarde por aqui!", actions: [{ type: "schedule_message", reason: "pediu mais tarde" }] as never }));
+
+      const result = await run("Faz assim, me chama mais tarde");
+
+      expect(mocks.callLLM).toHaveBeenCalled();
+      expect(result.closed).toBe(false);
+      expect(sentTexts()).not.toContain("Combinado! Quando puder, é só me chamar por aqui. 😊");
+    });
+
     it("aviso de transferência sai mesmo se um robô mandou o mesmo texto há pouco", async () => {
       mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: baseConfig(), active: true });
       mocks.getState.mockResolvedValue(makeState("active", "agente"));
