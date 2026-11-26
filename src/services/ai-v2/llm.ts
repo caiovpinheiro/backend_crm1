@@ -12,7 +12,7 @@ import { getAgentApiKey, getAgentChatKey } from "@/services/ai/agent-key";
 import { v2AuxModel, v2FastAuxModel } from "@/lib/ai-v2/models";
 import { answersBeforeHandoff, groundingAnswersWithoutHandoff, noSourceReplyMessage, statesProcedure } from "./no-source";
 import { businessHoursText } from "./rules";
-import { getRequestContext, runWithContext } from "@/lib/request-context";
+import { getOrgIdOrNull, getRequestContext, runWithContext } from "@/lib/request-context";
 import { behaviorToTemperature } from "@/lib/ai-v2/response-behavior";
 import { messageModelModeFor, messageModelPromptRule } from "@/lib/ai-v2/message-model-mode";
 import { sharedContentWords } from "./sent-materials";
@@ -102,6 +102,25 @@ export function schedulingConfirmationSentences(reply: string, at?: string | nul
       !/R\$|\d+\s?%|https?:\/\/|\d{8,}|\d{4,}[-\s]\d{4}/.test(s) &&
       matchesAt(s),
     );
+}
+
+/**
+ * Texto do cartão de cada produto: o mesmo que o cliente vê (modelo de
+ * mensagem de produto da organização + campos do produto). Taxa de
+ * matrícula, isenção, parcelas, "de/por" e campanha só existem aí — o
+ * search_products traz nome e preço. Sem organização ou com erro, nada.
+ */
+async function productCardTexts(productIds: string[], priceChannel?: string | null): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const orgId = getOrgIdOrNull();
+  const ids = [...new Set(productIds.filter(Boolean))].slice(0, 6);
+  if (!orgId || ids.length === 0) return out;
+  const { buildV2ProductCard } = await import("./product-card");
+  await Promise.all(ids.map(async (id) => {
+    const card = await buildV2ProductCard({ organizationId: orgId, productId: id, priceChannel }).catch(() => null);
+    if (card?.text?.trim()) out.set(id, card.text.trim());
+  }));
+  return out;
 }
 
 type PrefetchedChunk = { docId: string; docTitle: string; content: string; distance: number; priority?: boolean };
@@ -1676,23 +1695,39 @@ export async function callV2LLM(args: {
         }))
         .catch(() => [])).filter((p) => !catalogMatches?.some((c) => c.id === p.id))
     : [];
-  const catalogSourceTexts = lookupResultTexts([{ toolName: "search_products", result: { products: [...(catalogMatches ?? []), ...(historyCatalog ?? [])] } }])
-    .filter(() => (catalogMatches?.length ?? 0) + (historyCatalog?.length ?? 0) > 0);
+  const priceChannelForCards = args.config.productPolicy?.enabled ? args.config.productPolicy.priceChannel : undefined;
+  const cardTexts = await productCardTexts([...(catalogMatches ?? []), ...(historyCatalog ?? [])].map((p) => p.id), priceChannelForCards).catch(() => new Map<string, string>());
+  const catalogSourceTexts = [
+    ...lookupResultTexts([{ toolName: "search_products", result: { products: [...(catalogMatches ?? []), ...(historyCatalog ?? [])] } }])
+      .filter(() => (catalogMatches?.length ?? 0) + (historyCatalog?.length ?? 0) > 0),
+    ...cardTexts.values(),
+  ];
   resolvedProducts.push(...(catalogMatches ?? []), ...(historyCatalog ?? []));
   if (historyCatalog?.length) traceStep("catálogo", `Produto(s) já citados na conversa: dados no prompt e como fonte — ${historyCatalog.map((p) => `"${p.name}"`).join(", ")}`);
-  const productLine = (p: (typeof catalogMatches)[number]) => `- ${JSON.stringify({ id: p.id, name: p.name, price: p.priceFormatted, listPrice: p.listPriceFormatted, discountPercent: p.discountPercent, course: p.course })}`;
+  const productLine = (p: (typeof catalogMatches)[number]) => {
+    const card = cardTexts.get(p.id);
+    return `- ${JSON.stringify({ id: p.id, name: p.name, price: p.priceFormatted, listPrice: p.listPriceFormatted, discountPercent: p.discountPercent, course: p.course })}${card ? `\n  Cartão (o que o cliente vê): ${card.replace(/\s*\n\s*/g, " / ")}` : ""}`;
+  };
+  // O que o cartão diz (taxa de matrícula ou isenção, parcelas, de/por,
+  // campanha) vale como está, produto a produto, mesmo que uma regra geral
+  // fale da condição de forma genérica.
+  const cardRule = cardTexts.size > 0
+    ? "Taxa de matrícula ou isenção, parcelas, valor cheio e com desconto e campanha: responda pelo cartão de cada produto, como está nele. O cartão vale sobre o que as regras gerais dizem de forma genérica."
+    : "";
   const catalogSection = [
     ...(catalogMatches?.length
       ? [
           "# Produtos do catálogo citados na mensagem",
           "A mensagem do cliente cita estes produtos. Isto já é o resultado de search_products neste turno: não chame search_products de novo para eles. Os dados valem como fonte; para o cartão, devolva send_product com o id abaixo.",
+          ...(cardRule ? [cardRule] : []),
           ...catalogMatches.map(productLine),
         ]
       : []),
     ...(historyCatalog?.length
       ? [
           "# Produtos já citados nesta conversa",
-          "Dados do catálogo dos produtos de que a conversa já tratou (o cartão pode já ter sido enviado). Valem como fonte: se a pessoa pergunta o valor, responda com eles.",
+          "Dados do catálogo dos produtos de que a conversa já tratou (o cartão pode já ter sido enviado). Valem como fonte: se a pessoa pergunta o valor, a taxa ou a matrícula, responda com eles.",
+          ...(cardRule && !catalogMatches?.length ? [cardRule] : []),
           ...historyCatalog.map(productLine),
         ]
       : []),
@@ -1976,6 +2011,16 @@ export async function callV2LLM(args: {
     const known = (s: string) => (vault.size > 0 ? vault.tokenizeKnown(s) : s);
     const contextJson = known(JSON.stringify([args.context.contact, args.context.selectedDeal, args.context.citableContact, args.context.citableDeal, args.context.siteContext ?? null]));
     const lookupTexts = lookupResultTexts(r.toolCalls).map(known);
+    // Cartão que sai neste turno (produto achado pela busca): o texto dele
+    // é o que o cliente lê junto da resposta — "taxa de matrícula R$ 99"
+    // ou "matrícula isenta" vem dali.
+    const turnCardIds = (r.output.actions ?? [])
+      .filter((a) => a.type === "send_product" && typeof (a as { productId?: unknown }).productId === "string")
+      .map((a) => String((a as { productId?: unknown }).productId))
+      .filter((id) => !cardTexts.has(id));
+    const turnCardTexts = turnCardIds.length > 0
+      ? [...(await productCardTexts(turnCardIds, priceChannelForCards).catch(() => new Map<string, string>())).values()]
+      : [];
     // Só o que é fonte de verdade. Com o prompt inteiro (guias, lista de
     // títulos de todos os materiais) qualquer palavra comum, como
     // "Documentos" ou "Solicitações", passava como se tivesse fonte.
@@ -1988,6 +2033,7 @@ export async function callV2LLM(args: {
       allowedDomainsLine,
       ...lookupTexts,
       ...catalogSourceTexts,
+      ...turnCardTexts,
       args.themeInstructions ?? "",
       ...args.config.globalRules,
       // Persona e jeito de falar ("sou o Léo, assistente virtual…"): quem o
@@ -2081,6 +2127,7 @@ export async function callV2LLM(args: {
       ...messageModels.filter((m) => m.content?.trim()).map((m) => `${m.name}\n${m.content}`),
       ...lookupTexts,
       ...catalogSourceTexts,
+      ...turnCardTexts,
     ].filter((s) => s && s.trim());
     const claimSources = [...fixedFirst, ...factSources.filter((s) => !fixedFirst.includes(s))];
     const agentHistory = previousMessages.filter((m) => m.role === "assistant").map((m) => m.content);
