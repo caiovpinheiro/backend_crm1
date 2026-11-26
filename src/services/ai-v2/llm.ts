@@ -7,9 +7,10 @@
 import { z } from "zod";
 import { tool, type ToolSet } from "ai";
 import { generateWithTools } from "@/services/ai/provider";
+import { stripSystemCacheBreak, SYSTEM_CACHE_BREAK } from "@/services/ai/prompt-cache";
 import { getAgentApiKey, getAgentChatKey } from "@/services/ai/agent-key";
 import { v2AuxModel, v2FastAuxModel } from "@/lib/ai-v2/models";
-import { answersBeforeHandoff, statesProcedure } from "./no-source";
+import { answersBeforeHandoff, groundingAnswersWithoutHandoff, noSourceReplyMessage, statesProcedure } from "./no-source";
 import { businessHoursText } from "./rules";
 import { getRequestContext, runWithContext } from "@/lib/request-context";
 import { behaviorToTemperature } from "@/lib/ai-v2/response-behavior";
@@ -30,6 +31,7 @@ import type {
   V2CRMContext,
 } from "@/lib/ai-v2/types";
 import {
+  findV2ProductsNamedIn,
   searchV2Products,
   searchV2CrmRecords,
   searchV2Knowledge,
@@ -64,7 +66,43 @@ import { askedQuestionsSection, bubblesPromptLine, memoryPromptSection, profileA
 const log = getLogger("ai-v2.llm");
 
 /** Frase padrão quando a conferência tira o ponto pedido e o agente responde sem transferir. */
-export const GROUNDING_FALLBACK_DEFAULT = "Esse ponto eu prefiro confirmar antes de te passar, tá? Já deixei anotado.";
+/** Sem promessa de ação ("já deixei anotado"): o agente não anotou nada. */
+export const GROUNDING_FALLBACK_DEFAULT = "Esse ponto eu prefiro confirmar antes de te passar, tá?";
+
+const RETURN_PROMISE = /(?<![\p{L}\p{N}])(?:te\s+(?:chamo|chamar|mando|mandar|escrevo|escrever|ligo|procuro|retorno)|volto\s+a\s+(?:falar|te\s+chamar|te\s+escrever)|retomo|retomamos|falo\s+com\s+voc[eê]|falamos|entro\s+em\s+contato)(?![\p{L}\p{N}])/iu;
+const WHEN_WORDS = /(?<![\p{L}\p{N}])(?:\d{1,2}\s?h(?:\d{2})?|\d{1,2}:\d{2}|amanh[ãa]|hoje|manh[ãa]|tarde|noite|segunda|ter[çc]a|quarta|quinta|sexta|s[áa]bado|domingo|\d{1,2}\/\d{1,2}|daqui\s+a)(?![\p{L}\p{N}])/iu;
+
+/**
+ * Frases da resposta que só confirmam quando o agente volta a falar ("Te
+ * chamo amanhã às 9h."). Curtas, com verbo de retorno e marca de tempo, sem
+ * valor, percentual, link ou telefone. Com o horário agendado (`at`), a hora
+ * e a data citadas têm de ser as dele.
+ */
+export function schedulingConfirmationSentences(reply: string, at?: string | null): string[] {
+  const when = at && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(at) ? { hour: Number(at.slice(11, 13)), min: Number(at.slice(14, 16)), day: Number(at.slice(8, 10)), month: Number(at.slice(5, 7)) } : null;
+  const matchesAt = (s: string): boolean => {
+    if (!when) return true;
+    for (const m of s.matchAll(/(?<![\d/])(\d{1,2})\s?(?:h|:)(\d{2})?(?![\d/])/g)) {
+      if (Number(m[1]) !== when.hour || (m[2] && Number(m[2]) !== when.min)) return false;
+    }
+    for (const m of s.matchAll(/(?<!\d)(\d{1,2})\/(\d{1,2})(?![\d/])/g)) {
+      if (Number(m[1]) !== when.day || Number(m[2]) !== when.month) return false;
+    }
+    return true;
+  };
+  return reply
+    .split(/\n+/)
+    .flatMap((l) => l.split(/(?<=[.!?])\s+/))
+    .map((s) => s.trim())
+    .filter((s) =>
+      s &&
+      s.split(/\s+/).length <= 14 &&
+      RETURN_PROMISE.test(s) &&
+      WHEN_WORDS.test(s) &&
+      !/R\$|\d+\s?%|https?:\/\/|\d{8,}|\d{4,}[-\s]\d{4}/.test(s) &&
+      matchesAt(s),
+    );
+}
 
 type PrefetchedChunk = { docId: string; docTitle: string; content: string; distance: number; priority?: boolean };
 /** Trecho do material do assunto vai inteiro (o comum é cortado em PREFETCH_CHUNK_CHARS). */
@@ -491,6 +529,7 @@ export function buildV2ToolSet(args: {
         if (decision.action === "replay") {
           return replayPayload(toolName, decision.previousResult);
         }
+        if (decision.action === "reuse") return decision.previousResult;
         try {
           const realInput = args.restoreInput ? args.restoreInput(input) : input;
           const result = capturedCtx
@@ -1082,6 +1121,8 @@ function buildV2SystemPrompt(
   voiceSection = "",
   /** Perguntas que o agente já fez (perfis fora de "support"). */
   askedSection = "",
+  /** Produtos do catálogo que a mensagem cita pelo nome (dados já consultados). */
+  catalogSection = "",
 ): string {
   const timezone = config.businessHours?.timezone || "America/Sao_Paulo";
   const lines: string[] = [];
@@ -1093,9 +1134,6 @@ function buildV2SystemPrompt(
     // As palavras da tela não tinham efeito: "pediu uma pessoa" dependia só
     // do modelo adivinhar.
     lines.push(`# Pedido de atendente\nSe o cliente pedir para ser atendido por uma pessoa (ex.: ${humanWords.map((w) => `"${w}"`).join(", ")}), marque handoff=true e diga que vai chamar alguém da equipe. Palavra solta no meio de outro assunto ("a pessoa que me atendeu disse…") não é pedido. Vale só o pedido feito na mensagem atual: pedido de uma mensagem anterior já foi tratado — se a conversa segue com você, responda o que o cliente perguntou agora. Se ele pede uma pessoa e faz uma pergunta na mesma mensagem, responda a pergunta com as fontes; marque handoff=true só se não conseguir responder.`);
-  }
-  if (humanRequestWithQuestion) {
-    lines.push("# Nesta mensagem\nO cliente pediu uma pessoa e também fez uma pergunta ou disse o assunto. Responda a pergunta com as fontes (dados dele, trechos, informações fixas). Marque handoff=true só se não conseguir responder com o que tem.");
   }
   lines.push(`# Fontes\n${SOURCES_GUIDE}`);
   lines.push(`# Como escrever\n${WRITING_GUIDE}`);
@@ -1109,6 +1147,15 @@ function buildV2SystemPrompt(
   lines.push(`# Emojis\n${emojiInstruction(config.emojis)}`);
   const bold = boldInstruction(config.bold);
   if (bold) lines.push(`# Negrito\n${bold}`);
+  if (config.variables.length > 0) {
+    lines.push(`# Informações fixas da empresa\n${config.variables.map((v) => `${v.key}: ${v.value}`).join("\n")}`);
+  }
+  // Até aqui o prompt é o mesmo em todo turno do agente (vai ao cache de
+  // prompt); daqui para baixo muda a cada turno (data, cliente, trechos).
+  lines.push(SYSTEM_CACHE_BREAK.trim());
+  if (humanRequestWithQuestion) {
+    lines.push("# Nesta mensagem\nO cliente pediu uma pessoa e também fez uma pergunta ou disse o assunto. Responda a pergunta com as fontes (dados dele, trechos, informações fixas). Marque handoff=true só se não conseguir responder com o que tem.");
+  }
   lines.push(`# Data de hoje\n${currentDateLine(config.businessHours?.timezone)}`);
   // Avisos temporários em vigor: logo depois da data, com prioridade sobre os materiais.
   const notices = noticesPromptSection(noticesForTurn(config, { themeId, message: userMessageForNotices }), config);
@@ -1166,11 +1213,6 @@ function buildV2SystemPrompt(
     lines.push("Pergunte ao cliente qual destes negócios ele quer tratar. Não responda sobre nenhum deles antes de saber a escolha.");
   }
 
-  if (config.variables.length > 0) {
-    lines.push("# Informações fixas da empresa");
-    for (const v of config.variables) lines.push(`${v.key}: ${v.value}`);
-  }
-
   if (themeInstructions) {
     lines.push(`# Assunto ativo: ${activeTheme(config, themeId)?.name ?? themeId}`);
     lines.push(themeInstructions);
@@ -1213,9 +1255,14 @@ function buildV2SystemPrompt(
       lines.push(`[${i + 1}] ${c.docTitle}${c.priority ? " (material do assunto)" : ""}\n${body}`);
     });
   }
+  if (catalogSection) lines.push(catalogSection);
   if (nothingRelevant) {
     // Sem trecho que responda, o modelo completava com conhecimento geral.
     lines.push("# Sem material para esta mensagem");
+    // Produto citado pelo nome: o catálogo responde por ele. O aviso continua
+    // para o resto ("tenho direito a desconto?" não é pergunta sobre o curso
+    // de Direito só porque a palavra casou).
+    if (catalogSection) lines.push("Exceção: se a mensagem pede um dos produtos de \"Produtos do catálogo citados na mensagem\" (o curso, o valor, o cartão), responda com os dados dele e envie o cartão; não transfira por falta de material.");
     lines.push("A busca nos materiais não achou trecho que responda a esta mensagem (os que aparecem acima, se houver, só se parecem com ela). Se ela pede informação sobre produto, serviço, preço, prazo, regra, política ou como fazer algo, não responda com conhecimento geral nem com o que parece óbvio: diga com naturalidade que não tem essa informação e marque handoff=true se o cliente precisa dela para seguir. Cumprimento, agradecimento, confirmação e perguntas sobre os dados do próprio cliente você responde normalmente.");
   }
   if (messageModels.length > 0) {
@@ -1468,9 +1515,57 @@ export async function callV2LLM(args: {
       .map((x) => `"${x.name}" (material "${docTitleOf.get(x.docId) ?? "?"}" ${(docSimilarity.get(x.docId) ?? 0).toFixed(2)}; ${x.autoSend ? "enviar sempre" : "o agente decide"}${x.description ? "" : "; sem “quando enviar”"})`)
       .join(", ")}`);
   }
-  const prefetchCalls = prefetch.chunks.length > 0
+  /** Saídas montadas pela conferência com a frase de "sem fonte" (não passam pela reescrita anti-repetição). */
+  const fallbackOutputs = new WeakSet<object>();
+  const prefetchCalls: Array<{ toolName: string; args: unknown; result: unknown }> = prefetch.chunks.length > 0
     ? [{ toolName: "knowledge_search", args: { query: prefetch.query, prefetch: true }, result: { query: prefetch.query, chunks: prefetch.chunks } }]
     : [];
+  // A mensagem cita um produto do catálogo pelo nome ("quero Pedagogia"):
+  // os dados dele já vão ao modelo. Sem isso, a busca fraca nos materiais
+  // ("Sem material para esta mensagem") às vezes vencia, o modelo dizia que
+  // não tinha a informação e transferia sem consultar o catálogo.
+  const catalogOn = allowedToolNames.includes("search_products") || args.config.productPolicy?.enabled === true;
+  const catalogMatches = catalogOn
+    ? await Promise.resolve()
+        .then(() => findV2ProductsNamedIn({
+          message: userMessage,
+          allowedIds: args.config.productPolicy?.enabled ? args.config.productPolicy.allowedProductIds : undefined,
+          priceChannel: args.config.productPolicy?.enabled ? args.config.productPolicy.priceChannel : undefined,
+        }))
+        .catch(() => [])
+    : [];
+  if (catalogMatches?.length) {
+    const query = catalogMatches.map((p) => p.name).join("; ");
+    traceStep("catálogo", `A mensagem cita produto(s) do catálogo: ${catalogMatches.map((p) => `"${p.name}"`).join(", ")} — dados no prompt`);
+    prefetchCalls.push({ toolName: "search_products", args: { query, catalogMatch: true }, result: { query, total: catalogMatches.length, products: catalogMatches } });
+  }
+  // Cartão de produto (ou valor) já mandado na conversa: os dados do produto,
+  // refeitos a partir do catálogo, valem como fonte na conferência. "Quanto
+  // fica?" logo depois do cartão era cortado como valor sem fonte.
+  const pricedHistory = previousMessages
+    .filter((m) => m.role === "assistant" && /R\$\s?\d/.test(m.content))
+    .slice(-3)
+    .map((m) => m.content)
+    .join("\n");
+  const historyCatalog = catalogOn && pricedHistory
+    ? await Promise.resolve()
+        .then(() => findV2ProductsNamedIn({
+          message: pricedHistory,
+          allowedIds: args.config.productPolicy?.enabled ? args.config.productPolicy.allowedProductIds : undefined,
+          priceChannel: args.config.productPolicy?.enabled ? args.config.productPolicy.priceChannel : undefined,
+        }))
+        .catch(() => [])
+    : [];
+  const catalogSourceTexts = lookupResultTexts([{ toolName: "search_products", result: { products: [...(catalogMatches ?? []), ...(historyCatalog ?? [])] } }])
+    .filter(() => (catalogMatches?.length ?? 0) + (historyCatalog?.length ?? 0) > 0);
+  if (historyCatalog?.length) traceStep("catálogo", `Produto(s) já mandados na conversa contam como fonte: ${historyCatalog.map((p) => `"${p.name}"`).join(", ")}`);
+  const catalogSection = catalogMatches?.length
+    ? [
+        "# Produtos do catálogo citados na mensagem",
+        "A mensagem do cliente cita estes produtos. Os dados vêm do catálogo e valem como fonte; use o id para enviar o cartão do produto, se for o caso.",
+        ...catalogMatches.map((p) => `- ${JSON.stringify({ id: p.id, name: p.name, price: p.priceFormatted, listPrice: p.listPriceFormatted, discountPercent: p.discountPercent, course: p.course })}`),
+      ].join("\n")
+    : "";
 
   const system = buildV2SystemPrompt(
     args.config,
@@ -1495,6 +1590,7 @@ export async function callV2LLM(args: {
     lossReasonLabels,
     args.voiceSection ?? "",
     askedQuestionsSection(args.config, args.previousMessages),
+    catalogSection,
   );
 
   const messages: Array<{ role: "user" | "assistant"; content: string }> = [
@@ -1536,6 +1632,10 @@ export async function callV2LLM(args: {
           maxOutputTokens,
           maxSteps: hasTools ? (args.config.toolGovernor?.maxCallsPerTurn ?? 6) + 1 : 1,
           jsonMode: json,
+          // O governador recusou uma consulta (teto de chamadas ou de
+          // repetição): o passo seguinte sai sem ferramentas. Antes o modelo
+          // seguia chamando até acabar os passos e o último ficava sem texto.
+          ...(hasTools ? { stopToolsWhen: () => governor.deniedThisAttempt(), onAttempt: () => governor.startAttempt() } : {}),
         });
       if (!jsonMode) return call(false);
       try {
@@ -1741,6 +1841,7 @@ export async function callV2LLM(args: {
       ...linkedChunks.flatMap((c) => [c.docTitle, c.content]),
       allowedDomainsLine,
       ...lookupTexts,
+      ...catalogSourceTexts,
       args.themeInstructions ?? "",
       ...args.config.globalRules,
       // Persona e jeito de falar ("sou o Léo, assistente virtual…"): quem o
@@ -1770,7 +1871,32 @@ export async function callV2LLM(args: {
     // checagem por modelo, que distingue os dois casos.
     type Unsupported = { label: string; text: string };
     const tz = args.config.businessHours?.timezone || "America/Sao_Paulo";
-    const unsupportedOf = (reply: string, reason?: string): Unsupported[] => [
+    // Retorno combinado: a pessoa pediu para falar depois ("me chama às
+    // 18h", "amanhã de manhã") ou o modelo agendou a retomada. A frase que
+    // confirma quando o agente volta não é afirmação sobre a empresa — era
+    // cortada como "sem fonte" e saía a frase de escape no lugar.
+    // Só com a retomada agendada de fato: prometer voltar sem agendar não
+    // é confirmação, é promessa sem lastro.
+    const scheduleAction = (r.output.actions ?? []).find((a) => a.type === "schedule_message") as { at?: string } | undefined;
+    const withoutSchedulingConfirmations = (reply: string, list: Unsupported[]): Unsupported[] => {
+      if (!scheduleAction || list.length === 0) return list;
+      const confirmations = schedulingConfirmationSentences(reply, scheduleAction.at ?? null);
+      if (confirmations.length === 0) return list;
+      const bare = (t: string) => t.trim().replace(/[.!?]+$/, "").trim();
+      // A marcação tem de caber na frase de confirmação; uma marcação maior
+      // só passa se o que sobra fora dela é curto e sem número.
+      const covered = (u: Unsupported) => confirmations.some((c) => {
+        if (bare(c).includes(bare(u.text))) return true;
+        if (!bare(u.text).includes(bare(c))) return false;
+        const rest = bare(u.text).replace(bare(c), " ").trim();
+        return rest.split(/\s+/).filter(Boolean).length <= 2 && !/\d/.test(rest);
+      });
+      const kept = list.filter((u) => !(u.text && !/R\$|%|https?:\/\//.test(u.text) && covered(u)));
+      if (kept.length < list.length) traceStep("verificação", `Confirmação do retorno combinado não passa pela conferência: ${confirmations.map((c) => `"${c}"`).join(", ")}`);
+      return kept;
+    };
+    const unsupportedOf = (reply: string, reason?: string): Unsupported[] => withoutSchedulingConfirmations(reply, rawUnsupportedOf(reply, reason));
+    const rawUnsupportedOf = (reply: string, reason?: string): Unsupported[] => [
       // Tempo verbal que a data desmente e que não se conserta só no verbo
       // ("já passou" com data que ainda vem): a frase sai.
       ...tenseMismatches(reply, new Date(), tz).filter((t) => !t.fixed).map((t) => ({ label: `"${t.sentence}" (${t.why})`, text: t.sentence })),
@@ -1808,6 +1934,7 @@ export async function callV2LLM(args: {
       ...linkedChunks.map((c) => `${c.docTitle}\n${c.content}`),
       ...messageModels.filter((m) => m.content?.trim()).map((m) => `${m.name}\n${m.content}`),
       ...lookupTexts,
+      ...catalogSourceTexts,
     ].filter((s) => s && s.trim());
     const claimSources = [...fixedFirst, ...factSources.filter((s) => !fixedFirst.includes(s))];
     const agentHistory = previousMessages.filter((m) => m.role === "assistant").map((m) => m.content);
@@ -1842,26 +1969,44 @@ export async function callV2LLM(args: {
       const derivedAmounts = moneyDerivations(output.reply, sources).map((d) => `${d.token} = ${d.expr}`);
       if (derivedAmounts.length > 0) traceStep("verificação", `Conta conferida: ${derivedAmounts.join("; ")}`);
       const checkArgs = { model: v2FastAuxModel(args.config.model), apiKey, reply: output.reply, sources: claimSources, clientTexts, agentHistory, citableValues, clientDocuments, derivedAmounts };
-      let res = await checkClaimsWithModel(checkArgs);
-      r.inputTokens += res.inputTokens;
-      r.outputTokens += res.outputTokens;
-      // Checagem que falhou (erro ou tempo) tenta mais uma vez: sem ela, o
-      // passo a passo não conferido virava transferência.
-      if (!res.ok) {
+      // As duas leituras saem juntas (em paralelo): a segunda serve de nova
+      // tentativa quando a primeira falha e de confirmação quando ela marca
+      // algo. Em série, cada uma somava até 8 s à espera do cliente.
+      // AI_V2_CLAIM_CHECK_PARALLEL=0 volta à ordem antiga (uma por vez).
+      const parallelReads = process.env.AI_V2_CLAIM_CHECK_PARALLEL !== "0";
+      let res: Awaited<ReturnType<typeof checkClaimsWithModel>>;
+      let again: Awaited<ReturnType<typeof checkClaimsWithModel>> | undefined;
+      if (parallelReads) {
+        const [a, b] = await Promise.all([checkClaimsWithModel(checkArgs), checkClaimsWithModel(checkArgs)]);
+        r.inputTokens += a.inputTokens + b.inputTokens;
+        r.outputTokens += a.outputTokens + b.outputTokens;
+        res = a.ok ? a : b;
+        again = a.ok && b.ok ? b : undefined;
+      } else {
         res = await checkClaimsWithModel(checkArgs);
         r.inputTokens += res.inputTokens;
         r.outputTokens += res.outputTokens;
+        // Checagem que falhou (erro ou tempo) tenta mais uma vez: sem ela, o
+        // passo a passo não conferido virava transferência.
+        if (!res.ok) {
+          res = await checkClaimsWithModel(checkArgs);
+          r.inputTokens += res.inputTokens;
+          r.outputTokens += res.outputTokens;
+        }
       }
       // Segunda leitura quando a primeira marca algo: o checador varia de uma
       // chamada para outra e barrava, uma vez em cinco, o passo que o material
       // traz com outras palavras — a mesma pergunta ora respondia, ora
       // transferia. Fica marcado só o que as duas leituras apontam.
       if (res.ok && res.unsupported.length > 0) {
-        const again = await checkClaimsWithModel(checkArgs);
-        r.inputTokens += again.inputTokens;
-        r.outputTokens += again.outputTokens;
-        if (again.ok) {
-          const confirmed = res.unsupported.filter((c) => again.unsupported.some((d) => sameClaim(c, d)));
+        if (!again) {
+          again = await checkClaimsWithModel(checkArgs);
+          r.inputTokens += again.inputTokens;
+          r.outputTokens += again.outputTokens;
+        }
+        const second = again;
+        if (second?.ok) {
+          const confirmed = res.unsupported.filter((c) => second.unsupported.some((d) => sameClaim(c, d)));
           if (confirmed.length < res.unsupported.length) {
             traceStep("verificação", `Segunda leitura não confirmou ${res.unsupported.length - confirmed.length} marcação(ões) — ${res.unsupported.filter((c) => !confirmed.includes(c)).map((c) => `"${c}"`).join(", ")}`);
           }
@@ -1877,7 +2022,7 @@ export async function callV2LLM(args: {
       if (!res.ok) traceStep("verificação", "Checagem por modelo indisponível (erro ou tempo) — só as regras fixas conferiram a resposta");
       if (res.unsupported.length > 0) traceStep("verificação", `Checagem por modelo: ${res.unsupported.length} afirmação(ões) sem fonte — ${res.unsupported.map((c) => `"${c}"`).join(", ")}`);
       else if (res.ok) traceStep("verificação", "Checagem por modelo: tudo sustentado pelos materiais");
-      return res.unsupported.map((c) => ({ label: `"${c}" (afirmação que não está nos materiais)`, text: c }));
+      return withoutSchedulingConfirmations(output.reply, res.unsupported.map((c) => ({ label: `"${c}" (afirmação que não está nos materiais)`, text: c })));
     };
     const labelsOf = (list: Unsupported[]) => list.map((u) => u.label);
     const textsOf = (list: Unsupported[]) => list.map((u) => u.text).filter(Boolean);
@@ -2114,15 +2259,20 @@ export async function callV2LLM(args: {
     // Responder com o que foi conferido, em vez de transferir: tira as
     // frases sem fonte e, se o que a pessoa pediu saiu junto, diz que vai
     // confirmar. Nada sem fonte vai ao cliente; a conversa não cai.
-    if (args.config.groundingFallback === "answer" && !output.handoff) {
-      const unconfirmed = args.config.groundingFallbackMessage?.trim() || GROUNDING_FALLBACK_DEFAULT;
+    // A frase é a do campo da tela ("Se não achar a informação"); com ela
+    // preenchida, a conferência responde em vez de transferir.
+    if (groundingAnswersWithoutHandoff(args.config) && !output.handoff) {
+      const unconfirmed = noSourceReplyMessage(args.config) || GROUNDING_FALLBACK_DEFAULT;
       const trimmed = textsOf(flags).length === flags.length ? trimUnsupportedSentences(output.reply, textsOf(flags)) : null;
       const kept = trimmed && unsupportedOf(trimmed.reply, output.reason).length === 0 ? trimmed.reply.trim() : "";
       const droppedAnswer = !kept || trimDroppedTheAnswer(userMessage, output.reply, kept);
       const reply = kept ? (droppedAnswer ? `${kept} ${unconfirmed}` : kept) : unconfirmed;
       traceStep("verificação", `A reescrita ainda cita ${list} — responde só com o que foi conferido${droppedAnswer ? " e diz que vai confirmar" : ""}, sem transferir`);
-      noteV2Fact("verification", { unsupported: labelsOf(flags), rewritten: true, trimmed: kept ? [] : undefined, forcedHandoff: false, answeredWithConfirmed: true });
-      r.output = { ...output, reply, speech: undefined };
+      noteV2Fact("verification", { unsupported: labelsOf(flags), rewritten: true, trimmed: kept ? [] : undefined, forcedHandoff: false, answeredWithConfirmed: true, ...(kept ? {} : { onlyFallback: true }) });
+      // Só a frase de "sem fonte": os anexos do material que a resposta
+      // apresentava não acompanham (o motor também não põe o fecho).
+      r.output = { ...output, reply, speech: undefined, ...(kept ? {} : { attachments: [] }) };
+      fallbackOutputs.add(r.output);
       return;
     }
     traceStep("verificação", "A reescrita ainda cita o que não está no material — transferindo");
@@ -2144,6 +2294,13 @@ export async function callV2LLM(args: {
   async function avoidRepeat(r: Awaited<ReturnType<typeof attempt>>): Promise<void> {
     const last = [...previousMessages].reverse().find((m) => m.role === "assistant")?.content;
     if (!last || r.output.handoff || !isNearDuplicateReply(r.output.reply, last)) return;
+    // Resposta montada pela conferência (o conferido + a frase de "sem
+    // fonte"): reescrever aqui, sem nova conferência, podia trazer de volta
+    // o que acabou de ser cortado.
+    if (fallbackOutputs.has(r.output)) {
+      traceStep("verificação", "A frase de \"sem fonte\" repetiria a anterior — sai como está, sem reescrita não conferida");
+      return;
+    }
     traceStep("verificação", "Resposta repetiria a anterior — pedindo outra forma");
     const reviewSystem = [
       system,
@@ -2203,7 +2360,7 @@ export async function callV2LLM(args: {
         toolCalls: [...prefetchCalls, ...(r.toolCalls ?? [])],
         latencyMs: Date.now() - startedAt,
         governorStats: governor.stats(),
-        systemPrompt: system,
+        systemPrompt: stripSystemCacheBreak(system),
       } as any;
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));

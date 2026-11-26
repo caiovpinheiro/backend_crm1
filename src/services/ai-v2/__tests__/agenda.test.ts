@@ -139,7 +139,7 @@ const baseSnap = (over: Partial<AgendaSnapshot> = {}): AgendaSnapshot => ({
   configured: true,
   state: { owner: "agente", stage: "active", closeReason: null },
   inboundSinceCreated: [],
-  humanOutboundSinceCreated: false,
+  humanOutboundAfterAgent: false,
   deal: { status: "OPEN", stageId: "st-1" },
   dealStageIdAtCreate: "st-1",
   stopOnStageChange: false,
@@ -167,9 +167,8 @@ describe("decisão na hora do envio", () => {
       [{ configured: false }, "agent_off"],
       [{ optedOut: true }, "opt_out"],
       [{ inboundSinceCreated: ["na verdade já me inscrevi"] }, "client_replied"],
-      [{ humanOutboundSinceCreated: true }, "human"],
-      [{ conversation: { status: "OPEN", assignedToId: "pessoa-1", channelKind: "meta", lastInboundAt: ago(HOUR) } }, "human"],
-      [{ state: { owner: "pessoa", stage: "active", closeReason: null } }, "human"],
+      [{ humanOutboundAfterAgent: true }, "human"],
+      [{ assignedToOtherAi: true }, "other_agent"],
       [{ deal: { status: "WON", stageId: "st-1" } }, "deal_closed"],
       [{ deal: { status: "OPEN", stageId: "st-2" }, stopOnStageChange: true }, "stage_changed"],
       [{ conversation: { status: "RESOLVED", assignedToId: "ai-1", channelKind: "meta", lastInboundAt: ago(HOUR) }, state: { owner: "ninguem", stage: "closed", closeReason: "transferred" } }, "conversation_closed"],
@@ -180,6 +179,22 @@ describe("decisão na hora do envio", () => {
     for (const [over, outcome] of cases) {
       expect(decideAgendaSend(baseSnap(over)), outcome).toEqual({ action: "cancel", outcome });
     }
+  });
+
+  it("responsável humano ou conversa transferida, sem pessoa ter falado depois do agente: o passo sai", () => {
+    expect(decideAgendaSend(baseSnap({
+      conversation: { status: "OPEN", assignedToId: "pessoa-1", channelKind: "meta", lastInboundAt: ago(HOUR) },
+      state: { owner: "pessoa", stage: "active", closeReason: null },
+    })).action).toBe("send");
+  });
+
+  it("automações somadas batem o teto: adia para o dia seguinte; só os envios da agenda no teto: cancela", () => {
+    const d = decideAgendaSend(baseSnap({ sentLast24h: 1, automationSentLast24h: 1 }));
+    expect(d.action).toBe("reschedule");
+    expect(d.action === "reschedule" && d.at.getTime()).toBeGreaterThanOrEqual(NOW.getTime() + 24 * HOUR);
+    expect(decideAgendaSend(baseSnap({ sentLast24h: 0, automationSentLast24h: 1 })).action).toBe("send");
+    // Adiar tem prazo: passo criado há mais de 10 dias desiste.
+    expect(decideAgendaSend(baseSnap({ sentLast24h: 1, automationSentLast24h: 1, createdAt: ago(11 * 24 * HOUR) }))).toEqual({ action: "cancel", outcome: "daily_cap" });
   });
 
   it("retomada: \"ok, obrigado\" depois de agendar não cancela; no follow-up, qualquer resposta para", () => {

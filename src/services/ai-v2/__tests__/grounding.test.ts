@@ -8,7 +8,7 @@ vi.mock("@/lib/prisma-base", () => ({ prismaBase: {} }));
 import type { V2AgentConfig, V2CRMContext, V2LLMOutput } from "@/lib/ai-v2/types";
 import { renderMessage } from "@/lib/ai-v2/message-render";
 import { unsupportedFacts, unsupportedMenuPaths, unsupportedQuotedTerms } from "../ground-reply";
-import { applyNoSourceGuard } from "../no-source";
+import { applyNoSourceGuard, hasContentBeyondQuestion, withoutTrailingQuestion } from "../no-source";
 import { classifyPostCloseMessage } from "../closure";
 import { selectV2Theme } from "../themes";
 
@@ -67,6 +67,13 @@ describe("guarda 'sem material'", () => {
     expect(applyNoSourceGuard({ config: cfg(), output: o, context: ctx({ Nome: "Ana" }), toolCalls: [], queriedEmpty: false, prefetch: nothing })).toEqual({ applied: true, handoff: true });
   });
 
+  it("agente antigo só com a frase escondida (groundingFallbackMessage) responde com ela, sem transferir", () => {
+    const o = out("O prazo é de 5 dias.");
+    const r = applyNoSourceGuard({ config: cfg({ groundingFallback: "answer", groundingFallbackMessage: "Te confirmo já já." }), output: o, context: ctx({ Nome: "Ana" }), toolCalls: [], queriedEmpty: false, prefetch: nothing });
+    expect(r).toEqual({ applied: true, handoff: false });
+    expect(o.reply).toBe("Te confirmo já já.");
+  });
+
   it("modelo já transfere e a explicação afirma fato sem material → só o aviso configurado sai", () => {
     const o = { ...out("O prazo de análise é de 5 dias úteis. Vou chamar alguém da equipe."), handoff: true };
     const r = applyNoSourceGuard({ config: cfg(), output: o, context: ctx({ Nome: "Ana" }), toolCalls: [], queriedEmpty: false, prefetch: nothing });
@@ -99,5 +106,24 @@ describe("pós-encerramento e assuntos", () => {
     ];
     expect(selectV2Theme(cfg({ themes }), "quero desmarcar a consulta")?.id).toBe("desmarcar");
     expect(selectV2Theme(cfg({ themes }), "quero marcar uma consulta")?.id).toBe("marcar");
+  });
+});
+
+describe("troca sem avanço: pergunta pura × resposta que informa", () => {
+  it("reconhecimento curto + pergunta é só pergunta; informação + pergunta não", () => {
+    expect(hasContentBeyondQuestion("Entendo. O que tem dificultado: tempo, acesso ou outra situação?")).toBe(false);
+    expect(hasContentBeyondQuestion("A rotina corrida pesa mesmo. Essa flexibilidade poderia ajudar?")).toBe(false);
+    expect(hasContentBeyondQuestion("Qual curso você quer?")).toBe(false);
+    expect(hasContentBeyondQuestion("O curso custa R$ 199. Vamos garantir?")).toBe(true);
+    expect(hasContentBeyondQuestion("A matrícula é isenta e o primeiro pagamento é em 25/02/2027. O que achou?")).toBe(true);
+    expect(hasContentBeyondQuestion("As aulas são online e você assiste quando puder, no seu ritmo, de qualquer lugar. A prova é pelo celular, curtinha, e o resultado sai na hora. O que achou?")).toBe(true);
+    // Abertura longa, sem fato, numa frase só: continua sendo pergunta pura.
+    expect(hasContentBeyondQuestion("Entendo totalmente, muita gente passa por isso no começo e é super normal ficar em dúvida. Qual curso você quer?")).toBe(false);
+  });
+
+  it("tira só a pergunta do fim", () => {
+    expect(withoutTrailingQuestion("A rotina pesa mesmo. Isso ajudaria?")).toBe("A rotina pesa mesmo.");
+    expect(withoutTrailingQuestion("Você já tentou pelo aplicativo?")).toBe("");
+    expect(withoutTrailingQuestion("Linha um.\nLinha dois. E aí?")).toBe("Linha um.\nLinha dois.");
   });
 });
