@@ -456,6 +456,8 @@ export function buildV2ToolSet(args: {
   limits?: ToolCallLimits;
   /** Troca marcadores de dado sensível pelo valor real antes de executar. */
   restoreInput?: (input: unknown) => unknown;
+  /** Junta à recusa do governador o que o modelo já tem (ex.: produtos já consultados). */
+  denialHint?: (toolName: string) => Record<string, unknown> | undefined;
 }): { tools: ToolSet; governor: ToolCallGovernor } {
   const theme = activeTheme(args.config, args.themeId);
   const themeToolIds = themeToolRestriction(theme);
@@ -524,7 +526,7 @@ export function buildV2ToolSet(args: {
       execute: async (input: unknown) => {
         const decision = governor.decide(toolName, input);
         if (decision.action === "deny") {
-          return denialPayload(toolName, decision.reason);
+          return { ...denialPayload(toolName, decision.reason), ...(args.denialHint?.(toolName) ?? {}) };
         }
         if (decision.action === "replay") {
           return replayPayload(toolName, decision.previousResult);
@@ -1328,7 +1330,7 @@ function buildV2SystemPrompt(
     // Produto citado pelo nome: o catálogo responde por ele. O aviso continua
     // para o resto ("tenho direito a desconto?" não é pergunta sobre o curso
     // de Direito só porque a palavra casou).
-    if (catalogSection) lines.push("Exceção: se a mensagem pede um dos produtos de \"Produtos do catálogo citados na mensagem\" (o curso, o valor, o cartão), responda com os dados dele e envie o cartão; não transfira por falta de material.");
+    if (catalogSection) lines.push("Exceção: se a mensagem trata de um dos produtos do catálogo listados acima (o curso, o valor, o cartão), responda com os dados dele e envie o cartão; não transfira por falta de material.");
     lines.push("A busca nos materiais não achou trecho que responda a esta mensagem (os que aparecem acima, se houver, só se parecem com ela). Se ela pede informação sobre produto, serviço, preço, prazo, regra, política ou como fazer algo, não responda com conhecimento geral nem com o que parece óbvio: diga com naturalidade que não tem essa informação e marque handoff=true se o cliente precisa dela para seguir. Cumprimento, agradecimento, confirmação e perguntas sobre os dados do próprio cliente você responde normalmente.");
   }
   if (messageModels.length > 0) {
@@ -1579,6 +1581,8 @@ export async function callV2LLM(args: {
   if (vault.kinds.size > 0) {
     traceStep("dados sensíveis", `Mascarado antes do modelo: ${[...vault.kinds].join(", ")}`);
   }
+  /** Produtos já resolvidos pelo nome (mensagem ou conversa), para a recusa do governador. */
+  const resolvedProducts: Awaited<ReturnType<typeof findV2ProductsNamedIn>> = [];
   const { tools, governor } = buildV2ToolSet({
     config: args.config,
     context: args.context,
@@ -1586,6 +1590,12 @@ export async function callV2LLM(args: {
     apiKey,
     themeId: args.themeId,
     restoreInput: vault.size > 0 ? (input) => vault.restoreDeep(input) : undefined,
+    // Recusa de search_products com o produto já resolvido: o modelo lia
+    // "limite atingido" como falha e dizia "não consegui puxar o cartão".
+    denialHint: (toolName) =>
+      toolName === "search_products" && resolvedProducts.length > 0
+        ? { alreadyFound: "Os produtos abaixo já foram encontrados neste turno; use-os (id para send_product).", products: resolvedProducts.map((p) => ({ id: p.id, name: p.name, price: p.priceFormatted, listPrice: p.listPriceFormatted })) }
+        : undefined,
   });
   const allowedToolNames = Object.keys(tools);
 
@@ -1641,30 +1651,43 @@ export async function callV2LLM(args: {
   // Cartão de produto (ou valor) já mandado na conversa: os dados do produto,
   // refeitos a partir do catálogo, valem como fonte na conferência. "Quanto
   // fica?" logo depois do cartão era cortado como valor sem fonte.
-  const pricedHistory = previousMessages
-    .filter((m) => m.role === "assistant" && /R\$\s?\d/.test(m.content))
-    .slice(-3)
+  // Vale também o produto que a pessoa pediu antes ("quero Pedagogia" →
+  // "quanto fica?"): o cartão nem sempre está no histórico (a gaveta de teste
+  // guarda só a resposta), e sem os dados o modelo respondia sem o valor.
+  const recentHistory = previousMessages
+    .slice(-6)
     .map((m) => m.content)
     .join("\n");
-  const historyCatalog = catalogOn && pricedHistory
-    ? await Promise.resolve()
+  const historyCatalog = catalogOn && recentHistory.trim()
+    ? (await Promise.resolve()
         .then(() => findV2ProductsNamedIn({
-          message: pricedHistory,
+          message: recentHistory,
           allowedIds: args.config.productPolicy?.enabled ? args.config.productPolicy.allowedProductIds : undefined,
           priceChannel: args.config.productPolicy?.enabled ? args.config.productPolicy.priceChannel : undefined,
         }))
-        .catch(() => [])
+        .catch(() => [])).filter((p) => !catalogMatches?.some((c) => c.id === p.id))
     : [];
   const catalogSourceTexts = lookupResultTexts([{ toolName: "search_products", result: { products: [...(catalogMatches ?? []), ...(historyCatalog ?? [])] } }])
     .filter(() => (catalogMatches?.length ?? 0) + (historyCatalog?.length ?? 0) > 0);
-  if (historyCatalog?.length) traceStep("catálogo", `Produto(s) já mandados na conversa contam como fonte: ${historyCatalog.map((p) => `"${p.name}"`).join(", ")}`);
-  const catalogSection = catalogMatches?.length
-    ? [
-        "# Produtos do catálogo citados na mensagem",
-        "A mensagem do cliente cita estes produtos. Os dados vêm do catálogo e valem como fonte; use o id para enviar o cartão do produto, se for o caso.",
-        ...catalogMatches.map((p) => `- ${JSON.stringify({ id: p.id, name: p.name, price: p.priceFormatted, listPrice: p.listPriceFormatted, discountPercent: p.discountPercent, course: p.course })}`),
-      ].join("\n")
-    : "";
+  resolvedProducts.push(...(catalogMatches ?? []), ...(historyCatalog ?? []));
+  if (historyCatalog?.length) traceStep("catálogo", `Produto(s) já citados na conversa: dados no prompt e como fonte — ${historyCatalog.map((p) => `"${p.name}"`).join(", ")}`);
+  const productLine = (p: (typeof catalogMatches)[number]) => `- ${JSON.stringify({ id: p.id, name: p.name, price: p.priceFormatted, listPrice: p.listPriceFormatted, discountPercent: p.discountPercent, course: p.course })}`;
+  const catalogSection = [
+    ...(catalogMatches?.length
+      ? [
+          "# Produtos do catálogo citados na mensagem",
+          "A mensagem do cliente cita estes produtos. Isto já é o resultado de search_products neste turno: não chame search_products de novo para eles. Os dados valem como fonte; para o cartão, devolva send_product com o id abaixo.",
+          ...catalogMatches.map(productLine),
+        ]
+      : []),
+    ...(historyCatalog?.length
+      ? [
+          "# Produtos já citados nesta conversa",
+          "Dados do catálogo dos produtos de que a conversa já tratou (o cartão pode já ter sido enviado). Valem como fonte: se a pessoa pergunta o valor, responda com eles.",
+          ...historyCatalog.map(productLine),
+        ]
+      : []),
+  ].join("\n");
 
   const system = buildV2SystemPrompt(
     args.config,
@@ -2450,6 +2473,26 @@ export async function callV2LLM(args: {
     r.output = { ...r.output, reply: repeatFallback(last, args.config) };
   }
 
+  /**
+   * A pessoa citou um produto só ("quero Pedagogia"), o cartão está liberado
+   * e ainda não se falou dele na conversa, mas a resposta não pediu o cartão
+   * (a busca bateu no teto, ou o modelo só disse "te mandei aqui embaixo"):
+   * o cartão vai assim mesmo, com o id já resolvido pelo nome.
+   */
+  function ensureNamedProductCard(r: Awaited<ReturnType<typeof attempt>>): void {
+    if (catalogMatches?.length !== 1) return;
+    const product = catalogMatches[0];
+    const o = r.output;
+    if (o.handoff || o.concluded || o.outOfScope || o.messageModel?.id) return;
+    if ((o.actions ?? []).some((a) => a.type === "send_product")) return;
+    if (!allowedActionTypes(args.config, promptTheme).has("send_product")) return;
+    const fold = (t: string) => t.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+    if (fold(recentHistory).includes(fold(product.name))) return;
+    if (/n[ãa]o consegui/i.test(o.reply)) return;
+    o.actions = [...(o.actions ?? []), { type: "send_product", productId: product.id } as V2Action];
+    traceStep("catálogo", `A resposta não pediu o cartão de "${product.name}", citado pelo nome — o cartão vai junto`);
+  }
+
   let lastError: Error | undefined;
   for (let i = 0; i < 2; i++) {
     try {
@@ -2462,6 +2505,7 @@ export async function callV2LLM(args: {
       }
       await checkQuotedTerms(r);
       await avoidRepeat(r);
+      ensureNamedProductCard(r);
       if (vault.size > 0) {
         r.output.collected = vault.restoreDeep(r.output.collected);
         r.output.actions = vault.restoreDeep(r.output.actions);

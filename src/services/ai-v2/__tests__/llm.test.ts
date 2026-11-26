@@ -1865,7 +1865,63 @@ describe("conferência × retorno combinado, cartão já enviado e produto citad
     expect(r.systemPrompt).toContain('"id":"ped"');
     // O aviso continua (vale para o resto), com a exceção do produto citado.
     expect(r.systemPrompt).toContain("# Sem material para esta mensagem");
-    expect(r.systemPrompt).toContain("Exceção: se a mensagem pede um dos produtos");
+    expect(r.systemPrompt).toContain("Exceção: se a mensagem trata de um dos produtos do catálogo");
     expect(r.toolCalls.some((c) => c.toolName === "search_products")).toBe(true);
+  });
+});
+
+describe("produto citado pelo nome: cartão garantido e dados no prompt (reteste 25/11)", () => {
+  const PED = { id: "ped", name: "Pedagogia", sku: null, type: "SERVICE", unit: "mês", price: 212.45, priceFormatted: "R$ 212,45", listPrice: 303.5, listPriceFormatted: "R$ 303,50", discountPercent: 30, description: null, customFields: [] };
+  const cardConfig = () => baseConfig({ productPolicy: { enabled: true, sendCard: true } } as Partial<V2AgentConfig>);
+  const ctx = (c: V2AgentConfig) => ({ contact: null, deals: [], selectedDeal: null, fields: c.contextFields });
+  beforeEach(() => {
+    vi.clearAllMocks();
+    (findV2ProductsNamedIn as ReturnType<typeof vi.fn>).mockImplementation(async (a: { message: string }) => (/pedagogia/i.test(a.message) ? [PED] : []));
+  });
+
+  it("\"quero Pedagogia\" e a resposta não pediu o cartão: o cartão vai com o id já resolvido", async () => {
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(makeLLMResponse(JSON.stringify({ reply: "Pedagogia é uma ótima escolha! Te mandei o curso aqui embaixo.", actions: [] })));
+    const config = cardConfig();
+    const r = await callV2LLM({ agentId: "agent-1", config, context: ctx(config), userMessage: "quero Pedagogia", stage: "active" });
+    expect(r.output.actions).toEqual(expect.arrayContaining([expect.objectContaining({ type: "send_product", productId: "ped" })]));
+    expect(r.systemPrompt).toContain("não chame search_products de novo para eles");
+  });
+
+  it("não força o cartão: com transferência, cartão desligado, produto já tratado na conversa ou resposta que já pede o cartão", async () => {
+    const run = async (reply: Record<string, unknown>, config: V2AgentConfig, previousMessages: Array<{ role: "user" | "assistant"; content: string }> = []) => {
+      (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(makeLLMResponse(JSON.stringify({ actions: [], ...reply })));
+      const r = await callV2LLM({ agentId: "agent-1", config, context: ctx(config), userMessage: "quero Pedagogia", stage: "active", previousMessages });
+      return r.output.actions.filter((a) => a.type === "send_product").length;
+    };
+    expect(await run({ reply: "Vou chamar alguém.", handoff: true }, cardConfig())).toBe(0);
+    expect(await run({ reply: "Pedagogia é ótima!" }, baseConfig({ productPolicy: { enabled: true, sendCard: false } } as Partial<V2AgentConfig>))).toBe(0);
+    expect(await run({ reply: "Pedagogia é ótima!" }, cardConfig(), [{ role: "user", content: "quero Pedagogia" }, { role: "assistant", content: "Te mandei o curso." }])).toBe(0);
+    expect(await run({ reply: "Pedagogia é ótima!", actions: [{ type: "send_product", productId: "ped" }] }, cardConfig())).toBe(1);
+  });
+
+  it("recusa de search_products com o produto já resolvido traz o produto, não só \"limite atingido\"", async () => {
+    (searchV2Products as ReturnType<typeof vi.fn>).mockResolvedValue({ total: 0, products: [] });
+    const denied: unknown[] = [];
+    (generateWithTools as ReturnType<typeof vi.fn>).mockImplementation(async (a: { tools: Record<string, { execute: (i: unknown, o: unknown) => Promise<unknown> }> }) => {
+      for (const q of ["pedagogia graduacao", "pedagogia licenciatura", "pedagogia semipresencial"]) denied.push(await a.tools.search_products.execute({ query: q }, {}));
+      return makeLLMResponse(JSON.stringify({ reply: "Pedagogia é ótima!", actions: [] }));
+    });
+    const config = baseConfig({ productPolicy: { enabled: true, sendCard: true }, toolGovernor: { maxCallsPerTurn: 6, maxRepeatsPerTool: 2 } } as Partial<V2AgentConfig>);
+    await callV2LLM({ agentId: "agent-1", config, context: ctx(config), userMessage: "quero Pedagogia", stage: "active" });
+    expect(denied[2]).toMatchObject({ limitReached: true, products: [expect.objectContaining({ id: "ped", price: "R$ 212,45" })] });
+  });
+
+  it("\"quanto fica?\" depois de \"quero Pedagogia\", sem o cartão no histórico: os dados do produto vão ao prompt", async () => {
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(makeLLMResponse(JSON.stringify({ reply: "Fica R$ 212,45 por mês no primeiro semestre.", actions: [] })));
+    const config = cardConfig();
+    const r = await callV2LLM({
+      agentId: "agent-1", config, context: ctx(config), userMessage: "quanto fica?", stage: "active",
+      previousMessages: [{ role: "user", content: "quero Pedagogia" }, { role: "assistant", content: "Pedagogia é ótima! Te mandei o curso aqui embaixo." }],
+    });
+    expect(r.systemPrompt).toContain("# Produtos já citados nesta conversa");
+    expect(r.systemPrompt).toContain("R$ 212,45");
+    expect(r.output.reply).toBe("Fica R$ 212,45 por mês no primeiro semestre.");
+    // Já tratado na conversa: não reenvia o cartão.
+    expect(r.output.actions.some((a) => a.type === "send_product")).toBe(false);
   });
 });

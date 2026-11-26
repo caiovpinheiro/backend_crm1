@@ -173,7 +173,19 @@ export async function searchV2Products(args: {
       const cfText = p.customValues
         .map((v) => `${v.customField.name} ${v.customField.label} ${v.value}`)
         .join(" ");
+      // Nome igual à busca vem primeiro; a palavra inteira no nome vem antes
+      // de quem só a contém ("Pedagogia" antes de "Psicopedagogia"). Antes
+      // todos empatavam, a ordem alfabética cortava o curso pedido no limite
+      // e o modelo repetia a busca até o teto.
+      const nameNorm = normalizeSearch(p.name);
+      const termNorm = normalizeSearch(term);
+      const nameBonus = termNorm && nameNorm === termNorm
+        ? 200
+        : termNorm && ` ${nameNorm} `.includes(` ${termNorm} `)
+          ? 50
+          : 0;
       const score =
+        nameBonus +
         scoreTextMatch(p.name, term) +
         scoreTextMatch(p.sku ?? "", term) +
         scoreTextMatch(p.description ?? "", term) +

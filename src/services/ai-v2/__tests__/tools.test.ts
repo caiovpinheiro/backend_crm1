@@ -291,3 +291,23 @@ describe("findV2ProductsNamedIn — produto citado pelo nome na mensagem", () =>
     expect(await findV2ProductsNamedIn({ message: "pedagogia, letras ou administração?", max: 2 })).toEqual([]);
   });
 });
+
+describe("searchV2Products — nome igual primeiro", () => {
+  beforeEach(() => vi.clearAllMocks());
+  it("\"pedagogia\": o curso Pedagogia vem antes dos que só contêm a palavra (antes ficava fora do limite)", async () => {
+    const mk = (id: string, name: string) => ({ id, name, sku: null, type: "SERVICE", unit: "mês", price: 100, description: null, customValues: [], courseConfig: null });
+    (prisma.product.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([
+      mk("d1", "DESIGN INSTRUCIONAL E PEDAGOGIA DO E-LEARNING"),
+      mk("n1", "NEUROPSICOPEDAGOGIA"),
+      mk("n2", "NEUROPSICOPEDAGOGIA"),
+      mk("e1", "PEDAGOGIA EMPRESARIAL E EDUCACAO CORPORATIVA"),
+      mk("e2", "PEDAGOGIA EMPRESARIAL E EDUCACAO CORPORATIVA"),
+      mk("ps", "PSICOPEDAGOGIA"),
+      mk("ped", "Pedagogia"),
+    ]);
+    const r = await searchV2Products({ query: "pedagogia", limit: 5 });
+    expect(r.products[0].id).toBe("ped");
+    // Palavra inteira no nome antes de quem só a contém.
+    expect(r.products.slice(1, 4).map((p) => p.id)).toEqual(expect.arrayContaining(["d1", "e1", "e2"]));
+  });
+});
