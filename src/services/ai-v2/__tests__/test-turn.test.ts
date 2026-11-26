@@ -23,6 +23,11 @@ vi.mock("@/services/ai/provider", () => ({
   embedTexts: vi.fn().mockRejectedValue(new Error("sem rede no teste")),
 }));
 
+vi.mock("../product-card", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../product-card")>()),
+  buildV2ProductCard: vi.fn(async () => ({ productId: "p1", name: "Gestão de RH", text: "Gestão de RH • EAD • De R$ 184,30 por R$ 129,01 ao mês.", image: { url: "https://x/img.png", mimeType: "image/png", name: "img" } })),
+}));
+
 vi.mock("../context", () => ({
   loadV2Context: mocks.loadV2Context,
   buildAskDealMessage: mocks.buildAskDealMessage,
@@ -430,5 +435,33 @@ describe("simulateV2Turn — igual à produção", () => {
     const { simulateV2Turn } = await import("../test-turn");
     const r = await simulateV2Turn("agent-1", cfg, "e agora?", history, undefined, undefined, undefined, "active", "pag");
     expect(r.themeId).toBe("pag");
+  });
+});
+
+describe("gaveta: ordem apresentação → cartão → pergunta", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.loadV2Context.mockResolvedValue({
+      contact: null, citableContact: null, deals: [], selectedDeal: null, citableDeal: null,
+      fields: { contact: [], deal: [] }, exposure: { readableKeys: [], citableKeys: [], orgWide: false }, dealSelectionReason: "",
+    });
+  });
+
+  it("com cartão e bolhas, a pergunta final sai depois da prévia do cartão", async () => {
+    mocks.tryGetAgentApiKey.mockResolvedValue("sk-test");
+    mocks.callV2LLMTest.mockResolvedValue({
+      output: {
+        reply: "Gestão de RH fica R$ 129,01 por mês. Te mandei o curso aqui embaixo 😊\n\nFicou mais alguma dúvida ou seguimos para garantir sua vaga?",
+        confirmed: null, handoff: false, concluded: false, outOfScope: false, sentiment: "neutral", collected: {}, reason: "Produto",
+        actions: [{ type: "send_product", productId: "p1" }],
+      },
+      inputTokens: 10, outputTokens: 5, latencyMs: 100, toolCalls: [], systemPrompt: "",
+    });
+    const cfg = baseConfig({ replyBubbles: "split", productPolicy: { enabled: true, sendCard: true, allowedProductIds: [] } } as unknown as Partial<V2AgentConfig>);
+    const { simulateV2Turn } = await import("../test-turn");
+    const result = await simulateV2Turn("agent-1", cfg, "quanto fica gestão de RH?", [], "org-1");
+    expect(result.reply).toBe("Gestão de RH fica R$ 129,01 por mês. Te mandei o curso aqui embaixo 😊");
+    expect(result.replyAfterMaterial).toBe("Ficou mais alguma dúvida ou seguimos para garantir sua vaga?");
+    expect(result.materialText?.indexOf("R$ 129,01 ao mês")).toBeLessThan(result.materialText?.indexOf("seguimos para garantir") ?? -1);
   });
 });

@@ -3115,6 +3115,34 @@ describe("processV2Turn — correções do motor", () => {
     expect(mocks.simpleHandoff).toHaveBeenCalledTimes(1);
   });
 
+  it("cartão de produto entre as bolhas: apresentação → cartão → pergunta (não depois da pergunta)", async () => {
+    const config = baseConfig({ replyBubbles: "split", productPolicy: { enabled: true, sendCard: true, allowedProductIds: [] } } as unknown as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    const order: string[] = [];
+    mocks.sendText.mockImplementation(async (a: { text: string }) => { order.push(`texto:${a.text}`); return { sent: true }; });
+    mocks.executeActions.mockImplementation(async (actions: Array<{ type: string }>) => {
+      if (actions.length) order.push(`ações:${actions.map((a) => a.type).join(",")}`);
+      return { results: actions.map((a) => ({ action: a, ok: true })), anyHandoff: false, anyClose: false };
+    });
+    mocks.callLLM.mockResolvedValue(llmOut({
+      reply: "Gestão de RH fica R$ 129,01 por mês no primeiro semestre. Te mandei o curso aqui embaixo 😊\n\nFicou mais alguma dúvida ou seguimos para garantir sua vaga?",
+      actions: [{ type: "send_product", productId: "p1" }] as never,
+    }));
+    await run("quanto fica gestão de RH?");
+    const iCard = order.findIndex((o) => o.includes("send_product"));
+    const iIntro = order.findIndex((o) => o.includes("aqui embaixo"));
+    const iAsk = order.findIndex((o) => o.includes("seguimos para garantir"));
+    expect(iIntro).toBeGreaterThanOrEqual(0);
+    expect(iIntro).toBeLessThan(iCard);
+    expect(iCard).toBeLessThan(iAsk);
+    // O cartão não sai de novo depois.
+    expect(order.filter((o) => o.includes("send_product"))).toHaveLength(1);
+    mocks.sendText.mockReset();
+    mocks.sendText.mockResolvedValue({ sent: true });
+    mocks.executeActions.mockReset();
+    mocks.executeActions.mockResolvedValue({ results: [], anyHandoff: false, anyClose: false });
+  });
+
   it("fecho configurado vai no fim da resposta; não vai quando transfere", async () => {
     const config = baseConfig({
       replyEnding: { procedure: { enabled: true, phrases: ["Me avisa se funcionou."] }, info: { enabled: false, phrases: [] } },
