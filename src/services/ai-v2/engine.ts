@@ -336,8 +336,19 @@ async function arrivedBeforeLastReply(conversationId: string, messageIds: string
     const own = await db.message.findMany({ where: { id: { in: messageIds } }, select: { createdAt: true } });
     if (own.length === 0) return false;
     const last = new Date(Math.max(...own.map((m) => new Date(m.createdAt).getTime())));
+    // Só resposta que chegou ao cliente: nota interna, resumo da
+    // transferência entre agentes e evento de sistema não respondem nada.
+    // O resumo gravado na transferência Pré → Pós contava como resposta e o
+    // "oi" do cliente ficava sem nenhuma.
     const reply = await db.message.findFirst({
-      where: { conversationId, direction: "out", createdAt: { gt: last } },
+      where: {
+        conversationId,
+        direction: "out",
+        isPrivate: false,
+        authorType: { in: ["bot", "human"] },
+        messageType: { notIn: ["note", SUMMARY_MESSAGE_TYPE] },
+        createdAt: { gt: last },
+      },
       select: { id: true },
     });
     return !!reply;
@@ -1134,6 +1145,9 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   if (
     stage !== "closed" &&
     !(owner === "pessoa" && waitingInQueue) &&
+    // Acabou de receber a conversa de outro agente de IA: o que saiu antes
+    // foi do outro agente (ou só a passagem); este ainda não respondeu nada.
+    !handedByAnotherAgent &&
     (!input.messageType || input.messageType === "text") &&
     isFillerMessage(input.userMessage) &&
     (await arrivedBeforeLastReply(input.conversationId, input.messageIds))

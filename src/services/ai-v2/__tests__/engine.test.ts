@@ -1953,6 +1953,40 @@ describe("processV2Turn — correções do motor", () => {
     expect(mocks.sendText.mock.calls.map((c) => c[0].text as string).join("|")).toContain("Como posso ajudar");
   });
 
+  it("\"oi\" depois do resumo da passagem entre agentes: resumo não é resposta, e quem acabou de receber a conversa responde", async () => {
+    const config = baseConfig();
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.messageFindMany.mockImplementation(async (args: { where?: { id?: { in?: string[] } } }) =>
+      args?.where?.id?.in ? [{ createdAt: new Date("2026-11-26T00:57:55Z") }] : [],
+    );
+    // Só conta como resposta a mensagem pública do agente ou de pessoa; o resumo (ai_summary, privado) não.
+    const seen: unknown[] = [];
+    mocks.messageFindFirst.mockImplementation(async (args: { where?: Record<string, unknown> }) => {
+      seen.push(args?.where);
+      const w = args?.where ?? {};
+      const onlyPublic = w.isPrivate === false && JSON.stringify(w.messageType ?? {}).includes("ai_summary");
+      return w.direction === "out" && !onlyPublic ? { id: "summary-1" } : null;
+    });
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "Oi! Como posso te ajudar?" }));
+
+    mocks.getState.mockResolvedValue(makeState("active"));
+    await run("Oi", { messageIds: ["m-oi"] });
+    expect(mocks.callLLM).toHaveBeenCalled();
+    expect(seen.some((w) => (w as { isPrivate?: boolean })?.isPrivate === false)).toBe(true);
+
+    // Conversa recebida de outro agente agora: o filtro nem roda, mesmo com resposta pública depois.
+    mocks.callLLM.mockClear();
+    mocks.messageFindFirst.mockResolvedValue({ id: "out-outro-agente" });
+    mocks.getState.mockResolvedValue({ ...makeState("active"), agentId: "agent-0" });
+    await run("Oi", { messageIds: ["m-oi-2"] });
+    expect(mocks.logTurn.mock.calls.at(-1)![0].discardedActions ?? []).not.toEqual([{ type: "no_reply", reason: "answered meanwhile" }]);
+
+    mocks.messageFindFirst.mockReset();
+    mocks.messageFindFirst.mockImplementation(async () => null);
+    mocks.messageFindMany.mockReset();
+    mocks.messageFindMany.mockResolvedValue([]);
+  });
+
   it("'?' que chegou enquanto ele respondia a anterior não recebe outra resposta", async () => {
     const config = baseConfig();
     mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
