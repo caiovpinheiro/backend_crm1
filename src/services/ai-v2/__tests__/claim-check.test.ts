@@ -74,3 +74,12 @@ describe("linguagem de conversa não é afirmação de fato", () => {
     expect(notAFactClaim("O curso tem estágio obrigatório")).toBe(false);
   });
 });
+
+describe("checador recebe as regras inteiras", () => {
+  it("regras de ~29 mil caracteres chegam inteiras (o teto de 20 mil cortava o fim)", () => {
+    const rules = Array.from({ length: 29 }, (_, i) => `REGRA ${i + 1}. ${"x".repeat(990)}`);
+    const input = buildClaimCheckInput({ reply: "ok", sources: [...rules, "Sinto muito... Eu vejo o cancelamento com você aqui."], clientTexts: [] });
+    expect(input).toContain("REGRA 29.");
+    expect(input).toContain("Eu vejo o cancelamento com você aqui.");
+  });
+});
