@@ -42,11 +42,11 @@ import { noteV2Fact, peekV2Fact, runWithV2Trace, traceStep, v2TraceWasLogged } f
 import { evaluateV2StopLimits, parseV2Counters, shouldStopStalled, type V2Counters } from "./limits";
 import { answerToPostCloseQuestion, classifyPostCloseMessage, getPostCloseBehavior, isGreetingOnlyMessage, keepOpenOnNewRequest, postCloseHandoffMessage, postCloseQuestion, postCloseShortReply, isExplicitResolution } from "./closure";
 import { isConfusionMessage, rephraseAfterConfusion } from "./confusion";
-import { announcesTransfer, answersBeforeHandoff, applyNoSourceGuard, conditionalHandoff, handoffExplanation, type V2PrefetchFact } from "./no-source";
+import { announcesTransfer, answersBeforeHandoff, applyNoSourceGuard, conditionalHandoff, handoffExplanation, hasContentBeyondQuestion, noSourceReplyMessage, withoutTrailingQuestion, type V2PrefetchFact } from "./no-source";
 import { NONSENSE_LIMIT_REASON } from "./limits";
 import { applyV2Tabulation } from "./tabulation";
 import { withoutChoiceQuestionAfterSteps, applyReplyEnding, asksClient, classifyReply, effectiveReplyEnding, isGreetingOnlyReply, replyEndingButtons, replyEndingPhrases, withoutReplyEndings } from "./reply-ending";
-import { hasSearchableQuestion, knowledgeChunkTexts, lookupResultTexts, repeatFallback } from "./ground-reply";
+import { hasSearchableQuestion, isNearDuplicateReply, knowledgeChunkTexts, lookupResultTexts, repeatFallback } from "./ground-reply";
 import { splitReplyBubbles } from "./conversation-profile";
 import { voiceModelInfo } from "./voice-provider";
 import { loadPriorV2Summary, summaryEnabled, updateRunningSummary, writeV2Summary, SUMMARY_MESSAGE_TYPE } from "./summary";
@@ -593,6 +593,52 @@ async function queuedSince(conversationId: string, since: Date | undefined): Pro
     });
     if (!pending?.createdAt) return false;
     return new Date(pending.createdAt).getTime() >= new Date(since).getTime() - 5_000;
+  } catch {
+    return false;
+  }
+}
+
+/** Departamento atual da conversa (fila em que ela espera). */
+async function conversationDepartmentId(conversationId: string): Promise<string | null> {
+  try {
+    const row = await prisma.conversation.findUnique({ where: { id: conversationId }, select: { departmentId: true } }) as { departmentId?: string | null } | null;
+    return row?.departmentId ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Campos nativos do negócio: não dizem o que a pessoa quer (curso, produto, plano). */
+const NATIVE_DEAL_CONTEXT_KEYS = new Set([
+  "id", "number", "title", "value", "status", "stage", "stageId", "stageName", "pipeline", "pipelineId",
+  "owner", "ownerId", "ownerName", "expectedClose", "lostReason", "source", "createdAt", "updatedAt",
+]);
+
+/**
+ * Campo personalizado do negócio, configurado em "Dados do negócio" e já
+ * preenchido (ex.: curso de inscrição vindo do formulário): a pessoa já
+ * disse o que quer. Devolve o rótulo do primeiro, ou null.
+ */
+export function knownInterestFromDeal(config: V2AgentConfig, dealRaw: Record<string, unknown> | null | undefined): string | null {
+  if (!dealRaw) return null;
+  for (const f of config.contextFields?.deal ?? []) {
+    if (NATIVE_DEAL_CONTEXT_KEYS.has(f.key)) continue;
+    if (!f.permissions?.includes("read") && !f.permissions?.includes("cite")) continue;
+    const v = dealRaw[f.key];
+    if (v != null && String(v).trim()) return f.label || f.key;
+  }
+  return null;
+}
+
+/** A mensagem chegou de um anúncio Click-to-WhatsApp (referral da Meta): o assunto já vem do anúncio. */
+async function inboundCameFromAd(messageIds: string[] | undefined): Promise<boolean> {
+  if (!messageIds?.length) return false;
+  try {
+    const rows = (await prisma.message.findMany({
+      where: { id: { in: messageIds } },
+      select: { referral: true },
+    })) as Array<{ referral?: unknown }> | undefined;
+    return (rows ?? []).some((r) => r?.referral != null && typeof r.referral === "object");
   } catch {
     return false;
   }
@@ -2024,6 +2070,12 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
           traceStep("entrada", "O agente já respondeu nesta conversa (atalho) → segue sem as boas-vindas");
         } else if (!isGreetingOnlyMessage(input.userMessage)) {
           traceStep("entrada", "Primeira mensagem já traz o pedido → responde direto, sem as boas-vindas");
+        } else if (knownInterestFromDeal(config, context.selectedDealRaw)) {
+          // As boas-vindas perguntam o que a pessoa quer; o negócio já diz
+          // (formulário, importação). O modelo cumprimenta e segue dali.
+          traceStep("entrada", `O negócio já traz "${knownInterestFromDeal(config, context.selectedDealRaw)}" → responde direto, sem as boas-vindas`);
+        } else if (await inboundCameFromAd(input.messageIds)) {
+          traceStep("entrada", "A mensagem veio de um anúncio (o assunto já é conhecido) → responde direto, sem as boas-vindas");
         } else {
           const superseded = await newerInboundArrived(input.conversationId, input.messageIds);
           const rendered = superseded ? "" : renderMessage(config.entry.openingMessage, vars, defaultFormatter());
@@ -2247,6 +2299,8 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // afirma fatos (número, prazo, passo, caminho, link) que não vêm do
   // cadastro do cliente. Aplica a saída configurada.
   let noSourceApplied = false;
+  // A conferência respondeu só com a frase de "sem fonte": sem fecho nem anexo do material.
+  if ((peekV2Fact("verification") as { onlyFallback?: boolean } | undefined)?.onlyFallback) noSourceApplied = true;
   if (llmOutput) {
     const guarded = applyNoSourceGuard({
       config,
@@ -2279,7 +2333,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     !context.contact &&
     !context.selectedDeal
   ) {
-    const noSourceMessage = config.fallback?.noSource?.message?.trim();
+    const noSourceMessage = noSourceReplyMessage(config);
     if (noSourceMessage) {
       noSourceApplied = true;
       llmOutput.handoff = false;
@@ -2814,9 +2868,13 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // do assunto (destino escolhido) ou encerra. Pergunta de esclarecimento
   // a uma pergunta do cliente não conta; orientação ou dado novo zera.
   if (themeId && themeId !== (stateRow?.themeId ?? undefined)) counters.stalledExchanges = 0;
+  // Terminar em "?" não basta: resposta que informa (valor, explicação) e
+  // fecha com pergunta avança a conversa — a regra de venda manda fechar
+  // quase toda resposta assim, e o limite transferia conversa de venda.
   const probingOnly =
     !anyHandoff && !anyClose && !stopLimits.blocksReply && replyText.trim().length > 0 &&
     (askOptions.length > 0 || coreReply.trimEnd().endsWith("?")) &&
+    !hasContentBeyondQuestion(coreReply) &&
     classifyReply(coreReply) !== "procedure" &&
     !materialFollows && outboundActions.length === 0 &&
     Object.keys(llmOutput.collected ?? {}).length === 0;
@@ -2824,12 +2882,17 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // mandou outra mensagem enquanto o agente pensava, envio barrado) não é
   // troca sem avanço — antes duas perguntas que nem chegaram estouravam o limite.
   let stallPending = false;
+  // Limite estourado: a resposta já gerada não é apagada — sai o que ela
+  // informa (sem a pergunta do fim, que ninguém do agente vai seguir) antes
+  // da transferência ou do encerramento.
+  let stalledStop = false;
   if (probingOnly && !asksClient(input.userMessage)) {
     if (shouldStopStalled(config, counters)) {
       const stalledAction = config.limits.stalledExchangesAction;
       traceStep("limites", `Limite de trocas sem avanço: ${counters.stalledExchanges} pergunta(s) seguida(s) sem resolver → ${stalledAction === "close" ? "encerra" : "sai pela saída do assunto, sem insistir"}`);
       counters.stalledExchanges = 0;
-      replyText = "";
+      stalledStop = true;
+      replyText = withoutTrailingQuestion(replyText);
       replyOptions = [];
       if (stalledAction === "close") {
         anyClose = true;
@@ -3093,6 +3156,31 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
 
   // Handoff: aviso + transferência, uma vez. Destino: o pedido na ação >
   // o do assunto ativo > o padrão da config.
+  // Já está na fila da equipe (modo "responder enquanto espera"): transferir
+  // de novo só repetia o mesmo aviso fixo a cada mensagem. Responde o que o
+  // cliente disse (sem o anúncio de transferência) e devolve à fila. Destino
+  // outro agente de IA continua transferindo.
+  const queuedDestination = requestedDestination ?? activeTheme?.handoffDestination ?? config.handoff.defaultDestination;
+  // Só vira resposta quando o destino é a mesma fila (departamento sem id ou
+  // o departamento atual da conversa). Outro setor, uma pessoa ou outro
+  // agente de IA: transfere, senão a conversa ficava na fila errada.
+  const sameQueue = anyHandoff && !anyClose && waitingInQueue && queuedDestination?.type === "department" &&
+    (!queuedDestination.id || queuedDestination.id === (await conversationDepartmentId(input.conversationId)));
+  if (sameQueue) {
+    const cause = peekV2Fact("handoffCause");
+    const fallbackOnly = cause === "verification" || cause === "no_source";
+    const answer = fallbackOnly ? noSourceReplyMessage(config) : handoffExplanation(replyText);
+    const text = answer || renderMessage(queuedMessageFor(config.handoff.queuedMessage, isWithinV2BusinessHours(config), systemMessage(config, "queueOutsideHours")), vars, defaultFormatter());
+    if (text && (await sendReply(text)).sent) sentReply = sentReply ? `${sentReply}\n${text}` : text;
+    traceStep("fila", answer
+      ? "Conversa já está na fila da equipe → não transfere de novo; responde e devolve à fila"
+      : "Conversa já está na fila da equipe → não transfere de novo; só o aviso de fila");
+    await releaseToQueue(input.conversationId);
+    owner = "pessoa";
+    anyHandoff = false;
+    llmOutput.handoff = false;
+  }
+
   if (anyHandoff && !anyClose) {
     // Citava algo sem fonte: vale a mensagem "sem material" configurada (o
     // modelo já a montou), não a de transferência padrão.
@@ -3103,18 +3191,26 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     // (a checagem barrou ou nada nos materiais cobre a mensagem). Antes a
     // mesma situação saía de três jeitos diferentes.
     const fallbackOnly = cause === "verification" || cause === "no_source";
-    const noSourceMsg = fallbackOnly ? config.fallback?.noSource?.message?.trim() ?? "" : "";
+    const noSourceMsg = fallbackOnly ? noSourceReplyMessage(config) : "";
     // Só quando a resposta do modelo é uma explicação de verdade (transferiu
     // por decisão, cliente irritado, anexo que não chega, pedido de pessoa);
     // "segue o material:" de uma mensagem pronta barrada não é explicação.
-    const explains = cause === "model" || cause === "sentiment" || cause === "media_failed" || cause === "human_request";
-    const explanation = explains && !fallbackOnly && !waitingInQueue ? handoffExplanation(replyText) : "";
+    const explains = cause === "model" || cause === "sentiment" || cause === "media_failed" || cause === "human_request" || (cause === "limit" && stalledStop);
+    let explanation = explains && !fallbackOnly && !waitingInQueue ? handoffExplanation(replyText) : "";
+    // A explicação diz o mesmo que o aviso que vem logo depois: sai só o aviso.
+    const upcomingNotice = renderMessage((requestedDestination ?? activeTheme?.handoffDestination)?.message?.trim() || config.handoff.message, vars, defaultFormatter());
+    if (explanation && upcomingNotice && isNearDuplicateReply(explanation, upcomingNotice)) {
+      traceStep("resposta", "A explicação repetia o aviso de transferência → sai só o aviso");
+      explanation = "";
+    }
     if (explanation) {
       const answered = await sendReply(explanation);
       if (answered.sent) {
         sentReply = explanation;
         traceStep("resposta", cause === "sentiment"
           ? "Cliente irritado: responde antes de transferir"
+          : cause === "limit"
+            ? "Limite de trocas sem avanço: a resposta gerada sai (sem a pergunta do fim) antes de transferir"
           : cause === "media_failed"
             ? "Explica que o anexo não está chegando e chama a equipe"
             : "Explica antes de transferir; a mensagem configurada vem em seguida");
@@ -3144,9 +3240,13 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   // Encerramento
   if (anyClose) {
     const goodbye = config.closure.goodbyeMessage;
+    if (goodbye && !anyHandoff && stalledStop && replyText.trim()) {
+      if ((await sendReply(replyText)).sent) sentReply = replyText;
+      traceStep("encerramento", "Limite de trocas sem avanço: a resposta gerada sai (sem a pergunta do fim) antes da despedida");
+    }
     if (goodbye && !anyHandoff) {
       const goodbyeRendered = renderMessage(goodbye, vars, defaultFormatter());
-      if ((await sendReply(goodbyeRendered)).sent) sentReply = goodbyeRendered;
+      if ((await sendReply(goodbyeRendered)).sent) sentReply = sentReply ? `${sentReply}\n${goodbyeRendered}` : goodbyeRendered;
     } else if (!anyHandoff && replyText.trim()) {
       // Sem despedida configurada, sai a resposta do modelo ("Combinado!
       // Qualquer coisa, é só chamar."). Antes era descartada e o cliente

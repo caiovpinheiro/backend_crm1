@@ -1091,6 +1091,12 @@ export async function sendV2TextMessage(args: {
   dedupeIgnore?: readonly string[];
   /** Aviso de fila, com a conversa sem responsável. */
   queueNotice?: boolean;
+  /**
+   * Envio que não depende de a conversa estar com o agente (passo da régua
+   * com responsável humano que ainda não falou). Continua barrado se a
+   * última mensagem enviada foi de uma pessoa.
+   */
+  bypassAssignee?: boolean;
 }): Promise<{ sent: boolean; reason?: string }> {
   if (!args.text.trim()) return { sent: false, reason: "empty" };
   const text = toWhatsAppText(args.text);
@@ -1111,7 +1117,7 @@ export async function sendV2TextMessage(args: {
     channel: args.channel === "baileys" ? "baileys" : "meta",
     // Aviso de fila: a conversa está na fila, sem responsável. A trava de
     // "pessoa já respondeu" continua valendo.
-    bypassAssigneeCheck: args.queueNotice === true,
+    bypassAssigneeCheck: args.queueNotice === true || args.bypassAssignee === true,
     humanBehavior: args.humanBehavior ?? v2HumanBehavior({}),
     ...(interactive ? { interactive } : {}),
     ...(args.bypassDuplicateGuard ? { bypassDuplicateGuard: true } : {}),

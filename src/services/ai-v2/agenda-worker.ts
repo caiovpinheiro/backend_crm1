@@ -172,18 +172,18 @@ type PlanCandidate = {
 /**
  * Conversas em que a régua pode andar: agente v2 com régua configurada, a
  * última mensagem é do agente, o cliente não respondeu depois, o ticket
- * está com o agente (aberto, ou encerrado pelo próprio agente) e é o ticket
- * mais recente do contato. Sem passo aberto (PENDING/SENDING).
+ * está aberto (com o agente, sem responsável ou com uma pessoa que ainda
+ * não escreveu depois dele — a última mensagem é do agente) ou encerrado
+ * pelo próprio agente, e é o ticket mais recente do contato. Outro agente
+ * de IA com a conversa: fora. Sem passo aberto (PENDING/SENDING).
  */
 async function listPlanCandidates(now: Date): Promise<PlanCandidate[]> {
   return db.$queryRawUnsafe<PlanCandidate[]>(
     `SELECT c."id" AS conversation_id, c."organizationId" AS organization_id, c."contactId" AS contact_id,
-            c."assignedToId" AS agent_user_id, a."id" AS agent_config_id, a."simpleConfig" AS simple_config,
+            last_out."aiAgentUserId" AS agent_user_id, a."id" AS agent_config_id, a."simpleConfig" AS simple_config,
             c."lastInboundAt" AS last_inbound_at, last_out."id" AS last_out_id, last_out."createdAt" AS last_out_at,
             d."id" AS deal_id, d."stageId" AS deal_stage_id, st."name" AS stage_name, p."name" AS pipeline_name
        FROM "conversations" c
-       JOIN "users" u ON u."id" = c."assignedToId" AND u."type" = 'AI'
-       JOIN "ai_agent_configs" a ON a."userId" = u."id" AND a."active" = true AND a."engine" = 'simple'
        LEFT JOIN "ai_simple_conversation_states" s ON s."conversationId" = c."id"
        JOIN LATERAL (
          SELECT m."id", m."createdAt", m."aiAgentUserId" FROM "messages" m
@@ -191,6 +191,9 @@ async function listPlanCandidates(now: Date): Promise<PlanCandidate[]> {
             AND COALESCE(m."isPrivate", false) = false AND m."messageType" <> 'note'
           ORDER BY m."createdAt" DESC LIMIT 1
        ) last_out ON true
+       JOIN "users" u ON u."id" = last_out."aiAgentUserId" AND u."type" = 'AI'
+       JOIN "ai_agent_configs" a ON a."userId" = u."id" AND a."active" = true AND a."engine" = 'simple'
+       LEFT JOIN "users" assignee ON assignee."id" = c."assignedToId"
        JOIN LATERAL (
          SELECT dd."id", dd."stageId" FROM "deals" dd
           WHERE dd."status" = 'OPEN' AND dd."organizationId" = c."organizationId"
@@ -203,10 +206,10 @@ async function listPlanCandidates(now: Date): Promise<PlanCandidate[]> {
       WHERE jsonb_typeof(a."simpleConfig"->'followUpSequences') = 'array'
         AND jsonb_array_length(a."simpleConfig"->'followUpSequences') > 0
         AND c."updatedAt" > $1::timestamptz - make_interval(days => ${PLAN_LOOKBACK_DAYS})
-        AND last_out."aiAgentUserId" = c."assignedToId"
+        AND (c."assignedToId" IS NULL OR c."assignedToId" = last_out."aiAgentUserId" OR assignee."type" IS DISTINCT FROM 'AI')
         AND (c."lastInboundAt" IS NULL OR c."lastInboundAt" <= last_out."createdAt")
-        AND ((c."status" <> 'RESOLVED' AND (s."id" IS NULL OR s."owner" <> 'pessoa'))
-          OR (c."status" = 'RESOLVED' AND s."stage" = 'closed' AND s."closeReason" = ANY($2::text[])))
+        AND (c."status" <> 'RESOLVED'
+          OR (s."stage" = 'closed' AND s."closeReason" = ANY($2::text[])))
         AND NOT EXISTS (
           SELECT 1 FROM "ai_v2_scheduled_sends" x
            WHERE x."conversationId" = c."id" AND x."kind" = 'followup' AND x."status" IN ('PENDING','SENDING'))
@@ -325,6 +328,7 @@ async function listDue(now: Date): Promise<AgendaRow[]> {
 type ConvRow = {
   status: string;
   assigned_to_id: string | null;
+  assigned_to_type?: string | null;
   last_inbound_at: Date | null;
   channel: string | null;
   provider: string | null;
@@ -341,11 +345,12 @@ function channelKindOf(conv: Pick<ConvRow, "channel" | "provider">): "meta" | "b
 
 async function loadSnapshotData(row: AgendaRow, optOutDays: number) {
   const [conv] = await db.$queryRawUnsafe<ConvRow[]>(
-    `SELECT c."status", c."assignedToId" AS assigned_to_id, c."lastInboundAt" AS last_inbound_at, c."channel",
+    `SELECT c."status", c."assignedToId" AS assigned_to_id, u."type"::text AS assigned_to_type, c."lastInboundAt" AS last_inbound_at, c."channel",
             ch."provider", ct."name" AS contact_name, ct."phone" AS contact_phone
        FROM "conversations" c
        LEFT JOIN "channels" ch ON ch."id" = c."channelId"
        LEFT JOIN "contacts" ct ON ct."id" = c."contactId"
+       LEFT JOIN "users" u ON u."id" = c."assignedToId"
       WHERE c."id" = $1 AND c."organizationId" = $2`,
     row.conversationId,
     row.organizationId,
@@ -366,12 +371,27 @@ async function loadSnapshotData(row: AgendaRow, optOutDays: number) {
     row.organizationId,
     since,
   );
+  // Pessoa da equipe que escreveu depois da última mensagem do agente (sem
+  // mensagem do agente, depois da criação da linha).
   const [human] = await db.$queryRawUnsafe<Array<{ n: number }>>(
     `SELECT COUNT(*)::int AS n FROM "messages"
       WHERE "conversationId" = $1 AND "direction" = 'out' AND "authorType" = 'human'
-        AND COALESCE("isPrivate", false) = false AND "createdAt" > $2`,
+        AND COALESCE("isPrivate", false) = false
+        AND "createdAt" > COALESCE(
+          (SELECT MAX(a."createdAt") FROM "messages" a
+            WHERE a."conversationId" = $1 AND a."direction" = 'out' AND a."authorType" = 'bot' AND a."aiAgentUserId" = $3),
+          $2)`,
     row.conversationId,
     row.createdAt,
+    row.agentUserId,
+  );
+  // Automações e campanhas (robô sem agente de IA) também contam no teto do dia.
+  const [automation] = await db.$queryRawUnsafe<Array<{ n: number }>>(
+    `SELECT COUNT(*)::int AS n FROM "messages"
+      WHERE "conversationId" = $1 AND "direction" = 'out' AND "authorType" = 'bot' AND "aiAgentUserId" IS NULL
+        AND COALESCE("isPrivate", false) = false AND "messageType" <> 'note' AND "createdAt" > $2`,
+    row.conversationId,
+    new Date(Date.now() - DAY_MS),
   );
   const [deal] = row.dealId
     ? await db.$queryRawUnsafe<Array<{ status: string | null; stageId: string | null }>>(
@@ -391,7 +411,7 @@ async function loadSnapshotData(row: AgendaRow, optOutDays: number) {
     row.agentId,
     row.organizationId,
   );
-  return { conv: conv ?? null, state: state ?? null, inbound, humanCount: human?.n ?? 0, deal: deal ?? null, sentLast24h: sent?.n ?? 0, agent: agent ?? null };
+  return { conv: conv ?? null, state: state ?? null, inbound, humanCount: human?.n ?? 0, automationLast24h: automation?.n ?? 0, deal: deal ?? null, sentLast24h: sent?.n ?? 0, agent: agent ?? null };
 }
 
 /** Número dentro da lista de teste do agente (vazia = qualquer um). */
@@ -554,7 +574,8 @@ export async function dispatchAgendaRow(row: AgendaRow, now: Date): Promise<Disp
     configured,
     state: data.state,
     inboundSinceCreated: data.inbound.filter((m) => new Date(m.createdAt).getTime() > createdAt.getTime()).map((m) => m.content ?? ""),
-    humanOutboundSinceCreated: data.humanCount > 0,
+    humanOutboundAfterAgent: data.humanCount > 0,
+    assignedToOtherAi: !!data.conv?.assigned_to_id && data.conv.assigned_to_id !== row.agentUserId && data.conv.assigned_to_type === "AI",
     deal: data.deal,
     dealStageIdAtCreate: row.dealStageIdAtCreate,
     stopOnStageChange: row.kind === "followup" ? seq?.stopOnStageChange !== false : config?.scheduling?.stopOnStageChange === true,
@@ -562,6 +583,7 @@ export async function dispatchAgendaRow(row: AgendaRow, now: Date): Promise<Disp
     optedOut: data.inbound.some((m) => isOptOut(m.content, config?.autoSend?.optOutTerms)),
     // O "no fim" não conta no teto de envios.
     sentLast24h: isEnd ? 0 : data.sentLast24h,
+    automationSentLast24h: isEnd ? 0 : data.automationLast24h,
     maxPerDay: config?.autoSend?.maxPerDay ?? 2,
     window: config?.autoSend?.sendWindow,
     timeZone: config ? agendaTimezone(config) : "America/Sao_Paulo",
@@ -602,6 +624,8 @@ export async function dispatchAgendaRow(row: AgendaRow, now: Date): Promise<Disp
       channel,
       autonomyMode: autonomy(config!),
       humanBehavior: v2HumanBehavior(config!),
+      // Responsável humano que ainda não falou não barra o passo.
+      bypassAssignee: data.conv!.assigned_to_id !== row.agentUserId,
     });
   };
   const turnLog = (reply: string | undefined, executed: Array<{ action: { type: string; [k: string]: unknown }; ok: boolean }>, extra: { handoff?: boolean; closed?: boolean; owner?: "agente" | "pessoa" } = {}) =>

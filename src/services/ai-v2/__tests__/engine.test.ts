@@ -1838,6 +1838,32 @@ describe("processV2Turn — correções do motor", () => {
     const texts = mocks.sendText.mock.calls.map((c) => c[0].text as string);
     expect(texts).toContain("Aguarde na fila, por favor.");
     expect(texts).not.toContain("Vou transferir.");
+    // Já está na fila: não transfere de novo, só devolve à fila.
+    expect(mocks.simpleHandoff).not.toHaveBeenCalled();
+    expect(mocks.conversationUpdateMany).toHaveBeenCalled();
+  });
+
+  it("cliente na fila, modo responder: o modelo pede transferência de novo → responde o que explicou, sem o \"já chamei\" e sem transferir", async () => {
+    const config = baseConfig({ handoff: { defaultDestination: { type: "department" }, message: "Vou transferir.", humanRequestKeywords: [], whileQueued: "answer", queuedMessage: "Aguarde na fila, por favor." } } as unknown as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.getState.mockResolvedValue(makeState("active", "pessoa"));
+    mocks.pendingFindFirst.mockResolvedValueOnce({ id: "pend-1" });
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "Sua solicitação segue em análise pela secretaria, na ordem de chegada. Já chamei o time pra te ajudar.", handoff: true }));
+    const r = await run("E aí, alguma novidade?");
+    const texts = mocks.sendText.mock.calls.map((c) => c[0].text as string);
+    expect(texts).toEqual(["Sua solicitação segue em análise pela secretaria, na ordem de chegada."]);
+    expect(mocks.simpleHandoff).not.toHaveBeenCalled();
+    expect(r.handoff).toBe(false);
+  });
+
+  it("cliente na fila, modo responder: transferência para outro setor continua sendo transferência", async () => {
+    const config = baseConfig({ handoff: { defaultDestination: { type: "department" }, message: "Vou transferir.", humanRequestKeywords: [], whileQueued: "answer", queuedMessage: "Aguarde na fila, por favor." } } as unknown as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.getState.mockResolvedValue(makeState("active", "pessoa"));
+    mocks.pendingFindFirst.mockResolvedValueOnce({ id: "pend-1" });
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "Isso é com o financeiro.", handoff: true, actions: [{ type: "handoff", destination: { type: "department", id: "dep-fin" } }] as any }));
+    await run("Quero negociar meu boleto atrasado");
+    expect(mocks.simpleHandoff).toHaveBeenCalledWith(expect.objectContaining({ destination: expect.objectContaining({ id: "dep-fin" }) }));
   });
 
   it("cliente manda só \"?\": refaz a pergunta em vez de transferir (padrão)", async () => {
@@ -1996,6 +2022,39 @@ describe("processV2Turn — correções do motor", () => {
     await run("Oi, preciso da fatura");
     expect(mocks.callLLM).toHaveBeenCalled();
     expect(mocks.sendText.mock.calls.map((c) => c[0].text as string).join("|")).not.toContain("assistente virtual");
+  });
+
+  it("só cumprimento, mas o negócio já traz o curso (campo configurado e preenchido) ou a mensagem veio de anúncio: sem boas-vindas fixas", async () => {
+    const config = baseConfig({
+      entry: { confirmContact: false, onDealNotFound: "ask_identification", openingEnabled: true, openingMessage: "Oi! Qual curso você tá pensando em fazer?" },
+      contextFields: { contact: [], deal: [{ key: "stage", permissions: ["read"] }, { key: "cf-curso", label: "curso_de_inscricao", permissions: ["read", "cite"] }] },
+    } as unknown as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.getState.mockResolvedValue(makeState("idle"));
+    mocks.loadContext.mockResolvedValue({ ...CONTEXT_WITH_DEAL, contactId: "contact-1", selectedDealRaw: { id: "deal-1", title: "Inscrição", stage: "Novo", "cf-curso": "Enfermagem" } });
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "Oi! Vi que você se interessou por Enfermagem. Quer que eu te mostre a condição de hoje?" }));
+    await run("Oi");
+    expect(mocks.callLLM).toHaveBeenCalled();
+    expect(mocks.sendText.mock.calls.map((c) => c[0].text as string).join("|")).not.toContain("Qual curso você tá pensando");
+
+    // Campo vazio e mensagem sem anúncio: as boas-vindas saem.
+    mocks.sendText.mockClear();
+    mocks.callLLM.mockClear();
+    mocks.loadContext.mockResolvedValue({ ...CONTEXT_WITH_DEAL, contactId: "contact-1", selectedDealRaw: { id: "deal-1", title: "Inscrição", stage: "Novo", "cf-curso": "" } });
+    await run("Oi", { messageIds: ["m-1"] });
+    expect(mocks.callLLM).not.toHaveBeenCalled();
+    expect(mocks.sendText.mock.calls.map((c) => c[0].text as string)).toEqual(["Oi! Qual curso você tá pensando em fazer?"]);
+
+    // Mensagem que chegou com o referral do anúncio: sem boas-vindas.
+    mocks.sendText.mockClear();
+    mocks.messageFindMany.mockImplementation(async (args: { where?: { id?: { in?: string[] } }; select?: { referral?: boolean } }) =>
+      args?.select?.referral ? [{ referral: { source_id: "ad-1", headline: "Enfermagem EAD" } }] : [],
+    );
+    await run("Oi", { messageIds: ["m-2"] });
+    expect(mocks.callLLM).toHaveBeenCalled();
+    expect(mocks.sendText.mock.calls.map((c) => c[0].text as string).join("|")).not.toContain("Qual curso você tá pensando");
+    mocks.messageFindMany.mockReset();
+    mocks.messageFindMany.mockResolvedValue([]);
   });
 
   it("fecho vai depois da mensagem pronta, não na apresentação", async () => {
@@ -2783,7 +2842,25 @@ describe("processV2Turn — correções do motor", () => {
       expect(result.handoff).toBe(true);
       expect(mocks.simpleHandoff).toHaveBeenCalledWith(expect.objectContaining({ destination: expect.objectContaining({ type: "department", id: "dep-dec" }) }));
       expect(sentTexts().join(" ")).toContain("Vou te passar para o setor responsável");
+      // A resposta gerada não é apagada: sai o que ela diz, sem a pergunta do fim.
+      expect(sentTexts()[0]).toBe("A rotina corrida pesa mesmo.");
       expect(sentTexts().join(" ")).not.toContain("poderia ajudar você a continuar?");
+    });
+
+    it("resposta que informa e termina em pergunta não conta como troca sem avanço, nem no limite", async () => {
+      const config = baseConfig({ themes: [PROBING_THEME as any], limits: { ...baseConfig().limits, maxStalledExchanges: 2, stalledExchangesAction: "handoff" } } as any);
+      mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+      mocks.getState.mockResolvedValue({ ...makeState("active", "agente", { stalledExchanges: 2 }), themeId: "t-dec" });
+      const reply = "Com a bolsa, a mensalidade fica em R$ 199 e o primeiro pagamento só vence em fevereiro. Vamos garantir sua vaga?";
+      mocks.callLLM.mockResolvedValue(llmOut({ reply, theme: "t-dec" }));
+
+      const result = await run("Achei interessante");
+
+      expect(result.handoff).toBe(false);
+      expect(mocks.simpleHandoff).not.toHaveBeenCalled();
+      expect(sentTexts().join(" ")).toContain("Vamos garantir sua vaga?");
+      const saved = mocks.upsertState.mock.calls.map((c) => c[0] as { counters?: { stalledExchanges?: number } }).filter((c) => c.counters).at(-1)?.counters?.stalledExchanges;
+      expect(saved).toBe(0);
     });
 
     it("pergunta que não chegou ao cliente não conta como troca sem avanço", async () => {
