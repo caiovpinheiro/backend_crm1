@@ -14,6 +14,7 @@ import { actionValueAllowed, allowedActionTypes, allowedFlowIdsFor, allowedMessa
 import { defaultV2Counters } from "./limits";
 import { decideVoice, speechMatchesReply, voiceCompanionLine, voiceConfigured } from "./voice";
 import { noteV2Fact, peekV2Fact, traceStep } from "./trace";
+import { productCardSlot, splitReplyBubbles } from "./conversation-profile";
 import { isGreetingOnlyMessage, keepOpenOnNewRequest } from "./closure";
 import { isShortAckText } from "@/lib/ai-agents/tabulation-classify-policy";
 import { applyBoldPolicy, toWhatsAppText } from "./reply-format";
@@ -76,6 +77,12 @@ export type V2TestTurnResult = {
   handoffDestination?: V2Destination | null;
   /** Texto da mensagem pronta que sairia depois da resposta (o cliente recebe os dois). */
   materialText?: string;
+  /**
+   * Bolhas da resposta que saem DEPOIS do cartão de produto (apresentação →
+   * cartão → pergunta). Já estão no fim de `materialText`; `reply` fica só
+   * com as de antes.
+   */
+  replyAfterMaterial?: string;
   /** Texto que seria falado: a resposta iria por áudio e `reply` é a linha escrita que acompanha. */
   voiceText?: string;
 };
@@ -739,6 +746,7 @@ export async function simulateV2Turn(
   // mensagem pronta). O texto da mensagem pronta entra no resultado — é o que
   // o cliente recebe e o que o comparador mede.
   let materialText = "";
+  let replyAfterMaterial = "";
   const modelActions = handoff ? [] : executedActions.filter((e) => e.action.type === "send_message_model" && typeof e.action.modelId === "string");
   if (modelActions.length > 0 && organizationId) {
     try {
@@ -896,6 +904,16 @@ export async function simulateV2Turn(
     }
   }
 
+  // Mesma ordem da produção: apresentação → cartão → pergunta. As bolhas
+  // depois do cartão saem do `reply` e vão depois da prévia, em
+  // `replyAfterMaterial` (e no fim de `materialText`, para a tela de hoje).
+  const cardSlot = !handoff && productActions.length > 0 && config.replyBubbles === "split" && materialText ? productCardSlot(splitReplyBubbles(reply)) : null;
+  if (cardSlot !== null) {
+    const bubbles = splitReplyBubbles(reply);
+    replyAfterMaterial = bubbles.slice(cardSlot).join("\n\n");
+    reply = bubbles.slice(0, cardSlot).join("\n\n");
+    materialText = `${materialText}\n\n${replyAfterMaterial}`;
+  }
   return {
     userMessage,
     appliedRuleId,
@@ -926,6 +944,7 @@ export async function simulateV2Turn(
     chosenOption,
     handoffDestination,
     ...(materialText ? { materialText } : {}),
+    ...(replyAfterMaterial ? { replyAfterMaterial } : {}),
     ...(voiceText ? { voiceText } : {}),
   };
 }

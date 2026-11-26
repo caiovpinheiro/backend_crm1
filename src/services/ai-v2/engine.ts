@@ -47,7 +47,7 @@ import { NONSENSE_LIMIT_REASON } from "./limits";
 import { applyV2Tabulation } from "./tabulation";
 import { withoutChoiceQuestionAfterSteps, applyReplyEnding, asksClient, classifyReply, effectiveReplyEnding, isGreetingOnlyReply, replyEndingButtons, replyEndingPhrases, withoutReplyEndings } from "./reply-ending";
 import { hasSearchableQuestion, isNearDuplicateReply, knowledgeChunkTexts, lookupResultTexts, repeatFallback } from "./ground-reply";
-import { splitReplyBubbles } from "./conversation-profile";
+import { productCardSlot, splitReplyBubbles } from "./conversation-profile";
 import { voiceModelInfo } from "./voice-provider";
 import { loadPriorV2Summary, summaryEnabled, updateRunningSummary, writeV2Summary, SUMMARY_MESSAGE_TYPE } from "./summary";
 import { looksLikeSystemError, saysTriedAndFailed } from "./retry-signal";
@@ -3041,11 +3041,24 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     // a última segue o envio de sempre (opções, trava de repetição).
     const bubbles = !withOptions && config.replyBubbles === "split" ? splitReplyBubbles(outText) : [];
     const sentBubbles: string[] = [];
+    // Cartão de produto no meio, como a equipe faz: apresentação → cartão →
+    // pergunta. Antes o cartão chegava depois da pergunta e o "aqui embaixo"
+    // apontava para ela.
+    const cardSlot = outboundActions.some((a) => a.type === "send_product") && !stopLimits.blocksReply && !humanTookOver
+      ? productCardSlot(bubbles)
+      : null;
     if (bubbles.length > 1) {
       for (const part of bubbles.slice(0, -1)) {
         const partRes = await sendReply(part, null, { dropIfSuperseded: true });
         if (!partRes.sent) break;
         sentBubbles.push(part);
+        if (cardSlot !== null && sentBubbles.length === cardSlot) {
+          const cards = outboundActions.filter((a) => a.type === "send_product");
+          const cardRes = await executeV2Actions(cards, actionCtx);
+          executedActions = [...executedActions, ...cardRes.results];
+          outboundActions = outboundActions.filter((a) => a.type !== "send_product");
+          traceStep("ações", `Cartão de produto entre as mensagens (depois da ${cardSlot}ª): ${cardRes.results.map((r) => `${r.action.type}${r.ok ? " ✓" : ` ✗ (${r.error ?? "erro"})`}`).join(", ")}`);
+        }
       }
       if (sentBubbles.length === bubbles.length - 1) {
         outText = bubbles[bubbles.length - 1];
