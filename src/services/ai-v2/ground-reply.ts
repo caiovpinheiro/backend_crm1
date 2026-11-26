@@ -262,16 +262,38 @@ function sourceMoneyValues(sources: string[]): number[] {
   return [...out];
 }
 
+/** Percentuais das fontes ("20%", "12,5 %", "20 por cento"), sem repetição. */
+function sourcePercentValues(sources: string[]): number[] {
+  const joined = sources.join(" ");
+  const out = new Set<number>();
+  for (const m of joined.matchAll(/(\d+(?:[.,]\d+)?)\s?%|\b(\d+(?:[.,]\d+)?)\s+por\s*cento\b/gi)) {
+    const v = Number((m[1] ?? m[2]).replace(",", "."));
+    if (Number.isFinite(v) && v > 0) out.add(v);
+    if (out.size >= 30) break;
+  }
+  return [...out];
+}
+
+/** 12.5 → "12,5%". */
+function brPercent(v: number): string {
+  return `${String(Math.round(v * 100) / 100).replace(".", ",")}%`;
+}
+
+/** Arredondamento de centavos: a conta pode fechar em meio centavo para qualquer lado. */
+const CENT_TOLERANCE = 0.0051;
+
 /**
- * Valor em dinheiro da resposta que não está nas fontes, mas é a soma ou a
- * diferença de dois valores delas ("valor do documento menos o desconto"):
- * a conta certa está sustentada. Conta errada não casa com nenhum par e
- * continua sem fonte.
+ * Valor em dinheiro da resposta que não está nas fontes, mas é conta simples
+ * com números delas: soma ou diferença de dois valores ("valor do documento
+ * menos o desconto"), percentual sobre um valor ("20% de R$ 173,50") ou o
+ * valor menos o percentual ("R$ 173,50 com 20% de desconto"). A conta certa
+ * está sustentada. Conta errada não casa com nenhuma e continua sem fonte.
  */
 export function moneyDerivations(reply: string, sources: string[]): Array<{ token: string; expr: string }> {
   const squash = (s: string) => s.replace(/\s+/g, "").replace(/\.(?=\d{3}\b)/g, "").toLowerCase();
   const haystack = squash(sources.join(" "));
   const values = sourceMoneyValues(sources);
+  const percents = sourcePercentValues(sources);
   const out: Array<{ token: string; expr: string }> = [];
   const seen = new Set<string>();
   for (const m of reply.matchAll(/R\$\s?\d[\d.]*(?:,\d{1,2})?/gi)) {
@@ -288,8 +310,55 @@ export function moneyDerivations(reply: string, sources: string[]): Array<{ toke
         else if (i !== j && a > b && Math.abs(a - b - v) < 0.005) expr = `R$ ${brMoney(a)} − R$ ${brMoney(b)}`;
       }
     }
+    // Percentual das fontes sobre um valor das fontes, ou o valor menos ele.
+    for (let i = 0; i < percents.length && !expr; i += 1) {
+      const p = percents[i];
+      if (p >= 100) continue;
+      for (let j = 0; j < values.length && !expr; j += 1) {
+        const a = values[j];
+        const part = (a * p) / 100;
+        if (Math.abs(part - v) < CENT_TOLERANCE) expr = `${brPercent(p)} de R$ ${brMoney(a)}`;
+        else if (Math.abs(a - part - v) < CENT_TOLERANCE) expr = `R$ ${brMoney(a)} − ${brPercent(p)}`;
+      }
+    }
     if (expr) out.push({ token, expr });
   }
+  return out;
+}
+
+/**
+ * Percentual da resposta que não está nas fontes, mas sai de percentuais
+ * delas: o complemento ("20% de desconto" → "paga 80%") ou a diferença entre
+ * dois ("de 30% para 20%" → "10% a menos", "10 pontos percentuais"). Soma de
+ * percentuais não entra: descontos não se somam.
+ */
+export function percentDerivations(reply: string, sources: string[]): Array<{ token: string; expr: string }> {
+  const squash = (s: string) => s.replace(/\s+/g, "").toLowerCase();
+  const haystack = squash(sources.join(" "));
+  const percents = sourcePercentValues(sources);
+  const same = (a: number, b: number) => Math.abs(a - b) < 0.0001;
+  const derive = (v: number, allowComplement: boolean): string => {
+    if (allowComplement) {
+      const p = percents.find((x) => x < 100 && same(100 - x, v));
+      if (p !== undefined) return `100% − ${brPercent(p)}`;
+    }
+    for (const a of percents) for (const b of percents) if (a > b && same(a - b, v)) return `${brPercent(a)} − ${brPercent(b)}`;
+    return "";
+  };
+  const out: Array<{ token: string; expr: string }> = [];
+  const seen = new Set<string>();
+  const add = (raw: string, number: string, allowComplement: boolean) => {
+    const token = raw.trim().replace(/[.,;:!?]+$/, "");
+    if (seen.has(token) || haystack.includes(squash(token))) return;
+    seen.add(token);
+    const v = Number(number.replace(",", "."));
+    if (!Number.isFinite(v) || v <= 0) return;
+    const expr = derive(v, allowComplement);
+    if (expr) out.push({ token, expr });
+  };
+  for (const m of reply.matchAll(/(\d+(?:[.,]\d+)?)\s?%/g)) add(m[0], m[1], true);
+  // "Pontos percentuais" é sempre diferença entre dois percentuais.
+  for (const m of reply.matchAll(/(\d+(?:[.,]\d+)?)\s+(?:pontos?\s+percentua(?:l|is)|p\.\s?p\.)/gi)) add(m[0], m[1], false);
   return out;
 }
 
@@ -300,7 +369,7 @@ export function unsupportedFigures(reply: string, sources: string[], clientTexts
   // repetir como "R$ 129" é citar o cliente, não inventar.
   const clientValues = new Set([...clientTexts.join(" ").matchAll(/\d[\d.]*(?:,\d{1,2})?/g)].map((m) => moneyValue(m[0])).filter((v): v is number => v !== null));
   const out = new Set<string>();
-  const derived = new Set(moneyDerivations(reply, sources).map((d) => d.token));
+  const derived = new Set([...moneyDerivations(reply, sources), ...percentDerivations(reply, sources)].map((d) => d.token));
   const patterns = [/\d+(?:[.,]\d+)?\s?%/g, /R\$\s?\d[\d.]*(?:,\d{1,2})?/gi];
   for (const re of patterns) {
     for (const m of reply.matchAll(re)) {

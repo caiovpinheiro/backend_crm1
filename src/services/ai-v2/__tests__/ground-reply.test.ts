@@ -114,6 +114,41 @@ describe("conta conferida com valores das fontes", () => {
     expect(unsupportedFigures("Até 13/10 você paga R$ 136,00.", [doc])).toEqual(["R$ 136,00"]);
     expect(unsupportedFigures("As duas parcelas somam R$ 1.437,20.", ["Parcela 1: R$ 795,61. Parcela 2: R$ 641,59."])).toEqual([]);
   });
+
+  it("percentual das fontes sobre um valor das fontes passa; conta errada continua sem fonte", async () => {
+    const { moneyDerivations, unsupportedFigures } = await import("../ground-reply");
+    const doc = "Mensalidade: R$ 173,50. Quem paga até o vencimento tem 20% de desconto.";
+    expect(unsupportedFigures("Com o desconto de 20% a mensalidade de R$ 173,50 fica em R$ 138,80.", [doc])).toEqual([]);
+    expect(moneyDerivations("Fica em R$ 138,80, um desconto de R$ 34,70.", [doc])).toEqual([
+      { token: "R$ 138,80", expr: "R$ 173,50 − 20%" },
+      { token: "R$ 34,70", expr: "20% de R$ 173,50" },
+    ]);
+    expect(unsupportedFigures("Fica em R$ 139,90.", [doc])).toEqual(["R$ 139,90"]);
+    // Percentual que não está nas fontes não sustenta a conta.
+    expect(unsupportedFigures("Com 30% de desconto fica em R$ 121,45.", [doc])).toEqual(["30%", "R$ 121,45"]);
+    // Conta que fecha em meio centavo vale arredondada para qualquer lado.
+    const odd = "Taxa de 15% sobre o valor de R$ 33,30.";
+    expect(unsupportedFigures("A taxa é de R$ 5,00.", [odd])).toEqual([]);
+    expect(unsupportedFigures("A taxa é de R$ 4,99.", [odd])).toEqual([]);
+    expect(unsupportedFigures("A taxa é de R$ 5,02.", [odd])).toEqual(["R$ 5,02"]);
+  });
+
+  it("percentual que é complemento ou diferença de percentuais das fontes passa; os outros continuam sem fonte", async () => {
+    const { percentDerivations, unsupportedFigures } = await import("../ground-reply");
+    const doc = "Mensalidade: R$ 173,50. Desconto de 30% na primeira mensalidade e de 20% nas seguintes.";
+    expect(unsupportedFigures("Nas seguintes você paga 80% de R$ 173,50, ou seja, R$ 138,80.", [doc])).toEqual([]);
+    expect(percentDerivations("O desconto cai de 30% para 20%: são 10 pontos percentuais a menos. Você paga 80%.", [doc])).toEqual([
+      { token: "80%", expr: "100% − 20%" },
+      { token: "10 pontos percentuais", expr: "30% − 20%" },
+    ]);
+    expect(unsupportedFigures("O desconto cai 10% depois da primeira.", [doc])).toEqual([]);
+    expect(unsupportedFigures("Você paga 75% do valor.", [doc])).toEqual(["75%"]);
+    // Soma de percentuais não é conta aceita: descontos não se somam.
+    expect(unsupportedFigures("Somando, o desconto chega a 50%.", [doc])).toEqual(["50%"]);
+    expect(percentDerivations("São 15 pontos percentuais a menos.", [doc])).toEqual([]);
+    // "Pontos percentuais" nunca é complemento.
+    expect(percentDerivations("São 80 pontos percentuais.", [doc])).toEqual([]);
+  });
 });
 
 describe("resposta que reescreve a mensagem do cliente", () => {

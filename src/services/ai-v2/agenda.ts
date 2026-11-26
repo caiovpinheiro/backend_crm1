@@ -65,6 +65,7 @@ export type AgendaKind = "scheduled" | "followup";
 export type AgendaOutcome =
   | "client_replied"
   | "human"
+  | "other_agent"
   | "stage_changed"
   | "deal_closed"
   | "conversation_closed"
@@ -325,6 +326,9 @@ export function planFollowUp(args: {
   };
 }
 
+/** Até quando um passo adiado pelo teto (somando automações) espera, contado da criação. */
+export const AUTOMATION_DEFER_MAX_DAYS = 10;
+
 export type AgendaSnapshot = {
   kind: AgendaKind;
   now: Date;
@@ -342,13 +346,21 @@ export type AgendaSnapshot = {
   state: { owner: string | null; stage: string | null; closeReason: string | null } | null;
   /** Mensagens do cliente (qualquer ticket do contato) depois da criação da linha. */
   inboundSinceCreated: string[];
-  humanOutboundSinceCreated: boolean;
+  /**
+   * Alguém da equipe escreveu ao cliente depois da última mensagem do agente
+   * (sem mensagem do agente na conversa: depois da criação da linha).
+   */
+  humanOutboundAfterAgent: boolean;
+  /** A conversa está com outro agente de IA. */
+  assignedToOtherAi?: boolean;
   deal: { status: string | null; stageId: string | null } | null;
   dealStageIdAtCreate: string | null;
   stopOnStageChange: boolean;
   phoneAllowed: boolean;
   optedOut: boolean;
   sentLast24h: number;
+  /** Mensagens de automação/campanha (robô que não é agente) nas últimas 24 h da conversa. */
+  automationSentLast24h?: number;
   maxPerDay: number;
   window: V2BusinessHoursSlot[] | undefined;
   timeZone: string;
@@ -369,9 +381,11 @@ export function decideAgendaSend(s: AgendaSnapshot): AgendaDecision {
     ? s.inboundSinceCreated.length > 0
     : s.inboundSinceCreated.some((t) => !isCourtesyOnly(t));
   if (replied) return { action: "cancel", outcome: "client_replied" };
-  if (s.humanOutboundSinceCreated || conv.assignedToId !== s.agentUserId || s.state?.owner === "pessoa") {
-    return { action: "cancel", outcome: "human" };
-  }
+  // Ter responsável humano (ou ter sido transferida) não para a régua: o
+  // passo só cai se alguém da equipe falou com o cliente depois do agente.
+  // Antes, toda conversa passada à equipe perdia os passos seguintes.
+  if (s.humanOutboundAfterAgent) return { action: "cancel", outcome: "human" };
+  if (s.assignedToOtherAi) return { action: "cancel", outcome: "other_agent" };
   const dealStatus = (s.deal?.status ?? "").toUpperCase();
   if (dealStatus === "WON" || dealStatus === "LOST") return { action: "cancel", outcome: "deal_closed" };
   if (s.stopOnStageChange && s.dealStageIdAtCreate && s.deal && s.deal.stageId !== s.dealStageIdAtCreate) {
@@ -387,6 +401,16 @@ export function decideAgendaSend(s: AgendaSnapshot): AgendaDecision {
   if (conv.channelKind === "other") return { action: "cancel", outcome: "channel" };
   if (!s.phoneAllowed) return { action: "cancel", outcome: "not_allowed" };
   if (s.sentLast24h >= s.maxPerDay) return { action: "cancel", outcome: "daily_cap" };
+  // Automações e campanhas também falaram com o cliente hoje: somadas, batem
+  // o teto. O passo não morre — fica para o dia seguinte.
+  if (s.sentLast24h + (s.automationSentLast24h ?? 0) >= s.maxPerDay) {
+    // Adiar tem prazo: passo criado há mais de AUTOMATION_DEFER_MAX_DAYS
+    // desiste (automação que fala todo dia não segura o passo para sempre).
+    if (s.now.getTime() - s.createdAt.getTime() > AUTOMATION_DEFER_MAX_DAYS * 24 * 60 * 60 * 1000) {
+      return { action: "cancel", outcome: "daily_cap" };
+    }
+    return { action: "reschedule", at: nextAllowedSlot(new Date(s.now.getTime() + 24 * 60 * 60 * 1000), s.window, s.timeZone) };
+  }
   const slot = nextAllowedSlot(s.now, s.window, s.timeZone);
   if (slot.getTime() > s.now.getTime()) return { action: "reschedule", at: slot };
   if (conv.channelKind === "baileys" || withinWhatsAppWindow(conv.lastInboundAt, s.now)) {

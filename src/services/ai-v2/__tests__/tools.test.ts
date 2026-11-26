@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { prisma } from "@/lib/prisma";
 import {
+  findV2ProductsNamedIn,
   searchV2Products,
   searchV2CrmRecords,
   searchV2Knowledge,
@@ -249,5 +250,88 @@ describe("listV2MessageModels", () => {
     const result = await listV2MessageModels({ query: "tutorial", allowedIds: ["m2"], limit: 3 });
     expect(result.models.length).toBe(1);
     expect(result.models[0].id).toBe("m2");
+  });
+});
+
+describe("findV2ProductsNamedIn — produto citado pelo nome na mensagem", () => {
+  beforeEach(() => vi.clearAllMocks());
+  const catalog = [
+    { id: "ped", name: "Pedagogia, Licenciatura", sku: null, type: "SERVICE", unit: "mês", price: 303.5, description: null, customValues: [], courseConfig: null },
+    { id: "adm", name: "Administração, Bacharelado", sku: null, type: "SERVICE", unit: "mês", price: 173.5, description: null, customValues: [], courseConfig: null },
+    { id: "let", name: "Letras, Licenciatura", sku: null, type: "SERVICE", unit: "mês", price: 200, description: null, customValues: [], courseConfig: null },
+  ];
+  const mockCatalog = () =>
+    (prisma.product.findMany as ReturnType<typeof vi.fn>).mockImplementation(async (a: { where?: { id?: { in?: string[] } } }) =>
+      a?.where?.id?.in ? catalog.filter((p) => a.where!.id!.in!.includes(p.id)) : catalog,
+    );
+
+  it("acha pela palavra distintiva do nome; grau e modalidade sozinhos não contam", async () => {
+    mockCatalog();
+    expect((await findV2ProductsNamedIn({ message: "quero Pedagogia" })).map((p) => p.id)).toEqual(["ped"]);
+    expect((await findV2ProductsNamedIn({ message: "quero Administração mas agora tô dirigindo" })).map((p) => p.id)).toEqual(["adm"]);
+    expect(await findV2ProductsNamedIn({ message: "quero uma licenciatura" })).toEqual([]);
+    expect(await findV2ProductsNamedIn({ message: "quanto fica?" })).toEqual([]);
+  });
+
+  it("nome com mais palavras precisa de todas; o mais específico vence o contido nele", async () => {
+    const more = [
+      ...catalog,
+      { id: "admp", name: "Administração Pública, Tecnólogo", sku: null, type: "SERVICE", unit: "mês", price: 150, description: null, customValues: [], courseConfig: null },
+    ];
+    (prisma.product.findMany as ReturnType<typeof vi.fn>).mockImplementation(async (a: { where?: { id?: { in?: string[] } } }) =>
+      a?.where?.id?.in ? more.filter((p) => a.where!.id!.in!.includes(p.id)) : more,
+    );
+    expect((await findV2ProductsNamedIn({ message: "quero Administração" })).map((p) => p.id)).toEqual(["adm"]);
+    expect((await findV2ProductsNamedIn({ message: "quero Administração Pública" })).map((p) => p.id)).toEqual(["admp"]);
+  });
+
+  it("vários produtos citados voltam todos; acima do teto é ambíguo e não volta nenhum", async () => {
+    mockCatalog();
+    expect((await findV2ProductsNamedIn({ message: "pedagogia ou letras?" })).map((p) => p.id).sort()).toEqual(["let", "ped"]);
+    expect(await findV2ProductsNamedIn({ message: "pedagogia, letras ou administração?", max: 2 })).toEqual([]);
+  });
+});
+
+describe("searchV2Products — nome igual primeiro", () => {
+  beforeEach(() => vi.clearAllMocks());
+  it("\"pedagogia\": o curso Pedagogia vem antes dos que só contêm a palavra (antes ficava fora do limite)", async () => {
+    const mk = (id: string, name: string) => ({ id, name, sku: null, type: "SERVICE", unit: "mês", price: 100, description: null, customValues: [], courseConfig: null });
+    (prisma.product.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([
+      mk("d1", "DESIGN INSTRUCIONAL E PEDAGOGIA DO E-LEARNING"),
+      mk("n1", "NEUROPSICOPEDAGOGIA"),
+      mk("n2", "NEUROPSICOPEDAGOGIA"),
+      mk("e1", "PEDAGOGIA EMPRESARIAL E EDUCACAO CORPORATIVA"),
+      mk("e2", "PEDAGOGIA EMPRESARIAL E EDUCACAO CORPORATIVA"),
+      mk("ps", "PSICOPEDAGOGIA"),
+      mk("ped", "Pedagogia"),
+    ]);
+    const r = await searchV2Products({ query: "pedagogia", limit: 5 });
+    expect(r.products[0].id).toBe("ped");
+    // Palavra inteira no nome antes de quem só a contém.
+    expect(r.products.slice(1, 4).map((p) => p.id)).toEqual(expect.arrayContaining(["d1", "e1", "e2"]));
+  });
+});
+
+describe("Ciências Contábeis (conversa cmwwvovx90r98o7013oyk7h0i)", () => {
+  beforeEach(() => vi.clearAllMocks());
+  const mk = (id: string, name: string) => ({ id, name, sku: null, type: "PRODUCT", unit: "matrícula", price: 189.4, description: null, customValues: [], courseConfig: null });
+  const catalog = [
+    mk("cc2", "Ciências Contábeis 2.0"),
+    mk("ccb", "Ciências Contábeis (P/ Bach Adm, Econ, Atuariais)"),
+    mk("cc", "Ciências Contábeis"),
+  ];
+
+  it("a busca acha e põe o nome igual primeiro", async () => {
+    (prisma.product.findMany as ReturnType<typeof vi.fn>).mockResolvedValue(catalog);
+    const r = await searchV2Products({ query: "Ciências Contábeis", limit: 5 });
+    expect(r.products[0].id).toBe("cc");
+    expect(r.products.map((p) => p.id)).toEqual(expect.arrayContaining(["cc2", "ccb"]));
+  });
+
+  it("pelo nome na mensagem: \"2.0\" não atrapalha (as duas versões casam); a de Atuariais exige a palavra", async () => {
+    (prisma.product.findMany as ReturnType<typeof vi.fn>).mockImplementation(async (a: { where?: { id?: { in?: string[] } } }) =>
+      a?.where?.id?.in ? catalog.filter((p) => a.where!.id!.in!.includes(p.id)) : catalog,
+    );
+    expect((await findV2ProductsNamedIn({ message: "Ciências contábeis" })).map((p) => p.id).sort()).toEqual(["cc", "cc2"]);
   });
 });
