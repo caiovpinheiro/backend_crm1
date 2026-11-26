@@ -941,6 +941,11 @@ export interface V2LLMOutput {
   collected: Record<string, string>;
   reason: string;
   actions: V2Action[];
+  /**
+   * Saída bruta do modelo quando o JSON não pôde ser lido (fallback de erro
+   * ou texto livre): vai para o log do turno, para diagnóstico.
+   */
+  rawOutput?: { text: string; length: number; finishReason?: string; steps?: number; toolCalls?: number };
 }
 
 export interface V2TurnContext {

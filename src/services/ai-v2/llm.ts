@@ -42,7 +42,7 @@ import { knowledgeDocTitleMapByIds } from "@/services/ai/knowledge-docs";
 import { describeV2MessageModels, type V2MessageModelSummary } from "./tools";
 import { knowledgeDocIdsFor } from "./themes";
 import { asksBackOwnData, echoesClientText, clientNamesBoundToFacts, hasSearchableQuestion, admittedMissingInstructions, isNearDuplicateReply, repeatFallback, knowledgeChunkTexts, lookupResultTexts, moneyDerivations, percentDerivations, unsupportedFacts, unsupportedFigures, unsupportedHedges, unsupportedMenuPaths, unsupportedQuotedTerms } from "./ground-reply";
-import { noteV2Fact, traceStep } from "./trace";
+import { noteV2Fact, sliceWholeChars, traceStep } from "./trace";
 import { SensitiveVault } from "./sensitive";
 import { boldInstruction, breakInlineSteps } from "./reply-format";
 import { markPastDates, tenseMismatches } from "./dates";
@@ -739,13 +739,15 @@ function sanitizeActions(v: unknown): unknown[] {
   return v.filter((a) => v2ActionSchema.safeParse(a).success);
 }
 
-function extractFirstJSONObject(text: string): string | undefined {
-  // Tenta isolar o primeiro objeto JSON válido do texto.
+/** Objetos `{...}` balanceados do texto, na ordem em que aparecem. */
+function jsonObjectCandidates(text: string): string[] {
+  const out: string[] = [];
   let firstBrace = text.indexOf("{");
   while (firstBrace !== -1) {
     let depth = 0;
     let inString = false;
     let escaped = false;
+    let end = -1;
     for (let i = firstBrace; i < text.length; i++) {
       const char = text[i];
       if (inString) {
@@ -764,26 +766,102 @@ function extractFirstJSONObject(text: string): string | undefined {
         } else if (char === "}") {
           depth--;
           if (depth === 0) {
-            return text.slice(firstBrace, i + 1);
+            end = i;
+            break;
           }
         }
       }
     }
-    firstBrace = text.indexOf("{", firstBrace + 1);
+    if (end === -1) {
+      firstBrace = text.indexOf("{", firstBrace + 1);
+      continue;
+    }
+    out.push(text.slice(firstBrace, end + 1));
+    // Segue depois deste objeto: um `{nome}` solto antes do JSON não pode
+    // esconder o objeto de verdade.
+    firstBrace = text.indexOf("{", end + 1);
   }
-  return undefined;
+  return out;
+}
+
+function extractFirstJSONObject(text: string): string | undefined {
+  // Primeiro objeto que é JSON de verdade (não o primeiro par de chaves).
+  const candidates = jsonObjectCandidates(text);
+  for (const c of candidates) {
+    try {
+      JSON.parse(c);
+      return c;
+    } catch {
+      /* próximo */
+    }
+  }
+  return candidates[0];
+}
+
+/**
+ * Lê o JSON da resposta do modelo mesmo quando vem cercado de texto ("Claro!
+ * Segue: {...}"), dentro de um bloco ```json no meio da resposta, ou depois
+ * de um `{nome}` solto. Entre vários objetos, vence o que tem `reply`.
+ */
+export function parseV2ModelJson(raw: string): unknown | undefined {
+  const text = raw.trim();
+  if (!text) return undefined;
+  const tries: string[] = [];
+  let stripped = text.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
+  if (stripped.toLowerCase().startsWith("json")) stripped = stripped.slice(4).trim();
+  tries.push(stripped);
+  for (const m of text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)) tries.push(m[1].trim());
+  for (const t of tries) {
+    try {
+      const v = JSON.parse(t);
+      if (v && typeof v === "object" && !Array.isArray(v)) return v;
+    } catch {
+      /* segue para a extração */
+    }
+  }
+  let firstParsed: unknown | undefined;
+  for (const c of jsonObjectCandidates(text)) {
+    try {
+      const v = JSON.parse(c);
+      if (!v || typeof v !== "object" || Array.isArray(v)) continue;
+      if (typeof (v as { reply?: unknown }).reply === "string") return v;
+      firstParsed ??= v;
+    } catch {
+      /* próximo candidato */
+    }
+  }
+  return firstParsed;
 }
 
 const MALFORMED_REASON = "LLM não retornou JSON válido — fallback de erro aplicado.";
 
-function buildErrorFallbackOutput(config: V2AgentConfig, rawText: string): V2LLMOutput {
+/** Quanto da saída bruta do modelo vai para o log do turno quando o parse falha. */
+const RAW_OUTPUT_LOG_CHARS = 4000;
+
+/** Como a chamada terminou: entra no log do turno junto da saída bruta. */
+export type V2RawCallInfo = { finishReason?: string; steps?: number; toolCalls?: number };
+
+function rawOutputForLog(rawText: string, info: V2RawCallInfo = {}): NonNullable<V2LLMOutput["rawOutput"]> {
+  return {
+    text: sliceWholeChars(rawText, RAW_OUTPUT_LOG_CHARS),
+    length: rawText.length,
+    ...(info.finishReason ? { finishReason: info.finishReason } : {}),
+    ...(info.steps !== undefined ? { steps: info.steps } : {}),
+    ...(info.toolCalls !== undefined ? { toolCalls: info.toolCalls } : {}),
+  };
+}
+
+function buildErrorFallbackOutput(config: V2AgentConfig, rawText: string, info: V2RawCallInfo = {}): V2LLMOutput {
   const fallback = config.fallback?.error?.message ?? config.fallback?.noSource?.message;
   const reply = fallback || "Não consegui processar sua mensagem. Vou transferir para um atendente.";
+  // A saída bruta vai junto: sem ela não dá para saber se veio vazia, cortada
+  // ou com texto em volta do JSON.
   log.warn(
-    { textLength: rawText.length },
+    { textLength: rawText.length, raw: sliceWholeChars(rawText, RAW_OUTPUT_LOG_CHARS), ...info },
     "[ai-v2] LLM não retornou JSON válido. Fallback de erro aplicado.",
   );
   return {
+    rawOutput: rawOutputForLog(rawText, info),
     reply,
     handoff: true,
     concluded: false,
@@ -796,18 +874,18 @@ function buildErrorFallbackOutput(config: V2AgentConfig, rawText: string): V2LLM
   };
 }
 
-function buildInvalidJsonFallbackOutput(config: V2AgentConfig, rawText: string): V2LLMOutput {
+function buildInvalidJsonFallbackOutput(config: V2AgentConfig, rawText: string, info: V2RawCallInfo = {}): V2LLMOutput {
   const cleaned = rawText.trim();
   if (!cleaned) {
-    return buildErrorFallbackOutput(config, rawText);
+    return buildErrorFallbackOutput(config, rawText, info);
   }
   // JSON quebrado (cortado, fora do schema) não pode virar mensagem para o
   // cliente — iria o `{"reply": ...` cru. Só texto livre de verdade vira reply.
   if (/^[\s`]*(json)?[\s`]*[{[]/i.test(cleaned) || /"reply"\s*:/.test(cleaned)) {
-    return buildErrorFallbackOutput(config, rawText);
+    return buildErrorFallbackOutput(config, rawText, info);
   }
   log.warn(
-    { textLength: cleaned.length },
+    { textLength: cleaned.length, raw: sliceWholeChars(cleaned, RAW_OUTPUT_LOG_CHARS), ...info },
     "[ai-v2] LLM não devolveu JSON válido. Usando texto livre como reply.",
   );
   return {
@@ -820,6 +898,7 @@ function buildInvalidJsonFallbackOutput(config: V2AgentConfig, rawText: string):
     collected: {},
     reason: "LLM devolveu texto livre — resposta usada como reply; schema ignorado.",
     actions: [],
+    rawOutput: rawOutputForLog(rawText, info),
   };
 }
 
@@ -862,20 +941,7 @@ async function coerceV2OutputFromRawText(args: {
       jsonMode: args.jsonMode,
     });
 
-    const text = result.text.trim().replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
-    let parsed: unknown | undefined;
-    try {
-      parsed = JSON.parse(text);
-    } catch {
-      const extracted = extractFirstJSONObject(text) ?? extractFirstJSONObject(result.text);
-      if (extracted) {
-        try {
-          parsed = JSON.parse(extracted);
-        } catch {
-          parsed = undefined;
-        }
-      }
-    }
+    const parsed = parseV2ModelJson(result.text);
 
     const validated = parsed ? v2LLMOutputSchema.safeParse(parsed) : undefined;
     if (validated?.success) {
@@ -1379,6 +1445,39 @@ async function describeAllowedFlows(ids: string[]): Promise<Array<{ id: string; 
   return rows.filter((r) => allow.has(r.id)).map((r) => ({ id: r.id, name: r.name }));
 }
 
+/** Quanto de cada consulta vai para o pedido de resposta final. */
+const FINAL_ANSWER_TOOL_RESULT_CHARS = 1500;
+const FINAL_ANSWER_TOOLS_TOTAL_CHARS = 8000;
+
+/**
+ * Trecho do prompt para a resposta final sem ferramentas: o que as consultas
+ * do turno trouxeram, em texto (o histórico com tool_use não pode ir para a
+ * Anthropic sem as ferramentas declaradas).
+ */
+export function finalAnswerSection(toolCalls: Array<{ toolName: string; args: unknown; result: unknown }>): string {
+  const lines: string[] = [];
+  let total = 0;
+  const seen = new Set<string>();
+  for (const c of toolCalls) {
+    const argsText = JSON.stringify(c.args ?? {});
+    let resultText = typeof c.result === "string" ? c.result : JSON.stringify(c.result ?? null) ?? "null";
+    const key = `${c.toolName}\u0000${argsText}\u0000${resultText}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (resultText.length > FINAL_ANSWER_TOOL_RESULT_CHARS) resultText = `${sliceWholeChars(resultText, FINAL_ANSWER_TOOL_RESULT_CHARS)}…`;
+    const line = `- ${c.toolName} ${argsText} → ${resultText}`;
+    if (total + line.length > FINAL_ANSWER_TOOLS_TOTAL_CHARS) break;
+    total += line.length;
+    lines.push(line);
+  }
+  return [
+    "# RESPOSTA FINAL",
+    "Você já fez as consultas deste turno e não há mais ferramentas. Responda agora ao cliente com o que você já tem: o que as consultas e os materiais trazem; o que não trazem, não afirme.",
+    lines.length > 0 ? `Consultas feitas neste turno:\n${lines.join("\n")}` : "",
+    "Devolva só o objeto JSON no formato exigido, sem texto fora dele.",
+  ].filter(Boolean).join("\n\n");
+}
+
 export async function callV2LLM(args: {
   agentId: string;
   config: V2AgentConfig;
@@ -1661,29 +1760,38 @@ export async function callV2LLM(args: {
       result = await generate(responseLengthToMaxTokens("long"));
     }
 
-    let text = result.text.trim();
-    // Remove fences de markdown e "json" solto no início/fim.
-    let jsonText = text.replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
-    if (jsonText.toLowerCase().startsWith("json")) {
-      jsonText = jsonText.slice(4).trim();
-    }
-
-    let parsed: unknown | undefined;
-    try {
-      parsed = JSON.parse(jsonText);
-    } catch {
-      const extracted = extractFirstJSONObject(jsonText) ?? extractFirstJSONObject(text);
-      if (extracted) {
-        try {
-          parsed = JSON.parse(extracted);
-        } catch {
-          parsed = undefined;
-        }
+    // O modelo gastou os passos consultando ferramentas (ou parou numa
+    // consulta) e não escreveu a resposta: o texto final vem vazio. Antes
+    // isso virava "Não consegui processar sua mensagem" + transferência na
+    // primeira mensagem (Sonnet repetindo search_products até o limite).
+    // Pede a resposta final sem ferramentas, com o que as consultas trouxeram.
+    let finalized = { input: 0, output: 0 };
+    if (!result.text.trim() && hasTools && result.toolCalls.length > 0) {
+      traceStep("llm", `O modelo terminou nas consultas sem escrever a resposta (${result.toolCalls.length} consulta(s), fim: ${result.finishReason ?? "?"}) → pedindo a resposta final sem ferramentas`);
+      try {
+        const fin = await generateWithTools({
+          model: args.config.model,
+          apiKey: chatKey,
+          system: [system, finalAnswerSection(result.toolCalls)].join("\n\n"),
+          messages: messages as any,
+          temperature: behaviorToTemperature(args.config.responseBehavior),
+          maxOutputTokens: responseLengthToMaxTokens(args.config.responseLength),
+          maxSteps: 1,
+          jsonMode,
+        });
+        finalized = { input: fin.inputTokens, output: fin.outputTokens };
+        // Tokens da chamada final entram em `finalized`; os da primeira ficam.
+        result = { ...fin, inputTokens: result.inputTokens, outputTokens: result.outputTokens, toolCalls: result.toolCalls, steps: result.steps + fin.steps };
+      } catch (err) {
+        log.warn({ err: err instanceof Error ? err.message : String(err) }, "[ai-v2] resposta final sem ferramentas falhou");
       }
     }
 
+    const text = result.text.trim();
+    let parsed: unknown | undefined = parseV2ModelJson(text);
+
     let validated = parsed ? v2LLMOutputSchema.safeParse(parsed) : undefined;
-    let correctorTokens = { input: 0, output: 0 };
+    let correctorTokens = { input: finalized.input, output: finalized.output };
 
     if (!validated?.success && text.trim()) {
       const coerced = await coerceV2OutputFromRawText({
@@ -1696,7 +1804,7 @@ export async function callV2LLM(args: {
         maxOutputTokens: responseLengthToMaxTokens(args.config.responseLength),
         jsonMode,
       });
-      correctorTokens = { input: coerced.inputTokens, output: coerced.outputTokens };
+      correctorTokens = { input: correctorTokens.input + coerced.inputTokens, output: correctorTokens.output + coerced.outputTokens };
       if (coerced.output) {
         parsed = coerced.output;
         validated = v2LLMOutputSchema.safeParse(parsed);
@@ -1706,7 +1814,7 @@ export async function callV2LLM(args: {
     if (!validated?.success) {
       if (!validated) {
         log.warn(
-          { textLength: text.length },
+          { textLength: text.length, finishReason: result.finishReason, steps: result.steps, toolCalls: result.toolCalls.length },
           "[ai-v2] LLM não devolveu JSON válido; normalizador também falhou.",
         );
       } else {
@@ -1715,8 +1823,12 @@ export async function callV2LLM(args: {
           "[ai-v2] LLM devolveu JSON fora do schema",
         );
       }
+      const callInfo = { finishReason: result.finishReason, steps: result.steps, toolCalls: result.toolCalls.length };
+      traceStep("llm", text
+        ? `Saída do modelo sem JSON utilizável (${text.length} caracteres, fim: ${result.finishReason ?? "?"}) — a saída bruta fica no log do turno`
+        : `Saída do modelo vazia (fim: ${result.finishReason ?? "?"}, ${result.steps} passo(s), ${result.toolCalls.length} consulta(s))`);
       return {
-        output: buildInvalidJsonFallbackOutput(args.config, text),
+        output: buildInvalidJsonFallbackOutput(args.config, text, callInfo),
         inputTokens: result.inputTokens + correctorTokens.input,
         outputTokens: result.outputTokens + correctorTokens.output,
         toolCalls: result.toolCalls,

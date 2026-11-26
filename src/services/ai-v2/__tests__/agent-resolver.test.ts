@@ -206,7 +206,7 @@ describe("pickAgentForConversation", () => {
 });
 
 describe("conversa transferida esperando na fila", () => {
-  it("o agente que transferiu volta só para o aviso de fila, sem assumir; sem fila, ninguém", async () => {
+  it("o agente que transferiu volta para a fila (aviso ou resposta), sem assumir", async () => {
     mocks.attendanceEnabled.mockResolvedValue(true);
     mocks.conversationUpdateMany.mockReset();
     mocks.conversationFindUnique.mockResolvedValue({ id: "conv-9", organizationId: "org-1", assignedToId: null, closedAt: null, channelId: null, contact: { phone: "5511900000000" }, assignedTo: null });
@@ -217,7 +217,31 @@ describe("conversa transferida esperando na fila", () => {
     expect(r).toEqual({ userId: "ai-user-1", agentConfigId: "cfg-1", wasAssigned: false, queueOnly: true });
     expect(mocks.conversationUpdateMany).not.toHaveBeenCalled();
 
-    mocks.pendingFindFirst.mockResolvedValueOnce(null);
+    // Agente que transferiu foi desligado: ninguém.
+    mocks.userFindFirst.mockResolvedValueOnce(null);
     expect(await resolveV2AgentForConversation("conv-9")).toBeNull();
+  });
+
+  it("transferência que não abriu pendência (distribuição desligada) ainda é fila: o cliente que escreve de novo tem quem atenda", async () => {
+    // Caso real (25/11): transferência para o departamento soltou a conversa
+    // na Entrada sem pendência; o segundo áudio do cliente não virou turno.
+    mocks.attendanceEnabled.mockResolvedValue(true);
+    mocks.conversationUpdateMany.mockReset();
+    mocks.conversationFindUnique.mockResolvedValue({ id: "conv-9", organizationId: "org-1", assignedToId: null, closedAt: null, channelId: null, contact: { phone: "5511900000000" }, assignedTo: null });
+    mocks.stateFindUnique.mockResolvedValue({ owner: "pessoa", updatedAt: new Date(), agentId: "cfg-1" });
+    mocks.pendingFindFirst.mockResolvedValue(null);
+    mocks.userFindFirst.mockResolvedValueOnce({ id: "ai-user-1", aiAgentConfig: { id: "cfg-1" } });
+    const r = await resolveV2AgentForConversation("conv-9");
+    expect(r).toEqual({ userId: "ai-user-1", agentConfigId: "cfg-1", wasAssigned: false, queueOnly: true });
+    expect(mocks.conversationUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("conversa encerrada depois da transferência não é fila: volta ao fluxo normal", async () => {
+    mocks.attendanceEnabled.mockResolvedValue(true);
+    const handoffAt = new Date("2026-11-25T21:54:07Z");
+    mocks.conversationFindUnique.mockResolvedValue({ id: "conv-9", organizationId: "org-1", assignedToId: null, closedAt: new Date("2026-11-25T22:30:00Z"), channelId: null, contact: { phone: "5511900000000" }, assignedTo: null });
+    mocks.stateFindUnique.mockResolvedValue({ owner: "pessoa", updatedAt: handoffAt, agentId: "cfg-1" });
+    const { queueOnlyV2Agent } = await import("../agent-resolver");
+    expect(await queueOnlyV2Agent("conv-9")).toBeNull();
   });
 });

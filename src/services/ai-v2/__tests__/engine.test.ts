@@ -32,6 +32,7 @@ const mocks = vi.hoisted(() => ({
   turnLogFindFirst: vi.fn(async (): Promise<{ reply: string | null } | null> => null),
   messageFindFirst: vi.fn(async (): Promise<{ id: string } | null> => null),
   conversationUpdateMany: vi.fn(async () => ({ count: 1 })),
+  stateUpdateMany: vi.fn(async () => ({ count: 1 })),
   turnFindUnique: vi.fn(async (): Promise<{ status: string; claimedAt: Date | null } | null> => null),
   pipelineFindFirst: vi.fn(async (): Promise<{ id: string } | null> => null),
   stageFindFirst: vi.fn(async (): Promise<{ id: string } | null> => null),
@@ -52,6 +53,7 @@ vi.mock("@/lib/prisma", () => ({
     aIAgentConfig: { findUnique: mocks.prismaAIAgentFindUnique },
     conversation: { findUnique: mocks.prismaConversationFindUnique, updateMany: mocks.conversationUpdateMany },
     distributionPending: { findFirst: mocks.pendingFindFirst },
+    aISimpleConversationState: { updateMany: mocks.stateUpdateMany },
     aISimpleTurnLog: { findFirst: mocks.turnLogFindFirst },
     message: { findMany: mocks.messageFindMany, findFirst: mocks.messageFindFirst },
     messageTemplate: { findMany: mocks.templateFindMany },
@@ -1738,23 +1740,59 @@ describe("processV2Turn — correções do motor", () => {
     expect(mocks.conversationUpdateMany).toHaveBeenCalled();
   });
 
-  it("conversa na fila sem responsável: o agente só manda o aviso de fila, sem a trava de responsável; fora da fila, nada", async () => {
-    const config = baseConfig({ handoff: { ...baseConfig().handoff, whileQueued: "answer" } } as unknown as Partial<V2AgentConfig>);
+  it("conversa na fila sem responsável, modo avisar: só o aviso de fila, sem a trava de responsável; fora da fila, nada", async () => {
+    const config = baseConfig({ handoff: { ...baseConfig().handoff, whileQueued: "notify" } } as unknown as Partial<V2AgentConfig>);
     mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
     mocks.resolveAgent.mockResolvedValue({ userId: "user-1", agentConfigId: "agent-1", wasAssigned: false, queueOnly: true });
     mocks.getState.mockResolvedValue(makeState("active", "pessoa"));
-    mocks.pendingFindFirst.mockResolvedValueOnce({ id: "pend-1" });
     await run("Quero saber a data prevista");
     expect(mocks.callLLM).not.toHaveBeenCalled();
     expect(mocks.sendText).toHaveBeenCalledTimes(1);
     expect(mocks.sendText.mock.calls[0][0]).toMatchObject({ queueNotice: true });
     expect((mocks.sendText.mock.calls[0][0] as { text: string }).text).toContain("fila");
 
+    // O dono já não é pessoa (alguém devolveu ao agente): o turno de fila não faz nada.
     mocks.sendText.mockClear();
-    mocks.pendingFindFirst.mockResolvedValueOnce(null);
+    mocks.getState.mockResolvedValue(makeState("active", "agente"));
     await run("alguém?");
     expect(mocks.sendText).not.toHaveBeenCalled();
     expect(mocks.callLLM).not.toHaveBeenCalled();
+  });
+
+  it("conversa na fila sem responsável, modo responder: o agente responde e a conversa volta para a fila", async () => {
+    // Caso real (25/11): transferido na 1ª mensagem, o cliente mandou outro
+    // áudio; com "responder enquanto espera" o agente ficava mudo.
+    const config = baseConfig({ handoff: { ...baseConfig().handoff, whileQueued: "answer" } } as unknown as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.resolveAgent.mockResolvedValue({ userId: "user-1", agentConfigId: "agent-1", wasAssigned: false, queueOnly: true });
+    mocks.getState.mockResolvedValue(makeState("active", "pessoa"));
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "O curso de Pedagogia é semipresencial." }));
+    // (O áudio chega ao motor já transcrito; o tipo não muda a regra da fila.)
+    await run("[Áudio do cliente, transcrito]: E quanto custa?");
+    expect(mocks.callLLM).toHaveBeenCalledTimes(1);
+    expect(mocks.sendText.mock.calls.map((c) => (c[0] as { text: string }).text).join("|")).toContain("Pedagogia");
+    expect(mocks.simpleHandoff).not.toHaveBeenCalled();
+    const updates = mocks.conversationUpdateMany.mock.calls.map((c) => (c as unknown[])[0] as { where: Record<string, unknown>; data: Record<string, unknown> });
+    // Pega a conversa só se ninguém pegou…
+    expect(updates[0]).toEqual({ where: { id: "conv-1", assignedToId: null }, data: { assignedToId: "user-1" } });
+    // …e no fim devolve para a fila.
+    expect(updates.at(-1)).toEqual({ where: { id: "conv-1", assignedTo: { type: "AI" } }, data: { assignedToId: null } });
+    // O estado não é gravado como "agente" no começo; no fim, volta para pessoa.
+    expect(mocks.upsertState.mock.calls.some((c) => (c[0] as { owner?: string; stage?: string }).owner === "agente" && (c[0] as { stage?: string }).stage === undefined)).toBe(false);
+    expect(mocks.stateUpdateMany).toHaveBeenCalledWith({ where: { conversationId: "conv-1", owner: "agente", stage: { not: "closed" } }, data: { owner: "pessoa" } });
+  });
+
+  it("conversa na fila, modo responder: se uma pessoa pegou antes, o agente não responde e registra o turno", async () => {
+    const config = baseConfig({ handoff: { ...baseConfig().handoff, whileQueued: "answer" } } as unknown as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.resolveAgent.mockResolvedValue({ userId: "user-1", agentConfigId: "agent-1", wasAssigned: false, queueOnly: true });
+    mocks.getState.mockResolvedValue(makeState("active", "pessoa"));
+    mocks.conversationUpdateMany.mockResolvedValueOnce({ count: 0 });
+    await run("E quanto custa?");
+    expect(mocks.callLLM).not.toHaveBeenCalled();
+    expect(mocks.sendText).not.toHaveBeenCalled();
+    expect(mocks.logTurn).toHaveBeenCalledWith(expect.objectContaining({ discardedActions: [{ type: "no_reply", reason: "human assigned" }] }));
+    expect(mocks.stateUpdateMany).not.toHaveBeenCalled();
   });
 
   it("cadeia: o agente anterior passou a conversa sem avisar → este avisa a transferência", async () => {
