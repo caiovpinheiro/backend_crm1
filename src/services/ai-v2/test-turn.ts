@@ -806,7 +806,8 @@ export async function simulateV2Turn(
     // aviso) + mensagem configurada; "sem material" só sem resposta validada.
     const noSourceOnly = cause === "no_source";
     let explanation = noSourceOnly ? "" : handoffExplanation(output.reply);
-    if (!explanation && cause === "verification") explanation = renderMessage(systemMessage(config, "verificationHandoffAck"), vars, defaultFormatter());
+    const verificationCut = cause === "verification" || (peekV2Fact("verification") as { forcedHandoff?: boolean } | undefined)?.forcedHandoff === true;
+    if (!explanation && verificationCut && !noSourceOnly) explanation = renderMessage(systemMessage(config, "verificationHandoffAck"), vars, defaultFormatter());
     reply = renderMessage(activeTheme?.handoffDestination?.message?.trim() || config.handoff.message, vars, defaultFormatter());
     if (explanation) reply = explanationClosesTurn(explanation) ? explanation : `${explanation}\n\n${reply}`;
     // Fora do horário, a produção acrescenta o aviso de horário à mensagem de transferência.

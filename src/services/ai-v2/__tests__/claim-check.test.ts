@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("@/services/ai/provider", () => ({ generateWithTools: vi.fn() }));
 
-import { buildClaimCheckInput, claimBackedByProductCard, notAFactClaim, parseClaimCheck, worthClaimCheck } from "../claim-check";
+import { buildClaimCheckInput, claimBackedByProductCard, claimFoundInSources, notAFactClaim, parseClaimCheck, worthClaimCheck } from "../claim-check";
 
 describe("checagem por modelo — auxiliares", () => {
   it("só confere resposta com conteúdo", () => {
@@ -93,5 +93,24 @@ describe("afirmação sustentada pelo cartão do produto", () => {
     expect(claimBackedByProductCard("a taxa de matrícula é R$ 50,00", cards)).toBe(false);
     expect(claimBackedByProductCard("a matrícula é isenta", ["Taxa de matrícula: *R$99,00*"])).toBe(false);
     expect(claimBackedByProductCard("o curso dura 8 semestres", cards)).toBe(false);
+  });
+});
+
+describe("texto das regras vale como fonte (cópia, frase-modelo e negação curta)", () => {
+  const rule = "QUANDO TRANSFERIR. Na demora, diga: 'Entendi, [o que está demorando] ainda não chegou. Anotei aqui e te respondo por aqui.' e transfira.";
+  const cancel = "Cancelar não tem multa nem fidelidade; você paga só a mensalidade do mês em aberto.";
+  it("frase copiada da regra", () => {
+    expect(claimFoundInSources("Anotei aqui e te respondo por aqui.", [rule])).toBe(true);
+    expect(claimFoundInSources("Anotei aqui e te ligo amanhã.", [rule])).toBe(false);
+  });
+  it("frase-modelo com [colchetes] preenchida", () => {
+    expect(claimFoundInSources("Entendi, a proposta ainda não chegou.", [rule])).toBe(true);
+    expect(claimFoundInSources("Entendi, a proposta já chegou.", [rule])).toBe(false);
+  });
+  it("negação curta da regra", () => {
+    expect(claimFoundInSources("cancelar não tem multa", [cancel])).toBe(true);
+    expect(claimFoundInSources("o cancelamento não tem multa", [cancel])).toBe(true);
+    expect(claimFoundInSources("trancar não tem multa", [cancel])).toBe(false);
+    expect(claimFoundInSources("não tem taxa de matrícula", [cancel])).toBe(false);
   });
 });

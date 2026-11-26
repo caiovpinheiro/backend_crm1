@@ -182,7 +182,37 @@ export function sameClaim(a: string, b: string): boolean {
  * checador às vezes marcava o que o material diz com outras palavras (ex.:
  * o endereço do portal) e o cliente era transferido.
  */
+/** Texto sem acento, caixa, aspas, marcação e pontuação, para comparar cópia literal. */
+const literal = (t: string) => foldText(t).replace(/[*_~`"“”'‘’]/g, " ").replace(/[^a-z0-9[\]]+/g, " ").replace(/\s+/g, " ").trim();
+
+/**
+ * Cópia do que as fontes dizem: a frase está escrita nelas ("Anotei aqui e
+ * te respondo por aqui." nas regras), ou é uma frase-modelo da regra com o
+ * [trecho entre colchetes] preenchido ("Entendi, [o que está demorando]
+ * ainda não chegou." → "Entendi, a proposta ainda não chegou.").
+ */
+function copiedFromSources(claim: string, sources: string[]): boolean {
+  const c = literal(claim).replace(/[[\]]/g, "");
+  if (c.split(" ").length < 2) return false;
+  for (const source of sources) {
+    const s = literal(source);
+    if (` ${s.replace(/[[\]]/g, "")} `.includes(` ${c} `)) return true;
+    if (!s.includes("[")) continue;
+    for (const sentence of foldText(source).split(/(?<=[.!?])\s+|\n+/)) {
+      if (!sentence.includes("[")) continue;
+      // Só o trecho da frase-modelo (entre aspas ou depois de ":"), não a instrução em volta.
+      const segment = sentence.split(/[:'"“”‘’]/).find((seg) => seg.includes("[")) ?? sentence;
+      const parts = literal(segment).split(/\[[^\]]*\]/);
+      if (parts.length < 2 || parts.join(" ").trim().split(" ").length < 2) continue;
+      const pattern = parts.map((p) => p.trim().replace(/[.*+?^${}()|\\]/g, "\\$&")).join(" .{1,80}? ").replace(/\s+/g, "\\s*");
+      if (new RegExp(`(?:^| )${pattern}(?: |$)`).test(c) || new RegExp(`(?:^| )${pattern}(?: |$)`).test(` ${c} `)) return true;
+    }
+  }
+  return false;
+}
+
 export function claimFoundInSources(claim: string, sources: string[]): boolean {
+  if (copiedFromSources(claim, sources)) return true;
   // Marcação com mais de uma frase ("Depois disso, sua conta fica pronta.
   // Pelo celular, use o aplicativo."): cada frase pode vir de um trecho
   // diferente; vale quando todas estão nas fontes.
@@ -210,6 +240,18 @@ export function claimFoundInSources(claim: string, sources: string[]): boolean {
     return sources.some((source) =>
       foldText(source).replace(/[*_~`"“”]/g, "").split(/(?<=[.!?])\s+|\n+/)
         .some((s) => word.test(s) && s.split(/[^a-z0-9]+/).some((w) => verbs.includes(w.slice(0, 5)))),
+    );
+  }
+  // Negação curta ("cancelar não tem multa"): vale quando a mesma frase de
+  // uma fonte traz as mesmas palavras e também nega. Antes, com menos de 3
+  // palavras, toda negação era "sem fonte".
+  if (urls.length === 0 && negated && words.length > 0 && words.length < 3) {
+    const stems = words.map((w) => w.slice(0, 6));
+    return sources.some((source) =>
+      plain(source).split(/(?<=[.!?;])\s+|\n+/).some((sentence) => {
+        const vocab = new Set(sentence.split(/[^a-z0-9]+/).filter(Boolean).map((w) => w.slice(0, 6)));
+        return stems.every((w) => vocab.has(w)) && /\b(?:nao|nunca|sem|nem|nenhum|nenhuma|gratis|gratuit\w*|isent\w*)\b/.test(sentence);
+      }),
     );
   }
   if (urls.length === 0 && words.length < 3) return false;
