@@ -3213,6 +3213,20 @@ describe("processV2Turn — correções do motor", () => {
     expect(agendaStoreMocks.cancelOpenScheduledSends).not.toHaveBeenCalled();
   });
 
+  it("modelo já pedia a transferência e a conferência cortou a resposta: sai a reserva, não só o aviso", async () => {
+    const config = baseConfig();
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    const { noteV2Fact } = await import("../trace");
+    mocks.callLLM.mockImplementation(async () => {
+      noteV2Fact("handoffCause", "model", { keepFirst: true });
+      noteV2Fact("verification", { unsupported: ["x"], rewritten: false, forcedHandoff: true });
+      return llmOut({ handoff: true, reply: "", reason: "Citava algo sem fonte" });
+    });
+    await run("não recebi a proposta ainda, faz 2 dias");
+    const texts = mocks.sendText.mock.calls.map((c) => c[0].text as string);
+    expect(texts).toEqual(["Anotei seu pedido; a equipe te responde por aqui."]);
+  });
+
   it("fecho configurado vai no fim da resposta; não vai quando transfere", async () => {
     const config = baseConfig({
       replyEnding: { procedure: { enabled: true, phrases: ["Me avisa se funcionou."] }, info: { enabled: false, phrases: [] } },

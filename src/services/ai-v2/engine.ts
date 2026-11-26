@@ -3264,7 +3264,10 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     // A conferência cortou a resposta inteira: em vez de só o aviso, diz o
     // que acontece agora (sem afirmar fato). Pedido de boleto respondido só
     // com "Já te retorno por aqui" deixava a cliente sem o "sim".
-    if (!explanation && cause === "verification" && !waitingInQueue) {
+    // Vale também quando o modelo já pedia a transferência: a causa registrada
+    // fica a dele, mas foi a conferência que cortou a frase.
+    const verificationCut = cause === "verification" || (peekV2Fact("verification") as { forcedHandoff?: boolean } | undefined)?.forcedHandoff === true;
+    if (!explanation && verificationCut && !fallbackOnly && !waitingInQueue) {
       explanation = renderMessage(systemMessage(config, "verificationHandoffAck"), vars, defaultFormatter());
       traceStep("resposta", "A conferência cortou a resposta inteira → diz que anotou o pedido e que a equipe responde");
     }
