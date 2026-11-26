@@ -36,7 +36,7 @@ import { isDeferralText, isShortAckText } from "@/lib/ai-agents/tabulation-class
 import { isCourtesyOnlyInbound } from "@/services/post-close-return";
 import { executeV2Actions, sendV2TextMessage, applyV2ClosureFieldUpdates, v2HumanBehavior } from "./actions";
 import { findInheritablePostCloseState, getV2ConversationState, upsertV2ConversationState } from "./state";
-import { scheduleReplyNote } from "./agenda";
+import { isCourtesyOnly, scheduleReplyNote } from "./agenda";
 import { logV2Turn } from "./log";
 import { noteV2Fact, peekV2Fact, runWithV2Trace, traceStep, v2TraceWasLogged } from "./trace";
 import { evaluateV2StopLimits, parseV2Counters, shouldStopStalled, type V2Counters } from "./limits";
@@ -1772,6 +1772,17 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     ...((stateRow?.collectedVariables as Record<string, unknown> | null | undefined) ?? {}),
     ...automationVariables,
   };
+  // Retomada combinada ("me chama às 19h") e a pessoa voltou antes com algo
+  // que não é só cortesia ("voltei", uma pergunta): a retomada cai agora. Na
+  // hora do envio ela já seria cancelada pela mesma regra, mas ficava como
+  // pendente na agenda até lá. Se a pessoa pedir de novo, o modelo agenda.
+  if (input.userMessage.trim() && !isCourtesyOnly(input.userMessage)) {
+    const cancelled = await import("./agenda-store")
+      .then(({ cancelOpenScheduledSends }) => cancelOpenScheduledSends(input.conversationId, "client_replied"))
+      .catch(() => 0);
+    if (cancelled > 0) traceStep("agenda", "O cliente voltou antes da retomada combinada → retomada cancelada");
+  }
+
   // Adiamento ("chamo depois", "agora não posso", "estou no trabalho"):
   // não é pedido nem cortesia pura. Responde curto, sem fecho nem botões,
   // e encerra — a volta entra pela janela pós-encerramento (cortesia /
