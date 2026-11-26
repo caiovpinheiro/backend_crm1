@@ -6,7 +6,7 @@ import { guardV2Output, isCommonFieldValue } from "../output-guard";
 import { QUEUED_MESSAGE_DEFAULT, QUEUED_MESSAGE_OUTSIDE_HOURS, QUEUE_NOTICES, pickQueueNotice, queuedMessageFor } from "../queue-notice";
 import { mediaResendPlan, saysNotReceived } from "../sent-materials";
 import { trimUnsupportedSentences } from "../reply-trim";
-import { handoffExplanation } from "../no-source";
+import { explanationClosesTurn, handoffExplanation } from "../no-source";
 import { classifyReply } from "../reply-ending";
 import { humanRequestSubject } from "../action-policy";
 import type { V2AgentConfig } from "@/lib/ai-v2/types";
@@ -136,5 +136,14 @@ describe("corte — passos com emoji numérico", () => {
     const labeled = "Para trocar:\nPasso 1: Vá até a loja com a nota fiscal.\nPasso 2: Peça o reembolso em dinheiro na hora.\nPasso 3: Guarde o comprovante.";
     expect(trimUnsupportedSentences(labeled, ["Peça o reembolso em dinheiro na hora"])?.reply)
       .toBe("Para trocar:\nPasso 1: Vá até a loja com a nota fiscal.\nPasso 2: Guarde o comprovante.");
+  });
+});
+
+describe("aviso de transferência depois de resposta que já fecha", () => {
+  it("pergunta no fim ou confirmação de retorno fecham o turno; explicação comum não", () => {
+    expect(explanationClosesTurn("Você tem ENEM dos últimos 10 anos?")).toBe(true);
+    expect(explanationClosesTurn("Vale mostrar a proposta pra ele, combinado? 💙")).toBe(true);
+    expect(explanationClosesTurn("Anotei aqui e já te retorno por aqui.")).toBe(true);
+    expect(explanationClosesTurn("O boleto da taxa sai depois que você autoriza a matrícula.")).toBe(false);
   });
 });

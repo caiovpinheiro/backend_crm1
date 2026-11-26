@@ -42,7 +42,7 @@ import { noteV2Fact, peekV2Fact, runWithV2Trace, traceStep, v2TraceWasLogged } f
 import { evaluateV2StopLimits, parseV2Counters, shouldStopStalled, type V2Counters } from "./limits";
 import { answerToPostCloseQuestion, classifyPostCloseMessage, getPostCloseBehavior, isGreetingOnlyMessage, keepOpenOnNewRequest, postCloseHandoffMessage, postCloseQuestion, postCloseShortReply, isExplicitResolution } from "./closure";
 import { isConfusionMessage, rephraseAfterConfusion } from "./confusion";
-import { announcesTransfer, answersBeforeHandoff, applyNoSourceGuard, conditionalHandoff, handoffExplanation, hasContentBeyondQuestion, noSourceReplyMessage, withoutTrailingQuestion, type V2PrefetchFact } from "./no-source";
+import { announcesTransfer, answersBeforeHandoff, applyNoSourceGuard, conditionalHandoff, explanationClosesTurn, handoffExplanation, hasContentBeyondQuestion, noSourceReplyMessage, withoutTrailingQuestion, type V2PrefetchFact } from "./no-source";
 import { NONSENSE_LIMIT_REASON } from "./limits";
 import { applyV2Tabulation } from "./tabulation";
 import { withoutChoiceQuestionAfterSteps, applyReplyEnding, asksClient, classifyReply, effectiveReplyEnding, isGreetingOnlyReply, replyEndingButtons, replyEndingPhrases, withoutReplyEndings } from "./reply-ending";
@@ -3204,12 +3204,15 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     // resposta segura" fica só quando não há resposta validada nenhuma
     // (a checagem barrou ou nada nos materiais cobre a mensagem). Antes a
     // mesma situação saía de três jeitos diferentes.
-    const fallbackOnly = cause === "verification" || cause === "no_source";
-    const noSourceMsg = fallbackOnly ? noSourceReplyMessage(config) : "";
+    // "Sem material" transfere só com o aviso. A conferência ("verification")
+    // já tirou a frase sem apoio: o que sobrou é explicação conferida e sai
+    // antes do aviso — a frase de "sem fonte" não substitui mais o aviso de
+    // transferência (saía "Isso eu te confirmo aqui, tá?" sozinha).
+    const fallbackOnly = cause === "no_source";
     // Só quando a resposta do modelo é uma explicação de verdade (transferiu
     // por decisão, cliente irritado, anexo que não chega, pedido de pessoa);
     // "segue o material:" de uma mensagem pronta barrada não é explicação.
-    const explains = cause === "model" || cause === "sentiment" || cause === "media_failed" || cause === "human_request" || (cause === "limit" && stalledStop);
+    const explains = cause === "model" || cause === "verification" || cause === "sentiment" || cause === "media_failed" || cause === "human_request" || (cause === "limit" && stalledStop);
     let explanation = explains && !fallbackOnly && !waitingInQueue ? handoffExplanation(replyText) : "";
     // A explicação diz o mesmo que o aviso que vem logo depois: sai só o aviso.
     const upcomingNotice = renderMessage((requestedDestination ?? activeTheme?.handoffDestination)?.message?.trim() || config.handoff.message, vars, defaultFormatter());
@@ -3239,13 +3242,19 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     }
     // Já estava na fila: o aviso é o de fila (a transferência de novo só redistribui).
     const queuedMsg = waitingInQueue ? queuedMessageFor(config.handoff.queuedMessage, isWithinV2BusinessHours(config), systemMessage(config, "queueOutsideHours")) : "";
-    const handoffNote = queuedMsg || noSourceMsg;
+    const handoffNote = queuedMsg;
     const hoursNote = outsideHoursNote(config);
+    // A explicação que saiu já fecha com pergunta ou já diz que retorna:
+    // o aviso logo depois ("Já te retorno por aqui") dobrava o texto.
+    const explanationCloses = !!sentReply && !queuedMsg && explanationClosesTurn(sentReply);
+    if (explanationCloses) traceStep("transferência", "A resposta já fecha com pergunta ou confirmação de retorno → transfere sem o aviso");
     const sent = await performHandoff(
       requestedDestination ?? activeTheme?.handoffDestination,
-      handoffNote || hoursNote
-        ? { message: [handoffNote || renderMessage((requestedDestination ?? activeTheme?.handoffDestination)?.message?.trim() || config.handoff.message, vars, defaultFormatter()), hoursNote].filter(Boolean).join("\n\n") }
-        : {},
+      explanationCloses
+        ? (hoursNote ? { message: hoursNote } : { skipMessage: true })
+        : handoffNote || hoursNote
+          ? { message: [handoffNote || renderMessage((requestedDestination ?? activeTheme?.handoffDestination)?.message?.trim() || config.handoff.message, vars, defaultFormatter()), hoursNote].filter(Boolean).join("\n\n") }
+          : {},
     );
     if (sent) sentReply = sentReply ? `${sentReply}\n${sent}`.trim() : sent;
     owner = "pessoa";
