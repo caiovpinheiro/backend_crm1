@@ -47,7 +47,7 @@ import { NONSENSE_LIMIT_REASON } from "./limits";
 import { applyV2Tabulation } from "./tabulation";
 import { withoutChoiceQuestionAfterSteps, applyReplyEnding, asksClient, classifyReply, effectiveReplyEnding, isGreetingOnlyReply, replyEndingButtons, replyEndingPhrases, withoutReplyEndings } from "./reply-ending";
 import { hasSearchableQuestion, isNearDuplicateReply, knowledgeChunkTexts, lookupResultTexts, repeatFallback } from "./ground-reply";
-import { productCardSlot, promisesConfirmation, splitReplyBubbles, withoutRepeatedQuestion } from "./conversation-profile";
+import { isAutomatedBusinessReply, productCardSlot, promisesConfirmation, splitReplyBubbles, withoutRepeatedQuestion } from "./conversation-profile";
 import { voiceModelInfo } from "./voice-provider";
 import { loadPriorV2Summary, summaryEnabled, updateRunningSummary, writeV2Summary, SUMMARY_MESSAGE_TYPE } from "./summary";
 import { looksLikeSystemError, saysTriedAndFailed } from "./retry-signal";
@@ -1767,6 +1767,22 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     ...((stateRow?.collectedVariables as Record<string, unknown> | null | undefined) ?? {}),
     ...automationVariables,
   };
+  // Resposta automática de empresa ("Agradecemos seu contato! Em breve
+  // retornaremos…"): não é lead nem pedido. Responder gerava conversa entre
+  // dois robôs.
+  if ((!input.messageType || input.messageType === "text") && isAutomatedBusinessReply(input.userMessage)) {
+    traceStep("entrada", "Mensagem automática de empresa (\"agradecemos seu contato…\") → sem resposta");
+    await logV2Turn({
+      organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId, turnId: input.turnId,
+      inboundText: input.userMessage,
+      crmContext: { contact: null, deals: [], selectedDeal: null, fields: { contact: [], deal: [] } },
+      prompt: "", executedActions: [], discardedActions: [{ type: "no_reply", reason: "automated business reply" } as any],
+      handoff: false, latencyMs: Date.now() - startedAt,
+      inputTokens: 0, outputTokens: 0, owner, stage, versionId,
+    });
+    return { handoff: false, closed: false };
+  }
+
   // Retomada combinada ("me chama às 19h") e a pessoa voltou antes com algo
   // que não é só cortesia ("voltei", uma pergunta): a retomada cai agora. Na
   // hora do envio ela já seria cancelada pela mesma regra, mas ficava como
