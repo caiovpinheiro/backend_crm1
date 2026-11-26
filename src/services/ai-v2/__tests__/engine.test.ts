@@ -1961,7 +1961,7 @@ describe("processV2Turn — correções do motor", () => {
     );
     // Só conta como resposta a mensagem pública do agente ou de pessoa; o resumo (ai_summary, privado) não.
     const seen: unknown[] = [];
-    mocks.messageFindFirst.mockImplementation(async (args: { where?: Record<string, unknown> }) => {
+    (mocks.messageFindFirst as unknown as { mockImplementation: (f: (args: { where?: Record<string, unknown> }) => Promise<unknown>) => void }).mockImplementation(async (args) => {
       seen.push(args?.where);
       const w = args?.where ?? {};
       const onlyPublic = w.isPrivate === false && JSON.stringify(w.messageType ?? {}).includes("ai_summary");
