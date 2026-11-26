@@ -47,7 +47,7 @@ import { NONSENSE_LIMIT_REASON } from "./limits";
 import { applyV2Tabulation } from "./tabulation";
 import { withoutChoiceQuestionAfterSteps, applyReplyEnding, asksClient, classifyReply, effectiveReplyEnding, isGreetingOnlyReply, replyEndingButtons, replyEndingPhrases, withoutReplyEndings } from "./reply-ending";
 import { hasSearchableQuestion, isNearDuplicateReply, knowledgeChunkTexts, lookupResultTexts, repeatFallback } from "./ground-reply";
-import { splitReplyBubbles } from "./conversation-profile";
+import { productCardSlot, promisesConfirmation, splitReplyBubbles, withoutRepeatedQuestion } from "./conversation-profile";
 import { voiceModelInfo } from "./voice-provider";
 import { loadPriorV2Summary, summaryEnabled, updateRunningSummary, writeV2Summary, SUMMARY_MESSAGE_TYPE } from "./summary";
 import { looksLikeSystemError, saysTriedAndFailed } from "./retry-signal";
@@ -3033,6 +3033,17 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     }
   }
 
+  // A mesma pergunta da mensagem anterior não sai de novo (rajada "Não
+  // consigo agora" / "Só amanhã" / "Estou no trabalho" recebia a pergunta
+  // do horário três vezes): fica o resto da resposta.
+  if (!anyHandoff && !anyClose && replyOptions.length === 0 && replyText.trim() && !isFillerMessage(input.userMessage)) {
+    const trimmedQuestion = withoutRepeatedQuestion(replyText, lastAgentMessage);
+    if (trimmedQuestion !== replyText) {
+      traceStep("resposta", "A resposta repetia a pergunta da mensagem anterior → a pergunta não sai de novo");
+      replyText = trimmedQuestion;
+    }
+  }
+
   // Envia reply se houver e não for handoff/close
   if (!voiceDelivered && !anyHandoff && !anyClose && replyText.trim()) {
     const withOptions = replyOptions.length > 0 ? buildV2Interactive(replyText, replyOptions, optionTexts) : null;
@@ -3041,11 +3052,24 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     // a última segue o envio de sempre (opções, trava de repetição).
     const bubbles = !withOptions && config.replyBubbles === "split" ? splitReplyBubbles(outText) : [];
     const sentBubbles: string[] = [];
+    // Cartão de produto no meio, como a equipe faz: apresentação → cartão →
+    // pergunta. Antes o cartão chegava depois da pergunta e o "aqui embaixo"
+    // apontava para ela.
+    const cardSlot = outboundActions.some((a) => a.type === "send_product") && !stopLimits.blocksReply && !humanTookOver
+      ? productCardSlot(bubbles)
+      : null;
     if (bubbles.length > 1) {
       for (const part of bubbles.slice(0, -1)) {
         const partRes = await sendReply(part, null, { dropIfSuperseded: true });
         if (!partRes.sent) break;
         sentBubbles.push(part);
+        if (cardSlot !== null && sentBubbles.length === cardSlot) {
+          const cards = outboundActions.filter((a) => a.type === "send_product");
+          const cardRes = await executeV2Actions(cards, actionCtx);
+          executedActions = [...executedActions, ...cardRes.results];
+          outboundActions = outboundActions.filter((a) => a.type !== "send_product");
+          traceStep("ações", `Cartão de produto entre as mensagens (depois da ${cardSlot}ª): ${cardRes.results.map((r) => `${r.action.type}${r.ok ? " ✓" : ` ✗ (${r.error ?? "erro"})`}`).join(", ")}`);
+        }
       }
       if (sentBubbles.length === bubbles.length - 1) {
         outText = bubbles[bubbles.length - 1];
@@ -3124,6 +3148,18 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     // respondeu e o cliente não tinha recebido nada.
   }
   if (stallPending && sentReply) counters.stalledExchanges = (counters.stalledExchanges ?? 0) + 1;
+
+  // Prometeu confirmar ("isso eu te confirmo aqui") sem transferir: a dúvida
+  // vira nota para a equipe. Antes a promessa ficava sem dono.
+  if (sentReply && !anyHandoff && !anyClose && promisesConfirmation(sentReply, noSourceReplyMessage(config))
+    && !executedActions.some((r) => r.ok && r.action.type === "add_note")) {
+    const note = `Dúvida para a equipe confirmar com o cliente (o agente disse que ia confirmar): "${input.userMessage.trim().slice(0, 500)}"`;
+    const noteRes = await executeV2Actions([{ type: "add_note", content: note } as V2Action], actionCtx);
+    executedActions = [...executedActions, ...noteRes.results];
+    traceStep("ações", noteRes.results[0]?.ok
+      ? "Prometeu confirmar sem transferir → nota para a equipe com a dúvida"
+      : `Prometeu confirmar sem transferir → nota não gravada (${noteRes.results[0]?.error ?? "erro"})`);
+  }
 
   // Mensagens prontas/produtos/modelos: depois da reply. Não saem quando o
   // turno transfere ou quando um limite de parada bloqueou a resposta.
@@ -3219,6 +3255,13 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     // "segue o material:" de uma mensagem pronta barrada não é explicação.
     const explains = cause === "model" || cause === "verification" || cause === "sentiment" || cause === "media_failed" || cause === "human_request" || (cause === "limit" && stalledStop);
     let explanation = explains && !fallbackOnly && !waitingInQueue ? handoffExplanation(replyText) : "";
+    // A conferência cortou a resposta inteira: em vez de só o aviso, diz o
+    // que acontece agora (sem afirmar fato). Pedido de boleto respondido só
+    // com "Já te retorno por aqui" deixava a cliente sem o "sim".
+    if (!explanation && cause === "verification" && !waitingInQueue) {
+      explanation = renderMessage(systemMessage(config, "verificationHandoffAck"), vars, defaultFormatter());
+      traceStep("resposta", "A conferência cortou a resposta inteira → diz que anotou o pedido e que a equipe responde");
+    }
     // A explicação diz o mesmo que o aviso que vem logo depois: sai só o aviso.
     const upcomingNotice = renderMessage((requestedDestination ?? activeTheme?.handoffDestination)?.message?.trim() || config.handoff.message, vars, defaultFormatter());
     if (explanation && upcomingNotice && isNearDuplicateReply(explanation, upcomingNotice)) {

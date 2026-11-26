@@ -1941,3 +1941,14 @@ describe("cartão com dois produtos de mesmo nome-base", () => {
     expect(r.output.actions.filter((a) => a.type === "send_product")).toEqual([expect.objectContaining({ productId: "cc" })]);
   });
 });
+
+describe("texto livre: o motivo fica registrado", () => {
+  it("modelo e normalização sem JSON: o texto vale como resposta e a decisão diz que a 2ª chamada também não devolveu JSON", async () => {
+    vi.clearAllMocks();
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(makeLLMResponse("Combinado, te chamo mais tarde por aqui!"));
+    const r = await callV2LLM({ agentId: "agent-1", config: baseConfig(), context: { contact: null, deals: [], selectedDeal: null, fields: baseConfig().contextFields }, userMessage: "me chama mais tarde", stage: "active" });
+    expect(r.output.reply).toBe("Combinado, te chamo mais tarde por aqui!");
+    expect(r.output.reason).toContain("texto livre");
+    expect(r.output.reason).toContain("2ª chamada também não devolveu JSON");
+  });
+});

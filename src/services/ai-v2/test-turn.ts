@@ -14,6 +14,7 @@ import { actionValueAllowed, allowedActionTypes, allowedFlowIdsFor, allowedMessa
 import { defaultV2Counters } from "./limits";
 import { decideVoice, speechMatchesReply, voiceCompanionLine, voiceConfigured } from "./voice";
 import { noteV2Fact, peekV2Fact, traceStep } from "./trace";
+import { productCardSlot, promisesConfirmation, splitReplyBubbles, withoutRepeatedQuestion } from "./conversation-profile";
 import { isGreetingOnlyMessage, keepOpenOnNewRequest } from "./closure";
 import { isShortAckText } from "@/lib/ai-agents/tabulation-classify-policy";
 import { applyBoldPolicy, toWhatsAppText } from "./reply-format";
@@ -76,6 +77,12 @@ export type V2TestTurnResult = {
   handoffDestination?: V2Destination | null;
   /** Texto da mensagem pronta que sairia depois da resposta (o cliente recebe os dois). */
   materialText?: string;
+  /**
+   * Bolhas da resposta que saem DEPOIS do cartão de produto (apresentação →
+   * cartão → pergunta). Já estão no fim de `materialText`; `reply` fica só
+   * com as de antes.
+   */
+  replyAfterMaterial?: string;
   /** Texto que seria falado: a resposta iria por áudio e `reply` é a linha escrita que acompanha. */
   voiceText?: string;
 };
@@ -739,6 +746,7 @@ export async function simulateV2Turn(
   // mensagem pronta). O texto da mensagem pronta entra no resultado — é o que
   // o cliente recebe e o que o comparador mede.
   let materialText = "";
+  let replyAfterMaterial = "";
   const modelActions = handoff ? [] : executedActions.filter((e) => e.action.type === "send_message_model" && typeof e.action.modelId === "string");
   if (modelActions.length > 0 && organizationId) {
     try {
@@ -797,7 +805,8 @@ export async function simulateV2Turn(
     // Igual à produção, um caminho só: explicação do modelo (sem as frases de
     // aviso) + mensagem configurada; "sem material" só sem resposta validada.
     const noSourceOnly = cause === "no_source";
-    const explanation = noSourceOnly ? "" : handoffExplanation(output.reply);
+    let explanation = noSourceOnly ? "" : handoffExplanation(output.reply);
+    if (!explanation && cause === "verification") explanation = renderMessage(systemMessage(config, "verificationHandoffAck"), vars, defaultFormatter());
     reply = renderMessage(activeTheme?.handoffDestination?.message?.trim() || config.handoff.message, vars, defaultFormatter());
     if (explanation) reply = explanationClosesTurn(explanation) ? explanation : `${explanation}\n\n${reply}`;
     // Fora do horário, a produção acrescenta o aviso de horário à mensagem de transferência.
@@ -896,6 +905,24 @@ export async function simulateV2Turn(
     }
   }
 
+  // Como na produção: a pergunta igual à da mensagem anterior não sai de
+  // novo, e a promessa de confirmar sem transferir vira nota para a equipe.
+  if (!handoff && !closed && !interactive && reply.trim() && userMessage.trim().replace(/[?!.\s]/g, "")) {
+    reply = withoutRepeatedQuestion(reply, lastAgent);
+  }
+  if (!handoff && !closed && reply.trim() && promisesConfirmation(reply, noSourceReplyMessage(config)) && !executedActions.some((e) => e.action.type === "add_note")) {
+    executedActions.push({ action: { type: "add_note", content: `Dúvida para a equipe confirmar com o cliente (o agente disse que ia confirmar): "${userMessage.trim().slice(0, 500)}"` } as V2Action, label: actionLabel("add_note") });
+  }
+  // Mesma ordem da produção: apresentação → cartão → pergunta. As bolhas
+  // depois do cartão saem do `reply` e vão depois da prévia, em
+  // `replyAfterMaterial` (e no fim de `materialText`, para a tela de hoje).
+  const cardSlot = !handoff && productActions.length > 0 && config.replyBubbles === "split" && materialText ? productCardSlot(splitReplyBubbles(reply)) : null;
+  if (cardSlot !== null) {
+    const bubbles = splitReplyBubbles(reply);
+    replyAfterMaterial = bubbles.slice(cardSlot).join("\n\n");
+    reply = bubbles.slice(0, cardSlot).join("\n\n");
+    materialText = `${materialText}\n\n${replyAfterMaterial}`;
+  }
   return {
     userMessage,
     appliedRuleId,
@@ -926,6 +953,7 @@ export async function simulateV2Turn(
     chosenOption,
     handoffDestination,
     ...(materialText ? { materialText } : {}),
+    ...(replyAfterMaterial ? { replyAfterMaterial } : {}),
     ...(voiceText ? { voiceText } : {}),
   };
 }

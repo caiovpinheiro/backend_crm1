@@ -34,6 +34,8 @@ export const SYSTEM_MESSAGE_DEFAULTS = {
   optionsPrompt: "Escolha uma opção:",
   optionsButton: "Ver opções",
   deferralReply: "Combinado! Quando puder, é só me chamar por aqui. 😊",
+  /** A conferência cortou a resposta inteira e a conversa vai para a equipe: diz o que acontece agora, sem afirmar fato. */
+  verificationHandoffAck: "Anotei seu pedido; a equipe te responde por aqui.",
 } as const;
 
 export type SystemMessageKey = keyof typeof SYSTEM_MESSAGE_DEFAULTS;

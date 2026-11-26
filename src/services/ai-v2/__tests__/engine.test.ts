@@ -2958,6 +2958,19 @@ describe("processV2Turn — correções do motor", () => {
       expect(mocks.resolveInline).toHaveBeenCalled();
     });
 
+    it("“me chama mais tarde” é pedido de retomada: vai ao modelo (que agenda), não encerra", async () => {
+      const config = baseConfig();
+      mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+      mocks.getState.mockResolvedValue(makeState("active", "agente"));
+      mocks.callLLM.mockResolvedValue(llmOut({ reply: "Combinado, te chamo mais tarde por aqui!", actions: [{ type: "schedule_message", reason: "pediu mais tarde" }] as never }));
+
+      const result = await run("Faz assim, me chama mais tarde");
+
+      expect(mocks.callLLM).toHaveBeenCalled();
+      expect(result.closed).toBe(false);
+      expect(sentTexts()).not.toContain("Combinado! Quando puder, é só me chamar por aqui. 😊");
+    });
+
     it("aviso de transferência sai mesmo se um robô mandou o mesmo texto há pouco", async () => {
       mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: baseConfig(), active: true });
       mocks.getState.mockResolvedValue(makeState("active", "agente"));
@@ -3098,8 +3111,9 @@ describe("processV2Turn — correções do motor", () => {
     });
     await run("tive um problema de saúde, quero cancelar minha inscrição");
     const texts = mocks.sendText.mock.calls.map((c) => c[0].text as string);
-    // O que foi conferido sai antes do aviso (a frase só de acolhimento sai pelo filtro de sempre).
-    expect(texts).toEqual(["Eu vejo o cancelamento com você aqui.", "Vou transferir."]);
+    // O que foi conferido sai; como já promete ver com a pessoa, o aviso não vem
+    // logo depois (texto dobrado do S06). A frase só de acolhimento sai pelo filtro de sempre.
+    expect(texts).toEqual(["Eu vejo o cancelamento com você aqui."]);
     expect(texts).not.toContain("Isso eu te confirmo aqui, tá?");
     expect(mocks.simpleHandoff).toHaveBeenCalled();
   });
@@ -3113,6 +3127,69 @@ describe("processV2Turn — correções do motor", () => {
     expect(texts.join("|")).toContain("Você tem ENEM dos últimos 10 anos?");
     expect(texts).not.toContain("Vou transferir.");
     expect(mocks.simpleHandoff).toHaveBeenCalledTimes(1);
+  });
+
+  it("cartão de produto entre as bolhas: apresentação → cartão → pergunta (não depois da pergunta)", async () => {
+    const config = baseConfig({ replyBubbles: "split", productPolicy: { enabled: true, sendCard: true, allowedProductIds: [] } } as unknown as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    const order: string[] = [];
+    mocks.sendText.mockImplementation(async (a: { text: string }) => { order.push(`texto:${a.text}`); return { sent: true }; });
+    mocks.executeActions.mockImplementation(async (actions: Array<{ type: string }>) => {
+      if (actions.length) order.push(`ações:${actions.map((a) => a.type).join(",")}`);
+      return { results: actions.map((a) => ({ action: a, ok: true })), anyHandoff: false, anyClose: false };
+    });
+    mocks.callLLM.mockResolvedValue(llmOut({
+      reply: "Gestão de RH fica R$ 129,01 por mês no primeiro semestre. Te mandei o curso aqui embaixo 😊\n\nFicou mais alguma dúvida ou seguimos para garantir sua vaga?",
+      actions: [{ type: "send_product", productId: "p1" }] as never,
+    }));
+    await run("quanto fica gestão de RH?");
+    const iCard = order.findIndex((o) => o.includes("send_product"));
+    const iIntro = order.findIndex((o) => o.includes("aqui embaixo"));
+    const iAsk = order.findIndex((o) => o.includes("seguimos para garantir"));
+    expect(iIntro).toBeGreaterThanOrEqual(0);
+    expect(iIntro).toBeLessThan(iCard);
+    expect(iCard).toBeLessThan(iAsk);
+    // O cartão não sai de novo depois.
+    expect(order.filter((o) => o.includes("send_product"))).toHaveLength(1);
+    mocks.sendText.mockReset();
+    mocks.sendText.mockResolvedValue({ sent: true });
+    mocks.executeActions.mockReset();
+    mocks.executeActions.mockResolvedValue({ results: [], anyHandoff: false, anyClose: false });
+  });
+
+  it("conferência cortou a resposta inteira e transfere: diz que anotou o pedido (sem o aviso dobrado)", async () => {
+    const config = baseConfig();
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    const { noteV2Fact } = await import("../trace");
+    mocks.callLLM.mockImplementation(async () => {
+      noteV2Fact("handoffCause", "verification", { keepFirst: true });
+      return llmOut({ handoff: true, reply: "", reason: "Citava algo sem fonte" });
+    });
+    await run("Tem como você enviar o boleto? Pago amanhã.");
+    const texts = mocks.sendText.mock.calls.map((c) => c[0].text as string);
+    expect(texts).toEqual(["Anotei seu pedido; a equipe te responde por aqui."]);
+    expect(mocks.simpleHandoff).toHaveBeenCalledTimes(1);
+  });
+
+  it("pergunta igual à da mensagem anterior não sai de novo; prometer confirmar vira nota para a equipe", async () => {
+    const config = baseConfig();
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.messageFindMany.mockResolvedValue([
+      { direction: "in", authorType: "contact", content: "Não consigo fazer agora." },
+      { direction: "out", authorType: "bot", content: "Sem problema! Que horas fica bom pra você fazer a prova?" },
+    ].reverse());
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "Entendi, sua rotina tá corrida mesmo. Que horas fica bom pra você fazer a prova?" }));
+    await run("Minha rotina tá bem corrida essa semana.");
+    expect(mocks.sendText.mock.calls.map((c) => c[0].text as string)).toEqual(["Entendi, sua rotina tá corrida mesmo."]);
+    mocks.messageFindMany.mockResolvedValue([]);
+
+    mocks.sendText.mockClear();
+    mocks.executeActions.mockClear();
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "Sobre trancamento, isso eu te confirmo aqui, tá? O cancelamento é sem multa." }));
+    await run("E se eu precisar trancar, paga multa?");
+    const noteCall = mocks.executeActions.mock.calls.find((c) => (c[0] as Array<{ type: string }>).some((a) => a.type === "add_note"));
+    expect(noteCall).toBeDefined();
+    expect(JSON.stringify(noteCall![0])).toContain("precisar trancar");
   });
 
   it("fecho configurado vai no fim da resposta; não vai quando transfere", async () => {
