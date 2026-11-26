@@ -370,6 +370,30 @@ export function claimEchoesClient(claim: string, clientTexts: string[]): boolean
   });
 }
 
+/** Palavras de quem repete o relato ("entendi", "aparece", "você disse"): não são o conteúdo. */
+const REPORT_WORDS = new Set(["entendi", "entendo", "entao", "certo", "perfeito", "aparece", "aparecendo", "ficou", "fica", "esta", "consta", "constando", "segundo", "voce", "disse", "falou", "ainda", "continua", "mostra", "mostrando", "diz", "dizendo", "ta", "tah", "foi", "veio", "deu", "dando", "seu", "sua", "meu", "minha"]);
+
+/**
+ * Paráfrase do relato do cliente: "Entendi, o pix aparece pendente" para "fiz
+ * o pix e tá pendente"; "o cartão foi recusado" para "meu cartão recusou".
+ * Sem número nem link; tirando as palavras de quem repete o relato, toda
+ * palavra de conteúdo (pelo radical) está numa frase do cliente. A conferência
+ * cortava a paráfrase e sobrava só o aviso de transferência.
+ */
+export function claimParaphrasesClient(claim: string, clientTexts: string[]): boolean {
+  if (/\d|https?:\/\/|R\$/i.test(claim)) return false;
+  const fold = (s: string) => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const stems = (s: string) => fold(s).split(/[^a-z0-9]+/).filter((w) => w.length >= 3 && !ECHO_STOP.has(w) && !REPORT_WORDS.has(w)).map((w) => w.slice(0, 5));
+  const words = [...new Set(stems(claim))];
+  if (words.length < 2) return false;
+  return clientTexts
+    .flatMap((t) => t.split(/(?<=[.!?])\s+|\n+/))
+    .some((sentence) => {
+      const vocab = new Set(stems(sentence));
+      return words.every((w) => vocab.has(w));
+    });
+}
+
 const COMMON_CITABLE = new Set(["sim", "nao", "yes", "no", "true", "false", "ok", "ativo", "inativo", "aberto", "fechado", "pendente"]);
 
 /**
@@ -448,7 +472,7 @@ export async function checkClaimsWithModel(args: {
       }),
     ]);
     const flagged = parseClaimCheck(res.text, args.reply);
-    const unsupported = flagged.filter((c) => !notAFactClaim(c) && !claimEchoesClient(c, args.clientTexts) && !claimBackedByCitableValues(c, args.citableValues ?? []) && !claimFoundInSources(c, args.sources) && !claimBackedByArithmetic(c, args.derivedAmounts ?? [], args.clientDocuments ?? []) && !claimBackedByProductCard(c, args.productCards ?? []));
+    const unsupported = flagged.filter((c) => !notAFactClaim(c) && !claimEchoesClient(c, args.clientTexts) && !claimBackedByCitableValues(c, args.citableValues ?? []) && !claimFoundInSources(c, args.sources) && !claimBackedByArithmetic(c, args.derivedAmounts ?? [], args.clientDocuments ?? []) && !claimBackedByProductCard(c, args.productCards ?? []) && !claimParaphrasesClient(c, args.clientTexts));
     if (unsupported.length < flagged.length) {
       log.info(
         { descartadas: flagged.length - unsupported.length },

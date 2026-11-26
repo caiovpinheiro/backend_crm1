@@ -8,6 +8,7 @@ import {
   memoryFieldsOf,
   memoryPromptSection,
   profileAllowsOpinion,
+  isAutomatedBusinessReply,
   productCardSlot,
   promisesConfirmation,
   withoutRepeatedQuestion,
@@ -106,5 +107,14 @@ describe("pergunta repetida e promessa de confirmar", () => {
     expect(promisesConfirmation("Sobre trancamento, isso eu te confirmo aqui, tá?")).toBe(true);
     expect(promisesConfirmation("Isso eu te confirmo na inscrição, tá?", "Isso eu te confirmo na inscrição, tá?")).toBe(true);
     expect(promisesConfirmation("O cancelamento é sem multa.")).toBe(false);
+  });
+});
+
+describe("mensagem automática de empresa", () => {
+  it("reconhece resposta automática; mensagem de cliente não", () => {
+    expect(isAutomatedBusinessReply("Olá! Agradecemos seu contato. Em breve retornaremos. Nosso horário de atendimento é de segunda a sexta, das 8h às 18h.")).toBe(true);
+    expect(isAutomatedBusinessReply("Esta é uma mensagem automática.")).toBe(true);
+    expect(isAutomatedBusinessReply("Obrigado pelo contato! Quero saber de Administração")).toBe(false);
+    expect(isAutomatedBusinessReply("Agradecemos seu contato, qual o valor do curso?")).toBe(false);
   });
 });

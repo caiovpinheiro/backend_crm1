@@ -209,3 +209,22 @@ export function promisesConfirmation(reply: string, noSourceMessage?: string): b
   if (noSourceMessage?.trim() && reply.includes(noSourceMessage.trim())) return true;
   return /(?<![\p{L}])(?:te\s+confirmo|eu\s+confirmo|a\s+gente\s+confirma|vou\s+confirmar|confirmo\s+(?:com|pra|para)\s+voc[eê])(?![\p{L}])/iu.test(reply);
 }
+
+/**
+ * Resposta automática de empresa ("Agradecemos seu contato! Em breve
+ * retornaremos", "Esta é uma mensagem automática"): não é lead nem pedido.
+ * Duas marcas, ou uma explícita de "mensagem automática". Pergunta direta
+ * ao agente (termina em "?") não conta.
+ */
+export function isAutomatedBusinessReply(text: string | null | undefined): boolean {
+  const t = (text ?? "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  if (!t.trim() || t.trim().endsWith("?")) return false;
+  if (/\b(?:mensagem|resposta) automatica\b|\bauto-?resposta\b|\bnao responda (?:a )?esta mensagem\b/.test(t)) return true;
+  const marks = [
+    /\bagradecemos (?:o |pelo |seu |o seu )?contato\b|\bobrigad[oa] por entrar em contato\b|\bagradecemos a sua mensagem\b/,
+    /\bem breve (?:retornaremos|entraremos em contato|um de nossos|nossa equipe)\b|\bretornaremos (?:o mais breve|em breve|assim que)\b/,
+    /\bnosso horario de atendimento\b|\bhorario de funcionamento\b|\bde segunda a sexta,? das\b/,
+    /\bum de nossos (?:atendentes|consultores|colaboradores)\b|\bnossa equipe (?:ira|vai) (?:te )?atender\b/,
+  ];
+  return marks.filter((re) => re.test(t)).length >= 2;
+}

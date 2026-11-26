@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("@/services/ai/provider", () => ({ generateWithTools: vi.fn() }));
 
-import { buildClaimCheckInput, claimBackedByProductCard, claimFoundInSources, notAFactClaim, parseClaimCheck, worthClaimCheck } from "../claim-check";
+import { buildClaimCheckInput, claimBackedByProductCard, claimFoundInSources, claimParaphrasesClient, notAFactClaim, parseClaimCheck, worthClaimCheck } from "../claim-check";
 
 describe("checagem por modelo — auxiliares", () => {
   it("só confere resposta com conteúdo", () => {
@@ -112,5 +112,14 @@ describe("texto das regras vale como fonte (cópia, frase-modelo e negação cur
     expect(claimFoundInSources("o cancelamento não tem multa", [cancel])).toBe(true);
     expect(claimFoundInSources("trancar não tem multa", [cancel])).toBe(false);
     expect(claimFoundInSources("não tem taxa de matrícula", [cancel])).toBe(false);
+  });
+});
+
+describe("paráfrase do relato do cliente", () => {
+  it("repetir o que o cliente contou, com outras palavras, não é afirmação sem fonte", () => {
+    expect(claimParaphrasesClient("Entendi, o pix aparece pendente", ["fiz o pix e tá pendente ainda"])).toBe(true);
+    expect(claimParaphrasesClient("o cartão foi recusado", ["meu cartão recusou"])).toBe(true);
+    expect(claimParaphrasesClient("o pix cai em 2 dias", ["fiz o pix"])).toBe(false);
+    expect(claimParaphrasesClient("o pix foi estornado", ["fiz o pix e tá pendente"])).toBe(false);
   });
 });
