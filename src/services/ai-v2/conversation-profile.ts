@@ -159,3 +159,20 @@ export function splitReplyBubbles(text: string, max = 3): string[] {
   if (parts.length <= max) return parts;
   return [...parts.slice(0, max - 1), parts.slice(max - 1).join("\n\n")];
 }
+
+/** Bolha que apresenta o que vem embaixo ("te mandei o curso aqui embaixo"). */
+const ANNOUNCES_BELOW = /(?<![\p{L}])(?:aqui\s+embaixo|logo\s+abaixo|aqui\s+abaixo|abaixo|te\s+mandei|te\s+enviei|te\s+envio|vou\s+te\s+mandar|segue\s+(?:o|a|os|as)\s)/iu;
+
+/**
+ * Quantas bolhas saem antes do(s) cartão(ões) de produto, como a equipe faz:
+ * apresentação → cartão → pergunta. Depois da bolha que anuncia ("aqui
+ * embaixo", "te mandei"); senão, antes da última se ela é pergunta. `null`
+ * = o cartão vai depois de tudo (uma bolha só, ou nada a reordenar).
+ */
+export function productCardSlot(bubbles: string[]): number | null {
+  if (bubbles.length < 2) return null;
+  const announce = bubbles.slice(0, -1).findIndex((b) => ANNOUNCES_BELOW.test(b));
+  if (announce >= 0) return announce + 1;
+  const last = bubbles[bubbles.length - 1].trim();
+  return /\?\s*(?:[\p{Extended_Pictographic}\uFE0F\u200D]\s*)*$/u.test(last) ? bubbles.length - 1 : null;
+}
