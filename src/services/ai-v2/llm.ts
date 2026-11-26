@@ -2410,12 +2410,19 @@ export async function callV2LLM(args: {
       fallbackOutputs.add(r.output);
       return;
     }
-    traceStep("verificação", "A reescrita ainda cita o que não está no material — transferindo");
+    // Transfere, mas a resposta não vira a frase de "sem fonte": sai só a
+    // frase sem apoio; o resto (o acolhimento que a regra pede) segue antes
+    // do aviso de transferência. Sem nada conferido, sai só o aviso.
+    const trimmedForHandoff = textsOf(flags).length === flags.length ? trimUnsupportedSentences(output.reply, textsOf(flags)) : null;
+    const keptForHandoff = trimmedForHandoff && unsupportedOf(trimmedForHandoff.reply, output.reason).length === 0 ? trimmedForHandoff.reply.trim() : "";
+    traceStep("verificação", keptForHandoff
+      ? "A reescrita ainda cita o que não está no material — sai só o que foi conferido e transfere"
+      : "A reescrita ainda cita o que não está no material — transferindo só com o aviso");
     noteV2Fact("verification", { unsupported: labelsOf(flags), rewritten: false, forcedHandoff: true });
     noteV2Fact("handoffCause", "verification", { keepFirst: true });
     r.output = {
       ...output,
-      reply: args.config.fallback?.noSource?.message || args.config.handoff?.message || "Vou chamar uma pessoa da equipe para te ajudar com isso.",
+      reply: keptForHandoff,
       handoff: true,
       actions: [...output.actions.filter((a) => a.type !== "handoff"), { type: "handoff" }],
       reason: `Citava ${firstList === list ? list : `${firstList}; depois ${list}`}, que não está no material.`,

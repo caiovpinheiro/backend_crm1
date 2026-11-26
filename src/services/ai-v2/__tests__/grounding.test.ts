@@ -62,6 +62,13 @@ describe("guarda 'sem material'", () => {
     expect(o.reply).toBe("Não tenho essa informação.");
   });
 
+  it("só a frase que afirma fato sem apoio sai; o acolhimento fica, seguido da frase de \"sem fonte\"", () => {
+    const o = out("Sinto muito pelo que aconteceu, vejo isso com você. O reembolso cai em 5 dias úteis.");
+    const r = applyNoSourceGuard({ config: cfg({ fallback: { noSource: { message: "Isso eu te confirmo aqui, tá?" } } }), output: o, context: ctx({ Nome: "Ana" }), toolCalls: [], queriedEmpty: false, prefetch: nothing });
+    expect(r).toEqual({ applied: true, handoff: false });
+    expect(o.reply).toBe("Sinto muito pelo que aconteceu, vejo isso com você. Isso eu te confirmo aqui, tá?");
+  });
+
   it("sem mensagem configurada → transfere", () => {
     const o = out("1. Abra o app\n2. Toque em Pedidos");
     expect(applyNoSourceGuard({ config: cfg(), output: o, context: ctx({ Nome: "Ana" }), toolCalls: [], queriedEmpty: false, prefetch: nothing })).toEqual({ applied: true, handoff: true });

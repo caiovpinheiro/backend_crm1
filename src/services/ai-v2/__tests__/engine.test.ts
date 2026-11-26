@@ -3087,18 +3087,32 @@ describe("processV2Turn — correções do motor", () => {
     expect(facts?.handoffCause).toBe("human_request");
   });
 
-  it("transferência por citar algo sem fonte usa a mensagem 'sem material' configurada", async () => {
-    const config = baseConfig({ fallback: { noSource: { message: "Não tenho essa informação; vou chamar alguém da equipe." } } } as unknown as Partial<V2AgentConfig>);
+  it("transferência depois da conferência: sai o que foi conferido + o aviso configurado, nunca a frase de \"sem fonte\" sozinha", async () => {
+    const config = baseConfig({ fallback: { noSource: { message: "Isso eu te confirmo aqui, tá?" } } } as unknown as Partial<V2AgentConfig>);
     mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
     const { noteV2Fact } = await import("../trace");
     mocks.callLLM.mockImplementation(async () => {
       noteV2Fact("handoffCause", "verification", { keepFirst: true });
-      return llmOut({ handoff: true, reply: "Não tenho essa informação; vou chamar alguém da equipe.", reason: "Citava algo sem fonte" });
+      // A conferência já tirou a frase sem apoio; sobrou o acolhimento da regra.
+      return llmOut({ handoff: true, reply: "Sinto muito pelo que aconteceu. Eu vejo o cancelamento com você aqui.", reason: "Citava algo sem fonte" });
     });
-    await run("qual o valor da taxa extra?");
-    const texts = mocks.sendText.mock.calls.map((c) => c[0].text);
-    expect(texts).toContain("Não tenho essa informação; vou chamar alguém da equipe.");
+    await run("tive um problema de saúde, quero cancelar minha inscrição");
+    const texts = mocks.sendText.mock.calls.map((c) => c[0].text as string);
+    // O que foi conferido sai antes do aviso (a frase só de acolhimento sai pelo filtro de sempre).
+    expect(texts).toEqual(["Eu vejo o cancelamento com você aqui.", "Vou transferir."]);
+    expect(texts).not.toContain("Isso eu te confirmo aqui, tá?");
+    expect(mocks.simpleHandoff).toHaveBeenCalled();
+  });
+
+  it("explicação que já termina em pergunta: transfere sem o aviso logo depois (texto dobrado)", async () => {
+    const config = baseConfig();
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.callLLM.mockResolvedValue(llmOut({ handoff: true, reply: "Pra segunda graduação a entrada é pelo ENEM. Você tem ENEM dos últimos 10 anos?" }));
+    await run("já tenho uma graduação, quero outra");
+    const texts = mocks.sendText.mock.calls.map((c) => c[0].text as string);
+    expect(texts.join("|")).toContain("Você tem ENEM dos últimos 10 anos?");
     expect(texts).not.toContain("Vou transferir.");
+    expect(mocks.simpleHandoff).toHaveBeenCalledTimes(1);
   });
 
   it("fecho configurado vai no fim da resposta; não vai quando transfere", async () => {
