@@ -42,6 +42,12 @@ const mocks = vi.hoisted(() => ({
   enrichMedia: vi.fn(async (args: { userMessage: string }): Promise<{ userMessage: string; understood: number; failed: number }> => ({ userMessage: args.userMessage, understood: 0, failed: 0 })),
 }));
 
+const agendaStoreMocks = vi.hoisted(() => ({ cancelOpenScheduledSends: vi.fn(async () => 0) }));
+vi.mock("../agenda-store", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../agenda-store")>()),
+  cancelOpenScheduledSends: agendaStoreMocks.cancelOpenScheduledSends,
+}));
+
 vi.mock("../sent-materials", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../sent-materials")>()),
   recentlySentMessageModels: mocks.recentlySent,
@@ -3190,6 +3196,21 @@ describe("processV2Turn — correções do motor", () => {
     const noteCall = mocks.executeActions.mock.calls.find((c) => (c[0] as Array<{ type: string }>).some((a) => a.type === "add_note"));
     expect(noteCall).toBeDefined();
     expect(JSON.stringify(noteCall![0])).toContain("precisar trancar");
+  });
+
+  it("cliente volta antes da retomada combinada: a retomada pendente cai; cortesia não cancela", async () => {
+    const config = baseConfig();
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "Que bom que voltou! Vamos seguir com a sua inscrição?" }));
+    agendaStoreMocks.cancelOpenScheduledSends.mockClear();
+    agendaStoreMocks.cancelOpenScheduledSends.mockResolvedValueOnce(1);
+    await run("voltei");
+    expect(agendaStoreMocks.cancelOpenScheduledSends).toHaveBeenCalledWith("conv-1", "client_replied");
+
+    agendaStoreMocks.cancelOpenScheduledSends.mockClear();
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "Imagina!" }));
+    await run("ok, obrigado!");
+    expect(agendaStoreMocks.cancelOpenScheduledSends).not.toHaveBeenCalled();
   });
 
   it("fecho configurado vai no fim da resposta; não vai quando transfere", async () => {
