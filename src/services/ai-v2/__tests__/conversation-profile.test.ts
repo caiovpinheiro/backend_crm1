@@ -8,6 +8,7 @@ import {
   memoryFieldsOf,
   memoryPromptSection,
   profileAllowsOpinion,
+  productCardSlot,
   profilePromptSection,
   splitReplyBubbles,
 } from "../conversation-profile";
@@ -77,5 +78,15 @@ describe("balões", () => {
   it("lista e passo a passo não se dividem", () => {
     const steps = "Faz assim:\n\n1. Abra o app\n2. Toque em Entrar";
     expect(splitReplyBubbles(steps)).toEqual([steps]);
+  });
+});
+
+describe("posição do cartão de produto entre as bolhas", () => {
+  it("depois da bolha que anuncia; senão antes da pergunta final; uma bolha só, no fim", () => {
+    expect(productCardSlot(["Fica R$ 129,01. Te mandei o curso aqui embaixo 😊", "Ficou mais alguma dúvida?"])).toBe(1);
+    expect(productCardSlot(["Boa escolha!", "Segue o cartão com os detalhes.", "Vamos garantir sua vaga?"])).toBe(2);
+    expect(productCardSlot(["Boa escolha!", "A matrícula é isenta.", "O que achou? 😊"])).toBe(2);
+    expect(productCardSlot(["Boa escolha!", "A matrícula é isenta."])).toBeNull();
+    expect(productCardSlot(["Te mandei o curso aqui embaixo."])).toBeNull();
   });
 });
