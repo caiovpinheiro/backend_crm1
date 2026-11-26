@@ -136,7 +136,7 @@ export function handoffExplanation(reply: string): string {
     .map((line) =>
       line
         .split(/(?<=[.!?])\s+/)
-        .map((s) => withoutTransferClause(s))
+        .map((s) => withoutTransferClause(withoutTransferDoneClause(s)))
         .filter((s) => s.trim() && !isEmpathyOnly(s))
         .join(" ")
         .trim(),
@@ -144,6 +144,26 @@ export function handoffExplanation(reply: string): string {
     .filter(Boolean);
   const text = lines.join("\n").trim();
   return text.split(/\s+/).filter(Boolean).length >= 4 ? text : "";
+}
+
+/**
+ * Anúncio no passado ou no presente: "já chamei o time", "já avisei",
+ * "passei pra consultora", "tô vendo isso aqui", "estou chamando alguém".
+ * A mensagem configurada de transferência sai logo em seguida e diz o mesmo
+ * — antes a frase saía duas vezes, às vezes idêntica.
+ */
+const TRANSFER_DONE_CLAUSE = /,?\s*(?:e\s+)?(?:por isso|ent[ãa]o|assim)?\s*,?\s*(?:eu\s+)?(?:j[áa]\s+)?(?:(?:chamei|passei|encaminhei|transferi|pedi|direcionei|repassei)\b(?=[^.!?]*\b(?:time|equipe|setor|pessoal|consultor|consultora|algu[eé]m|atendente|respons[áa]vel|especialista|colega|coordena|suporte|financeiro|secretaria))|(?:avisei|acionei|sinalizei|notifiquei)\b|(?:t[ôo]|to|estou|j[áa] estou)\s+(?:chamando|passando|encaminhando|transferindo|acionando|avisando)\b)[^.!?]*[.!?]?\s*$/i;
+/** Frase só de "estou vendo isso" ("Tô vendo isso aqui pra você."): sem conteúdo, anuncia que alguém vai ver. */
+const LOOKING_INTO_IT = /^\s*(?:[\p{L}]+,\s*)?(?:j[áa]\s+)?(?:t[ôo]|to|estou|vou)\s+(?:vendo|verificando|checando|olhando|ver|verificar|checar|olhar)\s+(?:isso|isto|aqui|esse ponto|essa quest[ãa]o)(?:\s+(?:aqui|pra voc[eê]|para voc[eê]|agora|j[áa]|com (?:o|a) (?:time|equipe)))*\s*[.!]?\s*$/iu;
+
+/** Tira a oração que diz que a transferência já foi feita ou está sendo feita (frase que é só isso sai inteira). */
+export function withoutTransferDoneClause(sentence: string): string {
+  const s = sentence.trim();
+  if (LOOKING_INTO_IT.test(s)) return "";
+  if (!TRANSFER_DONE_CLAUSE.test(s)) return s;
+  const cut = standaloneClause(s.replace(TRANSFER_DONE_CLAUSE, "").trim().replace(/[,;:\s]+$/, ""));
+  if (!cut || cut.split(/\s+/).length < 3) return "";
+  return /[.!?]$/.test(cut) ? cut : `${cut}.`;
 }
 
 /** Oração que anuncia a transferência, ligada por vírgula/conector ("…, então vou chamar a equipe"). */
@@ -169,6 +189,58 @@ export function isEmpathyOnly(sentence: string): boolean {
   const s = sentence.trim().replace(/^[\p{L}\s]{1,30}?[,!]\s*/u, "");
   if (s.split(/\s+/).length > 7) return false;
   return /^(?:entendo|entendi|compreendo|imagino|sinto muito|poxa|que pena|tudo bem|claro|certo|perfeito|ok|obrigad[oa]|sem problemas?)\b/i.test(s);
+}
+
+/**
+ * Frase de "sem fonte": o campo da tela ("Se não achar a informação nos
+ * materiais", `fallback.noSource.message`) vale para as duas conferências —
+ * material vazio e afirmação sem fonte. Agente antigo que só tem o campo
+ * escondido (`groundingFallbackMessage` com `groundingFallback="answer"`)
+ * continua com ele. Vazio = nenhuma frase configurada.
+ */
+export function noSourceReplyMessage(config: Pick<V2AgentConfig, "fallback" | "groundingFallback" | "groundingFallbackMessage">): string {
+  const screen = config.fallback?.noSource?.message?.trim();
+  if (screen) return screen;
+  return config.groundingFallback === "answer" ? config.groundingFallbackMessage?.trim() ?? "" : "";
+}
+
+/**
+ * A conferência de afirmações responde (sem transferir) quando há frase de
+ * "sem fonte" na tela; sem ela, vale o modo antigo (padrão: transferir).
+ */
+export function groundingAnswersWithoutHandoff(config: Pick<V2AgentConfig, "fallback" | "groundingFallback">): boolean {
+  return !!config.fallback?.noSource?.message?.trim() || config.groundingFallback === "answer";
+}
+
+/**
+ * A resposta traz conteúdo além da pergunta do fim (informação, valor,
+ * explicação): "O curso custa R$ 199 com a bolsa. Vamos garantir?" não é
+ * troca sem avanço só por terminar em "?". Reconhecimento curto
+ * ("Entendo.", "A rotina pesa mesmo.") não conta como conteúdo.
+ */
+export function hasContentBeyondQuestion(reply: string): boolean {
+  const statements = reply
+    .split(/\n+/)
+    .flatMap((line) => line.split(/(?<=[.!?])\s+/))
+    .map((s) => s.trim())
+    .filter((s) => s && !s.endsWith("?") && !isEmpathyOnly(s));
+  if (statements.length === 0) return false;
+  const text = statements.join(" ");
+  // Fato (valor, data, prazo, percentual, passo, link) é avanço. Sem fato,
+  // só explicação de verdade: duas frases e 20+ palavras — uma abertura
+  // longa ("Entendo, muita gente passa por isso…") não zera o contador.
+  if (statesFacts(text)) return true;
+  return statements.length >= 2 && text.split(/\s+/).filter(Boolean).length >= 20;
+}
+
+/** Tira a(s) pergunta(s) do fim: o que sobra é a parte que informa ("" se só havia pergunta). */
+export function withoutTrailingQuestion(reply: string): string {
+  const sentences = reply
+    .trim()
+    .split(/\n+/)
+    .flatMap((line, i, all) => line.split(/(?<=[.!?])\s+/).map((s, j, parts) => (j === parts.length - 1 && i < all.length - 1 ? `${s}\n` : `${s} `)));
+  while (sentences.length > 0 && sentences[sentences.length - 1].trim().endsWith("?")) sentences.pop();
+  return sentences.join("").trim();
 }
 
 export type V2PrefetchFact = { searched?: boolean; found?: number; bestSimilarity?: number | null };
@@ -220,7 +292,7 @@ export function applyNoSourceGuard(args: {
     return { applied: true, handoff: true, explanationDropped: true };
   }
   if (!legacy && !invented) return { applied: false, handoff: false };
-  const noSourceMessage = config.fallback?.noSource?.message?.trim();
+  const noSourceMessage = noSourceReplyMessage(config);
   if (noSourceMessage) {
     output.handoff = false;
     output.reply = noSourceMessage;

@@ -203,22 +203,25 @@ export async function resolveV2AgentForConversation(
 }
 
 /**
- * Cliente escrevendo numa conversa que a IA transferiu e que espera na fila
- * (pendência de distribuição aberta, sem responsável): o agente que
- * transferiu responde só o aviso de fila, sem assumir. Sem isso o cliente
- * escrevia na fila e ninguém respondia nada até alguém da equipe pegar.
+ * Cliente escrevendo numa conversa que a IA transferiu e que espera a equipe
+ * (sem responsável): o agente que transferiu atende conforme "Enquanto espera
+ * na fila" (só o aviso, ou responde), sem assumir a conversa. Sem isso o
+ * cliente escrevia na fila e ninguém respondia nada até alguém da equipe pegar.
+ *
+ * Quem chama já conferiu que a conversa foi passada para pessoas e está sem
+ * responsável. Não exige pendência de distribuição: com a distribuição
+ * desligada (ou sem a distribuição inteligente) a transferência para o
+ * departamento só solta a conversa na Entrada, sem pendência — e o cliente
+ * que escrevia de novo ficava sem resposta e sem turno registrado.
  */
 async function queueNoticeAgent(conversationId: string): Promise<ResolvedV2Agent | null> {
   const db = prismaBase as unknown as {
     aISimpleConversationState: { findUnique: (args: unknown) => Promise<{ agentId: string | null } | null> };
-    distributionPending: { findFirst: (args: unknown) => Promise<{ id: string } | null> };
     user: { findFirst: (args: unknown) => Promise<{ id: string; aiAgentConfig?: { id: string } | null } | null> };
   };
   try {
     const state = await db.aISimpleConversationState.findUnique({ where: { conversationId }, select: { agentId: true } });
     if (!state?.agentId) return null;
-    const pending = await db.distributionPending.findFirst({ where: { status: "PENDING", conversationId }, select: { id: true } });
-    if (!pending) return null;
     const agent = await db.user.findFirst({
       where: { type: "AI", aiAgentConfig: { is: { id: state.agentId, active: true, engine: "simple" } } },
       select: { id: true, aiAgentConfig: { select: { id: true } } },

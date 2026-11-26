@@ -17,6 +17,17 @@ describe("transferência — um caminho só de mensagem", () => {
     expect(handoffExplanation("Vou te passar para a equipe.")).toBe("");
     expect(handoffExplanation("Claro! Vou encaminhar.")).toBe("");
     expect(handoffExplanation("Resposta do agente.")).toBe("");
+  });
+
+  it("anúncio no passado ou no presente também sai da explicação (a mensagem de transferência vem logo depois)", () => {
+    expect(handoffExplanation("Já chamei o time pra te ajudar com isso.")).toBe("");
+    expect(handoffExplanation("Entendi, já avisei a consultora.")).toBe("");
+    expect(handoffExplanation("Tô vendo isso aqui pra você.")).toBe("");
+    expect(handoffExplanation("Estou chamando alguém da equipe agora.")).toBe("");
+    expect(handoffExplanation("O boleto do mês já foi gerado no portal do aluno. Já passei pro time financeiro conferir o valor."))
+      .toBe("O boleto do mês já foi gerado no portal do aluno.");
+    // "passei" sem quem recebe não é transferência.
+    expect(handoffExplanation("Já passei o link do portal do aluno logo acima, tá bom?")).toBe("Já passei o link do portal do aluno logo acima, tá bom?");
     expect(handoffExplanation("A taxa é cobrada só na primeira entrega.\nO valor exato eu não tenho aqui.")).toBe("A taxa é cobrada só na primeira entrega.\nO valor exato eu não tenho aqui.");
   });
 

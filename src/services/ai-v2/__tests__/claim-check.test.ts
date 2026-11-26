@@ -46,6 +46,14 @@ describe("documento do cliente e conta conferida na checagem", () => {
     expect(claimBackedByArithmetic("o desconto vale até 13/10", derived, docs)).toBe(false);
     expect(claimBackedByArithmetic("você paga R$ 180,00", [], docs)).toBe(false);
   });
+
+  it("conta com percentual das fontes também sustenta a marcação", async () => {
+    const { claimBackedByArithmetic } = await import("../claim-check");
+    const derived = ["80% = 100% − 20%", "R$ 138,80 = R$ 173,50 − 20%", "10 pontos percentuais = 30% − 20%"];
+    expect(claimBackedByArithmetic("são 10 pontos percentuais a menos", derived, [])).toBe(true);
+    expect(claimBackedByArithmetic("você paga 80% de R$ 173,50, que dá R$ 138,80", derived, [])).toBe(true);
+    expect(claimBackedByArithmetic("são 10 pontos percentuais a menos até 15/12", derived, [])).toBe(false);
+  });
 });
 
 

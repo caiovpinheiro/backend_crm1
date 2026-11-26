@@ -50,6 +50,62 @@ function scoreTextMatch(haystack: string, query: string): number {
   return 20 + (hits / qWords.length) * 40;
 }
 
+/** Palavras do nome que não distinguem um produto de outro (grau, modalidade). */
+const GENERIC_PRODUCT_WORDS = new Set([
+  "curso", "cursos", "bacharelado", "licenciatura", "tecnologo", "tecnologico", "graduacao", "superior",
+  "semipresencial", "presencial", "digital", "online", "semestres", "semestre", "plano", "planos",
+  "basico", "completo", "especializacao", "segunda", "licenciado",
+]);
+
+/**
+ * Produtos cujo nome a mensagem cita ("quero Pedagogia"): uma palavra
+ * distintiva do nome (5+ letras, fora de grau e modalidade) aparece inteira
+ * na mensagem. Mais de `max` produtos = ambíguo, nenhum. Volta no formato
+ * do search_products.
+ */
+export async function findV2ProductsNamedIn(args: {
+  message: string;
+  allowedIds?: string[];
+  priceChannel?: string;
+  max?: number;
+}): Promise<Awaited<ReturnType<typeof searchV2Products>>["products"]> {
+  const words = new Set(normalizeSearch(args.message).split(" ").filter((w) => w.length >= 5));
+  if (words.size === 0) return [];
+  const orgId = getOrgIdOrThrow();
+  const allowedIds = Array.isArray(args.allowedIds) && args.allowedIds.length > 0 ? args.allowedIds : null;
+  const rows: Array<{ id: string; name: string }> = await prisma.product.findMany({
+    where: { organizationId: orgId, isActive: true, ...(allowedIds ? { id: { in: allowedIds } } : {}) },
+    select: { id: true, name: true },
+    take: 2000,
+  });
+  // Todas as palavras distintivas do nome têm de estar na mensagem:
+  // "quero Administração" casa "Administração", não "Administração Pública".
+  const distinctive = (name: string) => [...new Set(normalizeSearch(name).split(" ").filter((w) => w.length >= 5 && !GENERIC_PRODUCT_WORDS.has(w)))];
+  const scored = rows
+    .map((r) => ({ r, d: distinctive(r.name) }))
+    .filter(({ d }) => d.length > 0 && d.every((w) => words.has(w)));
+  // Um nome contido em outro também citado ("Gestão" e "Gestão Comercial"): fica o mais específico.
+  const matched = scored
+    .filter(({ d }) => !scored.some((o) => o.d.length > d.length && d.every((w) => o.d.includes(w))))
+    .map(({ r }) => r);
+  const max = args.max ?? 3;
+  if (matched.length === 0 || matched.length > max) return [];
+  const found = await searchV2Products({
+    query: matched[0].name,
+    allowedIds: matched.map((m) => m.id),
+    priceChannel: args.priceChannel,
+    limit: max,
+  });
+  // A busca pontua pelo nome do primeiro; os outros citados entram também.
+  const byId = new Map(found.products.map((p) => [p.id, p]));
+  const rest = matched.filter((m) => !byId.has(m.id));
+  for (const m of rest) {
+    const one = await searchV2Products({ query: m.name, allowedIds: [m.id], priceChannel: args.priceChannel, limit: 1 });
+    for (const p of one.products) byId.set(p.id, p);
+  }
+  return matched.map((m) => byId.get(m.id)).filter((p): p is NonNullable<typeof p> => !!p);
+}
+
 export async function searchV2Products(args: {
   query: string;
   type?: "PRODUCT" | "SERVICE";
@@ -117,7 +173,19 @@ export async function searchV2Products(args: {
       const cfText = p.customValues
         .map((v) => `${v.customField.name} ${v.customField.label} ${v.value}`)
         .join(" ");
+      // Nome igual à busca vem primeiro; a palavra inteira no nome vem antes
+      // de quem só a contém ("Pedagogia" antes de "Psicopedagogia"). Antes
+      // todos empatavam, a ordem alfabética cortava o curso pedido no limite
+      // e o modelo repetia a busca até o teto.
+      const nameNorm = normalizeSearch(p.name);
+      const termNorm = normalizeSearch(term);
+      const nameBonus = termNorm && nameNorm === termNorm
+        ? 200
+        : termNorm && ` ${nameNorm} `.includes(` ${termNorm} `)
+          ? 50
+          : 0;
       const score =
+        nameBonus +
         scoreTextMatch(p.name, term) +
         scoreTextMatch(p.sku ?? "", term) +
         scoreTextMatch(p.description ?? "", term) +

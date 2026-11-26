@@ -18,7 +18,7 @@ import { isGreetingOnlyMessage, keepOpenOnNewRequest } from "./closure";
 import { isShortAckText } from "@/lib/ai-agents/tabulation-classify-policy";
 import { applyBoldPolicy, toWhatsAppText } from "./reply-format";
 import { isConfusionMessage, rephraseAfterConfusion } from "./confusion";
-import { applyNoSourceGuard, conditionalHandoff, handoffExplanation, type V2PrefetchFact } from "./no-source";
+import { applyNoSourceGuard, conditionalHandoff, handoffExplanation, noSourceReplyMessage, type V2PrefetchFact } from "./no-source";
 import { applyReplyEnding, effectiveReplyEnding, replyEndingButtons } from "./reply-ending";
 import { buildV2Interactive, matchPendingOption, optionsFromAgentMessage } from "./interactive";
 import { detectV2Sentiment, shouldActOnSentiment } from "./sentiment";
@@ -574,6 +574,8 @@ export async function simulateV2Turn(
   const emptyQueries = allQueryToolResultsEmpty(llmResult.toolCalls);
   const governorBlind = llmResult.governorStats?.limitHit && (!llmResult.toolCalls?.length || emptyQueries);
   let noSourceApplied = false;
+  // A conferência respondeu só com a frase de "sem fonte": sem fecho nem anexo do material.
+  if ((peekV2Fact("verification") as { onlyFallback?: boolean } | undefined)?.onlyFallback) noSourceApplied = true;
   output = { ...output };
   const guarded = applyNoSourceGuard({
     config,
@@ -591,7 +593,7 @@ export async function simulateV2Turn(
       ? "Nada nos materiais cobre a mensagem e a resposta afirmava fatos → transfere"
       : "Nada nos materiais cobre a mensagem e a resposta afirmava fatos → mensagem \"sem material\"");
   } else if (!output.handoff && !output.concluded && noClientData && governorBlind) {
-    const noSourceMessage = config.fallback?.noSource?.message?.trim();
+    const noSourceMessage = noSourceReplyMessage(config);
     output = noSourceMessage
       ? { ...output, handoff: false, reply: noSourceMessage }
       : { ...output, handoff: true, reply: config.handoff.message };
@@ -795,7 +797,7 @@ export async function simulateV2Turn(
     // Igual à produção, um caminho só: explicação do modelo (sem as frases de
     // aviso) + mensagem configurada; "sem material" só sem resposta validada.
     const fallbackOnly = cause === "verification" || cause === "no_source";
-    const noSourceMsg = fallbackOnly ? config.fallback?.noSource?.message?.trim() ?? "" : "";
+    const noSourceMsg = fallbackOnly ? noSourceReplyMessage(config) : "";
     const explanation = fallbackOnly ? "" : handoffExplanation(output.reply);
     reply = renderMessage(noSourceMsg || activeTheme?.handoffDestination?.message?.trim() || config.handoff.message, vars, defaultFormatter());
     if (explanation) reply = `${explanation}\n\n${reply}`;
