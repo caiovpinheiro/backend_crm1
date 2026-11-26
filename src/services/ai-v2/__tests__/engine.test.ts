@@ -3227,6 +3227,14 @@ describe("processV2Turn — correções do motor", () => {
     expect(texts).toEqual(["Anotei seu pedido; a equipe te responde por aqui."]);
   });
 
+  it("mensagem automática de empresa não recebe resposta", async () => {
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: baseConfig(), active: true });
+    await run("Olá! Agradecemos seu contato. Em breve retornaremos. Nosso horário de atendimento é de segunda a sexta, das 8h às 18h.");
+    expect(mocks.callLLM).not.toHaveBeenCalled();
+    expect(mocks.sendText).not.toHaveBeenCalled();
+    expect(mocks.logTurn.mock.calls.at(-1)![0].discardedActions).toEqual([{ type: "no_reply", reason: "automated business reply" }]);
+  });
+
   it("fecho configurado vai no fim da resposta; não vai quando transfere", async () => {
     const config = baseConfig({
       replyEnding: { procedure: { enabled: true, phrases: ["Me avisa se funcionou."] }, info: { enabled: false, phrases: [] } },
