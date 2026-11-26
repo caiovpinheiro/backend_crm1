@@ -6,7 +6,7 @@
  */
 
 import type { V2AgentConfig, V2CRMContext, V2LLMOutput } from "@/lib/ai-v2/types";
-import { calendarPromptSection } from "./calendar";
+import { calendarFactsSection } from "./calendar";
 import { businessHoursText } from "./rules";
 import { FACT_IN_SENTENCE, lookupResultTexts, unsupportedFacts, unsupportedFigures, unsupportedLongDates } from "./ground-reply";
 import { standaloneClause } from "./reply-trim";
@@ -43,7 +43,7 @@ export function fixedSources(
     ...(config.variables ?? []).map((v) => `${v.key}: ${v.value}`),
     ...(config.globalRules ?? []),
     (themeId ? getV2ThemeById(config, themeId)?.instructions : undefined) ?? "",
-    calendarPromptSection(config.calendar?.events, now, config.businessHours?.timezone || "America/Sao_Paulo"),
+    calendarFactsSection(config.calendar, now, config.businessHours?.timezone || "America/Sao_Paulo"),
     businessHoursText(config),
     ...lookupResultTexts(toolCalls),
   ].filter((s) => s.trim());

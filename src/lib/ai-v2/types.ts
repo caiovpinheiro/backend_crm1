@@ -659,8 +659,26 @@ export interface V2CalendarEvent {
   title: string;
 }
 
+/**
+ * Entrada (turma): quem se matricula entre `enrollFrom` e `enrollUntil`
+ * (datas no fuso do agente) entra nela. `classesStart` e `firstPaymentDue`
+ * aceitam data ("2027-02-09") ou texto ("fevereiro de 2027").
+ */
+export interface V2Intake {
+  id: string;
+  level: "graduacao" | "pos" | "todos";
+  /** Nome da turma ("Turma 2027.1"). */
+  label?: string;
+  enrollFrom: string;
+  enrollUntil: string;
+  classesStart: string;
+  firstPaymentDue?: string;
+}
+
 export interface V2CalendarConfig {
   events: V2CalendarEvent[];
+  /** Entradas e início das aulas por período de matrícula. */
+  intakes?: V2Intake[];
 }
 
 /** Aviso temporário: situação com início e fim que muda o que o agente diz enquanto dura. */
