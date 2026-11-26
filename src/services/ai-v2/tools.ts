@@ -32,22 +32,32 @@ function normalizeSearch(s: string | null | undefined): string {
     .trim();
 }
 
+/** Palavras de ligação: não distinguem produto ("de", "em", "e"). */
+const SEARCH_STOPWORDS = new Set(["de", "da", "do", "das", "dos", "em", "e", "a", "o", "as", "os", "para", "com", "no", "na", "um", "uma"]);
+
 function scoreTextMatch(haystack: string, query: string): number {
   const q = normalizeSearch(query);
   const h = normalizeSearch(haystack);
   if (!q || !h) return 0;
   if (h.includes(q)) return 100;
-  const qWords = q.split(/\s+/).filter((w) => w.length >= 2);
+  const qWords = q.split(/\s+/).filter((w) => w.length >= 2 && !SEARCH_STOPWORDS.has(w));
   if (qWords.length === 0) return 0;
-  const hWords = new Set(h.split(/\s+/).filter(Boolean));
+  // Palavra curta do nome ("E", "DE", "EM") casava dentro de qualquer termo
+  // ("gEstao", "pEssoas"): todo produto com " E " no nome empatava e o
+  // certo ficava fora do limite. Parcial só entre palavras de 4+ letras.
+  const hWords = new Set(h.split(/\s+/).filter((w) => w && !SEARCH_STOPWORDS.has(w)));
+  let whole = 0;
   const hits = qWords.filter((w) => {
+    if (hWords.has(w)) { whole++; return true; }
     for (const hw of hWords) {
-      if (hw.includes(w) || w.includes(hw)) return true;
+      if (hw.length >= 4 && w.length >= 4 && (hw.includes(w) || w.includes(hw))) return true;
+      // Sigla de 3 letras no começo do termo ("ADM" → "administração").
+      if (hw.length === 3 && w.startsWith(hw)) return true;
     }
     return false;
   }).length;
   if (hits === 0) return 0;
-  return 20 + (hits / qWords.length) * 40;
+  return 20 + (hits / qWords.length) * 40 + (whole === qWords.length ? 10 : 0);
 }
 
 /** Palavras do nome que não distinguem um produto de outro (grau, modalidade). */

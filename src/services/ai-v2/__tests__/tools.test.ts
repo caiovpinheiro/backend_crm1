@@ -335,3 +335,22 @@ describe("Ciências Contábeis (conversa cmwwvovx90r98o7013oyk7h0i)", () => {
     expect((await findV2ProductsNamedIn({ message: "Ciências contábeis" })).map((p) => p.id).sort()).toEqual(["cc", "cc2"]);
   });
 });
+
+describe("searchV2Products — palavra curta do nome não casa dentro do termo", () => {
+  beforeEach(() => vi.clearAllMocks());
+  it("\"Gestão de Pessoas\" acha o MBA de Gestão Estratégica de Pessoas antes dos nomes com \" E \"", async () => {
+    const mk = (id: string, name: string) => ({ id, name, sku: null, type: "PRODUCT", unit: "un", price: 100, description: null, customValues: [], courseConfig: null });
+    (prisma.product.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([
+      mk("a1", "ADMINISTRACAO E MARKETING"),
+      mk("a2", "ARTE E EDUCACAO"),
+      mk("a3", "CIENCIA E TECNOLOGIA"),
+      mk("a4", "DIREITO E PROCESSO"),
+      mk("a5", "ENGENHARIA E SEGURANCA"),
+      mk("a6", "GESTAO DE PROJETOS"),
+      mk("mba", "MBA EM GESTAO ESTRATEGICA DE PESSOAS"),
+    ]);
+    const r = await searchV2Products({ query: "Gestão de Pessoas", limit: 5 });
+    expect(r.products[0].id).toBe("mba");
+    expect(r.products.map((p) => p.id)).not.toContain("a2");
+  });
+});

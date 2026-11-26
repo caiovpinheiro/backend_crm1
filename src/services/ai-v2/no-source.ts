@@ -243,6 +243,14 @@ export function withoutTrailingQuestion(reply: string): string {
   return sentences.join("").trim();
 }
 
+/** Resposta que já fecha o turno: termina em pergunta ou diz que a equipe/o agente retorna. */
+export function explanationClosesTurn(text: string): boolean {
+  const t = text.trim();
+  if (!t) return false;
+  if (/\?\s*(?:[\p{Extended_Pictographic}\uFE0F\u200D]\s*)*$/u.test(t)) return true;
+  return /(?<![\p{L}])(?:j[áa]\s+te\s+retorno|te\s+retorno|retorno\s+(?:por\s+aqui|j[áa]|em\s+breve)|volto\s+(?:a\s+falar|aqui|j[áa])|te\s+(?:chamo|aviso|respondo)\s+(?:por\s+aqui|aqui|j[áa]|em\s+breve)|a\s+equipe\s+(?:te\s+)?(?:responde|retorna|chama))(?![\p{L}])/iu.test(t);
+}
+
 export type V2PrefetchFact = { searched?: boolean; found?: number; bestSimilarity?: number | null };
 
 /** Nada relevante nos materiais para esta mensagem (buscou e não achou). */
@@ -294,8 +302,20 @@ export function applyNoSourceGuard(args: {
   if (!legacy && !invented) return { applied: false, handoff: false };
   const noSourceMessage = noSourceReplyMessage(config);
   if (noSourceMessage) {
+    // Sai só a frase que afirma fato sem apoio; o resto da resposta
+    // (acolhimento, o que a regra manda dizer) fica, seguido da frase de
+    // "sem fonte". Antes a resposta inteira virava só essa frase.
+    const fixed = fixedSources(config, args.themeId, args.toolCalls);
+    const kept = output.reply
+      .split(/\n+/)
+      .map((line) => line.split(/(?<=[.!?])\s+/).filter((sent) => sent.trim() && !(statesFacts(sent) && !mentionsClientData(sent, context) && !factsBackedBy(sent, fixed))).join(" ").trim())
+      .filter(Boolean)
+      .join("\n")
+      .trim();
     output.handoff = false;
-    output.reply = noSourceMessage;
+    // Consultou e não achou nada, sem dado do cliente: a resposta toda é
+    // palpite; vai só a frase. Nos demais, fica o que não afirma fato.
+    output.reply = !legacy && kept && kept.split(/\s+/).length >= 3 ? `${kept} ${noSourceMessage}` : noSourceMessage;
     output.reason = "Nada nos materiais cobre a mensagem (consulta sem resultados) — saída 'sem material de consulta' configurada";
     return { applied: true, handoff: false };
   }

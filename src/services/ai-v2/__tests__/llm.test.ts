@@ -797,7 +797,8 @@ describe("buildV2SystemPrompt — Tom, tamanho e regras", () => {
       stage: "active",
     });
     expect(r.output.handoff).toBe(true);
-    expect(r.output.reply).toBe("Vou transferir.");
+    // Nada conferido sobrou: a resposta fica vazia e o motor manda só o aviso de transferência.
+    expect(r.output.reply).toBe("");
     expect(r.output.reason).toContain("Menu Secreto");
   });
 
