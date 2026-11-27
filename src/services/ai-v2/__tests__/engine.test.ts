@@ -3117,9 +3117,9 @@ describe("processV2Turn — correções do motor", () => {
     });
     await run("tive um problema de saúde, quero cancelar minha inscrição");
     const texts = mocks.sendText.mock.calls.map((c) => c[0].text as string);
-    // O que foi conferido sai; como já promete ver com a pessoa, o aviso não vem
-    // logo depois (texto dobrado do S06). A frase só de acolhimento sai pelo filtro de sempre.
-    expect(texts).toEqual(["Eu vejo o cancelamento com você aqui."]);
+    // O que foi conferido sai inteiro, com o acolhimento (frase da regra); como
+    // já promete ver com a pessoa, o aviso não vem logo depois (texto dobrado do S06).
+    expect(texts).toEqual(["Sinto muito pelo que aconteceu. Eu vejo o cancelamento com você aqui."]);
     expect(texts).not.toContain("Isso eu te confirmo aqui, tá?");
     expect(mocks.simpleHandoff).toHaveBeenCalled();
   });

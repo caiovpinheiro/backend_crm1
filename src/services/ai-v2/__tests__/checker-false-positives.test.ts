@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { notAFactClaim } from "../claim-check";
+import { claimValueFromClient, notAFactClaim } from "../claim-check";
 import { unsupportedFacts } from "../ground-reply";
 
 describe("checagem — marcações que não são afirmação de fato", () => {
@@ -48,5 +48,23 @@ describe("acolhimento e paráfrase do cliente não são fato a conferir (rodada 
   it("empatia sem número passa; afirmação de oferta não", () => {
     expect(notAFactClaim("Sinto muito pela demora, a frustração faz sentido")).toBe(true);
     expect(notAFactClaim("Sinto muito, o curso é reconhecido pelo MEC com nota 5")).toBe(false);
+  });
+});
+
+describe("rodada 4 (27/11): pedido repetido, estado do atendimento e valor escrito pelo cliente", () => {
+  it("\"você quer…\" e \"anotei / já tá com a equipe\" não são fato a conferir; prazo continua sendo", () => {
+    expect(notAFactClaim("Entendi, você quer o vencimento no dia 20.")).toBe(true);
+    expect(notAFactClaim("Anotei seu pedido e alguém da equipe te responde por aqui")).toBe(true);
+    expect(notAFactClaim("Seu pedido de correção do nome já tá com a equipe; te respondo por aqui.")).toBe(true);
+    expect(notAFactClaim("Anotei e a equipe te responde em até 2 dias úteis")).toBe(false);
+  });
+
+  it("valor que o cliente afirmou vale; valor que ele perguntou, não", () => {
+    const card = ["[SIMULADO - pós; o cartão do curso mostra taxa de matrícula de R$ 99] || Mensagem do cliente: na pós tem prova?", "quanto é a taxa?"];
+    expect(claimValueFromClient("A taxa de matrícula do seu curso é R$ 99", card)).toBe(true);
+    const proposal = ["[SIMULADO - proposta: Taxa de matrícula: R$ 99. Mensalidades em 15 parcelas.] || Mensagem do cliente: a taxa dá pra parcelar?"];
+    expect(claimValueFromClient("A taxa de matrícula é R$ 99, como está na proposta", proposal)).toBe(true);
+    expect(claimValueFromClient("A taxa é R$ 30", ["a taxa é R$ 30, né?"])).toBe(false);
+    expect(claimValueFromClient("A taxa é R$ 30 em 3 parcelas", ["a taxa é R$ 30"])).toBe(false);
   });
 });

@@ -205,6 +205,26 @@ export function trimDroppedTheAnswer(question: string, original: string, trimmed
   return hits(original) >= 2 && hits(trimmed) === 0;
 }
 
+/**
+ * Mensagem com várias perguntas ("quanto é, é presencial, tem estágio, quando
+ * começa…?"): o corte tirou a única parte da resposta que tratava de uma
+ * delas. Melhor reescrever (que diz em meia frase que o ponto depende ou não
+ * tem aqui) do que mandar o resto com a pergunta em silêncio (GER-06, 27/11).
+ */
+export function trimDroppedAPart(question: string, original: string, trimmed: string): boolean {
+  const parts = question
+    .split(/[?;,]|\s+e\s+(?=(?:d[áa]|tem|quando|qual|quanto|como|onde|[ée]|posso|pode)(?![\p{L}]))/iu)
+    .map((p) => [...new Set(contentStems(p))])
+    .filter((stems) => stems.length > 0);
+  if (parts.length < 2) return false;
+  const hit = (stems: string[], text: string) => {
+    const words = contentStems(text);
+    // "presencial" × "semipresencial": a palavra dentro da outra também conta.
+    return stems.some((w) => words.some((x) => sameWordStem(w, x) || (w.length >= 6 && x.includes(w))));
+  };
+  return parts.some((stems) => hit(stems, original) && !hit(stems, trimmed));
+}
+
 const WRAP_CHARS = "*_~`\"“”";
 const OPENER: Record<string, string> = { "”": "“" };
 const CLOSER: Record<string, string> = { "“": "”" };

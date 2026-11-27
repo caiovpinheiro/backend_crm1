@@ -1989,6 +1989,21 @@ describe("texto livre: o motivo fica registrado", () => {
     expect(r.output.reason).toContain("texto livre");
     expect(r.output.reason).toContain("2ª chamada também não devolveu JSON");
   });
+
+  it("texto livre na 1ª tentativa: refaz a chamada e usa o JSON da 2ª (PRE2-06, 27/11)", async () => {
+    vi.clearAllMocks();
+    let calls = 0;
+    (generateWithTools as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      calls++;
+      // 1ª chamada e a normalização devolvem texto livre; a nova tentativa vem no formato.
+      return calls <= 2
+        ? makeLLMResponse("Sim, as bolsas são limitadas.")
+        : makeLLMResponse(JSON.stringify({ reply: "O prazo da condição a gente confirma na inscrição. Quer seguir?", actions: [] }));
+    });
+    const r = await callV2LLM({ agentId: "agent-1", config: baseConfig(), context: { contact: null, deals: [], selectedDeal: null, fields: baseConfig().contextFields }, userMessage: "preciso decidir hoje?", stage: "active" });
+    expect(r.output.reply).toBe("O prazo da condição a gente confirma na inscrição. Quer seguir?");
+    expect(r.output.reason ?? "").not.toContain("texto livre");
+  });
 });
 
 describe("cartão do produto como fonte: taxa de matrícula e isenção pelo catálogo", () => {
