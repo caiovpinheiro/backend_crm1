@@ -233,22 +233,42 @@ export function clearTemplateExampleMediaCache(): void {
  */
 export async function resolveTemplateOriginalHeaderMedia(
   client: MetaWhatsAppClient,
-  args: { templateName: string; languageCode: string; templateGraphId: string | null },
+  args: {
+    templateName: string;
+    languageCode: string;
+    templateGraphId: string | null;
+    /**
+     * Mídia original lida do catálogo quando a campanha foi criada. Usada se
+     * a Graph não devolver a definição do template no envio (token do canal
+     * sem acesso à listagem da WABA, template sem id salvo no CRM…).
+     */
+    fallbackExampleUrl?: string | null;
+    fallbackFormat?: "image" | "video" | "document" | null;
+  },
 ): Promise<{ id: string; format: "IMAGE" | "VIDEO" | "DOCUMENT" }> {
   const key = `${client.phoneId}::${args.templateName}::${args.languageCode}`;
   const hit = templateExampleMediaCache.get(key);
   if (hit && Date.now() - hit.at < TEMPLATE_EXAMPLE_MEDIA_TTL_MS) return hit.id;
 
   const pending = (async () => {
-    const { format, exampleUrl } = await resolveTemplateHeaderMediaExample(client, args);
-    if (!format) {
-      throw new TemplateHeaderMediaError(
-        `template "${args.templateName}": não foi possível ler o cabeçalho de mídia do template aprovado na Meta.`,
+    const fromGraph = await resolveTemplateHeaderMediaExample(client, args);
+    const fallbackUrl = args.fallbackExampleUrl?.trim() || null;
+    const fallbackFormat = args.fallbackFormat
+      ? (args.fallbackFormat.toUpperCase() as "IMAGE" | "VIDEO" | "DOCUMENT")
+      : null;
+    const useGraph = Boolean(fromGraph.format && fromGraph.exampleUrl);
+    const format = useGraph ? fromGraph.format : fallbackUrl ? fallbackFormat : null;
+    const exampleUrl = useGraph ? fromGraph.exampleUrl : fallbackUrl;
+    if (!useGraph) {
+      log.warn(
+        { template: args.templateName, detail: fromGraph.detail, fallback: Boolean(fallbackUrl) },
+        "[template-header-media] Graph sem mídia original do template",
       );
     }
-    if (!exampleUrl) {
+    if (!format || !exampleUrl) {
+      const why = fromGraph.detail ? ` (${fromGraph.detail})` : "";
       throw new TemplateHeaderMediaError(
-        `template "${args.templateName}": a Meta não devolveu a mídia original do cabeçalho. Use um campo do negócio com a URL da mídia.`,
+        `template "${args.templateName}": não foi possível obter a mídia original do cabeçalho na Meta${why}. Recrie a campanha (para gravar a mídia do catálogo) ou use um campo do negócio com a URL da mídia.`,
       );
     }
     const mediaType = format.toLowerCase() as "image" | "video" | "document";
@@ -307,6 +327,8 @@ export async function injectTemplateHeaderMediaComponent(
      * do HEADER na Meta), em vez de exigir URL/campo do CRM.
      */
     useTemplateOriginalMedia?: boolean;
+    /** Mídia original gravada na campanha (catálogo), fallback da Graph. */
+    templateExampleUrl?: string | null;
   },
 ): Promise<unknown[] | undefined> {
   if (args.useTemplateOriginalMedia && !args.headerMediaUrl?.trim()) {
@@ -314,6 +336,8 @@ export async function injectTemplateHeaderMediaComponent(
       templateName: args.templateName,
       languageCode: args.languageCode,
       templateGraphId: args.templateGraphId,
+      fallbackExampleUrl: args.templateExampleUrl ?? null,
+      fallbackFormat: args.headerMediaType ?? null,
     });
     return replaceHeaderComponent(
       args.components,
