@@ -101,7 +101,60 @@ describe("header com a mídia original do template", () => {
   });
 });
 
+describe("Graph sem o template no envio", () => {
+  const CATALOG_URL = "https://scontent.whatsapp.net/v/t61/catalogo.jpg?oe=1";
+
+  function failingClient() {
+    return {
+      phoneId: "phone-2",
+      uploadMedia: vi.fn(async () => "media-catalogo-1"),
+      getMessageTemplateByGraphId: vi.fn(async () => {
+        throw new Error("(#100) Tried accessing nonexisting field");
+      }),
+      listMessageTemplates: vi.fn(async () => {
+        throw new Error("Meta: WABA não configurada");
+      }),
+    };
+  }
+
+  it("usa a mídia original gravada do catálogo na criação da campanha", async () => {
+    const client = failingClient();
+    const out = await injectTemplateHeaderMediaComponent(client as never, {
+      ...baseArgs,
+      templateExampleUrl: CATALOG_URL,
+    });
+    expect((fetchMock.mock.calls[0] as unknown[])[0]).toBe(CATALOG_URL);
+    expect(out?.[0]).toEqual({
+      type: "header",
+      parameters: [{ type: "image", image: { id: "media-catalogo-1" } }],
+    });
+  });
+
+  it("sem fallback, o erro traz o motivo da Graph", async () => {
+    const client = failingClient();
+    await expect(injectTemplateHeaderMediaComponent(client as never, baseArgs)).rejects.toThrow(
+      /Tried accessing nonexisting field/,
+    );
+  });
+});
+
 describe("parseCampaignTemplatePayload × headerMediaSource", () => {
+  it("guarda a URL da mídia original do catálogo (só HTTPS)", () => {
+    expect(
+      parseCampaignTemplatePayload({
+        headerMediaSource: "template",
+        headerMediaType: "image",
+        headerMediaExampleUrl: "https://scontent.whatsapp.net/x.jpg",
+      }).headerMediaExampleUrl,
+    ).toBe("https://scontent.whatsapp.net/x.jpg");
+    expect(
+      parseCampaignTemplatePayload({
+        headerMediaSource: "template",
+        headerMediaExampleUrl: "http://169.254.169.254/latest",
+      }).headerMediaExampleUrl,
+    ).toBeUndefined();
+  });
+
   it("source=template ignora headerMediaUrl antigo", () => {
     expect(
       parseCampaignTemplatePayload({

@@ -396,6 +396,7 @@ async function resolveRecipientTemplateComponents(
         headerMediaUrl: null,
         headerMediaType: prepared.templatePayload.headerMediaType ?? null,
         useTemplateOriginalMedia: true,
+        templateExampleUrl: prepared.templatePayload.headerMediaExampleUrl ?? null,
       });
     }
     if (!fixedHeader) return prepared.baseComponents;
@@ -428,6 +429,7 @@ async function resolveRecipientTemplateComponents(
       headerMediaUrl: null,
       headerMediaType: prepared.templatePayload.headerMediaType ?? null,
       useTemplateOriginalMedia: true,
+      templateExampleUrl: prepared.templatePayload.headerMediaExampleUrl ?? null,
     });
   }
 

@@ -31,6 +31,11 @@ export type CampaignTemplatePayload = {
    * `headerMediaUrl` (campo do CRM ou URL fixa).
    */
   headerMediaSource?: "template" | "field" | null;
+  /**
+   * URL da mídia original (exemplo do HEADER) lida do catálogo ao criar a
+   * campanha. Fallback quando a Graph não devolve o template no envio.
+   */
+  headerMediaExampleUrl?: string | null;
 };
 
 const TOKEN_RE = /\{\{\s*([\w.]+)(?:\s*\|\s*([a-zA-Z0-9_]+))?\s*\}\}/g;
@@ -63,6 +68,11 @@ export function parseCampaignTemplatePayload(
     headerMediaUrl: headerMediaSource === "template" ? null : headerMediaUrl,
     headerMediaType,
     ...(headerMediaSource ? { headerMediaSource } : {}),
+    ...(headerMediaSource === "template" &&
+    typeof o.headerMediaExampleUrl === "string" &&
+    /^https:\/\//i.test(o.headerMediaExampleUrl.trim())
+      ? { headerMediaExampleUrl: o.headerMediaExampleUrl.trim() }
+      : {}),
   };
 }
 
