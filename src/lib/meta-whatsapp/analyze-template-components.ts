@@ -125,6 +125,8 @@ export function analyzeTemplateComponents(
         } else if (rawType) {
           buttonTypesSet.add(rawType);
           buttons.push({ type: rawType, text: label, url });
+          // URL dinâmica (`https://x/{{1}}`): o sufixo é parâmetro do envio.
+          if (rawType === "URL" && url && textHasVariablePlaceholders(url)) hasVariables = true;
         }
       }
     }
