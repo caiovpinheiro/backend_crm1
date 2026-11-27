@@ -12,7 +12,10 @@
  */
 
 import { toAbsolutePublicMediaUrl } from "@/lib/meta-whatsapp/to-absolute-public-media-url";
-import { resolveTemplateHeaderMediaFormat } from "@/lib/meta-whatsapp/enrich-template-flow";
+import {
+  resolveTemplateHeaderMediaExample,
+  resolveTemplateHeaderMediaFormat,
+} from "@/lib/meta-whatsapp/enrich-template-flow";
 import type { MetaWhatsAppClient } from "@/lib/meta-whatsapp/client";
 import { getLogger } from "@/lib/logger";
 
@@ -211,6 +214,81 @@ export async function resolveTemplateHeaderMediaParam(
   );
 }
 
+/** Media id da mídia original do template, por número + template + idioma. */
+const TEMPLATE_EXAMPLE_MEDIA_TTL_MS = 6 * 60 * 60 * 1000;
+const templateExampleMediaCache = new Map<
+  string,
+  { at: number; id: Promise<{ id: string; format: "IMAGE" | "VIDEO" | "DOCUMENT" }> }
+>();
+
+/** Só para testes. */
+export function clearTemplateExampleMediaCache(): void {
+  templateExampleMediaCache.clear();
+}
+
+/**
+ * Sobe UMA vez a mídia de exemplo do template aprovado (a "mídia original"
+ * cadastrada na Meta) e reaproveita o media id — uma campanha de milhares de
+ * contatos não pode baixar/subir o mesmo arquivo por destinatário.
+ */
+export async function resolveTemplateOriginalHeaderMedia(
+  client: MetaWhatsAppClient,
+  args: { templateName: string; languageCode: string; templateGraphId: string | null },
+): Promise<{ id: string; format: "IMAGE" | "VIDEO" | "DOCUMENT" }> {
+  const key = `${client.phoneId}::${args.templateName}::${args.languageCode}`;
+  const hit = templateExampleMediaCache.get(key);
+  if (hit && Date.now() - hit.at < TEMPLATE_EXAMPLE_MEDIA_TTL_MS) return hit.id;
+
+  const pending = (async () => {
+    const { format, exampleUrl } = await resolveTemplateHeaderMediaExample(client, args);
+    if (!format) {
+      throw new TemplateHeaderMediaError(
+        `template "${args.templateName}": não foi possível ler o cabeçalho de mídia do template aprovado na Meta.`,
+      );
+    }
+    if (!exampleUrl) {
+      throw new TemplateHeaderMediaError(
+        `template "${args.templateName}": a Meta não devolveu a mídia original do cabeçalho. Use um campo do negócio com a URL da mídia.`,
+      );
+    }
+    const mediaType = format.toLowerCase() as "image" | "video" | "document";
+    const fetched = await fetchPublicMediaBytes(exampleUrl, mediaType);
+    const id = await client.uploadMedia(fetched.buffer, fetched.mimeType, fetched.fileName);
+    if (!id) {
+      throw new TemplateHeaderMediaError(
+        `template "${args.templateName}": upload da mídia original na Meta não devolveu media id.`,
+      );
+    }
+    log.info(
+      { template: args.templateName, format, id: id.slice(0, 12) },
+      "[template-header-media] mídia original do template enviada",
+    );
+    return { id, format };
+  })();
+  templateExampleMediaCache.set(key, { at: Date.now(), id: pending });
+  // Falha não fica no cache: o próximo destinatário tenta de novo.
+  pending.catch(() => {
+    if (templateExampleMediaCache.get(key)?.id === pending) templateExampleMediaCache.delete(key);
+  });
+  return pending;
+}
+
+function replaceHeaderComponent(
+  components: unknown[] | undefined,
+  mediaType: "image" | "video" | "document",
+  id: string,
+): unknown[] {
+  const headerComponent: Record<string, unknown> = {
+    type: "header",
+    parameters: [{ type: mediaType, [mediaType]: { id } }],
+  };
+  const withoutExistingHeader = (components ?? []).filter((c) => {
+    const o = asRecord(c);
+    return String(o?.type ?? "").toLowerCase() !== "header";
+  });
+  return [headerComponent, ...withoutExistingHeader];
+}
+
 /**
  * Descobre o formato do header na Graph e injeta o parâmetro de mídia.
  * Se o template não exige mídia, devolve `components` intacto.
@@ -224,8 +302,26 @@ export async function injectTemplateHeaderMediaComponent(
     components: unknown[] | undefined;
     headerMediaUrl: string | null;
     headerMediaType?: "image" | "video" | "document" | null;
+    /**
+     * Sem URL: usa a mídia original cadastrada no template aprovado (exemplo
+     * do HEADER na Meta), em vez de exigir URL/campo do CRM.
+     */
+    useTemplateOriginalMedia?: boolean;
   },
 ): Promise<unknown[] | undefined> {
+  if (args.useTemplateOriginalMedia && !args.headerMediaUrl?.trim()) {
+    const original = await resolveTemplateOriginalHeaderMedia(client, {
+      templateName: args.templateName,
+      languageCode: args.languageCode,
+      templateGraphId: args.templateGraphId,
+    });
+    return replaceHeaderComponent(
+      args.components,
+      original.format.toLowerCase() as "image" | "video" | "document",
+      original.id,
+    );
+  }
+
   const fromGraph = await resolveTemplateHeaderMediaFormat(client, {
     templateName: args.templateName,
     languageCode: args.languageCode,
