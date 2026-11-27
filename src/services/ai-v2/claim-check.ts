@@ -294,6 +294,16 @@ export function notAFactClaim(claim: string): boolean {
   // Cortesia ("fico feliz em ajudar", "por nada"): o checador às vezes marca.
   if (!/\d/.test(c) && c.split(/\s+/).length <= 12 && /\b(?:fico (?:muito )?feliz|feliz em ajudar|que bom|por nada|de nada|obrigad[oa]|disponha|conte comigo|espero ter ajudado|a disposicao|qualquer (?:duvida|coisa)|estou por aqui|e so (?:me )?chamar|bom dia|boa tarde|boa noite|tudo bem)\b/.test(c)) return true;
   if (/(?:^|\bque |\bpelo que |\bcomo )(?:entendi[,.]?\s*)?voce (?:ja |tambem )?(?:enviou|disse|falou|mencionou|informou|tentou|subiu|mandou|comentou|contou|relatou|escreveu)\b/.test(c)) return true;
+  // Repetir o pedido da pessoa ("Entendi, você quer o vencimento no dia 20",
+  // "você precisa corrigir o nome"): é o pedido dela, não fato da empresa
+  // (POS4-05, 27/11).
+  if (/^(?:entendi|entendo|certo|beleza|ok|perfeito|show)?[,.!]?\s*(?:entao\s+)?voce (?:quer|queria|precisa|gostaria|pediu|esta pedindo|ta pedindo|prefere|deseja)\b/.test(c)) return true;
+  // Estado do próprio atendimento ("Anotei seu pedido", "já tá com a equipe",
+  // "te respondo por aqui"): é o que o agente fez agora, não afirmação a
+  // conferir nos materiais (POS1-06, POS4-03).
+  if (!/r\$|https?:\/\//.test(c) && c.split(/\s+/).length <= 22
+    && /\b(?:anotei|deixei anotado|registrei|ja anotei|esta anotado|ta anotado|(?:ja )?(?:esta|ta) com a equipe|ja passei (?:pra|para) (?:a )?equipe|te (?:respondo|retorno|aviso|chamo) por aqui|(?:alguem da )?equipe (?:ja )?te (?:responde|retorna|chama)|a equipe (?:vai )?(?:te )?(?:responder|retornar))\b/.test(c)
+    && !/\b(?:prazo|dias? uteis|horas?|em ate|isent|gratuit|garant)\w*/.test(c)) return true;
   // Motivo da transferência ("precisa ser tratado por uma pessoa da equipe").
   if (/\b(?:precisa|deve|tem que) ser (?:tratad|analisad|verificad|resolvid|feit|confirmad|avaliad)\w* (?:por|pela|pelo) (?:uma pessoa|alguem|a equipe|equipe|um atendente|atendente|setor|um consultor)/.test(c)) return true;
   // Pedido ao cliente ("para eu identificar o erro, envie…").
@@ -372,6 +382,36 @@ export function claimEchoesClient(claim: string, clientTexts: string[]): boolean
     const vocab = new Set(wordsOf(s.replace(/\d[\d.]*(?:,\d+)?/g, (n) => ` ${n.replace(/\./g, "")} `)));
     if (!numbers.every((n) => vocab.has(n))) return false;
     return words.filter((w) => vocab.has(w)).length / words.length >= 0.8;
+  });
+}
+
+/**
+ * Valor que a própria pessoa escreveu como afirmação ("o cartão mostra taxa
+ * de matrícula de R$ 99", "na proposta: Taxa de matrícula: R$ 99"): repetir
+ * esse valor não é inventar. Vale quando todo valor em R$ da marcação está
+ * numa frase do cliente que não é pergunta, junto de ao menos uma palavra de
+ * conteúdo da marcação ("taxa"). "É R$ 30, né?" continua sem valer
+ * (POS4-04, POS6-05, 27/11).
+ */
+export function claimValueFromClient(claim: string, clientTexts: string[]): boolean {
+  const fold = (s: string) => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const moneyOf = (s: string) => (fold(s).match(/r\$\s?\d{1,3}(?:\.\d{3})*(?:,\d{2})?/g) ?? []).map((m) => m.replace(/\s/g, "").replace(/,00$/, ""));
+  const money = moneyOf(claim);
+  if (money.length === 0) return false;
+  // Sem outros números fora dos valores (prazo, parcelas) e sem link.
+  const rest = fold(claim).replace(/r\$\s?\d{1,3}(?:\.\d{3})*(?:,\d{2})?/g, " ");
+  if (/\d|https?:\/\//.test(rest)) return false;
+  const words = rest.split(/[^a-z]+/).filter((w) => w.length >= 4 && !ECHO_STOP.has(w) && !REPORT_WORDS.has(w));
+  const CONFIRMATION_TAIL = /,?\s*(?:n[eé]|certo|correto|n[ãa]o [eé]|[eé] isso|ser[áa]|confere|verdade)\s*\??\s*$/i;
+  const sentences = clientTexts
+    .flatMap((t) => t.split(/(?<=[.!?;])\s+|\n+|\s*\|\|\s*|[[\]]/))
+    .map((x) => x.trim())
+    .filter((x) => x && !/\?\s*$/.test(x) && !CONFIRMATION_TAIL.test(x));
+  return sentences.some((sent) => {
+    const m = moneyOf(sent);
+    if (!money.every((v) => m.includes(v))) return false;
+    const vocab = fold(sent);
+    return words.length === 0 || words.some((w) => vocab.includes(w.slice(0, 5)));
   });
 }
 
@@ -479,7 +519,7 @@ export async function checkClaimsWithModel(args: {
       }),
     ]);
     const flagged = parseClaimCheck(res.text, args.reply);
-    const unsupported = flagged.filter((c) => !notAFactClaim(c) && !claimEchoesClient(c, args.clientTexts) && !claimBackedByCitableValues(c, args.citableValues ?? []) && !claimFoundInSources(c, args.sources) && !claimBackedByArithmetic(c, args.derivedAmounts ?? [], args.clientDocuments ?? []) && !claimBackedByProductCard(c, args.productCards ?? []) && !claimParaphrasesClient(c, args.clientTexts));
+    const unsupported = flagged.filter((c) => !notAFactClaim(c) && !claimEchoesClient(c, args.clientTexts) && !claimBackedByCitableValues(c, args.citableValues ?? []) && !claimFoundInSources(c, args.sources) && !claimBackedByArithmetic(c, args.derivedAmounts ?? [], args.clientDocuments ?? []) && !claimBackedByProductCard(c, args.productCards ?? []) && !claimParaphrasesClient(c, args.clientTexts) && !claimValueFromClient(c, args.clientTexts));
     if (unsupported.length < flagged.length) {
       log.info(
         { descartadas: flagged.length - unsupported.length },

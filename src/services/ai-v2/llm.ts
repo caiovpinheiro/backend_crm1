@@ -54,7 +54,7 @@ import { MAIN_SOURCE_SIMILARITY, WEAK_MATCH_SIMILARITY, knowledgeMinSimilarity }
 import { checkClaimsWithModel, clientDocumentTexts, sameClaim, worthClaimCheck } from "./claim-check";
 import { activeNotices, noticesForTurn, noticesPromptSection } from "./notices";
 import { brHolidayName, isBrazilTimezone, nextBrBusinessDay } from "@/lib/br-holidays";
-import { isMutilated, onlyKeptSentences, prescribedReplyMatching, trimDroppedTheAnswer, trimUnsupportedSentences } from "./reply-trim";
+import { isMutilated, onlyKeptSentences, prescribedReplyMatching, trimDroppedAPart, trimDroppedTheAnswer, trimUnsupportedSentences } from "./reply-trim";
 import { MATERIAL_ATTACHMENT_LIMITS, attachmentsForDocs, attachmentsPromptSection } from "./material-attachments";
 import { humanRequestTerms } from "@/lib/ai-v2/config";
 import { defaultV2Counters } from "./limits";
@@ -2384,7 +2384,7 @@ export async function callV2LLM(args: {
       if (!trimmed) break;
       // O que sobrou não fala mais do que o cliente perguntou: não sai como
       // se fosse resposta; vai para a reescrita só com o material.
-      if (trimDroppedTheAnswer(userMessage, output.reply, trimmed.reply)) {
+      if (trimDroppedTheAnswer(userMessage, output.reply, trimmed.reply) || trimDroppedAPart(userMessage, output.reply, trimmed.reply)) {
         traceStep("verificação", "O corte tiraria a parte que respondia a pergunta → reescreve em vez de mandar o resto");
         break;
       }
@@ -2414,7 +2414,7 @@ export async function callV2LLM(args: {
     const reviewSystem = [
       system,
       "# REVISÃO",
-      `Sua resposta anterior cita ${list}, que não aparece nos trechos da base, nas instruções nem na conversa. Tire essas afirmações da resposta e mantenha o resto como está: não as substitua por outra afirmação parecida, por uma generalidade ("pode variar", "depende do caso") nem por algo que também não esteja nas fontes. Use só nomes, passos e caminhos que estão nos trechos. Nome que o cliente citou e que não está nas fontes: não confirme que existe nem atribua a ele data, valor ou regra própria — dê a regra geral e diga que não consegue confirmar esse item. Não monte um passo a passo geral a partir do procedimento de outro serviço nem do que aparece numa imagem. Mantenha a resposta a cada pergunta da mensagem do cliente que tem fonte, o acolhimento e o próximo passo (a pergunta ou o pedido do fim); tirar uma frase não é motivo para deixar outra pergunta sem resposta. Se, sem essas afirmações, não sobra resposta ao que o cliente pediu, diga com naturalidade que não tem essa informação e diga o que as fontes mostram sobre o assunto (o cartão do produto, por exemplo). Transferir segue as instruções do agente: se elas mandam oferecer a equipe antes (perguntar se a pessoa quer que alguém continue), ofereça e não marque handoff; marque handoff=true só se as instruções mandam transferir, se a pessoa já pediu ou aceitou, ou se não há instrução sobre isso e ela precisa da informação para seguir. Nunca transfira por causa de preço de produto que está no cartão. Devolva o JSON completo no formato exigido.`,
+      `Sua resposta anterior cita ${list}, que não aparece nos trechos da base, nas instruções nem na conversa. Tire essas afirmações da resposta e mantenha o resto como está: não as substitua por outra afirmação parecida, por uma generalidade ("pode variar", "depende do caso") nem por algo que também não esteja nas fontes. Use só nomes, passos e caminhos que estão nos trechos. Nome que o cliente citou e que não está nas fontes: não confirme que existe nem atribua a ele data, valor ou regra própria — dê a regra geral e diga que não consegue confirmar esse item. Não monte um passo a passo geral a partir do procedimento de outro serviço nem do que aparece numa imagem. Mantenha a resposta a cada pergunta da mensagem do cliente que tem fonte, o acolhimento e o próximo passo (a pergunta ou o pedido do fim); tirar uma frase não é motivo para deixar outra pergunta sem resposta; pergunta cuja resposta saiu ganha meia frase dizendo que esse ponto depende do curso ou que não tem essa informação aqui, nunca fica em silêncio. Mantenha também o acolhimento e as frases do próprio atendimento ("anotei", "já está com a equipe", "te respondo por aqui"). Se, sem essas afirmações, não sobra resposta ao que o cliente pediu, diga com naturalidade que não tem essa informação e diga o que as fontes mostram sobre o assunto (o cartão do produto, por exemplo). Transferir segue as instruções do agente: se elas mandam oferecer a equipe antes (perguntar se a pessoa quer que alguém continue), ofereça e não marque handoff; marque handoff=true só se as instruções mandam transferir, se a pessoa já pediu ou aceitou, ou se não há instrução sobre isso e ela precisa da informação para seguir. Nunca transfira por causa de preço de produto que está no cartão. Devolva o JSON completo no formato exigido.`,
     ].join("\n\n");
     try {
       const res = await generateWithTools({
@@ -2710,6 +2710,12 @@ export async function callV2LLM(args: {
         traceStep("verificação", "O modelo devolveu um formato ilegível — tentando de novo");
         continue;
       }
+      // Texto livre fora do formato perde as ações e o fecho do turno e ia
+      // cru ao cliente (PRE2-06, 27/11): tenta a chamada inteira de novo uma vez.
+      if (i === 0 && r.output.reason.startsWith("LLM devolveu texto livre")) {
+        traceStep("verificação", "O modelo devolveu texto livre fora do formato — tentando de novo");
+        continue;
+      }
       const reasonBefore = r.output.reason;
       const replyBefore = r.output.reply;
       await checkQuotedTerms(r);
@@ -2719,9 +2725,9 @@ export async function callV2LLM(args: {
       await ensurePriceAnswer(r);
       // "Por que respondeu isso?" descrevia a resposta do modelo antes da
       // conferência; o cliente recebeu outra. Fica dito o que mudou.
-      if (r.output.reply !== replyBefore && r.output.reason === reasonBefore) {
+      if (r.output.reply !== replyBefore && (r.output.reason === reasonBefore || !/confer[êe]ncia/i.test(r.output.reason ?? ""))) {
         const v = peekV2Fact("verification") as { unsupported?: string[] } | undefined;
-        r.output.reason = [reasonBefore, `A conferência mudou a resposta enviada${v?.unsupported?.length ? ` (tirou: ${v.unsupported.slice(0, 2).join("; ")})` : ""}.`].filter(Boolean).join(" · ");
+        r.output.reason = [r.output.reason || reasonBefore, `A conferência mudou a resposta enviada${v?.unsupported?.length ? ` (tirou: ${v.unsupported.slice(0, 2).join("; ")})` : ""}.`].filter(Boolean).join(" · ");
       }
       if (vault.size > 0) {
         r.output.collected = vault.restoreDeep(r.output.collected);
