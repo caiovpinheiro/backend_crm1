@@ -36,6 +36,7 @@ import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import {
   buildTemplateComponents,
   renderTemplatePreview,
+  templateVariablesOfComponent,
   type TemplateVariableComponent,
   type TemplateVariableInput,
 } from "@/lib/meta-whatsapp/build-template-components";
@@ -451,7 +452,7 @@ export async function POST(request: Request, ctx: Ctx) {
           components,
           // Sem `bodyPreview` explícito o service busca o corpo na Graph e
           // renderiza com as variáveis — o node só precisa do nome.
-          bodyPreview: rawPreview ? renderTemplatePreview(rawPreview, variables) || null : null,
+          bodyPreview: rawPreview ? renderTemplatePreview(rawPreview, templateVariablesOfComponent(variables, "body")) || null : null,
           templateVariables: variables,
           templateGraphId:
             typeof body.templateGraphId === "string" ? body.templateGraphId : null,

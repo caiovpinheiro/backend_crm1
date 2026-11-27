@@ -58,6 +58,7 @@ import {
 import {
   renderTemplatePreview,
   templateVariablesFromSendComponents,
+  templateVariablesOfComponent,
 } from "@/lib/meta-whatsapp/build-template-components";
 import { enrichTemplateComponentsForFlowSend } from "@/lib/meta-whatsapp/enrich-template-flow";
 import { isMetaFlowEnrichError } from "@/lib/meta-whatsapp/meta-flow-enrich-error";
@@ -1631,6 +1632,37 @@ function sanitizeTemplateParameterText(value: string): string {
  * `conversation.id`), filtro `|first_name` e token ausente virando string
  * vazia se comportam igual em todo o motor.
  */
+/**
+ * Garante que todo parâmetro de botão URL dinâmico ficou com texto depois de
+ * resolver os tokens do CRM. Campo do negócio vazio vira string vazia no
+ * interpolador; mandar isso à Meta volta 132000 sem dizer qual campo faltou.
+ */
+export function assertTemplateButtonParamsFilled(
+  templateName: string,
+  configured: unknown[] | undefined,
+  resolved: unknown[] | undefined,
+): void {
+  const before = templateVariablesOfComponent(
+    templateVariablesFromSendComponents(configured),
+    "button",
+  );
+  const after = templateVariablesOfComponent(
+    templateVariablesFromSendComponents(resolved),
+    "button",
+  );
+  for (const v of after) {
+    const text = (v.value ?? "").trim();
+    if (text && !/\{\{/.test(text)) continue;
+    const raw = before.find(
+      (b) => b.buttonIndex === v.buttonIndex && b.key === v.key,
+    )?.value;
+    const origin = raw?.trim() ? ` ao resolver ${raw.trim()}` : "";
+    throw new MetaSendFailureError(
+      `send_whatsapp_template "${templateName}": o final da URL do botão ${(v.buttonIndex ?? 0) + 1} ficou vazio${origin}. Preencha esse campo no negócio/contato ou ajuste o valor do botão no passo.`,
+    );
+  }
+}
+
 async function interpolateTemplateComponents(
   components: unknown[] | undefined,
   rt: RuntimeContext,
@@ -3842,7 +3874,10 @@ export async function executeStep(
       const cfgBody = readString(cfg, "bodyPreview")?.trim() || null;
       const rawBody = cfgBody || tplBodyFromDb;
       const renderedBody = rawBody
-        ? renderTemplatePreview(rawBody, templateVariablesFromSendComponents(rawComponents)) || rawBody
+        ? renderTemplatePreview(
+            rawBody,
+            templateVariablesOfComponent(templateVariablesFromSendComponents(rawComponents), "body"),
+          ) || rawBody
         : null;
       const resolvedBody =
         renderedBody && tplFlowVars
@@ -3873,6 +3908,13 @@ export async function executeStep(
       );
 
       try {
+        // Botão URL dinâmico: a Meta recusa sufixo vazio com 132000, que não
+        // diz qual campo faltou. Falha aqui, nomeando o token do CRM.
+        assertTemplateButtonParamsFilled(
+          templateName,
+          Array.isArray(cfg["components"]) ? (cfg["components"] as unknown[]) : undefined,
+          rawComponents,
+        );
         const flowToken = readString(cfg, "flowToken") ?? null;
         const fad = cfg["flowActionData"];
         const flowActionData =
