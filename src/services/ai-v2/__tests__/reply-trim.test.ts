@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { onlyKeptSentences, trimUnsupportedSentences } from "../reply-trim";
+import { onlyKeptSentences, trimDroppedAPart, trimUnsupportedSentences } from "../reply-trim";
 
 describe("corte de frase sem fonte", () => {
   it("tira só a frase marcada e mantém o resto", () => {
@@ -42,5 +42,15 @@ describe("corte de frase sem fonte", () => {
     expect(onlyKeptSentences(rewritten, original, ["Peça o reembolso em dinheiro na hora"])).toBe(true);
     expect(onlyKeptSentences("Para trocar, vá à loja. O reembolso é feito por transferência.", original, ["Peça o reembolso em dinheiro na hora"])).toBe(false);
     expect(onlyKeptSentences("A instalação é gratuita, sim.", "Pode ficar tranquilo, a instalação é gratuita para todos os planos.", ["a instalação é gratuita para todos os planos"])).toBe(false);
+  });
+});
+
+describe("corte que tira a resposta de uma das perguntas (GER-06, 27/11)", () => {
+  it("várias perguntas: o corte que some com \"presencial\" pede reescrita; corte de detalhe não", () => {
+    const q = "quanto é, é presencial, tem estágio, quando começa e dá pra transferir minha faculdade?";
+    const original = "O valor depende do curso. É EAD ou semipresencial, conforme o curso. Os estágios são no campus. As aulas começam em fevereiro. Dá pra transferir, sim.";
+    expect(trimDroppedAPart(q, original, "O valor depende do curso. Os estágios são no campus. As aulas começam em fevereiro. Dá pra transferir, sim.")).toBe(true);
+    expect(trimDroppedAPart(q, original, "O valor depende do curso. É EAD ou semipresencial, conforme o curso. Os estágios são no campus. As aulas começam em fevereiro.")).toBe(true);
+    expect(trimDroppedAPart("qual o prazo de entrega?", "A entrega leva 2 dias. O frete é grátis.", "A entrega leva 2 dias.")).toBe(false);
   });
 });
