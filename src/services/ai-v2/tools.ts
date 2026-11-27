@@ -19,7 +19,7 @@ import {
 
 import { formatCourseDuration, formatCourseLevel, formatCourseMode } from "@/services/product-messages";
 
-import { pickPolicyPrice } from "./product-card";
+import { pickPolicyPrice, policyFinalPrice } from "./product-card";
 
 function normalizeSearch(s: string | null | undefined): string {
   if (!s) return "";
@@ -227,8 +227,9 @@ export async function searchV2Products(args: {
       const base = p.price ? Number(p.price) : null;
       const cc = (p as { courseConfig?: { level?: string | null; grau?: string | null; mode?: string | null; semester?: number | null; pricingOptions?: unknown } | null }).courseConfig ?? null;
       const options = cc?.pricingOptions;
-      const picked = priceChannel && base !== null ? pickPolicyPrice(base, options, priceChannel) : null;
-      const final = picked ? Math.round(picked.unitPrice * (1 - picked.discount / 100) * 100) / 100 : base;
+      // Mesmo preço do cartão: opção do canal, senão a principal do produto.
+      const picked = base !== null ? pickPolicyPrice(base, options, priceChannel) : null;
+      const final = picked ? policyFinalPrice(picked.unitPrice, picked.discount) : base;
       const course = cc
         ? {
             level: formatCourseLevel(cc.level),
