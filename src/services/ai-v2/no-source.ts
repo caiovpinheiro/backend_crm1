@@ -131,19 +131,33 @@ export function announcesTransfer(reply: string): boolean {
  * caminho só: a mesma situação gera a mesma estrutura de mensagem.
  */
 export function handoffExplanation(reply: string): string {
+  // A resposta já fecha com a passagem ("Entendo sua frustração. Anotei seu
+  // pedido de cancelamento e alguém da equipe te responde por aqui"): vai
+  // inteira, como está — é a frase literal da regra. Antes sobrava só o aviso
+  // padrão, sem acolhimento nem o pedido (POS8-06, POS4-02, 27/11).
+  if (promisesReturn(reply) && !conditionalHandoff(reply)) return reply.trim();
   const lines = reply
     .split(/\r?\n/)
     .map((line) =>
       line
         .split(/(?<=[.!?])\s+/)
         .map((s) => withoutTransferClause(withoutTransferDoneClause(s)))
-        .filter((s) => s.trim() && !isEmpathyOnly(s))
+        .filter((s) => s.trim() && (!isEmpathyOnly(s) || acknowledgesFeeling(s)))
         .join(" ")
         .trim(),
     )
     .filter(Boolean);
   const text = lines.join("\n").trim();
-  return text.split(/\s+/).filter(Boolean).length >= 4 ? text : "";
+  return text.split(/\s+/).filter(Boolean).length >= 4 || (text && acknowledgesFeeling(text)) ? text : "";
+}
+
+/**
+ * Acolhimento do que a pessoa sente ("Entendo sua frustração", "sinto pela
+ * demora"): não é cortesia vazia, é o que a regra pede antes da passagem.
+ * "Entendo a dúvida", "claro", "ok" continuam saindo.
+ */
+export function acknowledgesFeeling(sentence: string): boolean {
+  return /(?<![\p{L}])(?:frustra\p{L}*|chatea\p{L}*|irrita\p{L}*|indigna\p{L}*|chatead\p{L}*|preocupa\p{L}*|susto|transtorno|demora|espera|incômodo|incomodo|sinto\s+(?:muito|por\s+isso|pela|pelo)|lamento)(?![\p{L}])/iu.test(sentence);
 }
 
 /**
@@ -178,6 +192,11 @@ const TRANSFER_CLAUSE = /,?\s*(?:e\s+)?(?:por isso|ent[ãa]o|assim|portanto|logo
 export function withoutTransferClause(sentence: string): string {
   const s = sentence.trim();
   if (!announcesTransfer(s)) return s;
+  // "Me manda um print do comprovante que eu passo pra equipe conferir": o
+  // pedido fica, sai só "que eu passo pra equipe…" (a frase inteira saía e o
+  // pedido do comprovante sumia — POS6-02).
+  const relay = s.replace(/[,;]?\s+(?:que|e)\s+(?:eu\s+)?(?:j[áa]\s+)?(?:passo|repasso|encaminho|mando|levo|envio)\s+(?:pra|para|[àa])\s+(?:a\s+|o\s+)?(?:equipe|time|setor|atendimento|algu[eé]m|consultor\p{L}*)\b[^.!?]*([.!?]?)\s*$/iu, "$1").trim();
+  if (relay !== s && relay.split(/\s+/).length >= 3 && !announcesTransfer(relay)) return /[.!?]$/.test(relay) ? relay : `${relay}.`;
   // "…online; vou te passar…" deixava "online;." e "Como X, vou chamar…" deixava "Como X.".
   const cut = standaloneClause(s.replace(TRANSFER_CLAUSE, "").trim().replace(/[,;:\s]+$/, ""));
   if (!cut || announcesTransfer(cut) || cut.split(/\s+/).length < 3) return "";
