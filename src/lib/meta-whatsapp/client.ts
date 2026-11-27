@@ -305,6 +305,11 @@ export class MetaWhatsAppClient {
     return Boolean(this.accessToken?.trim() && this.phoneNumberId?.trim());
   }
 
+  /** Id do número na Cloud API — escopo dos media ids enviados por upload. */
+  get phoneId(): string {
+    return this.phoneNumberId?.trim() ?? "";
+  }
+
   /** Token + número + WABA — necessário para API de templates na conta comercial. */
   get templatesConfigured(): boolean {
     return this.configured && Boolean(this.businessAccountId?.trim());

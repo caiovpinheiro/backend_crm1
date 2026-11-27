@@ -503,6 +503,42 @@ export async function enrichTemplateComponentsForFlowSend(
  * pois a ausência de definição aqui não deve lançar — o chamador decide
  * (ex.: cai pra `headerMediaType` explícito no config do passo).
  */
+/**
+ * Formato do cabeçalho de mídia e a URL da mídia de exemplo cadastrada no
+ * template aprovado (`HEADER.example.header_handle[0]`, servida pela CDN da
+ * Meta). É a "mídia original" do template — a Meta não a reaproveita no
+ * envio sozinha: o parâmetro de mídia do header continua obrigatório.
+ */
+export async function resolveTemplateHeaderMediaExample(
+  client: MetaWhatsAppClient,
+  args: {
+    templateName: string;
+    languageCode: string;
+    templateGraphId?: string | null;
+  },
+): Promise<{ format: "IMAGE" | "VIDEO" | "DOCUMENT" | null; exampleUrl: string | null }> {
+  const resolved = await resolveTemplateDefinitionRow(client, {
+    templateName: args.templateName,
+    languageCode: args.languageCode,
+    templateGraphId: args.templateGraphId ?? null,
+    strictFlowEnrich: false,
+  });
+  const components = Array.isArray(resolved.row?.components)
+    ? (resolved.row?.components as unknown[])
+    : [];
+  for (const c of components) {
+    const o = asRecord(c);
+    if (!o || String(o.type ?? "").toUpperCase() !== "HEADER") continue;
+    const fmt = String(o.format ?? "").toUpperCase();
+    const format = fmt === "IMAGE" || fmt === "VIDEO" || fmt === "DOCUMENT" ? fmt : null;
+    const example = asRecord(o.example);
+    const handles = Array.isArray(example?.header_handle) ? example.header_handle : [];
+    const first = handles.find((h): h is string => typeof h === "string" && h.trim() !== "");
+    return { format, exampleUrl: first?.trim() ?? null };
+  }
+  return { format: null, exampleUrl: null };
+}
+
 export async function resolveTemplateHeaderMediaFormat(
   client: MetaWhatsAppClient,
   args: {
