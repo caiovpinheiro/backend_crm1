@@ -883,6 +883,10 @@ Cada seção volta como um bloco independente; uma seção que falha não derrub
 | `Indisponível sem réplica de leitura` | `no_replica` | Seção **pedida**, mas pulada: ela só roda na réplica de leitura e a réplica está ausente (`DATABASE_URL_REPLICA` não definida) ou derrubada (circuito aberto após erro de conexão). |
 | `Falha ao carregar este bloco.` | (ausente) | A consulta falhou. O erro do banco não vai ao cliente: fica no log estruturado (`painel-service`, campo `block`). |
 
+#### `GET /api/painel/portal-aluno`
+
+Para a aba Ao vivo do portal do aluno. Só leitura, com Bearer ou sessão de usuário ADMIN ou MANAGER. `?automacoes=a,b` (até 5), `?desde=AAAA-MM-DD` e `?alcance=passo1,passo2` (até 10) e `?coorte=passo3,passo4` (até 12, para testes A/B/C). Devolve os blocos `automacoes` (contagem por dia, passo e status), `alcance` (por passo, HMAC-SHA256 do telefone com o token como chave; vazio na sessão), `coorte` (por passo, `{ k, em, ok }`: chave embaralhada, primeira passagem e se o envio deu certo; vazio na sessão), `atendimento` e `atendentes` (contagens de humanos). Cada bloco é `{ ok, data }` ou `{ ok: false, error }`. Não traz nome, telefone nem id de contato ou conversa.
+
 #### `GET /api/painel/service` — seções
 
 | Seção | Roda em | Exige réplica | Conteúdo |
