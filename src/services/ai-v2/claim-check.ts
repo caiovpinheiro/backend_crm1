@@ -286,6 +286,11 @@ export function notAFactClaim(claim: string): boolean {
   // "preciso que um atendente analise a tela com você", "alguém da equipe vai
   // conferir": também é aviso de transferência, não afirmação da empresa.
   if (/\b(?:preciso|precisamos|vou precisar) que (?:um|uma|alguem|a equipe|o time|um atendente|uma pessoa|um consultor)\b|\b(?:um|uma) (?:atendente|pessoa|consultor\w*|colega|especialista)(?: da equipe| do time)? (?:vai|precisa|pode|ira) (?:analisar|verificar|conferir|avaliar|resolver|te ajudar|continuar|assumir)\b|\b(?:alguem|a equipe|o time) (?:da equipe |do time )?(?:vai|precisa|pode) (?:analisar|verificar|conferir|avaliar|resolver|te ajudar|continuar|assumir)\b/.test(c)) return true;
+  // Acolhimento ("Sinto muito pela demora, a frustração faz sentido", "Entendi,
+  // a distância pesou"): não afirma fato da empresa. Sem número e sem negar
+  // oferta ("não temos esse curso" continua sendo conferido).
+  if (!/\d/.test(c) && c.split(/\s+/).length <= 14 && !/\bnao (?:temos|tem|ha|oferecemos|existe|e possivel|da)\b/.test(c)
+    && /\b(?:sinto muito|lamento|que pena|poxa|imagino (?:como|que|o quanto)|compreendo|entendo (?:sua|a sua|o seu|seu|como|que)|faz (?:todo )?sentido|(?:sua |a )?frustracao|chateac\w*|(?:a |essa )?(?:distancia|demora|espera) pes\w*|pesou|desculp\w* (?:pela|pelo))\b/.test(c)) return true;
   // Cortesia ("fico feliz em ajudar", "por nada"): o checador às vezes marca.
   if (!/\d/.test(c) && c.split(/\s+/).length <= 12 && /\b(?:fico (?:muito )?feliz|feliz em ajudar|que bom|por nada|de nada|obrigad[oa]|disponha|conte comigo|espero ter ajudado|a disposicao|qualquer (?:duvida|coisa)|estou por aqui|e so (?:me )?chamar|bom dia|boa tarde|boa noite|tudo bem)\b/.test(c)) return true;
   if (/(?:^|\bque |\bpelo que |\bcomo )(?:entendi[,.]?\s*)?voce (?:ja |tambem )?(?:enviou|disse|falou|mencionou|informou|tentou|subiu|mandou|comentou|contou|relatou|escreveu)\b/.test(c)) return true;
@@ -371,7 +376,9 @@ export function claimEchoesClient(claim: string, clientTexts: string[]): boolean
 }
 
 /** Palavras de quem repete o relato ("entendi", "aparece", "você disse"): não são o conteúdo. */
-const REPORT_WORDS = new Set(["entendi", "entendo", "entao", "certo", "perfeito", "aparece", "aparecendo", "ficou", "fica", "esta", "consta", "constando", "segundo", "voce", "disse", "falou", "ainda", "continua", "mostra", "mostrando", "diz", "dizendo", "ta", "tah", "foi", "veio", "deu", "dando", "seu", "sua", "meu", "minha"]);
+const REPORT_WORDS = new Set(["entendi", "entendo", "entao", "certo", "perfeito", "aparece", "aparecendo", "ficou", "fica", "esta", "consta", "constando", "segundo", "voce", "disse", "falou", "ainda", "continua", "mostra", "mostrando", "diz", "dizendo", "ta", "tah", "foi", "veio", "deu", "dando", "seu", "sua", "meu", "minha",
+  // Verbos de apoio: "o pix que você fez" × "fiz o pagamento por pix".
+  "fez", "fiz", "feito", "fazer", "faco", "fazendo", "tem", "tenho", "teve", "tinha", "ter", "pode", "posso", "realizou", "realizei", "mandou", "mandei", "enviou", "enviei"]);
 
 /**
  * Paráfrase do relato do cliente: "Entendi, o pix aparece pendente" para "fiz

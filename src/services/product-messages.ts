@@ -268,8 +268,17 @@ export async function renderProductMessageForProduct(args: {
     return { templateId: null, templateName: null, text: null, gradeUrl, gradeFileName, gradeMime };
   }
 
-  const base = args.unitPrice != null && Number.isFinite(args.unitPrice) ? args.unitPrice : Number(product.price) || 0;
-  const discount = Math.min(100, Math.max(0, args.discount ?? 0));
+  // Sem preço/desconto pedidos (prévia da tela do produto): a opção
+  // principal do produto, a mesma de "Valor com desconto" — a prévia dizia
+  // "por R$ 189,50" com 35% de desconto cadastrado.
+  const noPriceArgs = args.unitPrice == null && args.discount == null;
+  const mainOption = noPriceArgs && Array.isArray(product.courseConfig?.pricingOptions)
+    ? (product.courseConfig!.pricingOptions as unknown[])[0] as Record<string, unknown> | undefined
+    : undefined;
+  const mainPrice = mainOption && Number(mainOption.price) > 0 ? Number(mainOption.price) : null;
+  const mainDiscount = mainOption && Number.isFinite(Number(mainOption.discountPercent)) ? Number(mainOption.discountPercent) : null;
+  const base = args.unitPrice != null && Number.isFinite(args.unitPrice) ? args.unitPrice : mainPrice ?? (Number(product.price) || 0);
+  const discount = Math.min(100, Math.max(0, args.discount ?? mainDiscount ?? 0));
   const qty = args.quantity != null && Number.isFinite(args.quantity) && args.quantity > 0 ? args.quantity : 1;
   const promo = base * (1 - discount / 100);
   const options = pricingOptions(product.courseConfig?.pricingOptions, Number(product.price) || 0);

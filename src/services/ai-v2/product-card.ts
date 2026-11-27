@@ -2,7 +2,7 @@
  * Cartão de produto que o agente envia: o mesmo texto que a equipe manda ao
  * encaminhar um produto (modelo de mensagem de produto da organização), com
  * a imagem cadastrada. O preço segue a opção de preço escolhida na
- * configuração do agente; sem ela, o de tabela. Nenhum domínio de cliente.
+ * configuração do agente; sem ela, a opção principal do produto. Nenhum domínio de cliente.
  */
 
 import { prisma } from "@/lib/prisma";
@@ -24,28 +24,45 @@ function fold(s: string): string {
 /**
  * Preço que o agente usa para um produto. Com uma opção de preço escolhida
  * (pelo nome do canal) e cadastrada no produto, vale o preço e o desconto
- * dela; nos demais casos, o preço de tabela sem desconto — o agente não
- * aplica desconto que ninguém configurou.
+ * dela. Sem canal escolhido, ou com um canal que o produto não tem (a
+ * campanha renomeou a opção), vale a opção principal do produto — a 1ª, a
+ * que a tela do produto mostra em "Desconto" e "Valor com desconto" e que o
+ * card do negócio copia ao adicionar o produto. Antes caía no preço de tabela
+ * sem desconto e o cartão do agente dizia "por R$ 189,50" enquanto o da
+ * equipe dizia "por R$ 123,17" (27/11). Produto sem opção: o de tabela.
  */
 export function pickPolicyPrice(
   basePrice: number,
   pricingOptions: unknown,
   priceChannel: string | null | undefined,
 ): { unitPrice: number; discount: number } {
+  const options = Array.isArray(pricingOptions)
+    ? pricingOptions.map((item) => (item && typeof item === "object" ? (item as Record<string, unknown>) : {}))
+    : [];
+  const toPrice = (o: Record<string, unknown>) => {
+    const price = Number(o.price);
+    const discount = Number(o.discountPercent);
+    return {
+      unitPrice: Number.isFinite(price) && price > 0 ? price : basePrice,
+      discount: Number.isFinite(discount) ? Math.min(100, Math.max(0, discount)) : 0,
+    };
+  };
   const wanted = fold(priceChannel ?? "");
-  if (wanted && Array.isArray(pricingOptions)) {
-    for (const item of pricingOptions) {
-      const o = item && typeof item === "object" ? (item as Record<string, unknown>) : {};
-      if (typeof o.channel !== "string" || fold(o.channel) !== wanted) continue;
-      const price = Number(o.price);
-      const discount = Number(o.discountPercent);
-      return {
-        unitPrice: Number.isFinite(price) && price > 0 ? price : basePrice,
-        discount: Number.isFinite(discount) ? Math.min(100, Math.max(0, discount)) : 0,
-      };
-    }
+  if (wanted) {
+    const hit = options.find((o) => typeof o.channel === "string" && fold(o.channel) === wanted);
+    if (hit) return toPrice(hit);
   }
+  if (options.length > 0) return toPrice(options[0]);
   return { unitPrice: basePrice, discount: 0 };
+}
+
+/**
+ * Valor final com desconto, arredondado como o cartão do produto
+ * (`toFixed(2)` em product-messages): 189,50 com 35% dá R$ 123,17 nos dois.
+ * `Math.round` dava 123,18 no texto do modelo e 123,17 no cartão.
+ */
+export function policyFinalPrice(unitPrice: number, discount: number): number {
+  return Number((unitPrice * (1 - discount / 100)).toFixed(2));
 }
 
 const fmtBRL = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" });
@@ -84,7 +101,7 @@ export async function buildV2ProductCard(args: {
     text = null;
   }
   if (!text?.trim()) {
-    const finalPrice = unitPrice * (1 - discount / 100);
+    const finalPrice = policyFinalPrice(unitPrice, discount);
     const cfText = (product.customValues ?? [])
       .filter((v) => v.value && v.value.trim())
       .map((v) => `${v.customField.label ?? v.customField.name}: ${v.value}`)

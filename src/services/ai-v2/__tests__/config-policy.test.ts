@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { normalizeV2Config } from "@/lib/ai-v2/config";
 import { actionValueAllowed, actionsGuide, allowedActionTypes, productAllowedByPolicy, themeToolRestriction } from "../action-policy";
-import { pickPolicyPrice } from "../product-card";
+import { pickPolicyPrice, policyFinalPrice } from "../product-card";
 import { matchV2Theme } from "../themes";
 import { defaultV2Counters, evaluateV2StopLimits } from "../limits";
 
@@ -101,15 +101,18 @@ describe("O que ele pode fazer", () => {
     expect(productAllowedByPolicy(off, "")).toBe(false);
   });
 
-  it("preço do agente: a opção de preço escolhida vale; sem ela, ou sem cadastro dela, o de tabela sem desconto", () => {
+  it("preço do agente: a opção de preço escolhida vale; sem ela, ou sem cadastro dela, a opção principal do produto", () => {
     const options = [
       { price: 200, channel: "Loja", discountPercent: 10 },
       { price: 180, channel: "Parceiro", discountPercent: null },
     ];
     expect(pickPolicyPrice(250, options, "loja ")).toEqual({ unitPrice: 200, discount: 10 });
     expect(pickPolicyPrice(250, options, "Parceiro")).toEqual({ unitPrice: 180, discount: 0 });
-    expect(pickPolicyPrice(250, options, "Outro")).toEqual({ unitPrice: 250, discount: 0 });
-    expect(pickPolicyPrice(250, options, undefined)).toEqual({ unitPrice: 250, discount: 0 });
+    expect(pickPolicyPrice(250, options, "Outro")).toEqual({ unitPrice: 200, discount: 10 });
+    expect(pickPolicyPrice(250, options, undefined)).toEqual({ unitPrice: 200, discount: 10 });
+    // Campanha renomeou a opção: 189,50 com 35% → R$ 123,17, igual ao cartão da equipe.
+    const c = pickPolicyPrice(189.5, [{ price: 189.5, channel: "Black Friday", discountPercent: 35 }], "Esquenta Black");
+    expect(policyFinalPrice(c.unitPrice, c.discount)).toBe(123.17);
     expect(pickPolicyPrice(250, null, "Loja")).toEqual({ unitPrice: 250, discount: 0 });
   });
 });

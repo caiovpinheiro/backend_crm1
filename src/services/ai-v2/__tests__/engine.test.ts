@@ -3124,15 +3124,19 @@ describe("processV2Turn — correções do motor", () => {
     expect(mocks.simpleHandoff).toHaveBeenCalled();
   });
 
-  it("explicação que já termina em pergunta: transfere sem o aviso logo depois (texto dobrado)", async () => {
+  it("transferência: resposta que só termina em pergunta leva o aviso; resposta que já promete retorno, não", async () => {
     const config = baseConfig();
     mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
-    mocks.callLLM.mockResolvedValue(llmOut({ handoff: true, reply: "Pra segunda graduação a entrada é pelo ENEM. Você tem ENEM dos últimos 10 anos?" }));
-    await run("já tenho uma graduação, quero outra");
-    const texts = mocks.sendText.mock.calls.map((c) => c[0].text as string);
-    expect(texts.join("|")).toContain("Você tem ENEM dos últimos 10 anos?");
-    expect(texts).not.toContain("Vou transferir.");
-    expect(mocks.simpleHandoff).toHaveBeenCalledTimes(1);
+    mocks.callLLM.mockResolvedValue(llmOut({ handoff: true, reply: "Tudo bem, acontece. Daqui pra frente não clica em mais nada por lá, tá?" }));
+    await run("cliquei em matrícula digital sem querer");
+    let texts = mocks.sendText.mock.calls.map((c) => c[0].text as string);
+    expect(texts).toEqual(["Tudo bem, acontece. Daqui pra frente não clica em mais nada por lá, tá?", "Vou transferir."]);
+
+    mocks.sendText.mockClear();
+    mocks.callLLM.mockResolvedValue(llmOut({ handoff: true, reply: "Anotei seu caso e te respondo por aqui com o próximo passo." }));
+    await run("e agora, perdi a bolsa?");
+    texts = mocks.sendText.mock.calls.map((c) => c[0].text as string);
+    expect(texts).toEqual(["Anotei seu caso e te respondo por aqui com o próximo passo."]);
   });
 
   it("cartão de produto entre as bolhas: apresentação → cartão → pergunta (não depois da pergunta)", async () => {
@@ -3351,6 +3355,22 @@ describe("processV2Turn — correções do motor", () => {
     mocks.getState.mockResolvedValue(makeState("active"));
 
     const r = await run("quero falar com atendente, como vejo meus pedidos?");
+
+    expect(r.handoff).toBe(true);
+    expect(mocks.callLLM).not.toHaveBeenCalled();
+    expect(mocks.simpleHandoff).toHaveBeenCalledTimes(1);
+    expect(mocks.sendText.mock.calls.map((c) => (c[0] as { text: string }).text)).toEqual(["Vou transferir."]);
+  });
+
+  it("pedido de pessoa sem assunto, “transferir direto”: transfere na hora, sem perguntar o assunto (GER-01)", async () => {
+    const config = baseConfig({
+      handoff: { ...baseConfig().handoff, humanRequestKeywords: ["falar com atendente"], humanRequestWithSubject: "transfer" },
+      rules: [{ id: "r-h", name: "Pedido de humano", order: 0, conditions: [{ type: "keywords", values: ["falar com atendente"] }], actions: [{ type: "handoff" }] }],
+    } as unknown as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.getState.mockResolvedValue(makeState("active"));
+
+    const r = await run("quero falar com atendente");
 
     expect(r.handoff).toBe(true);
     expect(mocks.callLLM).not.toHaveBeenCalled();

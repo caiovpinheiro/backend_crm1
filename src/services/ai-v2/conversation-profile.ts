@@ -207,7 +207,14 @@ export function withoutRepeatedQuestion(reply: string, lastAgent: string | null 
 /** A resposta promete que alguém vai confirmar depois ("isso eu te confirmo aqui"). */
 export function promisesConfirmation(reply: string, noSourceMessage?: string): boolean {
   if (noSourceMessage?.trim() && reply.includes(noSourceMessage.trim())) return true;
-  return /(?<![\p{L}])(?:te\s+confirmo|eu\s+confirmo|a\s+gente\s+confirma|vou\s+confirmar|confirmo\s+(?:com|pra|para)\s+voc[eê])(?![\p{L}])/iu.test(reply);
+  // "A gente confirma na inscrição/na proposta" adia para o processo, não
+  // promete que alguém volta: não vira nota (gerava anotação sem pedido).
+  return reply
+    .split(/(?<=[.!?])\s+|\n+/)
+    .some((s) =>
+      /(?<![\p{L}])(?:te\s+confirmo|eu\s+confirmo|a\s+gente\s+confirma|vou\s+confirmar|confirmo\s+(?:com|pra|para)\s+voc[eê])(?![\p{L}])/iu.test(s) &&
+      !/\b(?:na|no|pela|pelo)\s+(?:inscri[çc][ãa]o|matr[ií]cula|proposta|formul[áa]rio|prova)\b/iu.test(s),
+    );
 }
 
 /**
