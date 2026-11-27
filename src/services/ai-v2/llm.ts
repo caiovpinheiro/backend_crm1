@@ -1369,7 +1369,7 @@ function buildV2SystemPrompt(
     // para o resto ("tenho direito a desconto?" não é pergunta sobre o curso
     // de Direito só porque a palavra casou).
     if (catalogSection) lines.push("Exceção: se a mensagem trata de um dos produtos do catálogo listados acima (o curso, o valor, o cartão), responda com os dados dele e envie o cartão; não transfira por falta de material.");
-    lines.push("A busca nos materiais não achou trecho que responda a esta mensagem (os que aparecem acima, se houver, só se parecem com ela). Se ela pede informação sobre produto, serviço, preço, prazo, regra, política ou como fazer algo, não responda com conhecimento geral nem com o que parece óbvio: diga com naturalidade que não tem essa informação e marque handoff=true se o cliente precisa dela para seguir. Cumprimento, agradecimento, confirmação e perguntas sobre os dados do próprio cliente você responde normalmente.");
+    lines.push("A busca nos materiais não achou trecho que responda a esta mensagem (os que aparecem acima, se houver, só se parecem com ela). Antes de tudo, confira as Regras globais, as Informações fixas, o calendário e os produtos do catálogo acima: o que estiver escrito lá é fonte e vale como resposta — responda por eles, sem transferir. Só se a resposta não estiver em nenhum desses lugares e a mensagem pede informação sobre produto, serviço, preço, prazo, regra, política ou como fazer algo: não responda com conhecimento geral nem com o que parece óbvio; diga com naturalidade que não tem essa informação e marque handoff=true se o cliente precisa dela para seguir. Cumprimento, agradecimento, confirmação e perguntas sobre os dados do próprio cliente você responde normalmente.");
   }
   if (messageModels.length > 0) {
     lines.push("# Mensagens prontas que você pode enviar");
@@ -2394,7 +2394,7 @@ export async function callV2LLM(args: {
     const reviewSystem = [
       system,
       "# REVISÃO",
-      `Sua resposta anterior cita ${list}, que não aparece nos trechos da base, nas instruções nem na conversa. Tire essas afirmações da resposta e mantenha o resto como está: não as substitua por outra afirmação parecida, por uma generalidade ("pode variar", "depende do caso") nem por algo que também não esteja nas fontes. Use só nomes, passos e caminhos que estão nos trechos. Nome que o cliente citou e que não está nas fontes: não confirme que existe nem atribua a ele data, valor ou regra própria — dê a regra geral e diga que não consegue confirmar esse item. Não monte um passo a passo geral a partir do procedimento de outro serviço nem do que aparece numa imagem. Se, sem essas afirmações, não sobra resposta ao que o cliente pediu, diga com naturalidade que não tem essa informação e marque handoff=true. Devolva o JSON completo no formato exigido.`,
+      `Sua resposta anterior cita ${list}, que não aparece nos trechos da base, nas instruções nem na conversa. Tire essas afirmações da resposta e mantenha o resto como está: não as substitua por outra afirmação parecida, por uma generalidade ("pode variar", "depende do caso") nem por algo que também não esteja nas fontes. Use só nomes, passos e caminhos que estão nos trechos. Nome que o cliente citou e que não está nas fontes: não confirme que existe nem atribua a ele data, valor ou regra própria — dê a regra geral e diga que não consegue confirmar esse item. Não monte um passo a passo geral a partir do procedimento de outro serviço nem do que aparece numa imagem. Mantenha a resposta a cada pergunta da mensagem do cliente que tem fonte, o acolhimento e o próximo passo (a pergunta ou o pedido do fim); tirar uma frase não é motivo para deixar outra pergunta sem resposta. Se, sem essas afirmações, não sobra resposta ao que o cliente pediu, diga com naturalidade que não tem essa informação e marque handoff=true. Devolva o JSON completo no formato exigido.`,
     ].join("\n\n");
     try {
       const res = await generateWithTools({
@@ -2641,6 +2641,45 @@ export async function callV2LLM(args: {
     traceStep("verificação", "A nova geração não trouxe o valor → sai a linha de preço do cartão, sem transferir");
   }
 
+  /**
+   * Cartão de nível diferente do pedido: a pessoa quer pós (ou a resposta
+   * oferece pós) e o cartão é de graduação — ou o contrário. O cartão de
+   * Administração (graduação) saía junto com o texto das pós de gestão.
+   * O nível vem do cadastro de curso do produto (search_products/catálogo).
+   */
+  function dropMismatchedLevelCards(r: Awaited<ReturnType<typeof attempt>>): void {
+    const cards = (r.output.actions ?? []).filter((a) => a.type === "send_product");
+    if (cards.length === 0) return;
+    const POS = /(?<![\p{L}])(?:p[óo]s|p[óo]s-gradua\p{L}*|mba|especializa\p{L}*)(?![\p{L}])/iu;
+    const GRAD = /(?<![\p{L}])(?:gradua[çc][ãa]o|bacharelado|licenciatura|tecn[óo]logo)(?![\p{L}])/iu;
+    const askedPos = POS.test(userMessage);
+    const askedGrad = GRAD.test(userMessage) && !askedPos;
+    const wantPos = askedPos || (!askedGrad && POS.test(r.output.reply) && !GRAD.test(r.output.reply));
+    const wantGrad = askedGrad;
+    if (!wantPos && !wantGrad) return;
+    const levelOf = new Map<string, string>();
+    const collect = (products: unknown) => {
+      if (!Array.isArray(products)) return;
+      for (const p of products as Array<{ id?: unknown; course?: { level?: unknown } }>) {
+        if (typeof p?.id === "string" && typeof p.course?.level === "string") levelOf.set(p.id, p.course.level);
+      }
+    };
+    for (const call of [...prefetchCalls, ...(r.toolCalls ?? [])]) {
+      if (call.toolName === "search_products") collect((call.result as { products?: unknown })?.products);
+    }
+    collect(catalogMatches);
+    collect(historyCatalog);
+    const isPos = (level: string) => /p[óo]s/i.test(level);
+    const dropped = cards.filter((a) => {
+      const level = levelOf.get(String((a as { productId?: unknown }).productId));
+      if (!level) return false;
+      return (wantPos && !isPos(level)) || (wantGrad && isPos(level));
+    });
+    if (dropped.length === 0) return;
+    r.output.actions = (r.output.actions ?? []).filter((a) => !dropped.includes(a));
+    traceStep("catálogo", `Cartão de nível diferente do pedido (${wantPos ? "pós" : "graduação"}) não sai: ${dropped.length} cartão(ões)`);
+  }
+
   let lastError: Error | undefined;
   for (let i = 0; i < 2; i++) {
     try {
@@ -2656,6 +2695,7 @@ export async function callV2LLM(args: {
       await checkQuotedTerms(r);
       await avoidRepeat(r);
       ensureNamedProductCard(r);
+      dropMismatchedLevelCards(r);
       await ensurePriceAnswer(r);
       // "Por que respondeu isso?" descrevia a resposta do modelo antes da
       // conferência; o cliente recebeu outra. Fica dito o que mudou.
