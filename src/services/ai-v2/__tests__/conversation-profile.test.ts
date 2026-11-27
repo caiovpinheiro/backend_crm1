@@ -118,3 +118,11 @@ describe("mensagem automática de empresa", () => {
     expect(isAutomatedBusinessReply("Agradecemos seu contato, qual o valor do curso?")).toBe(false);
   });
 });
+
+describe("promisesConfirmation: passo do processo não é promessa de retorno (rodada 2, PRE2-05)", () => {
+  it("\"te confirmo na inscrição\" não pede anotação; \"te confirmo aqui\" pede", () => {
+    expect(promisesConfirmation("O valor final eu te confirmo na inscrição, tá?")).toBe(false);
+    expect(promisesConfirmation("Sobre trancamento, isso eu te confirmo aqui, tá?")).toBe(true);
+  });
+});
+

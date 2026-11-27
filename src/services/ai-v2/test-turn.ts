@@ -19,7 +19,7 @@ import { isGreetingOnlyMessage, keepOpenOnNewRequest } from "./closure";
 import { isShortAckText } from "@/lib/ai-agents/tabulation-classify-policy";
 import { applyBoldPolicy, toWhatsAppText } from "./reply-format";
 import { isConfusionMessage, rephraseAfterConfusion } from "./confusion";
-import { applyNoSourceGuard, conditionalHandoff, explanationClosesTurn, handoffExplanation, noSourceReplyMessage, type V2PrefetchFact } from "./no-source";
+import { applyNoSourceGuard, conditionalHandoff, explanationClosesTurn, handoffExplanation, promisesReturn, noSourceReplyMessage, type V2PrefetchFact } from "./no-source";
 import { applyReplyEnding, effectiveReplyEnding, replyEndingButtons } from "./reply-ending";
 import { buildV2Interactive, matchPendingOption, optionsFromAgentMessage } from "./interactive";
 import { detectV2Sentiment, shouldActOnSentiment } from "./sentiment";
@@ -490,7 +490,10 @@ export async function simulateV2Turn(
   let ruleForTurn: V2Rule | null = rule;
   if (rule?.actions.some((a) => a.type === "handoff") && mentionsHumanRequest(config, userMessage)) {
     const ask = renderMessage(systemMessage(config, "humanRequestAsk"), vars, defaultFormatter());
-    if (humanRequestSubject(config, userMessage)) {
+    if ((config.handoff.humanRequestWithSubject ?? "answer_first") === "transfer") {
+      // Configurado para transferir: a regra do atalho vale como está, com ou sem assunto.
+      traceStep("regra", "Pedido de pessoa → transfere direto (configurado: transferir sem tentar responder)");
+    } else if (humanRequestSubject(config, userMessage)) {
       humanRequestWithQuestion = true;
       ruleForTurn = { ...rule, actions: rule.actions.filter((a) => a.type !== "handoff") } as V2Rule;
       traceStep("regra", "Pedido de pessoa junto com uma pergunta → responde primeiro; transfere só se não conseguir");
@@ -798,6 +801,23 @@ export async function simulateV2Turn(
 
   let reply = output.reply;
   let interactive: V2TestTurnResult["interactive"] = null;
+  // A gaveta não guarda estado entre turnos. Em produção, conversa já
+  // transferida e na fila não é transferida de novo (o pedido vira resposta).
+  // Aqui, pelo histórico: uma mensagem anterior do agente já foi a passagem
+  // para a equipe → o novo pedido de transferência vira resposta.
+  const handoffNotice = renderMessage(activeTheme?.handoffDestination?.message?.trim() || config.handoff.message, vars, defaultFormatter()).trim();
+  const ackNotice = renderMessage(systemMessage(config, "verificationHandoffAck"), vars, defaultFormatter()).trim();
+  const alreadyHandedOff = history.some((h) => h.role === "assistant" && (
+    (handoffNotice && h.content.includes(handoffNotice)) || (ackNotice && h.content.includes(ackNotice)) || promisesReturn(h.content)
+  ));
+  if (handoff && alreadyHandedOff) {
+    handoff = false;
+    const answer = handoffExplanation(output.reply);
+    reply = answer || renderMessage(config.handoff.queuedMessage?.trim() || "Seu pedido já está com a equipe, que te responde por aqui.", vars, defaultFormatter());
+    traceStep("fila", answer
+      ? "Conversa já passada para a equipe nesta conversa → não transfere de novo; responde"
+      : "Conversa já passada para a equipe nesta conversa → não transfere de novo; só o aviso de fila");
+  }
   if (handoff) {
     // Mesma mensagem que a produção manda: "sem material" quando citava algo
     // sem fonte, senão a do destino do assunto, senão a padrão.
@@ -809,7 +829,7 @@ export async function simulateV2Turn(
     const verificationCut = cause === "verification" || (peekV2Fact("verification") as { forcedHandoff?: boolean } | undefined)?.forcedHandoff === true;
     if (!explanation && verificationCut && !noSourceOnly) explanation = renderMessage(systemMessage(config, "verificationHandoffAck"), vars, defaultFormatter());
     reply = renderMessage(activeTheme?.handoffDestination?.message?.trim() || config.handoff.message, vars, defaultFormatter());
-    if (explanation) reply = explanationClosesTurn(explanation) ? explanation : `${explanation}\n\n${reply}`;
+    if (explanation) reply = promisesReturn(explanation) ? explanation : `${explanation}\n\n${reply}`;
     // Fora do horário, a produção acrescenta o aviso de horário à mensagem de transferência.
     const hoursNote = outsideHoursNote(config);
     if (hoursNote) reply = `${reply}\n\n${hoursNote}`;

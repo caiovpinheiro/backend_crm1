@@ -42,7 +42,7 @@ import { noteV2Fact, peekV2Fact, runWithV2Trace, traceStep, v2TraceWasLogged } f
 import { evaluateV2StopLimits, parseV2Counters, shouldStopStalled, type V2Counters } from "./limits";
 import { answerToPostCloseQuestion, classifyPostCloseMessage, getPostCloseBehavior, isGreetingOnlyMessage, keepOpenOnNewRequest, postCloseHandoffMessage, postCloseQuestion, postCloseShortReply, isExplicitResolution } from "./closure";
 import { isConfusionMessage, rephraseAfterConfusion } from "./confusion";
-import { announcesTransfer, answersBeforeHandoff, applyNoSourceGuard, conditionalHandoff, explanationClosesTurn, handoffExplanation, hasContentBeyondQuestion, noSourceReplyMessage, withoutTrailingQuestion, type V2PrefetchFact } from "./no-source";
+import { announcesTransfer, answersBeforeHandoff, applyNoSourceGuard, conditionalHandoff, explanationClosesTurn, handoffExplanation, promisesReturn, hasContentBeyondQuestion, noSourceReplyMessage, withoutTrailingQuestion, type V2PrefetchFact } from "./no-source";
 import { NONSENSE_LIMIT_REASON } from "./limits";
 import { applyV2Tabulation } from "./tabulation";
 import { withoutChoiceQuestionAfterSteps, applyReplyEnding, asksClient, classifyReply, effectiveReplyEnding, isGreetingOnlyReply, replyEndingButtons, replyEndingPhrases, withoutReplyEndings } from "./reply-ending";
@@ -1863,8 +1863,13 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     if (ruleHandoff && mentionsHumanRequest(config, input.userMessage) && counters.humanRequestOffered) {
       // Já respondeu e ofereceu a equipe; o cliente pediu de novo: transfere.
       traceStep("regra", "Pediu pessoa de novo depois da resposta e da oferta → transfere");
-    } else if (ruleHandoff && mentionsHumanRequest(config, input.userMessage) && humanRequestMode === "transfer" && humanRequestSubject(config, input.userMessage)) {
-      traceStep("regra", "Pedido de pessoa junto com o assunto → transfere direto (configurado: transferir sem tentar responder)");
+    } else if (ruleHandoff && mentionsHumanRequest(config, input.userMessage) && humanRequestMode === "transfer") {
+      // Configurado para transferir: com ou sem assunto, a regra do atalho vale
+      // como está (mensagem e transferência). Antes, sem assunto, o motor
+      // perguntava "me conta o que você precisa" por cima da configuração.
+      traceStep("regra", humanRequestSubject(config, input.userMessage)
+        ? "Pedido de pessoa junto com o assunto → transfere direto (configurado: transferir sem tentar responder)"
+        : "Pedido de pessoa sem assunto → transfere direto (configurado: transferir sem tentar responder)");
     } else if (ruleHandoff && mentionsHumanRequest(config, input.userMessage)) {
       if (humanRequestSubject(config, input.userMessage)) {
         humanRequestWithSubject = true;
@@ -3319,8 +3324,10 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     const hoursNote = outsideHoursNote(config);
     // A explicação que saiu já fecha com pergunta ou já diz que retorna:
     // o aviso logo depois ("Já te retorno por aqui") dobrava o texto.
-    const explanationCloses = !!sentReply && !queuedMsg && explanationClosesTurn(sentReply);
-    if (explanationCloses) traceStep("transferência", "A resposta já fecha com pergunta ou confirmação de retorno → transfere sem o aviso");
+    // Só a promessa de retorno dispensa o aviso. Resposta que só termina em
+    // pergunta ("…por lá, tá?") transferia sem avisar a passagem.
+    const explanationCloses = !!sentReply && !queuedMsg && promisesReturn(sentReply);
+    if (explanationCloses) traceStep("transferência", "A resposta já diz que a equipe/o agente retorna → transfere sem o aviso");
     const sent = await performHandoff(
       requestedDestination ?? activeTheme?.handoffDestination,
       explanationCloses

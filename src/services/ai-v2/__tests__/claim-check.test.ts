@@ -119,6 +119,7 @@ describe("paráfrase do relato do cliente", () => {
   it("repetir o que o cliente contou, com outras palavras, não é afirmação sem fonte", () => {
     expect(claimParaphrasesClient("Entendi, o pix aparece pendente", ["fiz o pix e tá pendente ainda"])).toBe(true);
     expect(claimParaphrasesClient("o cartão foi recusado", ["meu cartão recusou"])).toBe(true);
+    expect(claimParaphrasesClient("Entendi, o pix que você fez ainda aparece como pendente", ["fiz o pix ontem e ainda tá pendente"])).toBe(true);
     expect(claimParaphrasesClient("o pix cai em 2 dias", ["fiz o pix"])).toBe(false);
     expect(claimParaphrasesClient("o pix foi estornado", ["fiz o pix e tá pendente"])).toBe(false);
   });

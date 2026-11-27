@@ -99,6 +99,35 @@ describe("fecho e transferência condicional (paridade produção × teste)", ()
     expect(again.reply).toBe("Vou transferir.");
   });
 
+  it("pedido de pessoa com “transferir direto”: transfere sem perguntar o assunto (GER-01)", async () => {
+    const { simulateV2Turn } = await import("../test-turn");
+    const cfg = {
+      ...config(),
+      handoff: { ...config().handoff, humanRequestKeywords: ["falar com atendente"], humanRequestWithSubject: "transfer" },
+      rules: [{ id: "r-h", name: "Pedido de humano", order: 0, conditions: [{ type: "keywords", values: ["falar com atendente"] }], actions: [{ type: "handoff" }] }],
+    } as unknown as V2AgentConfig;
+    const r = await simulateV2Turn("agent-1", cfg, "quero falar com atendente", [], undefined, undefined, undefined, "active", null, { skipEntry: true });
+    expect(r.handoff).toBe(true);
+    expect(r.reply).toBe("Vou transferir.");
+  });
+
+  it("pedido já transferido nesta conversa: não transfere de novo (POS2-06 T2)", async () => {
+    const { simulateV2Turn } = await import("../test-turn");
+    mocks.callV2LLMTest.mockResolvedValueOnce(llm("Vou te passar para a equipe.", true));
+    const history = [{ role: "user" as const, content: "meu boleto não chegou" }, { role: "assistant" as const, content: "Vou transferir." }];
+    const r = await simulateV2Turn("agent-1", config(), "e aí, alguma novidade?", history, undefined, undefined, undefined, "active", null, { skipEntry: true });
+    expect(r.handoff).toBe(false);
+    expect(r.reply).not.toBe("Vou transferir.");
+  });
+
+  it("resposta que já promete retorno não ganha o aviso de transferência colado (POS2-06 T1)", async () => {
+    const { simulateV2Turn } = await import("../test-turn");
+    mocks.callV2LLMTest.mockResolvedValueOnce(llm("Anotei seu caso e te respondo por aqui com o próximo passo.", true));
+    const r = await simulateV2Turn("agent-1", config(), "meu boleto não chegou", [], undefined, undefined, undefined, "active", null, { skipEntry: true });
+    expect(r.handoff).toBe(true);
+    expect(r.reply).not.toContain("Vou transferir.");
+  });
+
   it("fora do horário, a transferência traz o aviso de horário (igual à produção)", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-27T12:00:00Z")); // domingo

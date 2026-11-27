@@ -43,3 +43,10 @@ describe("checagem — condição sozinha não é afirmação", () => {
     expect(notAFactClaim("Se pagar até 10/11 o desconto é mantido")).toBe(false);
   });
 });
+
+describe("acolhimento e paráfrase do cliente não são fato a conferir (rodada 2)", () => {
+  it("empatia sem número passa; afirmação de oferta não", () => {
+    expect(notAFactClaim("Sinto muito pela demora, a frustração faz sentido")).toBe(true);
+    expect(notAFactClaim("Sinto muito, o curso é reconhecido pelo MEC com nota 5")).toBe(false);
+  });
+});

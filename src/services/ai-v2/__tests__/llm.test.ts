@@ -1938,6 +1938,25 @@ describe("produto citado pelo nome: cartão garantido e dados no prompt (reteste
   });
 });
 
+describe("cartão de nível diferente do pedido (rodada 2, PRE1-07)", () => {
+  it("pediu pós: o cartão de graduação não sai; o de pós sai", async () => {
+    vi.clearAllMocks();
+    (findV2ProductsNamedIn as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    const products = [
+      { id: "adm", name: "Administração", course: { level: "Graduação" } },
+      { id: "mba", name: "MBA em Gestão", course: { level: "Pós-graduação" } },
+    ];
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(makeLLMResponse(
+      JSON.stringify({ reply: "Temos o MBA em Gestão, te mandei aqui embaixo.", actions: [{ type: "send_product", productId: "adm" }, { type: "send_product", productId: "mba" }] }),
+      [{ toolName: "search_products", args: { query: "pós gestão" }, result: { total: 2, products } }],
+    ));
+    const config = baseConfig({ productPolicy: { enabled: true, sendCard: true } } as Partial<V2AgentConfig>);
+    const r = await callV2LLM({ agentId: "agent-1", config, context: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields }, userMessage: "quero uma pós em gestão", stage: "active" });
+    const ids = r.output.actions.filter((a) => a.type === "send_product").map((a) => (a as unknown as { productId: string }).productId);
+    expect(ids).toEqual(["mba"]);
+  });
+});
+
 describe("texto livre: o motivo fica registrado", () => {
   it("modelo e normalização sem JSON: o texto vale como resposta e a decisão diz que a 2ª chamada também não devolveu JSON", async () => {
     vi.clearAllMocks();
