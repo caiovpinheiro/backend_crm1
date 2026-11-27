@@ -1953,6 +1953,48 @@ describe("cartão com dois produtos de mesmo nome-base", () => {
   });
 });
 
+describe("produto da conversa com histórico que cita produtos demais (rodada 3, PRE2-01)", () => {
+  it("acha o produto mensagem a mensagem e responde o valor sem transferir", async () => {
+    vi.clearAllMocks();
+    const ADM = { id: "adm", name: "Administração", sku: null, type: "SERVICE", unit: "mês", price: 173.5, priceFormatted: "R$ 173,50", description: null, customFields: [] };
+    // Histórico inteiro (várias mensagens) casa com produtos demais → vazio; a mensagem do cliente sozinha acha Administração.
+    (findV2ProductsNamedIn as ReturnType<typeof vi.fn>).mockImplementation(async (a: { message: string }) => (a.message.includes("\n") ? [] : /administra/i.test(a.message) ? [ADM] : []));
+    (generateWithTools as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: "Não tenho essa informação confirmada aqui.", handoff: true, actions: [] })))
+      .mockResolvedValue(makeLLMResponse(JSON.stringify({ reply: "Fica R$ 173,50 por mês, depois da primeira mensalidade.", handoff: false, actions: [] })));
+    const config = baseConfig({ productPolicy: { enabled: true, sendCard: true } } as Partial<V2AgentConfig>);
+    const r = await callV2LLM({
+      agentId: "agent-1", config, context: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields }, userMessage: "qto fica por mês?", stage: "active",
+      previousMessages: [
+        { role: "user", content: "oi, quero saber de administração" },
+        { role: "assistant", content: "Oi! Te mandei o curso.\nDirija a gestão estratégica de negócios, com pessoas, finanças e logística." },
+      ],
+    });
+    expect(r.systemPrompt).toContain("# Produtos já citados nesta conversa");
+    expect(r.output.handoff).toBe(false);
+    expect(r.output.reply).toContain("R$ 173,50");
+  });
+});
+
+describe("cartão de nível diferente do pedido (rodada 2, PRE1-07)", () => {
+  it("pediu pós: o cartão de graduação não sai; o de pós sai", async () => {
+    vi.clearAllMocks();
+    (findV2ProductsNamedIn as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    const products = [
+      { id: "adm", name: "Administração", course: { level: "Graduação" } },
+      { id: "mba", name: "MBA em Gestão", course: { level: "Pós-graduação" } },
+    ];
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(makeLLMResponse(
+      JSON.stringify({ reply: "Temos o MBA em Gestão, te mandei aqui embaixo.", actions: [{ type: "send_product", productId: "adm" }, { type: "send_product", productId: "mba" }] }),
+      [{ toolName: "search_products", args: { query: "pós gestão" }, result: { total: 2, products } }],
+    ));
+    const config = baseConfig({ productPolicy: { enabled: true, sendCard: true } } as Partial<V2AgentConfig>);
+    const r = await callV2LLM({ agentId: "agent-1", config, context: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields }, userMessage: "quero uma pós em gestão", stage: "active" });
+    const ids = r.output.actions.filter((a) => a.type === "send_product").map((a) => (a as unknown as { productId: string }).productId);
+    expect(ids).toEqual(["mba"]);
+  });
+});
+
 describe("texto livre: o motivo fica registrado", () => {
   it("modelo e normalização sem JSON: o texto vale como resposta e a decisão diz que a 2ª chamada também não devolveu JSON", async () => {
     vi.clearAllMocks();
@@ -2022,5 +2064,106 @@ describe("cartão do produto como fonte: taxa de matrícula e isenção pelo cat
     const config = baseConfig({ groundingCheck: "model", productPolicy: { enabled: true, sendCard: true }, fallback: { noSource: { message: "Te confirmo." } } } as Partial<V2AgentConfig>);
     const r = await callV2LLM({ agentId: "agent-1", config, context: ctx(config), userMessage: "tem algum MBA de RH?", stage: "active" });
     expect(r.output.reply).toBe("Esse MBA tem taxa de matrícula de R$ 99,00.");
+  });
+});
+
+describe("rodada 9 — B1/B2: o cartão já enviado vale mesmo quando o checador marca", () => {
+  const product = (id: string, name: string) => ({ id, name, sku: null, type: "SERVICE", unit: "mês", price: 0, priceFormatted: "R$ 1,00", description: null, customFields: [] });
+  const CARDS: Record<string, string> = {
+    adm: "🎓 *Administração*\nBacharelado • EAD • 8 semestres\n🎁 Matrícula isenta",
+    adm2: "🎓 *Administração 2.0*\nBacharelado • EAD\nTaxa de matrícula: *R$50,00*",
+    mba6: "📘 Curso: MBA EM GESTAO ESTRATEGICA DE PESSOAS\n⏰ Duração: 6 meses\nTaxa de matrícula: *R$99,00*",
+    mba9: "📘 Curso: MBA EM GESTAO ESTRATEGICA DE PESSOAS\n⏰ Duração: 9 meses\nTaxa de matrícula: *R$99,00*",
+  };
+  const ctx = (c: V2AgentConfig) => ({ contact: null, deals: [], selectedDeal: null, fields: c.contextFields });
+  const config = () => baseConfig({ groundingCheck: "model", productPolicy: { enabled: true, sendCard: true }, fallback: { noSource: { message: "Te confirmo." } } } as Partial<V2AgentConfig>);
+  beforeEach(() => {
+    vi.clearAllMocks();
+    (buildV2ProductCard as ReturnType<typeof vi.fn>).mockImplementation(async (a: { productId: string }) =>
+      CARDS[a.productId] ? { productId: a.productId, name: a.productId, text: CARDS[a.productId], image: null } : null,
+    );
+  });
+
+  it("B2: \"Administração\" e \"Administração 2.0\" casam; vale só o de nome exato, e \"a matrícula é isenta\" fica mesmo com o checador marcando", async () => {
+    (findV2ProductsNamedIn as ReturnType<typeof vi.fn>).mockImplementation(async (a: { message: string }) =>
+      /administra/i.test(a.message) ? [product("adm2", "Administração 2.0"), product("adm", "Administração")] : [],
+    );
+    (generateWithTools as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: "Não, a matrícula de Administração é isenta 😊", actions: [] })))
+      .mockResolvedValue(makeLLMResponse('{"unsupported": ["a matrícula de Administração é isenta"]}'));
+    const c = config();
+    const r = await callV2LLM({
+      agentId: "agent-1", config: c, context: ctx(c), userMessage: "tem taxa de matrícula?", stage: "active",
+      previousMessages: [{ role: "user", content: "quero administração" }, { role: "assistant", content: "Boa escolha! Te mandei o curso de Administração 😊" }],
+    });
+    expect(r.systemPrompt).toContain("🎁 Matrícula isenta");
+    expect(r.systemPrompt).not.toContain("R$50,00");
+    expect(r.output.reply).toBe("Não, a matrícula de Administração é isenta 😊");
+    expect(r.output.handoff).toBeFalsy();
+  });
+
+  it("B1: pós com taxa nos dois cartões; \"a taxa de matrícula é R$ 99,00\" fica mesmo com o checador marcando", async () => {
+    (findV2ProductsNamedIn as ReturnType<typeof vi.fn>).mockImplementation(async (a: { message: string }) =>
+      /estrat[eé]gica de pessoas/i.test(a.message) ? [product("mba6", "MBA EM GESTAO ESTRATEGICA DE PESSOAS"), product("mba9", "MBA EM GESTAO ESTRATEGICA DE PESSOAS")] : [],
+    );
+    (generateWithTools as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: "Tem sim: a taxa de matrícula é R$ 99,00, não é isenta.", actions: [] })))
+      .mockResolvedValue(makeLLMResponse('{"unsupported": ["a taxa de matrícula é R$ 99,00"]}'));
+    const c = config();
+    const r = await callV2LLM({
+      agentId: "agent-1", config: c, context: ctx(c), userMessage: "tem taxa de matrícula? é isenta?", stage: "active",
+      previousMessages: [{ role: "user", content: "quero pós em gestão de pessoas" }, { role: "assistant", content: "Show! Te mandei o curso de MBA em Gestão Estratégica de Pessoas nas opções de 6 e 9 meses." }],
+    });
+    expect(r.output.reply).toBe("Tem sim: a taxa de matrícula é R$ 99,00, não é isenta.");
+    expect(r.output.handoff).toBeFalsy();
+  });
+});
+
+describe("apuração 26/11 — preço do produto da conversa e motivo depois da conferência", () => {
+  const ADM = { id: "adm", name: "Administração", sku: null, type: "SERVICE", unit: "mês", price: 121.45, priceFormatted: "R$ 121,45", listPrice: 173.5, listPriceFormatted: "R$ 173,50", description: null, customFields: [] };
+  const CARD = "🎓 Administração\nBacharelado • EAD • 8 semestres\n🎁 Matrícula isenta\n💰 De R$ 173,50 por R$ 121,45 ao mês";
+  const history = [{ role: "user" as const, content: "oi, quero saber de administração" }, { role: "assistant" as const, content: "Oi! Te mandei o curso de Administração 😊" }];
+  const cfg = () => baseConfig({ productPolicy: { enabled: true, sendCard: true } } as Partial<V2AgentConfig>);
+  const ctx = (c: V2AgentConfig) => ({ contact: null, deals: [], selectedDeal: null, fields: c.contextFields });
+  beforeEach(() => {
+    vi.clearAllMocks();
+    (findV2ProductsNamedIn as ReturnType<typeof vi.fn>).mockImplementation(async (a: { message: string }) => (/administra/i.test(a.message) ? [ADM] : []));
+    (buildV2ProductCard as ReturnType<typeof vi.fn>).mockImplementation(async () => ({ productId: "adm", name: "Administração", text: CARD, image: null }));
+  });
+
+  it("PRE2-01: \"qto fica por mês?\" e o modelo transfere dizendo que não tem o valor → nova geração com o cartão responde o valor", async () => {
+    (generateWithTools as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: "Não tenho o valor da mensalidade aqui.", handoff: true, actions: [] })))
+      .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: "Fica R$ 121,45 por mês no primeiro semestre, com a bolsa.", actions: [] })));
+    const c = cfg();
+    const r = await callV2LLM({ agentId: "agent-1", config: c, context: ctx(c), userMessage: "qto fica por mês?", stage: "active", previousMessages: history });
+    expect(r.output.handoff).toBeFalsy();
+    expect(r.output.reply).toBe("Fica R$ 121,45 por mês no primeiro semestre, com a bolsa.");
+    expect((generateWithTools as ReturnType<typeof vi.fn>).mock.calls[1][0].system).toContain("Não transfira por causa de preço");
+  });
+
+  it("se a nova geração ainda não traz o valor, sai a linha de preço do cartão, sem transferir", async () => {
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(makeLLMResponse(JSON.stringify({ reply: "Não tenho o valor da mensalidade aqui.", handoff: true, actions: [] })));
+    const c = cfg();
+    const r = await callV2LLM({ agentId: "agent-1", config: c, context: ctx(c), userMessage: "qto fica por mês?", stage: "active", previousMessages: history });
+    expect(r.output.handoff).toBe(false);
+    expect(r.output.reply).toBe("💰 De R$ 173,50 por R$ 121,45 ao mês");
+  });
+
+  it("resposta com o valor não é tocada", async () => {
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(makeLLMResponse(JSON.stringify({ reply: "Fica R$ 121,45 por mês.", actions: [] })));
+    const c = cfg();
+    const r = await callV2LLM({ agentId: "agent-1", config: c, context: ctx(c), userMessage: "qto fica por mês?", stage: "active", previousMessages: history });
+    expect(r.output.reply).toBe("Fica R$ 121,45 por mês.");
+    expect((generateWithTools as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1);
+  });
+
+  it("\"Por que respondeu isso?\": quando a conferência muda a resposta, o motivo diz isso", async () => {
+    (findV2ProductsNamedIn as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(makeLLMResponse(JSON.stringify({ reply: 'Clique em "Menu Secreto".', reason: "Explicou o caminho", actions: [] })));
+    const c = baseConfig({ fallback: { noSource: { message: "Te confirmo." } } } as Partial<V2AgentConfig>);
+    const r = await callV2LLM({ agentId: "agent-1", config: c, context: ctx(c), userMessage: "onde clico?", stage: "active" });
+    expect(r.output.reply).toBe("Te confirmo.");
+    expect(r.output.reason).toContain("A conferência mudou a resposta enviada");
   });
 });

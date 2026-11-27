@@ -26,6 +26,11 @@ export type TemplateComponentsAnalysis = {
   flowId: string | null;
   /** `format` do componente HEADER (Graph). `null` quando o template não tem header. */
   headerFormat: "NONE" | "TEXT" | "IMAGE" | "VIDEO" | "DOCUMENT" | null;
+  /**
+   * URL da mídia de exemplo do HEADER (`example.header_handle[0]`), servida
+   * pela CDN da Meta — a "mídia original" cadastrada no template.
+   */
+  headerExampleUrl: string | null;
 };
 
 function asRecord(v: unknown): Record<string, unknown> | null {
@@ -54,6 +59,7 @@ export function analyzeTemplateComponents(
   let flowAction: string | null = null;
   let flowId: string | null = null;
   let headerFormat: TemplateComponentsAnalysis["headerFormat"] = null;
+  let headerExampleUrl: string | null = null;
 
   if (options?.parameterFormat?.trim().toUpperCase() === "NAMED") {
     hasVariables = true;
@@ -71,6 +77,7 @@ export function analyzeTemplateComponents(
       flowAction: null,
       flowId: null,
       headerFormat: null,
+      headerExampleUrl: null,
     };
   }
 
@@ -93,6 +100,10 @@ export function analyzeTemplateComponents(
       if (pf === "NAMED") hasVariables = true;
 
       if (type === "HEADER") {
+        const example = asRecord(comp.example);
+        const handles = Array.isArray(example?.header_handle) ? example.header_handle : [];
+        const first = handles.find((h): h is string => typeof h === "string" && h.trim() !== "");
+        if (first) headerExampleUrl = first.trim();
         const format = String(comp.format ?? "").toUpperCase();
         if (format === "TEXT" || format === "IMAGE" || format === "VIDEO" || format === "DOCUMENT") {
           headerFormat = format;
@@ -125,6 +136,8 @@ export function analyzeTemplateComponents(
         } else if (rawType) {
           buttonTypesSet.add(rawType);
           buttons.push({ type: rawType, text: label, url });
+          // URL dinâmica (`https://x/{{1}}`): o sufixo é parâmetro do envio.
+          if (rawType === "URL" && url && textHasVariablePlaceholders(url)) hasVariables = true;
         }
       }
     }
@@ -142,5 +155,6 @@ export function analyzeTemplateComponents(
     flowAction,
     flowId,
     headerFormat,
+    headerExampleUrl,
   };
 }

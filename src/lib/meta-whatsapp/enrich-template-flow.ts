@@ -126,6 +126,8 @@ function collectFlatButtonsFromDefinitionComponents(components: unknown): unknow
 
 type TemplateDefinitionResolution = {
   row: ListTemplatesRow | null;
+  /** Motivo da listagem não ter achado o template (sem `templateGraphId`). */
+  listingFailure?: string;
   resolutionPath:
     | "getMessageTemplateByGraphId"
     | "getMessageTemplateByGraphId_empty"
@@ -334,7 +336,11 @@ async function resolveTemplateDefinitionRow(
   );
   return result.row
     ? { row: result.row, resolutionPath: "listMessageTemplates" }
-    : { row: null, resolutionPath: "listMessageTemplates_none" };
+    : {
+        row: null,
+        resolutionPath: "listMessageTemplates_none",
+        listingFailure: describeListingFailure(result.reason),
+      };
 }
 
 export function buildFlowButtonComponent(
@@ -503,6 +509,74 @@ export async function enrichTemplateComponentsForFlowSend(
  * pois a ausência de definição aqui não deve lançar — o chamador decide
  * (ex.: cai pra `headerMediaType` explícito no config do passo).
  */
+/**
+ * Formato do cabeçalho de mídia e a URL da mídia de exemplo cadastrada no
+ * template aprovado (`HEADER.example.header_handle[0]`, servida pela CDN da
+ * Meta). É a "mídia original" do template — a Meta não a reaproveita no
+ * envio sozinha: o parâmetro de mídia do header continua obrigatório.
+ */
+export async function resolveTemplateHeaderMediaExample(
+  client: MetaWhatsAppClient,
+  args: {
+    templateName: string;
+    languageCode: string;
+    templateGraphId?: string | null;
+  },
+): Promise<{
+  format: "IMAGE" | "VIDEO" | "DOCUMENT" | null;
+  exampleUrl: string | null;
+  /** Por que não achou (caminho da busca + erro da Graph), para o operador. */
+  detail: string | null;
+}> {
+  let resolved: TemplateDefinitionResolution;
+  try {
+    resolved = await resolveTemplateDefinitionRow(client, {
+      templateName: args.templateName,
+      languageCode: args.languageCode,
+      templateGraphId: args.templateGraphId ?? null,
+      strictFlowEnrich: false,
+    });
+  } catch (e) {
+    return {
+      format: null,
+      exampleUrl: null,
+      detail: e instanceof Error ? e.message : String(e),
+    };
+  }
+  if (!resolved.row) {
+    return {
+      format: null,
+      exampleUrl: null,
+      detail: [
+        args.templateGraphId?.trim() ? `id ${args.templateGraphId.trim()}` : "sem id do template no CRM",
+        resolved.resolutionPath,
+        resolved.gidFailureMessage ?? null,
+        resolved.listingFailure ?? null,
+      ]
+        .filter(Boolean)
+        .join(" · "),
+    };
+  }
+  const components = Array.isArray(resolved.row?.components)
+    ? (resolved.row?.components as unknown[])
+    : [];
+  for (const c of components) {
+    const o = asRecord(c);
+    if (!o || String(o.type ?? "").toUpperCase() !== "HEADER") continue;
+    const fmt = String(o.format ?? "").toUpperCase();
+    const format = fmt === "IMAGE" || fmt === "VIDEO" || fmt === "DOCUMENT" ? fmt : null;
+    const example = asRecord(o.example);
+    const handles = Array.isArray(example?.header_handle) ? example.header_handle : [];
+    const first = handles.find((h): h is string => typeof h === "string" && h.trim() !== "");
+    return {
+      format,
+      exampleUrl: first?.trim() ?? null,
+      detail: first ? null : "template sem mídia de exemplo no cabeçalho",
+    };
+  }
+  return { format: null, exampleUrl: null, detail: "template sem componente HEADER" };
+}
+
 export async function resolveTemplateHeaderMediaFormat(
   client: MetaWhatsAppClient,
   args: {

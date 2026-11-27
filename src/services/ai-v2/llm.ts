@@ -42,7 +42,7 @@ import { knowledgeDocTitleMapByIds } from "@/services/ai/knowledge-docs";
 import { describeV2MessageModels, type V2MessageModelSummary } from "./tools";
 import { knowledgeDocIdsFor } from "./themes";
 import { asksBackOwnData, echoesClientText, clientNamesBoundToFacts, hasSearchableQuestion, admittedMissingInstructions, isNearDuplicateReply, repeatFallback, knowledgeChunkTexts, lookupResultTexts, moneyDerivations, percentDerivations, unsupportedFacts, unsupportedFigures, unsupportedHedges, unsupportedMenuPaths, unsupportedQuotedTerms } from "./ground-reply";
-import { noteV2Fact, sliceWholeChars, traceStep } from "./trace";
+import { noteV2Fact, peekV2Fact, sliceWholeChars, traceStep } from "./trace";
 import { SensitiveVault } from "./sensitive";
 import { boldInstruction, breakInlineSteps } from "./reply-format";
 import { markPastDates, tenseMismatches } from "./dates";
@@ -127,6 +127,11 @@ async function productCardTexts(productIds: string[], priceChannel?: string | nu
   }));
   return out;
 }
+
+/** Pergunta de preço: "quanto fica", "qto fica por mês", "valor", "mensalidade", "quanto custa". */
+const PRICE_QUESTION = /(?<![\p{L}])(?:quanto|qto|qnto|quantos?)\s+(?:fica|custa|sai|é|e|vou\s+pagar|pago|seria)|(?<![\p{L}])(?:valor|valores|mensalidade|pre[çc]o)(?![\p{L}])/iu;
+/** Resposta que foge do valor ("não tenho o valor da mensalidade aqui"). */
+const PRICE_DODGE = /n[ãa]o\s+(?:tenho|consigo|sei|posso)[^.!?]{0,50}(?:valor|mensalidade|pre[çc]o)/iu;
 
 type PrefetchedChunk = { docId: string; docTitle: string; content: string; distance: number; priority?: boolean };
 /** Trecho do material do assunto vai inteiro (o comum é cortado em PREFETCH_CHUNK_CHARS). */
@@ -1364,7 +1369,7 @@ function buildV2SystemPrompt(
     // para o resto ("tenho direito a desconto?" não é pergunta sobre o curso
     // de Direito só porque a palavra casou).
     if (catalogSection) lines.push("Exceção: se a mensagem trata de um dos produtos do catálogo listados acima (o curso, o valor, o cartão), responda com os dados dele e envie o cartão; não transfira por falta de material.");
-    lines.push("A busca nos materiais não achou trecho que responda a esta mensagem (os que aparecem acima, se houver, só se parecem com ela). Se ela pede informação sobre produto, serviço, preço, prazo, regra, política ou como fazer algo, não responda com conhecimento geral nem com o que parece óbvio: diga com naturalidade que não tem essa informação e marque handoff=true se o cliente precisa dela para seguir. Cumprimento, agradecimento, confirmação e perguntas sobre os dados do próprio cliente você responde normalmente.");
+    lines.push("A busca nos materiais não achou trecho que responda a esta mensagem (os que aparecem acima, se houver, só se parecem com ela). Antes de tudo, confira as Regras globais, as Informações fixas, o calendário e os produtos do catálogo acima: o que estiver escrito lá é fonte e vale como resposta — responda por eles, sem transferir. Só se a resposta não estiver em nenhum desses lugares e a mensagem pede informação sobre produto, serviço, preço, prazo, regra, política ou como fazer algo: não responda com conhecimento geral nem com o que parece óbvio; diga com naturalidade que não tem essa informação. Transferir segue as instruções do agente: se elas mandam oferecer a equipe antes, ofereça e não marque handoff; sem instrução sobre isso, marque handoff=true se o cliente precisa da informação para seguir. Cumprimento, agradecimento, confirmação e perguntas sobre os dados do próprio cliente você responde normalmente.");
   }
   if (messageModels.length > 0) {
     lines.push("# Mensagens prontas que você pode enviar");
@@ -1667,7 +1672,7 @@ export async function callV2LLM(args: {
   // ("Sem material para esta mensagem") às vezes vencia, o modelo dizia que
   // não tinha a informação e transferia sem consultar o catálogo.
   const catalogOn = allowedToolNames.includes("search_products") || args.config.productPolicy?.enabled === true;
-  const catalogMatches = catalogOn
+  let catalogMatches = catalogOn
     ? await Promise.resolve()
         .then(() => findV2ProductsNamedIn({
           message: userMessage,
@@ -1676,6 +1681,17 @@ export async function callV2LLM(args: {
         }))
         .catch(() => [])
     : [];
+  // Mesmo nome-base em mais de um produto ("Administração" e "Administração
+  // 2.0"): fica o que tem o nome inteiro escrito. Os dois cartões juntos
+  // podiam dizer coisas diferentes (isenta × taxa) e a conferência barrava.
+  const preferExactName = <T extends { name: string }>(list: T[], text: string): T[] => {
+    if (list.length < 2) return list;
+    const fold = (t: string) => t.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, " ").trim();
+    const phrase = ` ${fold(text)} `;
+    const exact = list.filter((p) => phrase.includes(` ${fold(p.name)} `));
+    return exact.length > 0 ? exact : list;
+  };
+  catalogMatches = preferExactName(catalogMatches ?? [], userMessage);
   if (catalogMatches?.length) {
     const query = catalogMatches.map((p) => p.name).join("; ");
     traceStep("catálogo", `A mensagem cita produto(s) do catálogo: ${catalogMatches.map((p) => `"${p.name}"`).join(", ")} — dados no prompt`);
@@ -1691,15 +1707,36 @@ export async function callV2LLM(args: {
     .slice(-6)
     .map((m) => m.content)
     .join("\n");
-  const historyCatalog = catalogOn && recentHistory.trim()
-    ? (await Promise.resolve()
-        .then(() => findV2ProductsNamedIn({
-          message: recentHistory,
-          allowedIds: args.config.productPolicy?.enabled ? args.config.productPolicy.allowedProductIds : undefined,
-          priceChannel: args.config.productPolicy?.enabled ? args.config.productPolicy.priceChannel : undefined,
-        }))
-        .catch(() => [])).filter((p) => !catalogMatches?.some((c) => c.id === p.id))
+  const namedIn = (message: string) => Promise.resolve()
+    .then(() => findV2ProductsNamedIn({
+      message,
+      allowedIds: args.config.productPolicy?.enabled ? args.config.productPolicy.allowedProductIds : undefined,
+      priceChannel: args.config.productPolicy?.enabled ? args.config.productPolicy.priceChannel : undefined,
+    }))
+    .catch(() => [] as NonNullable<typeof catalogMatches>);
+  let historyText = recentHistory;
+  let historyCatalog = catalogOn && recentHistory.trim()
+    ? (await namedIn(recentHistory)).filter((p) => !catalogMatches?.some((c) => c.id === p.id))
     : [];
+  // O histórico inteiro pode citar produtos demais (o texto do cartão fala
+  // de "gestão", "pessoas", "finanças") e a busca devolve vazio: "qto fica
+  // por mês?" depois do cartão de Administração ficava sem o produto e a
+  // conferência cortava o valor (PRE2-01, 27/11). Tenta mensagem a
+  // mensagem, da mais recente para a mais antiga.
+  // Só para pergunta de valor/condição (cada tentativa lê o catálogo).
+  const asksCondition = PRICE_QUESTION.test(userMessage) || /(?<![\p{L}])(?:parcel\p{L}*|taxa|matr[íi]cula|desconto|bolsa|isen\p{L}*|pagamento|investimento)(?![\p{L}])/iu.test(userMessage);
+  if (catalogOn && asksCondition && historyCatalog.length === 0 && !catalogMatches?.length) {
+    for (const m of previousMessages.slice(-6).reverse()) {
+      if (!m.content?.trim()) continue;
+      const found = (await namedIn(m.content)).filter((p) => !catalogMatches?.some((c) => c.id === p.id));
+      if (found.length > 0) {
+        historyCatalog = found;
+        historyText = m.content;
+        break;
+      }
+    }
+  }
+  historyCatalog = preferExactName(historyCatalog, historyText);
   const priceChannelForCards = args.config.productPolicy?.enabled ? args.config.productPolicy.priceChannel : undefined;
   const cardTexts = await productCardTexts([...(catalogMatches ?? []), ...(historyCatalog ?? [])].map((p) => p.id), priceChannelForCards).catch(() => new Map<string, string>());
   const catalogSourceTexts = [
@@ -2118,6 +2155,11 @@ export async function callV2LLM(args: {
     // checagem, o calendário ficava no fim e era cortado — a data certa do
     // calendário era barrada como "sem fonte" e o cliente, transferido.
     const fixedFirst = [
+      // Cartões de produto primeiro: curtos e o dado mais específico (taxa,
+      // isenção, parcelas). No fim, depois das regras e da busca, o teto de
+      // tamanho da checagem cortava o cartão.
+      ...[...cardTexts.values()],
+      ...turnCardTexts,
       calendarPromptSection(args.config.calendar?.events, new Date(), args.config.businessHours?.timezone || "America/Sao_Paulo"),
       businessHoursText(args.config),
       currentDateLine(args.config.businessHours?.timezone),
@@ -2131,8 +2173,7 @@ export async function callV2LLM(args: {
       ...linkedChunks.map((c) => `${c.docTitle}\n${c.content}`),
       ...messageModels.filter((m) => m.content?.trim()).map((m) => `${m.name}\n${m.content}`),
       ...lookupTexts,
-      ...catalogSourceTexts,
-      ...turnCardTexts,
+      ...catalogSourceTexts.filter((t) => ![...cardTexts.values()].includes(t)),
     ].filter((s) => s && s.trim());
     const claimSources = [...fixedFirst, ...factSources.filter((s) => !fixedFirst.includes(s))];
     const agentHistory = previousMessages.filter((m) => m.role === "assistant").map((m) => m.content);
@@ -2166,7 +2207,7 @@ export async function callV2LLM(args: {
       const clientDocuments = clientDocumentTexts(clientTexts);
       const derivedAmounts = [...moneyDerivations(output.reply, sources), ...percentDerivations(output.reply, sources)].map((d) => `${d.token} = ${d.expr}`);
       if (derivedAmounts.length > 0) traceStep("verificação", `Conta conferida: ${derivedAmounts.join("; ")}`);
-      const checkArgs = { model: v2FastAuxModel(args.config.model), apiKey, reply: output.reply, sources: claimSources, clientTexts, agentHistory, citableValues, clientDocuments, derivedAmounts };
+      const checkArgs = { model: v2FastAuxModel(args.config.model), apiKey, reply: output.reply, sources: claimSources, clientTexts, agentHistory, citableValues, clientDocuments, derivedAmounts, productCards: [...cardTexts.values(), ...turnCardTexts] };
       // As duas leituras saem juntas (em paralelo): a segunda serve de nova
       // tentativa quando a primeira falha e de confirmação quando ela marca
       // algo. Em série, cada uma somava até 8 s à espera do cliente.
@@ -2373,7 +2414,7 @@ export async function callV2LLM(args: {
     const reviewSystem = [
       system,
       "# REVISÃO",
-      `Sua resposta anterior cita ${list}, que não aparece nos trechos da base, nas instruções nem na conversa. Tire essas afirmações da resposta e mantenha o resto como está: não as substitua por outra afirmação parecida, por uma generalidade ("pode variar", "depende do caso") nem por algo que também não esteja nas fontes. Use só nomes, passos e caminhos que estão nos trechos. Nome que o cliente citou e que não está nas fontes: não confirme que existe nem atribua a ele data, valor ou regra própria — dê a regra geral e diga que não consegue confirmar esse item. Não monte um passo a passo geral a partir do procedimento de outro serviço nem do que aparece numa imagem. Se, sem essas afirmações, não sobra resposta ao que o cliente pediu, diga com naturalidade que não tem essa informação e marque handoff=true. Devolva o JSON completo no formato exigido.`,
+      `Sua resposta anterior cita ${list}, que não aparece nos trechos da base, nas instruções nem na conversa. Tire essas afirmações da resposta e mantenha o resto como está: não as substitua por outra afirmação parecida, por uma generalidade ("pode variar", "depende do caso") nem por algo que também não esteja nas fontes. Use só nomes, passos e caminhos que estão nos trechos. Nome que o cliente citou e que não está nas fontes: não confirme que existe nem atribua a ele data, valor ou regra própria — dê a regra geral e diga que não consegue confirmar esse item. Não monte um passo a passo geral a partir do procedimento de outro serviço nem do que aparece numa imagem. Mantenha a resposta a cada pergunta da mensagem do cliente que tem fonte, o acolhimento e o próximo passo (a pergunta ou o pedido do fim); tirar uma frase não é motivo para deixar outra pergunta sem resposta. Se, sem essas afirmações, não sobra resposta ao que o cliente pediu, diga com naturalidade que não tem essa informação e diga o que as fontes mostram sobre o assunto (o cartão do produto, por exemplo). Transferir segue as instruções do agente: se elas mandam oferecer a equipe antes (perguntar se a pessoa quer que alguém continue), ofereça e não marque handoff; marque handoff=true só se as instruções mandam transferir, se a pessoa já pediu ou aceitou, ou se não há instrução sobre isso e ela precisa da informação para seguir. Nunca transfira por causa de preço de produto que está no cartão. Devolva o JSON completo no formato exigido.`,
     ].join("\n\n");
     try {
       const res = await generateWithTools({
@@ -2569,6 +2610,96 @@ export async function callV2LLM(args: {
     traceStep("catálogo", `A resposta não pediu o cartão de "${product.name}", citado pelo nome — o cartão vai junto`);
   }
 
+  /**
+   * Pergunta de preço ("qto fica por mês?") com o produto da conversa já
+   * resolvido e com valor (cartão enviado / produto citado): a resposta não
+   * pode virar "não tenho o valor" nem transferência por preço. Uma nova
+   * geração, com o cartão; se ainda assim não vier o valor, sai a linha de
+   * preço do próprio cartão (o mesmo que a pessoa vê). Nunca transfere por preço.
+   */
+  async function ensurePriceAnswer(r: Awaited<ReturnType<typeof attempt>>): Promise<void> {
+    if (!PRICE_QUESTION.test(userMessage)) return;
+    const pool = catalogMatches?.length ? catalogMatches : historyCatalog ?? [];
+    const product = pool.length === 1 && pool[0].priceFormatted ? pool[0] : null;
+    if (!product) return;
+    const o = r.output;
+    const dodges = o.handoff || PRICE_DODGE.test(o.reply) || !/R\$\s?\d/.test(o.reply);
+    if (!dodges) return;
+    const card = cardTexts.get(product.id) ?? "";
+    const priceOf = (t: string) => t.replace(/\s+/g, "").includes(String(product.priceFormatted).replace(/\s+/g, ""));
+    traceStep("verificação", `Pergunta de preço com o produto da conversa ("${product.name}", ${product.priceFormatted}) e a resposta ${o.handoff ? "transferia" : "não trazia o valor"} → gerando de novo com o cartão`);
+    try {
+      const res = await generateWithTools({
+        model: args.config.model,
+        apiKey: chatKey,
+        system: [
+          system,
+          "# REVISÃO",
+          `A pessoa perguntou o valor. O produto desta conversa é ${product.name}: ${product.priceFormatted}${product.listPriceFormatted ? ` (valor cheio ${product.listPriceFormatted})` : ""}.${card ? ` Cartão (o que ela vê): ${card.replace(/\s*\n\s*/g, " / ")}` : ""}`,
+          "Responda o valor pelo cartão, curto, e siga a conversa. Não transfira por causa de preço. Devolva o JSON completo no formato exigido.",
+        ].join("\n\n"),
+        messages: messages as any,
+        temperature: 0.3,
+        maxOutputTokens: responseLengthToMaxTokens(args.config.responseLength),
+        maxSteps: 1,
+        jsonMode,
+      });
+      r.inputTokens += res.inputTokens;
+      r.outputTokens += res.outputTokens;
+      const parsed = parseV2ModelJson(res.text);
+      const fixed = parsed ? v2LLMOutputSchema.safeParse(parsed) : undefined;
+      if (fixed?.success && !fixed.data.handoff && priceOf(fixed.data.reply)) {
+        r.output = { ...(fixed.data as V2LLMOutput), reply: breakInlineSteps(renderMessage(fixed.data.reply, renderVars) ?? fixed.data.reply) };
+        traceStep("verificação", "A nova geração respondeu o valor pelo cartão");
+        return;
+      }
+    } catch (err) {
+      log.warn({ err: err instanceof Error ? err.message : err }, "[ai-v2] nova geração para pergunta de preço falhou");
+    }
+    const line = card.split(/\n+/).map((l) => l.trim()).find((l) => /R\$\s?\d/.test(l)) ?? `${product.name}: ${product.priceFormatted}`;
+    r.output = { ...o, reply: line.replace(/[*_~]/g, ""), handoff: false, actions: (o.actions ?? []).filter((a) => a.type !== "handoff") };
+    traceStep("verificação", "A nova geração não trouxe o valor → sai a linha de preço do cartão, sem transferir");
+  }
+
+  /**
+   * Cartão de nível diferente do pedido: a pessoa quer pós (ou a resposta
+   * oferece pós) e o cartão é de graduação — ou o contrário. O cartão de
+   * Administração (graduação) saía junto com o texto das pós de gestão.
+   * O nível vem do cadastro de curso do produto (search_products/catálogo).
+   */
+  function dropMismatchedLevelCards(r: Awaited<ReturnType<typeof attempt>>): void {
+    const cards = (r.output.actions ?? []).filter((a) => a.type === "send_product");
+    if (cards.length === 0) return;
+    const POS = /(?<![\p{L}])(?:p[óo]s|p[óo]s-gradua\p{L}*|mba|especializa\p{L}*)(?![\p{L}])/iu;
+    const GRAD = /(?<![\p{L}])(?:gradua[çc][ãa]o|bacharelado|licenciatura|tecn[óo]logo)(?![\p{L}])/iu;
+    const askedPos = POS.test(userMessage);
+    const askedGrad = GRAD.test(userMessage) && !askedPos;
+    const wantPos = askedPos || (!askedGrad && POS.test(r.output.reply) && !GRAD.test(r.output.reply));
+    const wantGrad = askedGrad;
+    if (!wantPos && !wantGrad) return;
+    const levelOf = new Map<string, string>();
+    const collect = (products: unknown) => {
+      if (!Array.isArray(products)) return;
+      for (const p of products as Array<{ id?: unknown; course?: { level?: unknown } }>) {
+        if (typeof p?.id === "string" && typeof p.course?.level === "string") levelOf.set(p.id, p.course.level);
+      }
+    };
+    for (const call of [...prefetchCalls, ...(r.toolCalls ?? [])]) {
+      if (call.toolName === "search_products") collect((call.result as { products?: unknown })?.products);
+    }
+    collect(catalogMatches);
+    collect(historyCatalog);
+    const isPos = (level: string) => /p[óo]s/i.test(level);
+    const dropped = cards.filter((a) => {
+      const level = levelOf.get(String((a as { productId?: unknown }).productId));
+      if (!level) return false;
+      return (wantPos && !isPos(level)) || (wantGrad && isPos(level));
+    });
+    if (dropped.length === 0) return;
+    r.output.actions = (r.output.actions ?? []).filter((a) => !dropped.includes(a));
+    traceStep("catálogo", `Cartão de nível diferente do pedido (${wantPos ? "pós" : "graduação"}) não sai: ${dropped.length} cartão(ões)`);
+  }
+
   let lastError: Error | undefined;
   for (let i = 0; i < 2; i++) {
     try {
@@ -2579,9 +2710,19 @@ export async function callV2LLM(args: {
         traceStep("verificação", "O modelo devolveu um formato ilegível — tentando de novo");
         continue;
       }
+      const reasonBefore = r.output.reason;
+      const replyBefore = r.output.reply;
       await checkQuotedTerms(r);
       await avoidRepeat(r);
       ensureNamedProductCard(r);
+      dropMismatchedLevelCards(r);
+      await ensurePriceAnswer(r);
+      // "Por que respondeu isso?" descrevia a resposta do modelo antes da
+      // conferência; o cliente recebeu outra. Fica dito o que mudou.
+      if (r.output.reply !== replyBefore && r.output.reason === reasonBefore) {
+        const v = peekV2Fact("verification") as { unsupported?: string[] } | undefined;
+        r.output.reason = [reasonBefore, `A conferência mudou a resposta enviada${v?.unsupported?.length ? ` (tirou: ${v.unsupported.slice(0, 2).join("; ")})` : ""}.`].filter(Boolean).join(" · ");
+      }
       if (vault.size > 0) {
         r.output.collected = vault.restoreDeep(r.output.collected);
         r.output.actions = vault.restoreDeep(r.output.actions);

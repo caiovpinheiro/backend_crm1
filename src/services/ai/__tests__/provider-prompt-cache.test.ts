@@ -101,3 +101,15 @@ describe("ferramentas cortadas no meio do turno", () => {
     expect(choices[1]).toEqual({ type: "none" });
   });
 });
+
+describe("prefill do assistente", () => {
+  it("Claude: conversa terminando em mensagem do assistente ganha uma mensagem do usuário no fim; OpenAI recebe igual", async () => {
+    seen.length = 0;
+    const msgs = [{ role: "user" as const, content: "oi" }, { role: "assistant" as const, content: "{\"reply\":\"rascunho\"}" }];
+    await generateWithTools({ model: "claude-sonnet-5-5", apiKey: "k", system: "s", messages: msgs });
+    await generateWithTools({ model: "gpt-4.1-mini", apiKey: "k", system: "s", messages: msgs });
+    const roles = (p: Seen["prompt"]) => p.filter((m) => m.role !== "system").map((m) => m.role);
+    expect(roles(seen[0].prompt)).toEqual(["user", "assistant", "user"]);
+    expect(roles(seen[1].prompt)).toEqual(["user", "assistant"]);
+  });
+});

@@ -99,6 +99,23 @@ function modelCallOptions(modelName: string, args: { temperature?: number; maxOu
   return { temperature, maxOutputTokens, jsonMode: args.jsonMode && !isClaude, providerOptions };
 }
 
+/**
+ * Claude não aceita conversa terminando em mensagem do assistente (prefill):
+ * "This model does not support assistant message prefill". As revisões do
+ * motor (normalizar JSON, reescrever o que a conferência barrou) mandavam a
+ * resposta anterior como última mensagem — no Claude a chamada falhava e o
+ * turno saía torto. Para Claude, entra uma mensagem curta do usuário pedindo
+ * para seguir a instrução do sistema; os outros modelos recebem igual.
+ */
+export const CONTINUE_AFTER_ASSISTANT = "Siga a última instrução do sistema sobre a sua resposta acima e devolva a resposta completa no formato exigido.";
+
+export function messagesForModel(modelName: string, messages: ModelMessage[]): ModelMessage[] {
+  if (!modelName.startsWith("claude-") || messages.length === 0) return messages;
+  const last = messages[messages.length - 1];
+  if (last.role !== "assistant") return messages;
+  return [...messages, { role: "user", content: CONTINUE_AFTER_ASSISTANT }];
+}
+
 /** Claude: parte estável em bloco com `cache_control`; outros: o marcador some. */
 export function systemForModel(modelName: string, system: string): string | SystemModelMessage[] {
   const at = system.indexOf(SYSTEM_CACHE_BREAK);
@@ -191,7 +208,7 @@ export async function generateWithTools(
       return generateText({
         model,
         system: systemForModel(args.model, args.system),
-        messages: args.messages,
+        messages: messagesForModel(args.model, args.messages),
         tools: args.tools,
         ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
         maxOutputTokens: opts.maxOutputTokens,

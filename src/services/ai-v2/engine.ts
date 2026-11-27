@@ -36,18 +36,18 @@ import { isDeferralText, isShortAckText } from "@/lib/ai-agents/tabulation-class
 import { isCourtesyOnlyInbound } from "@/services/post-close-return";
 import { executeV2Actions, sendV2TextMessage, applyV2ClosureFieldUpdates, v2HumanBehavior } from "./actions";
 import { findInheritablePostCloseState, getV2ConversationState, upsertV2ConversationState } from "./state";
-import { scheduleReplyNote } from "./agenda";
+import { isCourtesyOnly, scheduleReplyNote } from "./agenda";
 import { logV2Turn } from "./log";
 import { noteV2Fact, peekV2Fact, runWithV2Trace, traceStep, v2TraceWasLogged } from "./trace";
 import { evaluateV2StopLimits, parseV2Counters, shouldStopStalled, type V2Counters } from "./limits";
 import { answerToPostCloseQuestion, classifyPostCloseMessage, getPostCloseBehavior, isGreetingOnlyMessage, keepOpenOnNewRequest, postCloseHandoffMessage, postCloseQuestion, postCloseShortReply, isExplicitResolution } from "./closure";
 import { isConfusionMessage, rephraseAfterConfusion } from "./confusion";
-import { announcesTransfer, answersBeforeHandoff, applyNoSourceGuard, conditionalHandoff, explanationClosesTurn, handoffExplanation, hasContentBeyondQuestion, noSourceReplyMessage, withoutTrailingQuestion, type V2PrefetchFact } from "./no-source";
+import { announcesTransfer, answersBeforeHandoff, applyNoSourceGuard, conditionalHandoff, explanationClosesTurn, handoffExplanation, promisesReturn, hasContentBeyondQuestion, noSourceReplyMessage, withoutTrailingQuestion, type V2PrefetchFact } from "./no-source";
 import { NONSENSE_LIMIT_REASON } from "./limits";
 import { applyV2Tabulation } from "./tabulation";
 import { withoutChoiceQuestionAfterSteps, applyReplyEnding, asksClient, classifyReply, effectiveReplyEnding, isGreetingOnlyReply, replyEndingButtons, replyEndingPhrases, withoutReplyEndings } from "./reply-ending";
 import { hasSearchableQuestion, isNearDuplicateReply, knowledgeChunkTexts, lookupResultTexts, repeatFallback } from "./ground-reply";
-import { productCardSlot, promisesConfirmation, splitReplyBubbles, withoutRepeatedQuestion } from "./conversation-profile";
+import { isAutomatedBusinessReply, productCardSlot, promisesConfirmation, splitReplyBubbles, withoutRepeatedQuestion } from "./conversation-profile";
 import { voiceModelInfo } from "./voice-provider";
 import { loadPriorV2Summary, summaryEnabled, updateRunningSummary, writeV2Summary, SUMMARY_MESSAGE_TYPE } from "./summary";
 import { looksLikeSystemError, saysTriedAndFailed } from "./retry-signal";
@@ -1772,6 +1772,33 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     ...((stateRow?.collectedVariables as Record<string, unknown> | null | undefined) ?? {}),
     ...automationVariables,
   };
+  // Resposta automática de empresa ("Agradecemos seu contato! Em breve
+  // retornaremos…"): não é lead nem pedido. Responder gerava conversa entre
+  // dois robôs.
+  if ((!input.messageType || input.messageType === "text") && isAutomatedBusinessReply(input.userMessage)) {
+    traceStep("entrada", "Mensagem automática de empresa (\"agradecemos seu contato…\") → sem resposta");
+    await logV2Turn({
+      organizationId: orgId, conversationId: input.conversationId, agentId: resolved!.agentConfigId, turnId: input.turnId,
+      inboundText: input.userMessage,
+      crmContext: { contact: null, deals: [], selectedDeal: null, fields: { contact: [], deal: [] } },
+      prompt: "", executedActions: [], discardedActions: [{ type: "no_reply", reason: "automated business reply" } as any],
+      handoff: false, latencyMs: Date.now() - startedAt,
+      inputTokens: 0, outputTokens: 0, owner, stage, versionId,
+    });
+    return { handoff: false, closed: false };
+  }
+
+  // Retomada combinada ("me chama às 19h") e a pessoa voltou antes com algo
+  // que não é só cortesia ("voltei", uma pergunta): a retomada cai agora. Na
+  // hora do envio ela já seria cancelada pela mesma regra, mas ficava como
+  // pendente na agenda até lá. Se a pessoa pedir de novo, o modelo agenda.
+  if (input.userMessage.trim() && !isCourtesyOnly(input.userMessage)) {
+    const cancelled = await import("./agenda-store")
+      .then(({ cancelOpenScheduledSends }) => cancelOpenScheduledSends(input.conversationId, "client_replied"))
+      .catch(() => 0);
+    if (cancelled > 0) traceStep("agenda", "O cliente voltou antes da retomada combinada → retomada cancelada");
+  }
+
   // Adiamento ("chamo depois", "agora não posso", "estou no trabalho"):
   // não é pedido nem cortesia pura. Responde curto, sem fecho nem botões,
   // e encerra — a volta entra pela janela pós-encerramento (cortesia /
@@ -1841,8 +1868,13 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     if (ruleHandoff && mentionsHumanRequest(config, input.userMessage) && counters.humanRequestOffered) {
       // Já respondeu e ofereceu a equipe; o cliente pediu de novo: transfere.
       traceStep("regra", "Pediu pessoa de novo depois da resposta e da oferta → transfere");
-    } else if (ruleHandoff && mentionsHumanRequest(config, input.userMessage) && humanRequestMode === "transfer" && humanRequestSubject(config, input.userMessage)) {
-      traceStep("regra", "Pedido de pessoa junto com o assunto → transfere direto (configurado: transferir sem tentar responder)");
+    } else if (ruleHandoff && mentionsHumanRequest(config, input.userMessage) && humanRequestMode === "transfer") {
+      // Configurado para transferir: com ou sem assunto, a regra do atalho vale
+      // como está (mensagem e transferência). Antes, sem assunto, o motor
+      // perguntava "me conta o que você precisa" por cima da configuração.
+      traceStep("regra", humanRequestSubject(config, input.userMessage)
+        ? "Pedido de pessoa junto com o assunto → transfere direto (configurado: transferir sem tentar responder)"
+        : "Pedido de pessoa sem assunto → transfere direto (configurado: transferir sem tentar responder)");
     } else if (ruleHandoff && mentionsHumanRequest(config, input.userMessage)) {
       if (humanRequestSubject(config, input.userMessage)) {
         humanRequestWithSubject = true;
@@ -3258,7 +3290,10 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     // A conferência cortou a resposta inteira: em vez de só o aviso, diz o
     // que acontece agora (sem afirmar fato). Pedido de boleto respondido só
     // com "Já te retorno por aqui" deixava a cliente sem o "sim".
-    if (!explanation && cause === "verification" && !waitingInQueue) {
+    // Vale também quando o modelo já pedia a transferência: a causa registrada
+    // fica a dele, mas foi a conferência que cortou a frase.
+    const verificationCut = cause === "verification" || (peekV2Fact("verification") as { forcedHandoff?: boolean } | undefined)?.forcedHandoff === true;
+    if (!explanation && verificationCut && !fallbackOnly && !waitingInQueue) {
       explanation = renderMessage(systemMessage(config, "verificationHandoffAck"), vars, defaultFormatter());
       traceStep("resposta", "A conferência cortou a resposta inteira → diz que anotou o pedido e que a equipe responde");
     }
@@ -3294,8 +3329,10 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
     const hoursNote = outsideHoursNote(config);
     // A explicação que saiu já fecha com pergunta ou já diz que retorna:
     // o aviso logo depois ("Já te retorno por aqui") dobrava o texto.
-    const explanationCloses = !!sentReply && !queuedMsg && explanationClosesTurn(sentReply);
-    if (explanationCloses) traceStep("transferência", "A resposta já fecha com pergunta ou confirmação de retorno → transfere sem o aviso");
+    // Só a promessa de retorno dispensa o aviso. Resposta que só termina em
+    // pergunta ("…por lá, tá?") transferia sem avisar a passagem.
+    const explanationCloses = !!sentReply && !queuedMsg && promisesReturn(sentReply);
+    if (explanationCloses) traceStep("transferência", "A resposta já diz que a equipe/o agente retorna → transfere sem o aviso");
     const sent = await performHandoff(
       requestedDestination ?? activeTheme?.handoffDestination,
       explanationCloses

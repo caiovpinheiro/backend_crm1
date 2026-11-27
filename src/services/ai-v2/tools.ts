@@ -61,6 +61,15 @@ function scoreTextMatch(haystack: string, query: string): number {
 }
 
 /** Palavras do nome que não distinguem um produto de outro (grau, modalidade). */
+/**
+ * Palavras comuns que, sozinhas, não indicam produto: um produto ativo chamado
+ * "teste" casava com "[CPF de teste]" e o cartão dele saía junto do formulário.
+ */
+const COMMON_NOISE_WORDS = new Set([
+  "teste", "testes", "exemplo", "modelo", "padrao", "produto", "produtos", "servico", "servicos", "valor", "valores",
+  "preco", "pagamento", "matricula", "inscricao", "documento", "contato", "cadastro", "formulario", "mensagem",
+]);
+
 const GENERIC_PRODUCT_WORDS = new Set([
   "curso", "cursos", "bacharelado", "licenciatura", "tecnologo", "tecnologico", "graduacao", "superior",
   "semipresencial", "presencial", "digital", "online", "semestres", "semestre", "plano", "planos",
@@ -93,7 +102,7 @@ export async function findV2ProductsNamedIn(args: {
   const distinctive = (name: string) => [...new Set(normalizeSearch(name).split(" ").filter((w) => w.length >= 5 && !GENERIC_PRODUCT_WORDS.has(w)))];
   const scored = rows
     .map((r) => ({ r, d: distinctive(r.name) }))
-    .filter(({ d }) => d.length > 0 && d.every((w) => words.has(w)));
+    .filter(({ d }) => d.length > 0 && d.every((w) => words.has(w)) && !d.every((w) => COMMON_NOISE_WORDS.has(w)));
   // Um nome contido em outro também citado ("Gestão" e "Gestão Comercial"): fica o mais específico.
   const matched = scored
     .filter(({ d }) => !scored.some((o) => o.d.length > d.length && d.every((w) => o.d.includes(w))))

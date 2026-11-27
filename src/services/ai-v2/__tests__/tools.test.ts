@@ -354,3 +354,12 @@ describe("searchV2Products — palavra curta do nome não casa dentro do termo",
     expect(r.products.map((p) => p.id)).not.toContain("a2");
   });
 });
+
+describe("findV2ProductsNamedIn — palavra comum não casa produto", () => {
+  beforeEach(() => vi.clearAllMocks());
+  it("produto chamado \"teste\" não casa com \"[CPF de teste]\"", async () => {
+    const rows = [{ id: "t", name: "teste", sku: null, type: "PRODUCT", unit: "un", price: 150, description: null, customValues: [], courseConfig: null }];
+    (prisma.product.findMany as ReturnType<typeof vi.fn>).mockResolvedValue(rows);
+    expect(await findV2ProductsNamedIn({ message: "segue meu [CPF de teste] e o formulário" })).toEqual([]);
+  });
+});

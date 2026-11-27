@@ -42,6 +42,12 @@ const mocks = vi.hoisted(() => ({
   enrichMedia: vi.fn(async (args: { userMessage: string }): Promise<{ userMessage: string; understood: number; failed: number }> => ({ userMessage: args.userMessage, understood: 0, failed: 0 })),
 }));
 
+const agendaStoreMocks = vi.hoisted(() => ({ cancelOpenScheduledSends: vi.fn(async () => 0) }));
+vi.mock("../agenda-store", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../agenda-store")>()),
+  cancelOpenScheduledSends: agendaStoreMocks.cancelOpenScheduledSends,
+}));
+
 vi.mock("../sent-materials", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../sent-materials")>()),
   recentlySentMessageModels: mocks.recentlySent,
@@ -3118,15 +3124,19 @@ describe("processV2Turn — correções do motor", () => {
     expect(mocks.simpleHandoff).toHaveBeenCalled();
   });
 
-  it("explicação que já termina em pergunta: transfere sem o aviso logo depois (texto dobrado)", async () => {
+  it("transferência: resposta que só termina em pergunta leva o aviso; resposta que já promete retorno, não", async () => {
     const config = baseConfig();
     mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
-    mocks.callLLM.mockResolvedValue(llmOut({ handoff: true, reply: "Pra segunda graduação a entrada é pelo ENEM. Você tem ENEM dos últimos 10 anos?" }));
-    await run("já tenho uma graduação, quero outra");
-    const texts = mocks.sendText.mock.calls.map((c) => c[0].text as string);
-    expect(texts.join("|")).toContain("Você tem ENEM dos últimos 10 anos?");
-    expect(texts).not.toContain("Vou transferir.");
-    expect(mocks.simpleHandoff).toHaveBeenCalledTimes(1);
+    mocks.callLLM.mockResolvedValue(llmOut({ handoff: true, reply: "Tudo bem, acontece. Daqui pra frente não clica em mais nada por lá, tá?" }));
+    await run("cliquei em matrícula digital sem querer");
+    let texts = mocks.sendText.mock.calls.map((c) => c[0].text as string);
+    expect(texts).toEqual(["Tudo bem, acontece. Daqui pra frente não clica em mais nada por lá, tá?", "Vou transferir."]);
+
+    mocks.sendText.mockClear();
+    mocks.callLLM.mockResolvedValue(llmOut({ handoff: true, reply: "Anotei seu caso e te respondo por aqui com o próximo passo." }));
+    await run("e agora, perdi a bolsa?");
+    texts = mocks.sendText.mock.calls.map((c) => c[0].text as string);
+    expect(texts).toEqual(["Anotei seu caso e te respondo por aqui com o próximo passo."]);
   });
 
   it("cartão de produto entre as bolhas: apresentação → cartão → pergunta (não depois da pergunta)", async () => {
@@ -3190,6 +3200,43 @@ describe("processV2Turn — correções do motor", () => {
     const noteCall = mocks.executeActions.mock.calls.find((c) => (c[0] as Array<{ type: string }>).some((a) => a.type === "add_note"));
     expect(noteCall).toBeDefined();
     expect(JSON.stringify(noteCall![0])).toContain("precisar trancar");
+  });
+
+  it("cliente volta antes da retomada combinada: a retomada pendente cai; cortesia não cancela", async () => {
+    const config = baseConfig();
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "Que bom que voltou! Vamos seguir com a sua inscrição?" }));
+    agendaStoreMocks.cancelOpenScheduledSends.mockClear();
+    agendaStoreMocks.cancelOpenScheduledSends.mockResolvedValueOnce(1);
+    await run("voltei");
+    expect(agendaStoreMocks.cancelOpenScheduledSends).toHaveBeenCalledWith("conv-1", "client_replied");
+
+    agendaStoreMocks.cancelOpenScheduledSends.mockClear();
+    mocks.callLLM.mockResolvedValue(llmOut({ reply: "Imagina!" }));
+    await run("ok, obrigado!");
+    expect(agendaStoreMocks.cancelOpenScheduledSends).not.toHaveBeenCalled();
+  });
+
+  it("modelo já pedia a transferência e a conferência cortou a resposta: sai a reserva, não só o aviso", async () => {
+    const config = baseConfig();
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    const { noteV2Fact } = await import("../trace");
+    mocks.callLLM.mockImplementation(async () => {
+      noteV2Fact("handoffCause", "model", { keepFirst: true });
+      noteV2Fact("verification", { unsupported: ["x"], rewritten: false, forcedHandoff: true });
+      return llmOut({ handoff: true, reply: "", reason: "Citava algo sem fonte" });
+    });
+    await run("não recebi a proposta ainda, faz 2 dias");
+    const texts = mocks.sendText.mock.calls.map((c) => c[0].text as string);
+    expect(texts).toEqual(["Anotei seu pedido; a equipe te responde por aqui."]);
+  });
+
+  it("mensagem automática de empresa não recebe resposta", async () => {
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: baseConfig(), active: true });
+    await run("Olá! Agradecemos seu contato. Em breve retornaremos. Nosso horário de atendimento é de segunda a sexta, das 8h às 18h.");
+    expect(mocks.callLLM).not.toHaveBeenCalled();
+    expect(mocks.sendText).not.toHaveBeenCalled();
+    expect(mocks.logTurn.mock.calls.at(-1)![0].discardedActions).toEqual([{ type: "no_reply", reason: "automated business reply" }]);
   });
 
   it("fecho configurado vai no fim da resposta; não vai quando transfere", async () => {
@@ -3308,6 +3355,22 @@ describe("processV2Turn — correções do motor", () => {
     mocks.getState.mockResolvedValue(makeState("active"));
 
     const r = await run("quero falar com atendente, como vejo meus pedidos?");
+
+    expect(r.handoff).toBe(true);
+    expect(mocks.callLLM).not.toHaveBeenCalled();
+    expect(mocks.simpleHandoff).toHaveBeenCalledTimes(1);
+    expect(mocks.sendText.mock.calls.map((c) => (c[0] as { text: string }).text)).toEqual(["Vou transferir."]);
+  });
+
+  it("pedido de pessoa sem assunto, “transferir direto”: transfere na hora, sem perguntar o assunto (GER-01)", async () => {
+    const config = baseConfig({
+      handoff: { ...baseConfig().handoff, humanRequestKeywords: ["falar com atendente"], humanRequestWithSubject: "transfer" },
+      rules: [{ id: "r-h", name: "Pedido de humano", order: 0, conditions: [{ type: "keywords", values: ["falar com atendente"] }], actions: [{ type: "handoff" }] }],
+    } as unknown as Partial<V2AgentConfig>);
+    mocks.prismaAIAgentFindUnique.mockResolvedValue({ id: "agent-1", simpleConfig: config, active: true });
+    mocks.getState.mockResolvedValue(makeState("active"));
+
+    const r = await run("quero falar com atendente");
 
     expect(r.handoff).toBe(true);
     expect(mocks.callLLM).not.toHaveBeenCalled();

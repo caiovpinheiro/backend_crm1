@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("@/services/ai/provider", () => ({ generateWithTools: vi.fn() }));
 
-import { buildClaimCheckInput, notAFactClaim, parseClaimCheck, worthClaimCheck } from "../claim-check";
+import { buildClaimCheckInput, claimBackedByProductCard, claimFoundInSources, claimParaphrasesClient, notAFactClaim, parseClaimCheck, worthClaimCheck } from "../claim-check";
 
 describe("checagem por modelo — auxiliares", () => {
   it("só confere resposta com conteúdo", () => {
@@ -81,5 +81,46 @@ describe("checador recebe as regras inteiras", () => {
     const input = buildClaimCheckInput({ reply: "ok", sources: [...rules, "Sinto muito... Eu vejo o cancelamento com você aqui."], clientTexts: [] });
     expect(input).toContain("REGRA 29.");
     expect(input).toContain("Eu vejo o cancelamento com você aqui.");
+  });
+});
+
+describe("afirmação sustentada pelo cartão do produto", () => {
+  const cards = ["🎁 Matrícula isenta\nDe R$ 173,50 por R$ 121,45 ao mês", "Taxa de matrícula: *R$99,00*"];
+  it("isenção e valores do cartão passam; valor que o cartão não traz, não", () => {
+    expect(claimBackedByProductCard("a matrícula de Administração é isenta", cards)).toBe(true);
+    expect(claimBackedByProductCard("a taxa de matrícula é R$ 99,00", cards)).toBe(true);
+    expect(claimBackedByProductCard("fica R$ 121,45 por mês", cards)).toBe(true);
+    expect(claimBackedByProductCard("a taxa de matrícula é R$ 50,00", cards)).toBe(false);
+    expect(claimBackedByProductCard("a matrícula é isenta", ["Taxa de matrícula: *R$99,00*"])).toBe(false);
+    expect(claimBackedByProductCard("o curso dura 8 semestres", cards)).toBe(false);
+  });
+});
+
+describe("texto das regras vale como fonte (cópia, frase-modelo e negação curta)", () => {
+  const rule = "QUANDO TRANSFERIR. Na demora, diga: 'Entendi, [o que está demorando] ainda não chegou. Anotei aqui e te respondo por aqui.' e transfira.";
+  const cancel = "Cancelar não tem multa nem fidelidade; você paga só a mensalidade do mês em aberto.";
+  it("frase copiada da regra", () => {
+    expect(claimFoundInSources("Anotei aqui e te respondo por aqui.", [rule])).toBe(true);
+    expect(claimFoundInSources("Anotei aqui e te ligo amanhã.", [rule])).toBe(false);
+  });
+  it("frase-modelo com [colchetes] preenchida", () => {
+    expect(claimFoundInSources("Entendi, a proposta ainda não chegou.", [rule])).toBe(true);
+    expect(claimFoundInSources("Entendi, a proposta já chegou.", [rule])).toBe(false);
+  });
+  it("negação curta da regra", () => {
+    expect(claimFoundInSources("cancelar não tem multa", [cancel])).toBe(true);
+    expect(claimFoundInSources("o cancelamento não tem multa", [cancel])).toBe(true);
+    expect(claimFoundInSources("trancar não tem multa", [cancel])).toBe(false);
+    expect(claimFoundInSources("não tem taxa de matrícula", [cancel])).toBe(false);
+  });
+});
+
+describe("paráfrase do relato do cliente", () => {
+  it("repetir o que o cliente contou, com outras palavras, não é afirmação sem fonte", () => {
+    expect(claimParaphrasesClient("Entendi, o pix aparece pendente", ["fiz o pix e tá pendente ainda"])).toBe(true);
+    expect(claimParaphrasesClient("o cartão foi recusado", ["meu cartão recusou"])).toBe(true);
+    expect(claimParaphrasesClient("Entendi, o pix que você fez ainda aparece como pendente", ["fiz o pix ontem e ainda tá pendente"])).toBe(true);
+    expect(claimParaphrasesClient("o pix cai em 2 dias", ["fiz o pix"])).toBe(false);
+    expect(claimParaphrasesClient("o pix foi estornado", ["fiz o pix e tá pendente"])).toBe(false);
   });
 });

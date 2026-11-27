@@ -126,6 +126,23 @@ export function buildTemplateComponents(
  * Placeholders sem valor correspondente ficam intactos (`{{2}}`), sinalizando
  * visualmente o que falta preencher.
  */
+/**
+ * Recorta as variáveis de um componente. Cabeçalho, corpo e cada botão têm
+ * numeração independente na Meta (todos podem ter `{{1}}`), então o preview
+ * de um texto precisa ser renderizado só com as variáveis dele.
+ */
+export function templateVariablesOfComponent(
+  vars: TemplateVariableInput[] | null | undefined,
+  component: TemplateVariableComponent,
+  buttonIndex?: number,
+): TemplateVariableInput[] {
+  return (vars ?? []).filter((v) => {
+    if ((v.component ?? "body") !== component) return false;
+    if (component !== "button" || buttonIndex == null) return true;
+    return (v.buttonIndex ?? 0) === buttonIndex;
+  });
+}
+
 /** Extrai variáveis de `components` no formato Cloud API (envio). */
 export function templateVariablesFromSendComponents(
   components: unknown[] | undefined,
@@ -136,8 +153,28 @@ export function templateVariablesFromSendComponents(
     const o = c && typeof c === "object" ? (c as Record<string, unknown>) : null;
     if (!o) continue;
     const type = String(o.type ?? "").toLowerCase();
-    if (type !== "body" && type !== "header") continue;
     const params = Array.isArray(o.parameters) ? o.parameters : [];
+    if (type === "button") {
+      // Só botão URL dinâmico carrega parâmetro de texto editável pelo
+      // operador; Flow/quick reply/copy code têm payload próprio.
+      const sub = String(o.sub_type ?? o.subType ?? "").toLowerCase();
+      const index = Number(o.index);
+      if (sub !== "url" || !Number.isInteger(index) || index < 0) continue;
+      let k = 1;
+      for (const p of params) {
+        const pr = p && typeof p === "object" ? (p as Record<string, unknown>) : null;
+        if (!pr) continue;
+        out.push({
+          component: "button",
+          key: String(k),
+          value: typeof pr.text === "string" ? pr.text : "",
+          buttonIndex: index,
+        });
+        k += 1;
+      }
+      continue;
+    }
+    if (type !== "body" && type !== "header") continue;
     let i = 1;
     for (const p of params) {
       const pr = p && typeof p === "object" ? (p as Record<string, unknown>) : null;

@@ -182,7 +182,37 @@ export function sameClaim(a: string, b: string): boolean {
  * checador às vezes marcava o que o material diz com outras palavras (ex.:
  * o endereço do portal) e o cliente era transferido.
  */
+/** Texto sem acento, caixa, aspas, marcação e pontuação, para comparar cópia literal. */
+const literal = (t: string) => foldText(t).replace(/[*_~`"“”'‘’]/g, " ").replace(/[^a-z0-9[\]]+/g, " ").replace(/\s+/g, " ").trim();
+
+/**
+ * Cópia do que as fontes dizem: a frase está escrita nelas ("Anotei aqui e
+ * te respondo por aqui." nas regras), ou é uma frase-modelo da regra com o
+ * [trecho entre colchetes] preenchido ("Entendi, [o que está demorando]
+ * ainda não chegou." → "Entendi, a proposta ainda não chegou.").
+ */
+function copiedFromSources(claim: string, sources: string[]): boolean {
+  const c = literal(claim).replace(/[[\]]/g, "");
+  if (c.split(" ").length < 2) return false;
+  for (const source of sources) {
+    const s = literal(source);
+    if (` ${s.replace(/[[\]]/g, "")} `.includes(` ${c} `)) return true;
+    if (!s.includes("[")) continue;
+    for (const sentence of foldText(source).split(/(?<=[.!?])\s+|\n+/)) {
+      if (!sentence.includes("[")) continue;
+      // Só o trecho da frase-modelo (entre aspas ou depois de ":"), não a instrução em volta.
+      const segment = sentence.split(/[:'"“”‘’]/).find((seg) => seg.includes("[")) ?? sentence;
+      const parts = literal(segment).split(/\[[^\]]*\]/);
+      if (parts.length < 2 || parts.join(" ").trim().split(" ").length < 2) continue;
+      const pattern = parts.map((p) => p.trim().replace(/[.*+?^${}()|\\]/g, "\\$&")).join(" .{1,80}? ").replace(/\s+/g, "\\s*");
+      if (new RegExp(`(?:^| )${pattern}(?: |$)`).test(c) || new RegExp(`(?:^| )${pattern}(?: |$)`).test(` ${c} `)) return true;
+    }
+  }
+  return false;
+}
+
 export function claimFoundInSources(claim: string, sources: string[]): boolean {
+  if (copiedFromSources(claim, sources)) return true;
   // Marcação com mais de uma frase ("Depois disso, sua conta fica pronta.
   // Pelo celular, use o aplicativo."): cada frase pode vir de um trecho
   // diferente; vale quando todas estão nas fontes.
@@ -210,6 +240,18 @@ export function claimFoundInSources(claim: string, sources: string[]): boolean {
     return sources.some((source) =>
       foldText(source).replace(/[*_~`"“”]/g, "").split(/(?<=[.!?])\s+|\n+/)
         .some((s) => word.test(s) && s.split(/[^a-z0-9]+/).some((w) => verbs.includes(w.slice(0, 5)))),
+    );
+  }
+  // Negação curta ("cancelar não tem multa"): vale quando a mesma frase de
+  // uma fonte traz as mesmas palavras e também nega. Antes, com menos de 3
+  // palavras, toda negação era "sem fonte".
+  if (urls.length === 0 && negated && words.length > 0 && words.length < 3) {
+    const stems = words.map((w) => w.slice(0, 6));
+    return sources.some((source) =>
+      plain(source).split(/(?<=[.!?;])\s+|\n+/).some((sentence) => {
+        const vocab = new Set(sentence.split(/[^a-z0-9]+/).filter(Boolean).map((w) => w.slice(0, 6)));
+        return stems.every((w) => vocab.has(w)) && /\b(?:nao|nunca|sem|nem|nenhum|nenhuma|gratis|gratuit\w*|isent\w*)\b/.test(sentence);
+      }),
     );
   }
   if (urls.length === 0 && words.length < 3) return false;
@@ -244,6 +286,11 @@ export function notAFactClaim(claim: string): boolean {
   // "preciso que um atendente analise a tela com você", "alguém da equipe vai
   // conferir": também é aviso de transferência, não afirmação da empresa.
   if (/\b(?:preciso|precisamos|vou precisar) que (?:um|uma|alguem|a equipe|o time|um atendente|uma pessoa|um consultor)\b|\b(?:um|uma) (?:atendente|pessoa|consultor\w*|colega|especialista)(?: da equipe| do time)? (?:vai|precisa|pode|ira) (?:analisar|verificar|conferir|avaliar|resolver|te ajudar|continuar|assumir)\b|\b(?:alguem|a equipe|o time) (?:da equipe |do time )?(?:vai|precisa|pode) (?:analisar|verificar|conferir|avaliar|resolver|te ajudar|continuar|assumir)\b/.test(c)) return true;
+  // Acolhimento ("Sinto muito pela demora, a frustração faz sentido", "Entendi,
+  // a distância pesou"): não afirma fato da empresa. Sem número e sem negar
+  // oferta ("não temos esse curso" continua sendo conferido).
+  if (!/\d/.test(c) && c.split(/\s+/).length <= 14 && !/\bnao (?:temos|tem|ha|oferecemos|existe|e possivel|da)\b/.test(c)
+    && /\b(?:sinto muito|lamento|que pena|poxa|imagino (?:como|que|o quanto)|compreendo|entendo (?:sua|a sua|o seu|seu|como|que)|faz (?:todo )?sentido|(?:sua |a )?frustracao|chateac\w*|(?:a |essa )?(?:distancia|demora|espera) pes\w*|pesou|desculp\w* (?:pela|pelo))\b/.test(c)) return true;
   // Cortesia ("fico feliz em ajudar", "por nada"): o checador às vezes marca.
   if (!/\d/.test(c) && c.split(/\s+/).length <= 12 && /\b(?:fico (?:muito )?feliz|feliz em ajudar|que bom|por nada|de nada|obrigad[oa]|disponha|conte comigo|espero ter ajudado|a disposicao|qualquer (?:duvida|coisa)|estou por aqui|e so (?:me )?chamar|bom dia|boa tarde|boa noite|tudo bem)\b/.test(c)) return true;
   if (/(?:^|\bque |\bpelo que |\bcomo )(?:entendi[,.]?\s*)?voce (?:ja |tambem )?(?:enviou|disse|falou|mencionou|informou|tentou|subiu|mandou|comentou|contou|relatou|escreveu)\b/.test(c)) return true;
@@ -328,6 +375,32 @@ export function claimEchoesClient(claim: string, clientTexts: string[]): boolean
   });
 }
 
+/** Palavras de quem repete o relato ("entendi", "aparece", "você disse"): não são o conteúdo. */
+const REPORT_WORDS = new Set(["entendi", "entendo", "entao", "certo", "perfeito", "aparece", "aparecendo", "ficou", "fica", "esta", "consta", "constando", "segundo", "voce", "disse", "falou", "ainda", "continua", "mostra", "mostrando", "diz", "dizendo", "ta", "tah", "foi", "veio", "deu", "dando", "seu", "sua", "meu", "minha",
+  // Verbos de apoio: "o pix que você fez" × "fiz o pagamento por pix".
+  "fez", "fiz", "feito", "fazer", "faco", "fazendo", "tem", "tenho", "teve", "tinha", "ter", "pode", "posso", "realizou", "realizei", "mandou", "mandei", "enviou", "enviei"]);
+
+/**
+ * Paráfrase do relato do cliente: "Entendi, o pix aparece pendente" para "fiz
+ * o pix e tá pendente"; "o cartão foi recusado" para "meu cartão recusou".
+ * Sem número nem link; tirando as palavras de quem repete o relato, toda
+ * palavra de conteúdo (pelo radical) está numa frase do cliente. A conferência
+ * cortava a paráfrase e sobrava só o aviso de transferência.
+ */
+export function claimParaphrasesClient(claim: string, clientTexts: string[]): boolean {
+  if (/\d|https?:\/\/|R\$/i.test(claim)) return false;
+  const fold = (s: string) => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const stems = (s: string) => fold(s).split(/[^a-z0-9]+/).filter((w) => w.length >= 3 && !ECHO_STOP.has(w) && !REPORT_WORDS.has(w)).map((w) => w.slice(0, 5));
+  const words = [...new Set(stems(claim))];
+  if (words.length < 2) return false;
+  return clientTexts
+    .flatMap((t) => t.split(/(?<=[.!?])\s+|\n+/))
+    .some((sentence) => {
+      const vocab = new Set(stems(sentence));
+      return words.every((w) => vocab.has(w));
+    });
+}
+
 const COMMON_CITABLE = new Set(["sim", "nao", "yes", "no", "true", "false", "ok", "ativo", "inativo", "aberto", "fechado", "pendente"]);
 
 /**
@@ -351,6 +424,26 @@ export function claimBackedByCitableValues(claim: string, values: string[]): boo
   return !/\d|https?:\/\//.test(rest) && !/["“”]/.test(rest);
 }
 
+const foldCard = (t: string) => t.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[*_~]/g, "").replace(/r\$\s*/g, "r$ ");
+
+/**
+ * Afirmação sobre taxa de matrícula, isenção ou valor que o cartão do produto
+ * traz: "a matrícula é isenta" com "Matrícula isenta" no cartão; "a taxa é
+ * R$ 99,00" com "Taxa de matrícula: *R$99,00*". O checador às vezes não via
+ * o cartão (cortado no fim das fontes) e a resposta certa virava "não tenho
+ * essa informação". Valor em reais: todos os da frase têm de estar nos cartões.
+ */
+export function claimBackedByProductCard(claim: string, cards: string[]): boolean {
+  if (cards.length === 0) return false;
+  const pool = foldCard(cards.join("\n"));
+  const c = foldCard(claim);
+  const money = c.match(/r\$ \d{1,3}(?:\.\d{3})*(?:,\d{2})?/g) ?? [];
+  if (money.length > 0) return money.every((m) => pool.includes(m));
+  if (/\bisent[ao]s?\b|\bisencao\b/.test(c)) return /\bisent[ao]s?\b|\bisencao\b/.test(pool);
+  if (/\btaxa de matricula\b/.test(c) && /\bnao (?:tem|ha|existe|cobra)/.test(c)) return /\bisent[ao]\b/.test(pool);
+  return false;
+}
+
 /** Afirmações sem fonte segundo o modelo auxiliar. Falha ou demora: lista vazia. */
 export async function checkClaimsWithModel(args: {
   model: string;
@@ -365,6 +458,8 @@ export async function checkClaimsWithModel(args: {
   clientDocuments?: string[];
   /** Contas conferidas: "R$ 135,90 = R$ 795,61 − R$ 659,71". */
   derivedAmounts?: string[];
+  /** Texto dos cartões de produto da conversa (o que o cliente vê). */
+  productCards?: string[];
 }): Promise<{ unsupported: string[]; inputTokens: number; outputTokens: number; ok: boolean }> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -384,7 +479,7 @@ export async function checkClaimsWithModel(args: {
       }),
     ]);
     const flagged = parseClaimCheck(res.text, args.reply);
-    const unsupported = flagged.filter((c) => !notAFactClaim(c) && !claimEchoesClient(c, args.clientTexts) && !claimBackedByCitableValues(c, args.citableValues ?? []) && !claimFoundInSources(c, args.sources) && !claimBackedByArithmetic(c, args.derivedAmounts ?? [], args.clientDocuments ?? []));
+    const unsupported = flagged.filter((c) => !notAFactClaim(c) && !claimEchoesClient(c, args.clientTexts) && !claimBackedByCitableValues(c, args.citableValues ?? []) && !claimFoundInSources(c, args.sources) && !claimBackedByArithmetic(c, args.derivedAmounts ?? [], args.clientDocuments ?? []) && !claimBackedByProductCard(c, args.productCards ?? []) && !claimParaphrasesClient(c, args.clientTexts));
     if (unsupported.length < flagged.length) {
       log.info(
         { descartadas: flagged.length - unsupported.length },

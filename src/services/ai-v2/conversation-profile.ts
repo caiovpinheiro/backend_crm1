@@ -207,5 +207,31 @@ export function withoutRepeatedQuestion(reply: string, lastAgent: string | null 
 /** A resposta promete que alguém vai confirmar depois ("isso eu te confirmo aqui"). */
 export function promisesConfirmation(reply: string, noSourceMessage?: string): boolean {
   if (noSourceMessage?.trim() && reply.includes(noSourceMessage.trim())) return true;
-  return /(?<![\p{L}])(?:te\s+confirmo|eu\s+confirmo|a\s+gente\s+confirma|vou\s+confirmar|confirmo\s+(?:com|pra|para)\s+voc[eê])(?![\p{L}])/iu.test(reply);
+  // "A gente confirma na inscrição/na proposta" adia para o processo, não
+  // promete que alguém volta: não vira nota (gerava anotação sem pedido).
+  return reply
+    .split(/(?<=[.!?])\s+|\n+/)
+    .some((s) =>
+      /(?<![\p{L}])(?:te\s+confirmo|eu\s+confirmo|a\s+gente\s+confirma|vou\s+confirmar|confirmo\s+(?:com|pra|para)\s+voc[eê])(?![\p{L}])/iu.test(s) &&
+      !/\b(?:na|no|pela|pelo)\s+(?:inscri[çc][ãa]o|matr[ií]cula|proposta|formul[áa]rio|prova)\b/iu.test(s),
+    );
+}
+
+/**
+ * Resposta automática de empresa ("Agradecemos seu contato! Em breve
+ * retornaremos", "Esta é uma mensagem automática"): não é lead nem pedido.
+ * Duas marcas, ou uma explícita de "mensagem automática". Pergunta direta
+ * ao agente (termina em "?") não conta.
+ */
+export function isAutomatedBusinessReply(text: string | null | undefined): boolean {
+  const t = (text ?? "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  if (!t.trim() || t.trim().endsWith("?")) return false;
+  if (/\b(?:mensagem|resposta) automatica\b|\bauto-?resposta\b|\bnao responda (?:a )?esta mensagem\b/.test(t)) return true;
+  const marks = [
+    /\bagradecemos (?:o |pelo |seu |o seu )?contato\b|\bobrigad[oa] por entrar em contato\b|\bagradecemos a sua mensagem\b/,
+    /\bem breve (?:retornaremos|entraremos em contato|um de nossos|nossa equipe)\b|\bretornaremos (?:o mais breve|em breve|assim que)\b/,
+    /\bnosso horario de atendimento\b|\bhorario de funcionamento\b|\bde segunda a sexta,? das\b/,
+    /\bum de nossos (?:atendentes|consultores|colaboradores)\b|\bnossa equipe (?:ira|vai) (?:te )?atender\b/,
+  ];
+  return marks.filter((re) => re.test(t)).length >= 2;
 }

@@ -382,9 +382,23 @@ async function resolveRecipientTemplateComponents(
   client: ReturnType<typeof metaClientFromConfig>,
   contactId: string,
 ): Promise<unknown[] | undefined> {
+  const useTemplateOriginalMedia = prepared.templatePayload.headerMediaSource === "template";
   if (!prepared.dynamic) {
     // Estático, mas ainda pode precisar de headerMediaUrl fixo (URL única).
     const fixedHeader = prepared.templatePayload.headerMediaUrl?.trim() || null;
+    if (useTemplateOriginalMedia) {
+      // Mídia original do template: um upload por campanha (cacheado).
+      return injectTemplateHeaderMediaComponent(client, {
+        templateName: campaign.templateName!,
+        languageCode: campaign.templateLanguage ?? "pt_BR",
+        templateGraphId: prepared.templateGraphId,
+        components: prepared.baseComponents,
+        headerMediaUrl: null,
+        headerMediaType: prepared.templatePayload.headerMediaType ?? null,
+        useTemplateOriginalMedia: true,
+        templateExampleUrl: prepared.templatePayload.headerMediaExampleUrl ?? null,
+      });
+    }
     if (!fixedHeader) return prepared.baseComponents;
     return injectTemplateHeaderMediaComponent(client, {
       templateName: campaign.templateName!,
@@ -405,6 +419,19 @@ async function resolveRecipientTemplateComponents(
 
   const wantsMediaHeader = Boolean(prepared.templatePayload.headerMediaType);
   const headerUrl = resolved.headerMediaUrl?.trim() || "";
+
+  if (useTemplateOriginalMedia) {
+    return injectTemplateHeaderMediaComponent(client, {
+      templateName: campaign.templateName!,
+      languageCode: campaign.templateLanguage ?? "pt_BR",
+      templateGraphId: prepared.templateGraphId,
+      components,
+      headerMediaUrl: null,
+      headerMediaType: prepared.templatePayload.headerMediaType ?? null,
+      useTemplateOriginalMedia: true,
+      templateExampleUrl: prepared.templatePayload.headerMediaExampleUrl ?? null,
+    });
+  }
 
   if (wantsMediaHeader && !headerUrl) {
     throw new Error(

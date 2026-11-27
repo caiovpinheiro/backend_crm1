@@ -122,6 +122,7 @@ export async function GET(request: Request) {
             ...row,
             hasButtons: analysis.hasButtons,
             buttonTypes: analysis.buttonTypes,
+            buttons: analysis.buttons,
             hasVariables: analysis.hasVariables,
             flowAction: analysis.flowAction,
             flowId: analysis.flowId,

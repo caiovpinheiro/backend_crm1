@@ -25,6 +25,17 @@ export type CampaignTemplatePayload = {
   headerMediaUrl?: string | null;
   /** Espelha o format do template — evita depender só da Graph no envio. */
   headerMediaType?: "image" | "video" | "document" | null;
+  /**
+   * De onde vem a mídia do header: `template` = a mídia original cadastrada
+   * no template aprovado na Meta (mesma para todos); `field` (ou ausente) =
+   * `headerMediaUrl` (campo do CRM ou URL fixa).
+   */
+  headerMediaSource?: "template" | "field" | null;
+  /**
+   * URL da mídia original (exemplo do HEADER) lida do catálogo ao criar a
+   * campanha. Fallback quando a Graph não devolve o template no envio.
+   */
+  headerMediaExampleUrl?: string | null;
 };
 
 const TOKEN_RE = /\{\{\s*([\w.]+)(?:\s*\|\s*([a-zA-Z0-9_]+))?\s*\}\}/g;
@@ -49,11 +60,19 @@ export function parseCampaignTemplatePayload(
     rawType === "image" || rawType === "video" || rawType === "document"
       ? rawType
       : null;
+  const headerMediaSource =
+    o.headerMediaSource === "template" ? "template" : o.headerMediaSource === "field" ? "field" : null;
   return {
     version: typeof o.version === "number" ? o.version : 1,
     components,
-    headerMediaUrl,
+    headerMediaUrl: headerMediaSource === "template" ? null : headerMediaUrl,
     headerMediaType,
+    ...(headerMediaSource ? { headerMediaSource } : {}),
+    ...(headerMediaSource === "template" &&
+    typeof o.headerMediaExampleUrl === "string" &&
+    /^https:\/\//i.test(o.headerMediaExampleUrl.trim())
+      ? { headerMediaExampleUrl: o.headerMediaExampleUrl.trim() }
+      : {}),
   };
 }
 
