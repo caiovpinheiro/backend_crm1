@@ -248,6 +248,17 @@ export function explanationClosesTurn(text: string): boolean {
   const t = text.trim();
   if (!t) return false;
   if (/\?\s*(?:[\p{Extended_Pictographic}\uFE0F\u200D]\s*)*$/u.test(t)) return true;
+  return promisesReturn(t);
+}
+
+/**
+ * A resposta já diz que a equipe ou o agente retorna ("anotei e te respondo
+ * por aqui", "a equipe te responde", "já já te chamam"). Só isso dispensa o
+ * aviso de transferência logo depois; terminar em pergunta, não.
+ */
+export function promisesReturn(text: string): boolean {
+  const t = text.trim();
+  if (!t) return false;
   return /(?<![\p{L}])(?:j[áa]\s+te\s+retorno|te\s+retorno|te\s+dou\s+(?:um\s+)?retorno|retorno\s+(?:por\s+aqui|j[áa]|em\s+breve)|volto\s+(?:a\s+falar|aqui|j[áa])|te\s+(?:chamo|aviso|respondo|confirmo)(?:\s+(?:por\s+aqui|aqui|j[áa]|em\s+breve))?|(?:eu\s+)?vejo\s+(?:isso|isto|o\s+\p{L}+|a\s+\p{L}+)?\s*com\s+voc[eê]|vejo\s+isso\s+(?:aqui|pra\s+voc[eê])|(?:a\s+)?equipe\s+(?:j[áa]\s+)?(?:te\s+)?(?:responde|retorna|chama|manda|fala\s+com\s+voc[eê])|algu[eé]m\s+(?:da\s+equipe\s+)?(?:j[áa]\s+)?(?:te\s+)?(?:chama|responde|retorna)|j[áa]\s+j[áa]\s+te\s+(?:chamam|chamo|respondem|respondo|retornam|retorno))(?![\p{L}])/iu.test(t);
 }
 
