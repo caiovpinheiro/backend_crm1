@@ -1364,7 +1364,7 @@ function buildV2SystemPrompt(
     // para o resto ("tenho direito a desconto?" não é pergunta sobre o curso
     // de Direito só porque a palavra casou).
     if (catalogSection) lines.push("Exceção: se a mensagem trata de um dos produtos do catálogo listados acima (o curso, o valor, o cartão), responda com os dados dele e envie o cartão; não transfira por falta de material.");
-    lines.push("A busca nos materiais não achou trecho que responda a esta mensagem (os que aparecem acima, se houver, só se parecem com ela). Antes de tudo, confira as Regras globais, as Informações fixas, o calendário e os produtos do catálogo acima: o que estiver escrito lá é fonte e vale como resposta — responda por eles, sem transferir. Só se a resposta não estiver em nenhum desses lugares e a mensagem pede informação sobre produto, serviço, preço, prazo, regra, política ou como fazer algo: não responda com conhecimento geral nem com o que parece óbvio; diga com naturalidade que não tem essa informação e marque handoff=true se o cliente precisa dela para seguir. Cumprimento, agradecimento, confirmação e perguntas sobre os dados do próprio cliente você responde normalmente.");
+    lines.push("A busca nos materiais não achou trecho que responda a esta mensagem (os que aparecem acima, se houver, só se parecem com ela). Antes de tudo, confira as Regras globais, as Informações fixas, o calendário e os produtos do catálogo acima: o que estiver escrito lá é fonte e vale como resposta — responda por eles, sem transferir. Só se a resposta não estiver em nenhum desses lugares e a mensagem pede informação sobre produto, serviço, preço, prazo, regra, política ou como fazer algo: não responda com conhecimento geral nem com o que parece óbvio; diga com naturalidade que não tem essa informação. Transferir segue as instruções do agente: se elas mandam oferecer a equipe antes, ofereça e não marque handoff; sem instrução sobre isso, marque handoff=true se o cliente precisa da informação para seguir. Cumprimento, agradecimento, confirmação e perguntas sobre os dados do próprio cliente você responde normalmente.");
   }
   if (messageModels.length > 0) {
     lines.push("# Mensagens prontas que você pode enviar");
@@ -1702,16 +1702,36 @@ export async function callV2LLM(args: {
     .slice(-6)
     .map((m) => m.content)
     .join("\n");
+  const namedIn = (message: string) => Promise.resolve()
+    .then(() => findV2ProductsNamedIn({
+      message,
+      allowedIds: args.config.productPolicy?.enabled ? args.config.productPolicy.allowedProductIds : undefined,
+      priceChannel: args.config.productPolicy?.enabled ? args.config.productPolicy.priceChannel : undefined,
+    }))
+    .catch(() => [] as NonNullable<typeof catalogMatches>);
+  let historyText = recentHistory;
   let historyCatalog = catalogOn && recentHistory.trim()
-    ? (await Promise.resolve()
-        .then(() => findV2ProductsNamedIn({
-          message: recentHistory,
-          allowedIds: args.config.productPolicy?.enabled ? args.config.productPolicy.allowedProductIds : undefined,
-          priceChannel: args.config.productPolicy?.enabled ? args.config.productPolicy.priceChannel : undefined,
-        }))
-        .catch(() => [])).filter((p) => !catalogMatches?.some((c) => c.id === p.id))
+    ? (await namedIn(recentHistory)).filter((p) => !catalogMatches?.some((c) => c.id === p.id))
     : [];
-  historyCatalog = preferExactName(historyCatalog, recentHistory);
+  // O histórico inteiro pode citar produtos demais (o texto do cartão fala
+  // de "gestão", "pessoas", "finanças") e a busca devolve vazio: "qto fica
+  // por mês?" depois do cartão de Administração ficava sem o produto e a
+  // conferência cortava o valor (PRE2-01, 27/11). Tenta mensagem a
+  // mensagem, da mais recente para a mais antiga.
+  // Só para pergunta de valor/condição (cada tentativa lê o catálogo).
+  const asksCondition = PRICE_QUESTION.test(userMessage) || /(?<![\p{L}])(?:parcel\p{L}*|taxa|matr[íi]cula|desconto|bolsa|isen\p{L}*|pagamento|investimento)(?![\p{L}])/iu.test(userMessage);
+  if (catalogOn && asksCondition && historyCatalog.length === 0 && !catalogMatches?.length) {
+    for (const m of previousMessages.slice(-6).reverse()) {
+      if (!m.content?.trim()) continue;
+      const found = (await namedIn(m.content)).filter((p) => !catalogMatches?.some((c) => c.id === p.id));
+      if (found.length > 0) {
+        historyCatalog = found;
+        historyText = m.content;
+        break;
+      }
+    }
+  }
+  historyCatalog = preferExactName(historyCatalog, historyText);
   const priceChannelForCards = args.config.productPolicy?.enabled ? args.config.productPolicy.priceChannel : undefined;
   const cardTexts = await productCardTexts([...(catalogMatches ?? []), ...(historyCatalog ?? [])].map((p) => p.id), priceChannelForCards).catch(() => new Map<string, string>());
   const catalogSourceTexts = [
@@ -2389,7 +2409,7 @@ export async function callV2LLM(args: {
     const reviewSystem = [
       system,
       "# REVISÃO",
-      `Sua resposta anterior cita ${list}, que não aparece nos trechos da base, nas instruções nem na conversa. Tire essas afirmações da resposta e mantenha o resto como está: não as substitua por outra afirmação parecida, por uma generalidade ("pode variar", "depende do caso") nem por algo que também não esteja nas fontes. Use só nomes, passos e caminhos que estão nos trechos. Nome que o cliente citou e que não está nas fontes: não confirme que existe nem atribua a ele data, valor ou regra própria — dê a regra geral e diga que não consegue confirmar esse item. Não monte um passo a passo geral a partir do procedimento de outro serviço nem do que aparece numa imagem. Mantenha a resposta a cada pergunta da mensagem do cliente que tem fonte, o acolhimento e o próximo passo (a pergunta ou o pedido do fim); tirar uma frase não é motivo para deixar outra pergunta sem resposta. Se, sem essas afirmações, não sobra resposta ao que o cliente pediu, diga com naturalidade que não tem essa informação e marque handoff=true. Devolva o JSON completo no formato exigido.`,
+      `Sua resposta anterior cita ${list}, que não aparece nos trechos da base, nas instruções nem na conversa. Tire essas afirmações da resposta e mantenha o resto como está: não as substitua por outra afirmação parecida, por uma generalidade ("pode variar", "depende do caso") nem por algo que também não esteja nas fontes. Use só nomes, passos e caminhos que estão nos trechos. Nome que o cliente citou e que não está nas fontes: não confirme que existe nem atribua a ele data, valor ou regra própria — dê a regra geral e diga que não consegue confirmar esse item. Não monte um passo a passo geral a partir do procedimento de outro serviço nem do que aparece numa imagem. Mantenha a resposta a cada pergunta da mensagem do cliente que tem fonte, o acolhimento e o próximo passo (a pergunta ou o pedido do fim); tirar uma frase não é motivo para deixar outra pergunta sem resposta. Se, sem essas afirmações, não sobra resposta ao que o cliente pediu, diga com naturalidade que não tem essa informação e diga o que as fontes mostram sobre o assunto (o cartão do produto, por exemplo). Transferir segue as instruções do agente: se elas mandam oferecer a equipe antes (perguntar se a pessoa quer que alguém continue), ofereça e não marque handoff; marque handoff=true só se as instruções mandam transferir, se a pessoa já pediu ou aceitou, ou se não há instrução sobre isso e ela precisa da informação para seguir. Nunca transfira por causa de preço de produto que está no cartão. Devolva o JSON completo no formato exigido.`,
     ].join("\n\n");
     try {
       const res = await generateWithTools({

@@ -1938,6 +1938,29 @@ describe("produto citado pelo nome: cartão garantido e dados no prompt (reteste
   });
 });
 
+describe("produto da conversa com histórico que cita produtos demais (rodada 3, PRE2-01)", () => {
+  it("acha o produto mensagem a mensagem e responde o valor sem transferir", async () => {
+    vi.clearAllMocks();
+    const ADM = { id: "adm", name: "Administração", sku: null, type: "SERVICE", unit: "mês", price: 173.5, priceFormatted: "R$ 173,50", description: null, customFields: [] };
+    // Histórico inteiro (várias mensagens) casa com produtos demais → vazio; a mensagem do cliente sozinha acha Administração.
+    (findV2ProductsNamedIn as ReturnType<typeof vi.fn>).mockImplementation(async (a: { message: string }) => (a.message.includes("\n") ? [] : /administra/i.test(a.message) ? [ADM] : []));
+    (generateWithTools as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: "Não tenho essa informação confirmada aqui.", handoff: true, actions: [] })))
+      .mockResolvedValue(makeLLMResponse(JSON.stringify({ reply: "Fica R$ 173,50 por mês, depois da primeira mensalidade.", handoff: false, actions: [] })));
+    const config = baseConfig({ productPolicy: { enabled: true, sendCard: true } } as Partial<V2AgentConfig>);
+    const r = await callV2LLM({
+      agentId: "agent-1", config, context: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields }, userMessage: "qto fica por mês?", stage: "active",
+      previousMessages: [
+        { role: "user", content: "oi, quero saber de administração" },
+        { role: "assistant", content: "Oi! Te mandei o curso.\nDirija a gestão estratégica de negócios, com pessoas, finanças e logística." },
+      ],
+    });
+    expect(r.systemPrompt).toContain("# Produtos já citados nesta conversa");
+    expect(r.output.handoff).toBe(false);
+    expect(r.output.reply).toContain("R$ 173,50");
+  });
+});
+
 describe("cartão de nível diferente do pedido (rodada 2, PRE1-07)", () => {
   it("pediu pós: o cartão de graduação não sai; o de pós sai", async () => {
     vi.clearAllMocks();
