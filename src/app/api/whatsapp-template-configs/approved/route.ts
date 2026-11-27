@@ -156,6 +156,7 @@ export async function GET(request: Request) {
             flowAction: analysis.flowAction,
             flowId: analysis.flowId,
             headerFormat: analysis.headerFormat,
+            headerExampleUrl: analysis.headerExampleUrl,
             operatorVariables:
               operatorVarsById.get(id) ?? operatorVarsByName.get(name) ?? null,
           });
