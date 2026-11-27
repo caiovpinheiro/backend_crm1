@@ -121,6 +121,27 @@ export function isInFlightPlainSend(args: {
   return args.stepType === "send_whatsapp_message" && args.timeoutAt == null;
 }
 
+/** RUNNING sem timer mais velho que isso é vazamento (sweeper fecha). */
+const STALE_NO_TIMER_MS = 2 * 60 * 1000;
+
+/**
+ * Execução ainda no ar: `ensureExecutionContext` aponta para o 1º passo
+ * (ex.: condição) e o ponteiro só anda quando o fluxo pausa. Um 2º inbound
+ * nesses segundos ("Boa tarde" + "Tudo bem?") não é resposta; cancelar
+ * aqui encerrava o contexto e o clique no menu enviado logo depois caía
+ * no vazio (Cruzeiro, deal 118143, 27/nov/26).
+ */
+export function isInFlightRunStart(args: {
+  stepType?: string | null;
+  timeoutAt?: Date | null;
+  updatedAt: Date;
+  now?: number;
+}): boolean {
+  if (args.timeoutAt != null) return false;
+  if (args.stepType && PAUSING_STEP_TYPES.has(args.stepType)) return false;
+  return (args.now ?? Date.now()) - args.updatedAt.getTime() < STALE_NO_TIMER_MS;
+}
+
 /** Marcador de "fim de ramo" gravado pelo canvas em saídas não conectadas. */
 const NONE_STEP_ID = "__none__";
 
@@ -1503,6 +1524,19 @@ export async function processIncomingMessage(
       );
       continue;
     }
+    if (
+      isInFlightRunStart({
+        stepType: currentStep.type,
+        timeoutAt: ctx.timeoutAt,
+        updatedAt: ctx.updatedAt,
+      })
+    ) {
+      sawInFlightPlainSend = true;
+      log.info(
+        `processIncomingMessage skip — execução no ar (${currentStep.type}, sem timeoutAt) ctx=${ctx.id} auto=${ctx.automation.name}`,
+      );
+      continue;
+    }
     if (!PAUSING_STEP_TYPES.has(currentStep.type)) {
       // Delay / step vazado RUNNING: o robô não estava à espera desta
       // mensagem. Encerrar evita a conversa ficar presa em Automação
@@ -2746,8 +2780,6 @@ export function interpolateVariables(template: string, variables: Record<string,
     },
   );
 }
-
-const STALE_NO_TIMER_MS = 2 * 60 * 1000;
 
 /**
  * Contextos RUNNING sem `timeoutAt` são vazamento: o motor só persiste
