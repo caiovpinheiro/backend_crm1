@@ -407,6 +407,25 @@ describe("processIncomingMessage — wait_for_reply", () => {
     expect(h.continueFromStep).not.toHaveBeenCalled();
   });
 
+  it("2º inbound com a execução ainda no 1º passo (sem timer, recém-criada) não cancela o fluxo", async () => {
+    h.ctx.findMany.mockResolvedValueOnce([
+      ctxRow({ currentStepId: "step-next", timeoutAt: null, updatedAt: new Date(NOW.getTime() - 3_000) }),
+    ]);
+    const out = await withOrg(ORG, () => processIncomingMessage("contact-1", "Tudo bem?"));
+    expect(out).toEqual({ handled: false, replied: false });
+    expect(h.ctx.update).not.toHaveBeenCalled();
+    expect(h.ctx.updateMany).not.toHaveBeenCalled();
+    expect(h.continueFromStep).not.toHaveBeenCalled();
+  });
+
+  it("mesmo ponteiro sem timer, mas velho (vazado): cancela", async () => {
+    h.ctx.findMany.mockResolvedValueOnce([
+      ctxRow({ currentStepId: "step-next", timeoutAt: null, updatedAt: new Date(NOW.getTime() - 5 * 60_000) }),
+    ]);
+    await withOrg(ORG, () => processIncomingMessage("contact-1", "oi"));
+    expect(updateData()).toEqual({ status: "COMPLETED", currentStepId: null, timeoutAt: null });
+  });
+
   it("passo que não espera resposta (delay) ou ponteiro morto: cancela para o card sair de Automação", async () => {
     h.ctx.findMany.mockResolvedValueOnce([ctxRow({ currentStepId: "step-delay" })]);
     expect((await withOrg(ORG, () => processIncomingMessage("contact-1", "oi"))).handled).toBe(false);
