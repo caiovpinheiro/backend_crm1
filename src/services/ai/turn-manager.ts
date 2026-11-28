@@ -416,7 +416,7 @@ export async function onInboundMessageForAi(
   // Mesmo sigilo dos comandos de teste: número não autorizado segue normal.
   // Webchat fica de fora: o telefone do visitante é digitado (não prova
   // que ele é o testador autorizado).
-  const { isV2ResetCommand } = await import("@/services/ai-v2/reset");
+  const { isV2ResetCommand, isV2ResetTotalCommand } = await import("@/services/ai-v2/reset");
   if (input.channel !== "webchat" && isV2ResetCommand(input.userMessage)) {
     const { handleV2ResetCommand } = await import("@/services/ai-v2/reset");
     const consumed = await handleV2ResetCommand({
@@ -424,6 +424,7 @@ export async function onInboundMessageForAi(
       contactId: input.contactId,
       messageId: input.messageId,
       channel: input.channel,
+      total: isV2ResetTotalCommand(input.userMessage),
     }).catch((err) => {
       log.error({ err }, "[ai-v2] #reset falhou");
       return false;

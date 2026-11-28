@@ -25,6 +25,8 @@ const log = getLogger("ai-v2.summary");
 
 /** `messageType` da mensagem privada com o resumo. */
 export const SUMMARY_MESSAGE_TYPE = "ai_summary";
+/** Marcador do `#reset total` (mesmo valor de `V2_RESET_MARKER_TYPE` em reset.ts). */
+const V2_RESET_MARKER_TYPE = "ai_v2_reset";
 
 /** Resumos mais velhos que isso não entram no contexto do turno. */
 const PRIOR_SUMMARY_MAX_AGE_DAYS = 30;
@@ -363,18 +365,30 @@ export async function loadPriorV2Summary(args: {
   if (args.runningSummary?.trim()) return { text: args.runningSummary.trim(), at: null, agent: null, current: true };
   if (!args.contactId) return null;
   const since = new Date(Date.now() - PRIOR_SUMMARY_MAX_AGE_DAYS * 24 * 60 * 60 * 1000);
+  // `#reset total`: o que veio de conversas anteriores ao reset não entra.
+  const resetAt = await lastResetTotalAt(args.contactId);
   const row = await prisma.message.findFirst({
     where: {
       messageType: SUMMARY_MESSAGE_TYPE,
       isPrivate: true,
       createdAt: { gte: since },
-      conversation: { contactId: args.contactId, id: { not: args.conversationId } },
+      conversation: { contactId: args.contactId, id: { not: args.conversationId }, ...(resetAt ? { createdAt: { gt: resetAt } } : {}) },
     },
     orderBy: { createdAt: "desc" },
     select: { content: true, createdAt: true, senderName: true },
   });
   if (row?.content?.trim()) return { text: row.content.trim(), at: row.createdAt, agent: row.senderName ?? null, current: false };
-  return loadPriorConversationExcerpt(args.contactId, args.conversationId);
+  return loadPriorConversationExcerpt(args.contactId, args.conversationId, resetAt);
+}
+
+/** Último `#reset total` do contato (marcador privado gravado pelo reset). */
+async function lastResetTotalAt(contactId: string): Promise<Date | null> {
+  const marker = await prisma.message.findFirst({
+    where: { messageType: V2_RESET_MARKER_TYPE, isPrivate: true, conversation: { contactId } },
+    orderBy: { createdAt: "desc" },
+    select: { createdAt: true },
+  }).catch(() => null);
+  return marker?.createdAt ?? null;
 }
 
 const PRIOR_EXCERPT_MAX_AGE_HOURS = 24;
@@ -386,10 +400,10 @@ const PRIOR_EXCERPT_MESSAGES = 8;
  * servem de contexto. "Já fiz o processo" minutos depois de uma pessoa
  * explicar o processo não pode virar "qual processo você fez?".
  */
-export async function loadPriorConversationExcerpt(contactId: string, conversationId: string): Promise<V2PriorSummary | null> {
+export async function loadPriorConversationExcerpt(contactId: string, conversationId: string, resetAt?: Date | null): Promise<V2PriorSummary | null> {
   const since = new Date(Date.now() - PRIOR_EXCERPT_MAX_AGE_HOURS * 60 * 60 * 1000);
   const prev = await prisma.conversation.findFirst({
-    where: { contactId, id: { not: conversationId }, status: "RESOLVED", closedAt: { gte: since } },
+    where: { contactId, id: { not: conversationId }, status: "RESOLVED", closedAt: { gte: since }, ...(resetAt ? { createdAt: { gt: resetAt } } : {}) },
     orderBy: { closedAt: "desc" },
     select: { id: true, closedAt: true },
   });
