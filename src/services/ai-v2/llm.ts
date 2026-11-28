@@ -859,6 +859,21 @@ export function parseV2ModelJson(raw: string): unknown | undefined {
   return firstParsed;
 }
 
+/** Frase final que é o próximo passo: pergunta curta ou "me avisa por aqui". Sem número, valor nem link. */
+const STEP_PHRASE = /(?<![\p{L}])(?:me\s+(?:avisa|chama|conta|fala|manda|diz)|[ée]\s+s[óo]\s+me|pode\s+me\s+chamar|qualquer\s+coisa|fico\s+no\s+aguardo|te\s+espero|bora|vamos\s+(?:garantir|seguir))(?![\p{L}])/iu;
+export function closingStepOf(reply: string): string | null {
+  const sentences = reply.trim().split(/(?<=[.!?])\s+|\n+/).map((x) => x.trim()).filter(Boolean);
+  const last = sentences.at(-1);
+  if (!last || sentences.length < 2) return null;
+  if (/\d|R\$|https?:\/\//i.test(last) || last.split(/\s+/).length > 20) return null;
+  return /\?\s*$/.test(last) || STEP_PHRASE.test(last) ? last : null;
+}
+export function endsWithStep(reply: string): boolean {
+  const sentences = reply.trim().split(/(?<=[.!?])\s+|\n+/).map((x) => x.trim()).filter(Boolean);
+  const last = sentences.at(-1) ?? "";
+  return /\?\s*$/.test(last) || STEP_PHRASE.test(last);
+}
+
 const MALFORMED_REASON = "LLM não retornou JSON válido — fallback de erro aplicado.";
 
 /** Quanto da saída bruta do modelo vai para o log do turno quando o parse falha. */
@@ -2409,7 +2424,7 @@ export async function callV2LLM(args: {
     const reviewSystem = [
       system,
       "# REVISÃO",
-      `Sua resposta anterior cita ${list}, que não aparece nos trechos da base, nas instruções nem na conversa. Tire essas afirmações da resposta e mantenha o resto como está: não as substitua por outra afirmação parecida, por uma generalidade ("pode variar", "depende do caso") nem por algo que também não esteja nas fontes. Use só nomes, passos e caminhos que estão nos trechos. Nome que o cliente citou e que não está nas fontes: não confirme que existe nem atribua a ele data, valor ou regra própria — dê a regra geral e diga que não consegue confirmar esse item. Não monte um passo a passo geral a partir do procedimento de outro serviço nem do que aparece numa imagem. Mantenha a resposta a cada pergunta da mensagem do cliente que tem fonte, o acolhimento e o próximo passo (a pergunta ou o pedido do fim); tirar uma frase não é motivo para deixar outra pergunta sem resposta; pergunta cuja resposta saiu ganha meia frase dizendo que esse ponto depende do curso ou que não tem essa informação aqui, nunca fica em silêncio. Mantenha também o acolhimento e as frases do próprio atendimento ("anotei", "já está com a equipe", "te respondo por aqui"). Se, sem essas afirmações, não sobra resposta ao que o cliente pediu, diga com naturalidade que não tem essa informação e diga o que as fontes mostram sobre o assunto (o cartão do produto, por exemplo). Transferir segue as instruções do agente: se elas mandam oferecer a equipe antes (perguntar se a pessoa quer que alguém continue), ofereça e não marque handoff; marque handoff=true só se as instruções mandam transferir, se a pessoa já pediu ou aceitou, ou se não há instrução sobre isso e ela precisa da informação para seguir. Nunca transfira por causa de preço de produto que está no cartão. Devolva o JSON completo no formato exigido.`,
+      `Sua resposta anterior cita ${list}, que não aparece nos trechos da base, nas instruções nem na conversa. Tire essas afirmações da resposta e mantenha o resto como está: não as substitua por outra afirmação parecida, por uma generalidade ("pode variar", "depende do caso") nem por algo que também não esteja nas fontes. Use só nomes, passos e caminhos que estão nos trechos. Nome que o cliente citou e que não está nas fontes: não confirme que existe nem atribua a ele data, valor ou regra própria — dê a regra geral e diga que não consegue confirmar esse item. Não monte um passo a passo geral a partir do procedimento de outro serviço nem do que aparece numa imagem. Mantenha a resposta a cada pergunta da mensagem do cliente que tem fonte, o acolhimento e o próximo passo (a pergunta ou o pedido do fim); tirar uma frase não é motivo para deixar outra pergunta sem resposta; pergunta cuja resposta saiu ganha meia frase dizendo que esse ponto depende do curso ou que não tem essa informação aqui, nunca fica em silêncio. Mantenha também o acolhimento, as frases do próprio atendimento ("anotei", "já está com a equipe", "te respondo por aqui"), o que as Regras globais escrevem literalmente (telefones, horários, frases entre aspas) e a pergunta ou o passo do fim. Se, sem essas afirmações, não sobra resposta ao que o cliente pediu, diga com naturalidade que não tem essa informação e diga o que as fontes mostram sobre o assunto (o cartão do produto, por exemplo). Transferir segue as instruções do agente: se elas mandam oferecer a equipe antes (perguntar se a pessoa quer que alguém continue), ofereça e não marque handoff; marque handoff=true só se as instruções mandam transferir, se a pessoa já pediu ou aceitou, ou se não há instrução sobre isso e ela precisa da informação para seguir. Nunca transfira por causa de preço de produto que está no cartão. Devolva o JSON completo no formato exigido.`,
     ].join("\n\n");
     try {
       const res = await generateWithTools({
@@ -2432,6 +2447,8 @@ export async function callV2LLM(args: {
         fixed.reply = renderMessage(fixed.reply, renderVars) ?? fixed.reply;
         // Roteiro falado da reescrita não passou pela conferência: o motor refaz a partir da resposta final.
         fixed.speech = undefined;
+        // A resposta ia por áudio: a reescrita continua por áudio.
+        if (output.voice === true) fixed.voice = true;
         // Reescrita que perdeu o link ou começa no meio ("Se aparecer…") não
         // sai assim: melhor uma pessoa do que uma resposta mutilada.
         if (!fixed.handoff && isMutilated(output.reply, fixed.reply, textsOf(flags))) {
@@ -2707,11 +2724,30 @@ export async function callV2LLM(args: {
       }
       const reasonBefore = r.output.reason;
       const replyBefore = r.output.reply;
+      const voiceBefore = r.output.voice;
       await checkQuotedTerms(r);
       await avoidRepeat(r);
       ensureNamedProductCard(r);
       dropMismatchedLevelCards(r);
       await ensurePriceAnswer(r);
+      if (r.output.reply !== replyBefore && !r.output.handoff) {
+        // Áudio pedido: a resposta reescrita continua por áudio; o roteiro
+        // falado é refeito a partir dela (GER-03, 27/11).
+        if (voiceBefore === true && r.output.voice !== true) {
+          r.output.voice = true;
+          traceStep("verificação", "A conferência mudou a resposta: continua por áudio (o roteiro falado é refeito)");
+        }
+        // O passo final da resposta (pergunta ou "me avisa por aqui") não some
+        // por causa de um corte em outra frase (PRE2-02, PRE4-04, GER-08).
+        const closing = closingStepOf(replyBefore);
+        const v = peekV2Fact("verification") as { unsupported?: string[]; trimmed?: string[]; onlyFallback?: boolean; replyCleared?: boolean } | undefined;
+        const flagged = [...(v?.trimmed ?? []), ...(v?.unsupported ?? [])].map((t) => t.replace(/^"|"$/g, "").replace(/\s*\(.*\)\s*$/, "").trim()).filter(Boolean);
+        const closingFlagged = closing && flagged.some((f) => closing.includes(f) || f.includes(closing));
+        if (closing && !closingFlagged && r.output.reply.trim() && !v?.onlyFallback && !v?.replyCleared && !endsWithStep(r.output.reply)) {
+          r.output.reply = `${r.output.reply.trim()} ${closing}`.trim();
+          traceStep("verificação", `A conferência tinha tirado o passo final — volta: "${closing}"`);
+        }
+      }
       // "Por que respondeu isso?" descrevia a resposta do modelo antes da
       // conferência; o cliente recebeu outra. Fica dito o que mudou.
       if (r.output.reply !== replyBefore && (r.output.reason === reasonBefore || !/confer[êe]ncia/i.test(r.output.reason ?? ""))) {
