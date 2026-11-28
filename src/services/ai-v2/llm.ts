@@ -128,6 +128,18 @@ async function productCardTexts(productIds: string[], priceChannel?: string | nu
   return out;
 }
 
+/** Textos de cartão que vieram no resultado de search_products neste turno. */
+function searchCardTexts(toolCalls: Array<{ toolName: string; result: unknown }> | undefined): string[] {
+  return (toolCalls ?? [])
+    .filter((c) => c.toolName === "search_products")
+    .flatMap((c) => ((c.result as { products?: Array<{ card?: unknown }> } | null)?.products ?? []))
+    .map((p) => (typeof p?.card === "string" ? p.card : ""))
+    .filter((t) => t.trim());
+}
+
+/** Quantos resultados de search_products levam o texto do cartão (cada cartão lê o produto e o modelo de mensagem). */
+const SEARCH_CARD_LIMIT = 3;
+
 /** Pergunta de preço: "quanto fica", "qto fica por mês", "valor", "mensalidade", "quanto custa". */
 const PRICE_QUESTION = /(?<![\p{L}])(?:quanto|qto|qnto|quantos?)\s+(?:fica|custa|sai|é|e|vou\s+pagar|pago|seria)|(?<![\p{L}])(?:valor|valores|mensalidade|pre[çc]o)(?![\p{L}])/iu;
 /** Resposta que foge do valor ("não tenho o valor da mensalidade aqui"). */
@@ -599,14 +611,29 @@ export function buildV2ToolSet(args: {
       type: z.enum(["PRODUCT", "SERVICE"]).optional().describe("Filtro opcional por tipo."),
       limit: z.number().int().min(1).max(20).optional().describe("Máximo de resultados (1-20)."),
     }),
-    async (input) =>
-      searchV2Products({
+    async (input) => {
+      const priceChannel = args.config.productPolicy?.enabled ? args.config.productPolicy.priceChannel : undefined;
+      const found = await searchV2Products({
         ...input,
         allowedIds: args.config.productPolicy?.enabled
           ? args.config.productPolicy.allowedProductIds
           : undefined,
-        priceChannel: args.config.productPolicy?.enabled ? args.config.productPolicy.priceChannel : undefined,
-      }),
+        priceChannel,
+      });
+      // O texto do cartão (primeira mensalidade, de/por, taxa, campanha) só
+      // existe no cartão: sem ele o modelo chutava "a primeira mensalidade é
+      // R$ 119,80" e a conferência cortava os valores (Pós, 28/11). Vai junto
+      // dos primeiros resultados — e, por estar no resultado, vale como fonte.
+      if (!args.config.productPolicy?.enabled || found.products.length === 0) return found;
+      const top = found.products.slice(0, SEARCH_CARD_LIMIT);
+      const cards = await productCardTexts(top.map((p) => p.id), priceChannel).catch(() => new Map<string, string>());
+      if (cards.size === 0) return found;
+      return {
+        ...found,
+        cardNote: "card = o texto do cartão que o cliente vê ao receber o produto (send_product). Valores, primeira mensalidade, de/por e taxa: responda por ele, como está.",
+        products: found.products.map((p) => (cards.has(p.id) ? { ...p, card: cards.get(p.id) } : p)),
+      };
+    },
   );
   if (searchProducts) tools.search_products = searchProducts;
 
@@ -2222,7 +2249,7 @@ export async function callV2LLM(args: {
       const clientDocuments = clientDocumentTexts(clientTexts);
       const derivedAmounts = [...moneyDerivations(output.reply, sources), ...percentDerivations(output.reply, sources)].map((d) => `${d.token} = ${d.expr}`);
       if (derivedAmounts.length > 0) traceStep("verificação", `Conta conferida: ${derivedAmounts.join("; ")}`);
-      const checkArgs = { model: v2FastAuxModel(args.config.model), apiKey, reply: output.reply, sources: claimSources, clientTexts, agentHistory, citableValues, clientDocuments, derivedAmounts, productCards: [...cardTexts.values(), ...turnCardTexts] };
+      const checkArgs = { model: v2FastAuxModel(args.config.model), apiKey, reply: output.reply, sources: claimSources, clientTexts, agentHistory, citableValues, clientDocuments, derivedAmounts, productCards: [...cardTexts.values(), ...turnCardTexts, ...searchCardTexts(r.toolCalls)] };
       // As duas leituras saem juntas (em paralelo): a segunda serve de nova
       // tentativa quando a primeira falha e de confirmação quando ela marca
       // algo. Em série, cada uma somava até 8 s à espera do cliente.
