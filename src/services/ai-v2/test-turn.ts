@@ -595,8 +595,11 @@ export async function simulateV2Turn(
     queriedEmpty: emptyQueries || !!governorBlind,
     prefetch: peekV2Fact("prefetch") as V2PrefetchFact | undefined,
     themeId,
+    conversationTexts: [userMessage, ...history.map((h) => h.content)],
   });
-  if (guarded.applied) {
+  if (guarded.applied && guarded.trimmed) {
+    traceStep("verificação", "Nada nos materiais cobre a mensagem: saiu só a frase sem apoio da explicação antes da transferência");
+  } else if (guarded.applied) {
     noSourceApplied = !guarded.handoff;
     if (guarded.handoff) noteV2Fact("handoffCause", "no_source", { keepFirst: true });
     traceStep("verificação", guarded.handoff

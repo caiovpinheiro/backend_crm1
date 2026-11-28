@@ -1980,6 +1980,19 @@ describe("cartão de nível diferente do pedido (rodada 2, PRE1-07)", () => {
   });
 });
 
+describe("reescrita da conferência mantém o passo final e o áudio (rodada 5, 27/11)", () => {
+  it("a reescrita tirou o \"me avisa por aqui\" e o áudio: os dois voltam", async () => {
+    vi.clearAllMocks();
+    (findV2ProductsNamedIn as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    (generateWithTools as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(makeLLMResponse(JSON.stringify({ reply: 'O boleto fica no aplicativo, em "Menu Secreto". Me avisa por aqui se achou.', voice: true, actions: [] })))
+      .mockResolvedValue(makeLLMResponse(JSON.stringify({ reply: "O boleto fica no aplicativo.", voice: false, actions: [] })));
+    const r = await callV2LLM({ agentId: "agent-1", config: baseConfig(), context: { contact: null, deals: [], selectedDeal: null, fields: baseConfig().contextFields }, userMessage: "onde fica o boleto no aplicativo?", stage: "active" });
+    expect(r.output.reply).toBe("O boleto fica no aplicativo. Me avisa por aqui se achou.");
+    expect(r.output.voice).toBe(true);
+  });
+});
+
 describe("texto livre: o motivo fica registrado", () => {
   it("modelo e normalização sem JSON: o texto vale como resposta e a decisão diz que a 2ª chamada também não devolveu JSON", async () => {
     vi.clearAllMocks();
