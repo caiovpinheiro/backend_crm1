@@ -606,6 +606,40 @@ export const v2AgentConfigSchema = z.object({
           }),
         ),
       ),
+      // Entradas (turmas): período de matrícula → turma, início das aulas e
+      // primeiro pagamento. O motor resolve a que vale hoje. Linha sem
+      // período válido ou sem início das aulas é descartada.
+      intakes: z.preprocess(
+        (v) =>
+          Array.isArray(v)
+            ? v
+                .filter((e) => e && typeof e === "object"
+                  && /^\d{4}-\d{2}-\d{2}$/.test(String(e.enrollFrom)) && /^\d{4}-\d{2}-\d{2}$/.test(String(e.enrollUntil))
+                  && String(e.enrollUntil) >= String(e.enrollFrom)
+                  && typeof e.classesStart === "string" && e.classesStart.trim())
+                .map((e, i) => ({
+                  id: typeof e.id === "string" && e.id.trim() ? e.id.trim() : `intake-${i + 1}`,
+                  level: e.level === "graduacao" || e.level === "pos" ? e.level : "todos",
+                  label: typeof e.label === "string" && e.label.trim() ? e.label.trim().slice(0, 80) : undefined,
+                  enrollFrom: String(e.enrollFrom),
+                  enrollUntil: String(e.enrollUntil),
+                  classesStart: String(e.classesStart).trim().slice(0, 120),
+                  firstPaymentDue: typeof e.firstPaymentDue === "string" && e.firstPaymentDue.trim() ? e.firstPaymentDue.trim().slice(0, 120) : undefined,
+                }))
+                .slice(0, 50)
+            : [],
+        z.array(
+          z.object({
+            id: z.string(),
+            level: z.enum(["graduacao", "pos", "todos"]),
+            label: z.string().optional(),
+            enrollFrom: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+            enrollUntil: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+            classesStart: z.string().min(1),
+            firstPaymentDue: z.string().optional(),
+          }),
+        ),
+      ).optional(),
     })
     .optional(),
   structuredOutput: z.boolean().optional().default(false),

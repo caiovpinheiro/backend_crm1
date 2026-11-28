@@ -46,7 +46,7 @@ import { noteV2Fact, peekV2Fact, sliceWholeChars, traceStep } from "./trace";
 import { SensitiveVault } from "./sensitive";
 import { boldInstruction, breakInlineSteps } from "./reply-format";
 import { markPastDates, tenseMismatches } from "./dates";
-import { calendarPromptSection } from "./calendar";
+import { calendarFactsSection } from "./calendar";
 import { QUERY_TOOL_NAMES, themePromptText } from "./theme-prompt";
 import { REPLY_ENDING_PROMPT, effectiveReplyEnding, hasReplyEnding } from "./reply-ending";
 import { CONFUSION_PROMPT } from "./confusion";
@@ -1358,7 +1358,7 @@ function buildV2SystemPrompt(
     lines.push("Esta conversa veio de outro assistente da mesma equipe e o cliente não sabe disso. Continue o atendimento como se fosse o mesmo assistente: não se apresente, não cumprimente de novo, não diga que recebeu a conversa nem que ela foi transferida. Responda direto ao que o cliente pediu.");
   }
 
-  const calendar = calendarPromptSection(config.calendar?.events, new Date(), timezone);
+  const calendar = calendarFactsSection(config.calendar, new Date(), timezone);
   if (calendar) lines.push(calendar);
 
   if (prefetchedChunks.length > 0) {
@@ -2097,7 +2097,7 @@ export async function callV2LLM(args: {
       // Modo "combinar": o texto da mensagem pronta mostrado ao modelo é fonte.
       ...messageModels.map((m) => m.content ?? "").filter((t) => t.trim()),
       contextJson,
-      calendarPromptSection(args.config.calendar?.events, new Date(), args.config.businessHours?.timezone || "America/Sao_Paulo"),
+      calendarFactsSection(args.config.calendar, new Date(), args.config.businessHours?.timezone || "America/Sao_Paulo"),
       businessHoursText(args.config),
       // "Hoje é domingo", "o encontro de 19/09 já passou": vêm da data de hoje.
       currentDateLine(args.config.businessHours?.timezone),
@@ -2170,7 +2170,7 @@ export async function callV2LLM(args: {
       // tamanho da checagem cortava o cartão.
       ...[...cardTexts.values()],
       ...turnCardTexts,
-      calendarPromptSection(args.config.calendar?.events, new Date(), args.config.businessHours?.timezone || "America/Sao_Paulo"),
+      calendarFactsSection(args.config.calendar, new Date(), args.config.businessHours?.timezone || "America/Sao_Paulo"),
       businessHoursText(args.config),
       currentDateLine(args.config.businessHours?.timezone),
       noticesPromptSection(activeNotices(args.config), args.config),

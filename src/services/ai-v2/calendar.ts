@@ -6,7 +6,7 @@
  * eventos, escala). Nenhum domínio de cliente.
  */
 
-import type { V2CalendarEvent } from "@/lib/ai-v2/types";
+import type { V2CalendarEvent, V2Intake } from "@/lib/ai-v2/types";
 
 const MONTHS: Record<string, number> = {
   janeiro: 1, fevereiro: 2, marco: 3, "março": 3, abril: 4, maio: 5, junho: 6,
@@ -173,4 +173,61 @@ export function calendarPromptSection(
     "Datas oficiais cadastradas pela empresa; a situação entre parênteses já está calculada em relação a hoje. Para \"próximo\", \"quando é\" ou \"ainda dá tempo\", responda com a data daqui.",
     ...lines,
   ].join("\n");
+}
+
+const INTAKE_LEVEL_LABEL: Record<V2Intake["level"], string> = { graduacao: "Graduação", pos: "Pós-graduação", todos: "Todos os cursos" };
+
+/** Data ISO vira dd/mm/aaaa; texto ("fevereiro de 2027") fica como está. */
+function intakeWhen(value: string): string {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value) ? formatBr(value) : value;
+}
+
+/**
+ * A entrada que vale para quem se matricula hoje, por nível: período de
+ * matrícula que contém a data de hoje (fuso do agente). Duas vigentes no
+ * mesmo nível: fica a que abriu por último.
+ */
+export function activeIntakes(intakes: V2Intake[] | undefined, now: Date = new Date(), timezone = "America/Sao_Paulo"): Map<V2Intake["level"], V2Intake | null> {
+  const out = new Map<V2Intake["level"], V2Intake | null>();
+  if (!intakes || intakes.length === 0) return out;
+  const today = todayIso(now, timezone);
+  for (const level of new Set(intakes.map((i) => i.level))) {
+    const open = intakes
+      .filter((i) => i.level === level && i.enrollFrom <= today && today <= i.enrollUntil)
+      .sort((a, b) => b.enrollFrom.localeCompare(a.enrollFrom));
+    out.set(level, open[0] ?? null);
+  }
+  return out;
+}
+
+/**
+ * Linhas de fato para o prompt e para a conferência: "matrícula feita hoje
+ * entra na turma X; aulas começam em Y; primeiro pagamento em Z". Nível sem
+ * entrada aberta hoje: o agente diz que a data vem na inscrição.
+ */
+export function intakesPromptSection(intakes: V2Intake[] | undefined, now: Date = new Date(), timezone = "America/Sao_Paulo"): string {
+  const active = activeIntakes(intakes, now, timezone);
+  if (active.size === 0) return "";
+  const today = formatBr(todayIso(now, timezone));
+  const order: V2Intake["level"][] = ["graduacao", "pos", "todos"];
+  const lines = order.filter((l) => active.has(l)).map((level) => {
+    const i = active.get(level);
+    if (!i) return `- ${INTAKE_LEVEL_LABEL[level]}: hoje não há entrada aberta cadastrada. A turma, o início das aulas e o primeiro pagamento vêm na inscrição; não diga data.`;
+    const parts = [
+      `matrícula feita hoje entra na ${i.label ?? "entrada atual"}`,
+      `as aulas começam em ${intakeWhen(i.classesStart)}`,
+      ...(i.firstPaymentDue ? [`o primeiro pagamento vence em ${intakeWhen(i.firstPaymentDue)}`] : []),
+    ];
+    return `- ${INTAKE_LEVEL_LABEL[level]}: ${parts.join("; ")} (matrículas de ${formatBr(i.enrollFrom)} a ${formatBr(i.enrollUntil)}).`;
+  });
+  return [
+    `# Entradas e início das aulas (calculado para hoje, ${today})`,
+    "Use estas linhas para \"quando começam as aulas\", \"qual turma\" e \"quando pago a primeira\". Se o cartão do produto trouxer outra data, vale a do cartão.",
+    ...lines,
+  ].join("\n");
+}
+
+/** Calendário + entradas: o que vai ao prompt e às fontes da conferência. */
+export function calendarFactsSection(calendar: { events?: V2CalendarEvent[]; intakes?: V2Intake[] } | undefined, now: Date = new Date(), timezone = "America/Sao_Paulo"): string {
+  return [calendarPromptSection(calendar?.events, now, timezone), intakesPromptSection(calendar?.intakes, now, timezone)].filter(Boolean).join("\n\n");
 }

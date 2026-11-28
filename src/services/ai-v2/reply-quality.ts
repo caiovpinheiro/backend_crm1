@@ -38,7 +38,7 @@ import { generateWithTools } from "@/services/ai/provider";
 
 import { getV2Agent } from "./agents";
 import { checkClaimsWithModel, worthClaimCheck } from "./claim-check";
-import { calendarPromptSection } from "./calendar";
+import { calendarFactsSection } from "./calendar";
 import { knowledgeChunkTexts, lookupResultTexts } from "./ground-reply";
 import { activeNotices, noticesPromptSection } from "./notices";
 import { currentDateLine } from "./llm";
@@ -234,7 +234,7 @@ export function turnSources(args: {
   const fixed = [
     currentDateLine(tz, at),
     noticesPromptSection(activeNotices(config, at), config),
-    calendarPromptSection(config.calendar?.events, at, tz),
+    calendarFactsSection(config.calendar, at, tz),
     businessHoursText(config),
     ...config.variables.map((v) => `${v.key}: ${v.value}`),
     theme ? themePromptText(theme) : "",

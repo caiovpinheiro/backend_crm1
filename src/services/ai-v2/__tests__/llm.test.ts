@@ -2132,6 +2132,16 @@ describe("rodada 9 — B1/B2: o cartão já enviado vale mesmo quando o checador
   });
 });
 
+describe("entradas e início das aulas no prompt", () => {
+  it("a entrada vigente vai ao prompt do agente", async () => {
+    vi.clearAllMocks();
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(makeLLMResponse(JSON.stringify({ reply: "ok", actions: [] })));
+    const config = baseConfig({ calendar: { events: [], intakes: [{ id: "g", level: "graduacao", label: "Turma 2027.1", enrollFrom: "2000-01-01", enrollUntil: "2999-12-31", classesStart: "fevereiro de 2027", firstPaymentDue: "2027-02-25" }] } } as Partial<V2AgentConfig>);
+    const r = await callV2LLM({ agentId: "agent-1", config, context: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields }, userMessage: "quando começam as aulas?", stage: "active" });
+    expect(r.systemPrompt).toContain("Graduação: matrícula feita hoje entra na Turma 2027.1; as aulas começam em fevereiro de 2027; o primeiro pagamento vence em 25/02/2027");
+  });
+});
+
 describe("apuração 26/11 — preço do produto da conversa e motivo depois da conferência", () => {
   const ADM = { id: "adm", name: "Administração", sku: null, type: "SERVICE", unit: "mês", price: 121.45, priceFormatted: "R$ 121,45", listPrice: 173.5, listPriceFormatted: "R$ 173,50", description: null, customFields: [] };
   const CARD = "🎓 Administração\nBacharelado • EAD • 8 semestres\n🎁 Matrícula isenta\n💰 De R$ 173,50 por R$ 121,45 ao mês";
