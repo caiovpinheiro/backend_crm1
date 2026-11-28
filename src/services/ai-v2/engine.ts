@@ -986,6 +986,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
   let lastAgentMessage: string | null = null;
   let historyLength = 0;
   let clientHistory: string[] = [];
+  let conversationHistory: string[] = [];
   let versionId: string | undefined = stateRow?.versionId ?? agent.versionId ?? undefined;
   // Clique numa opção da pergunta que o agente acabou de mandar é resposta,
   // mesmo com o mesmo rótulo do clique anterior: o agente perguntou de novo
@@ -2336,6 +2337,7 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       lastAgentMessage = llmResult.lastAgentMessage ?? null;
       historyLength = llmResult.historyLength ?? 0;
       clientHistory = llmResult.clientTexts ?? [];
+      conversationHistory = llmResult.conversationTexts ?? [];
     }
   }
 
@@ -2361,8 +2363,11 @@ async function processV2TurnInner(input: V2TurnInput): Promise<V2TurnResult> {
       queriedEmpty: allQueryToolResultsEmpty(toolCalls),
       prefetch: peekV2Fact("prefetch") as V2PrefetchFact | undefined,
       themeId,
+      conversationTexts: [input.userMessage, ...conversationHistory],
     });
-    if (guarded.applied && guarded.explanationDropped) {
+    if (guarded.applied && guarded.trimmed) {
+      traceStep("verificação", "Nada nos materiais cobre a mensagem: saiu só a frase sem apoio da explicação antes da transferência");
+    } else if (guarded.applied && guarded.explanationDropped) {
       traceStep("verificação", "Nada nos materiais cobre a mensagem e a explicação antes da transferência afirmava fatos → só o aviso de transferência sai");
     } else if (guarded.applied) {
       noSourceApplied = !guarded.handoff;
@@ -3570,6 +3575,8 @@ async function callLLMWithTheme(
   historyLength?: number;
   /** O que o cliente escreveu antes nesta conversa (para a guarda de saída). */
   clientTexts?: string[];
+  /** Todas as mensagens da conversa (cliente e agente) que foram ao modelo. */
+  conversationTexts?: string[];
 }> {
   const theme = getV2ThemeById(config, themeId);
   let themeInstructions = theme
@@ -3651,6 +3658,7 @@ async function callLLMWithTheme(
       lastAgentMessage: [...previousMessages].reverse().find((m) => m.role === "assistant")?.content ?? null,
       historyLength: previousMessages.length,
       clientTexts: previousMessages.filter((m) => m.role === "user").map((m) => m.content),
+      conversationTexts: previousMessages.map((m) => m.content),
     };
   } catch (err) {
     return {
