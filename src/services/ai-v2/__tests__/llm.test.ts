@@ -1993,6 +1993,29 @@ describe("reescrita da conferência mantém o passo final e o áudio (rodada 5, 
   });
 });
 
+describe("busca no catálogo traz o texto do cartão (Pós, 28/11)", () => {
+  it("os primeiros resultados levam o cartão; o valor da primeira mensalidade vale como fonte", async () => {
+    vi.clearAllMocks();
+    (findV2ProductsNamedIn as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    (searchV2Products as ReturnType<typeof vi.fn>).mockResolvedValue({ query: "gestão de rh", total: 1, products: [{ id: "rh", name: "Gestão de Recursos Humanos", priceFormatted: "R$ 119,80", customFields: [] }] });
+    (buildV2ProductCard as ReturnType<typeof vi.fn>).mockImplementation(async (a: { productId: string }) =>
+      a.productId === "rh" ? { productId: "rh", name: "RH", text: "🎁 Primeira mensalidade R$ 20,00 ( Pagamento Imediato )\n💰 De ~R$ 184,30~ por *R$ 119,80 ao mês*", image: null } : null,
+    );
+    let toolResult: unknown;
+    (generateWithTools as ReturnType<typeof vi.fn>).mockImplementation(async (a: { tools?: Record<string, { execute: (i: unknown, o: unknown) => Promise<unknown> }> }) => {
+      if (a.tools?.search_products && toolResult === undefined) {
+        toolResult = await a.tools.search_products.execute({ query: "gestão de rh" }, {});
+        return makeLLMResponse(JSON.stringify({ reply: "A primeira mensalidade é R$ 20,00 e depois fica R$ 119,80 por mês.", actions: [] }), [{ toolName: "search_products", args: { query: "gestão de rh" }, result: toolResult }]);
+      }
+      return makeLLMResponse(JSON.stringify({ reply: "A primeira mensalidade é R$ 20,00 e depois fica R$ 119,80 por mês.", actions: [] }));
+    });
+    const config = baseConfig({ productPolicy: { enabled: true, sendCard: true } } as Partial<V2AgentConfig>);
+    const r = await callV2LLM({ agentId: "agent-1", config, context: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields }, userMessage: "quanto custa gestão de rh?", stage: "active" });
+    expect((toolResult as { products: Array<{ card?: string }> }).products[0].card).toContain("Primeira mensalidade R$ 20,00");
+    expect(r.output.reply).toBe("A primeira mensalidade é R$ 20,00 e depois fica R$ 119,80 por mês.");
+  });
+});
+
 describe("texto livre: o motivo fica registrado", () => {
   it("modelo e normalização sem JSON: o texto vale como resposta e a decisão diz que a 2ª chamada também não devolveu JSON", async () => {
     vi.clearAllMocks();
