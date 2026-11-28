@@ -714,11 +714,16 @@ function stopWarning(config: V2AgentConfig, reason: string): string {
 }
 
 /** Uma linha para o rastro: o que o modelo consultou e o que voltou. */
-function describeToolCall(call: { toolName: string; args: unknown; result: unknown }): string {
+export function describeToolCall(call: { toolName: string; args: unknown; result: unknown }): string {
   const args = (call.args ?? {}) as { query?: unknown };
   const query = typeof args.query === "string" ? ` "${args.query}"` : "";
-  const r = (call.result ?? {}) as Record<string, unknown>;
-  if (r.ok === false) return `${call.toolName}${query} → erro: ${String(r.error ?? "")}`;
+  const raw = (call.result ?? {}) as Record<string, unknown>;
+  if (raw.ok === false) return `${call.toolName}${query} → erro: ${String(raw.error ?? "")}`;
+  // Repetição devolvida pelo governador: o resultado vem dentro de
+  // `previousResult`. O rastro dizia "nada encontrado" com o produto achado.
+  const replayed = raw.alreadyAttempted === true && raw.previousResult && typeof raw.previousResult === "object";
+  const r = (replayed ? raw.previousResult : raw) as Record<string, unknown>;
+  const tag = replayed ? " (repetida: resultado da chamada anterior)" : "";
   const names = (list: unknown, key: string) =>
     Array.isArray(list) ? (list as Array<Record<string, unknown>>).map((i) => String(i[key] ?? "?")) : [];
   let found: string[] = [];
@@ -728,7 +733,7 @@ function describeToolCall(call: { toolName: string; args: unknown; result: unkno
   else if (call.toolName === "search_crm_records") {
     found = [...names(r.contacts, "name"), ...names(r.deals, "title")];
   }
-  return `${call.toolName}${query} → ${found.length ? found.join(", ") : "nada encontrado"}`;
+  return `${call.toolName}${query} → ${found.length ? found.join(", ") : "nada encontrado"}${tag}`;
 }
 
 /** Variáveis gravadas por ações `set_variable` bem-sucedidas. */

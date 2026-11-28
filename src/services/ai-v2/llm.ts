@@ -104,6 +104,11 @@ export function schedulingConfirmationSentences(reply: string, at?: string | nul
     );
 }
 
+/** Nome sem acento, caixa e pontuação ("Ciências Contábeis 2.0" → "ciencias contabeis 2 0"). */
+function foldName(t: string): string {
+  return t.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, " ").trim();
+}
+
 /**
  * Texto do cartão de cada produto: o mesmo que o cliente vê (modelo de
  * mensagem de produto da organização + campos do produto). Taxa de
@@ -2603,8 +2608,14 @@ export async function callV2LLM(args: {
    * o cartão vai assim mesmo, com o id já resolvido pelo nome.
    */
   function ensureNamedProductCard(r: Awaited<ReturnType<typeof attempt>>): void {
-    if (catalogMatches?.length !== 1) return;
-    const product = catalogMatches[0];
+    if (!catalogMatches?.length) return;
+    // Mais de um produto com o mesmo nome-base ("Ciências Contábeis" e
+    // "Ciências Contábeis 2.0"): vale o que tem o nome inteiro escrito na
+    // mensagem. Sem um só assim, o cartão fica com o modelo.
+    const phrase = ` ${foldName(userMessage)} `;
+    const exact = catalogMatches.filter((p) => phrase.includes(` ${foldName(p.name)} `));
+    const product = catalogMatches.length === 1 ? catalogMatches[0] : exact.length === 1 ? exact[0] : null;
+    if (!product) return;
     const o = r.output;
     if (o.handoff || o.concluded || o.outOfScope || o.messageModel?.id) return;
     if ((o.actions ?? []).some((a) => a.type === "send_product")) return;

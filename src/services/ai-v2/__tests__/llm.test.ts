@@ -1938,6 +1938,21 @@ describe("produto citado pelo nome: cartão garantido e dados no prompt (reteste
   });
 });
 
+describe("cartão com dois produtos de mesmo nome-base", () => {
+  const prod = (id: string, name: string) => ({ id, name, sku: null, type: "PRODUCT", unit: "matrícula", price: 132.58, priceFormatted: "R$ 132,58", listPrice: 189.4, listPriceFormatted: "R$ 189,40", description: null, customFields: [] });
+  beforeEach(() => vi.clearAllMocks());
+
+  it("\"Ciências contábeis\" casa \"Ciências Contábeis\" e \"Ciências Contábeis 2.0\": o cartão vai do que tem o nome inteiro na mensagem", async () => {
+    (findV2ProductsNamedIn as ReturnType<typeof vi.fn>).mockImplementation(async (a: { message: string }) =>
+      /cont[aá]beis/i.test(a.message) ? [prod("cc2", "Ciências Contábeis 2.0"), prod("cc", "Ciências Contábeis")] : [],
+    );
+    (generateWithTools as ReturnType<typeof vi.fn>).mockResolvedValue(makeLLMResponse(JSON.stringify({ reply: "Ciências Contábeis é uma ótima escolha!", actions: [] })));
+    const config = baseConfig({ productPolicy: { enabled: true, sendCard: true } } as Partial<V2AgentConfig>);
+    const r = await callV2LLM({ agentId: "agent-1", config, context: { contact: null, deals: [], selectedDeal: null, fields: config.contextFields }, userMessage: "Ciências contábeis", stage: "active" });
+    expect(r.output.actions.filter((a) => a.type === "send_product")).toEqual([expect.objectContaining({ productId: "cc" })]);
+  });
+});
+
 describe("produto da conversa com histórico que cita produtos demais (rodada 3, PRE2-01)", () => {
   it("acha o produto mensagem a mensagem e responde o valor sem transferir", async () => {
     vi.clearAllMocks();

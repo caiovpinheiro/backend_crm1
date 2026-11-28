@@ -4000,3 +4000,17 @@ describe("atalho de resposta fixa em mensagem longa com vários pedidos", () => 
     expect(shortcutTooNarrowFor({ conditions: [{ type: "first_message" }], actions: [{ type: "send_message" }] }, longo)).toBe(false);
   });
 });
+
+describe("rastro da consulta repetida", () => {
+  it("repetição devolvida pelo governador mostra o que a chamada anterior achou, não \"nada encontrado\"", async () => {
+    const { describeToolCall } = await import("../engine");
+    const replay = {
+      alreadyAttempted: true,
+      warning: "Você já chamou `search_products` com estes mesmos argumentos neste atendimento.",
+      previousResult: { query: "Ciências Contábeis", total: 1, products: [{ id: "cc", name: "Ciências Contábeis" }] },
+    };
+    expect(describeToolCall({ toolName: "search_products", args: { query: "Ciências Contábeis" }, result: replay }))
+      .toBe('search_products "Ciências Contábeis" → Ciências Contábeis (repetida: resultado da chamada anterior)');
+    expect(describeToolCall({ toolName: "search_products", args: { query: "x" }, result: { total: 0, products: [] } })).toBe('search_products "x" → nada encontrado');
+  });
+});
