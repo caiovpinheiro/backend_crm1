@@ -68,6 +68,11 @@ export type V2TurnFeedback = {
   byUserId: string | null;
   diagnosis: V2Diagnosis | null;
   diagnosisError?: string;
+  /** Marcado pelo `#corrigir` no WhatsApp, sem comentário da tela (`corrections.ts`). */
+  via?: "whatsapp";
+  /** Comentário do "Marcar erro" quando o turno também tem correções. */
+  baseComment?: string;
+  corrections?: Array<{ id: string; number: number; text: string; at: string }>;
 };
 
 type TurnLogRow = {

@@ -368,6 +368,12 @@ const agent = vi.hoisted(() => ({
 }));
 
 vi.mock("@/services/ai-v2/engine", () => ({ processV2Turn: agent.maybeReplyAsAIAgent }));
+// `#corrigir`: o reconhecimento do comando é o real; só o tratamento é simulado.
+const correctCommand = vi.hoisted(() => ({ handle: vi.fn() }));
+vi.mock("@/services/ai-v2/correct", async (orig) => ({
+  ...(await orig<typeof import("@/services/ai-v2/correct")>()),
+  handleV2CorrectCommand: correctCommand.handle,
+}));
 
 import {
   appendToOpenTurn,
@@ -1071,5 +1077,49 @@ describe("entrypoint de ingestão", () => {
     });
 
     expect(turns.size).toBe(0);
+  });
+});
+
+describe("#corrigir (comando de quem testa o agente v2)", () => {
+  const send = (channel: "meta" | "webchat", text: string) => {
+    addMessage("m1", text);
+    return onInboundMessageForAi({ conversationId: CONV, contactId: CONTACT, messageId: "m1", userMessage: text, channel });
+  };
+
+  it("número de teste: o comando é consumido e não vira turno do cliente", async () => {
+    correctCommand.handle.mockResolvedValue(true);
+    await send("meta", "#corrigir o prazo é de 10 dias");
+
+    expect(correctCommand.handle).toHaveBeenCalledWith(expect.objectContaining({ conversationId: CONV, contactId: CONTACT, messageId: "m1", userMessage: "#corrigir o prazo é de 10 dias" }));
+    expect(turns.size).toBe(0);
+    expect(maybeReplyAsAIAgent).not.toHaveBeenCalled();
+  });
+
+  it("número fora da lista de teste: a mensagem segue o fluxo normal e abre turno", async () => {
+    correctCommand.handle.mockResolvedValue(false);
+    await send("meta", "#corrigir meu cadastro por favor");
+
+    expect(turns.size).toBe(1);
+  });
+
+  it("falha no comando não engole a mensagem", async () => {
+    correctCommand.handle.mockRejectedValue(new Error("banco fora"));
+    await send("meta", "#corrigir o prazo é de 10 dias");
+
+    expect(turns.size).toBe(1);
+  });
+
+  it("webchat fica de fora: o telefone digitado não prova quem é", async () => {
+    correctCommand.handle.mockResolvedValue(true);
+    await send("webchat", "#corrigir o prazo é de 10 dias");
+
+    expect(correctCommand.handle).not.toHaveBeenCalled();
+  });
+
+  it("mensagem comum nem chega ao comando", async () => {
+    await send("meta", "quero #corrigir meu cadastro");
+
+    expect(correctCommand.handle).not.toHaveBeenCalled();
+    expect(turns.size).toBe(1);
   });
 });
