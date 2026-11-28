@@ -84,11 +84,22 @@ describe("guarda 'sem material'", () => {
   it("modelo já transfere e a explicação afirma fato sem material → só o aviso configurado sai", () => {
     const o = { ...out("O prazo de análise é de 5 dias úteis. Vou chamar alguém da equipe."), handoff: true };
     const r = applyNoSourceGuard({ config: cfg(), output: o, context: ctx({ Nome: "Ana" }), toolCalls: [], queriedEmpty: false, prefetch: nothing });
-    expect(r).toEqual({ applied: true, handoff: true, explanationDropped: true });
+    // Sai só a frase do prazo; a passagem fica (antes a resposta inteira virava o aviso).
+    expect(r).toEqual({ applied: true, handoff: true, explanationDropped: false, trimmed: true });
     expect(o.reply).toBe("Vou chamar alguém da equipe.");
+    const only = { ...out("O prazo de análise é de 5 dias úteis."), handoff: true };
+    expect(applyNoSourceGuard({ config: cfg(), output: only, context: ctx({ Nome: "Ana" }), toolCalls: [], queriedEmpty: false, prefetch: nothing })).toEqual({ applied: true, handoff: true, explanationDropped: true, trimmed: false });
     const plain = { ...out("Entendi, vou chamar alguém da equipe para ver isso com você."), handoff: true };
     expect(applyNoSourceGuard({ config: cfg(), output: plain, context: ctx({ Nome: "Ana" }), toolCalls: [], queriedEmpty: false, prefetch: nothing }).applied).toBe(false);
     expect(plain.reply).toBe("Entendi, vou chamar alguém da equipe para ver isso com você.");
+  });
+
+  it("valor que está na conversa (proposta enviada) não é invenção; acolhimento e passagem ficam (POS6-05, 27/11)", () => {
+    const reply = "A taxa de matrícula é R$ 99, como está na proposta. Anotei as duas dúvidas e te respondo por aqui.";
+    const o = { ...out(reply), handoff: true };
+    const conversationTexts = ["Então, ficou assim: curso de pós-graduação EAD de 9 meses. Taxa de matrícula: R$ 99. Mensalidades em 15 parcelas.", "a taxa dá pra parcelar?"];
+    expect(applyNoSourceGuard({ config: cfg(), output: o, context: ctx({ Nome: "Ana" }), toolCalls: [], queriedEmpty: false, prefetch: nothing, conversationTexts }).applied).toBe(false);
+    expect(o.reply).toBe(reply);
   });
 
   it("cortesia, dado do próprio cliente ou material encontrado: não mexe", () => {

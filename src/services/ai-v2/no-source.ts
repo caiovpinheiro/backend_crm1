@@ -306,8 +306,16 @@ export function applyNoSourceGuard(args: {
   prefetch: V2PrefetchFact | undefined;
   /** Assunto do turno: as instruções dele contam como fonte fixa. */
   themeId?: string | null;
-}): { applied: boolean; handoff: boolean; explanationDropped?: boolean } {
+  /**
+   * Mensagens da conversa (cliente e agente: proposta enviada, cartão do
+   * produto, valor que a pessoa escreveu). O que está nelas não é invenção —
+   * a conferência do turno já as aceita; aqui a resposta inteira virava o
+   * aviso padrão (POS6-05: "a taxa é R$ 99", com a proposta na conversa).
+   */
+  conversationTexts?: string[];
+}): { applied: boolean; handoff: boolean; explanationDropped?: boolean; trimmed?: boolean } {
   const { config, output, context } = args;
+  const backing = [...fixedSources(config, args.themeId, args.toolCalls), ...(args.conversationTexts ?? []).filter((t) => t?.trim())];
   if (output.concluded) return { applied: false, handoff: false };
   const hasClientData = !!context.contact || !!context.selectedDeal;
   const modelQueried = (args.toolCalls ?? []).some((c) => !(c.args as { prefetch?: boolean } | undefined)?.prefetch);
@@ -319,15 +327,25 @@ export function applyNoSourceGuard(args: {
     !mentionsClientData(output.reply, context) &&
     // Data do calendário, valor das informações fixas, preço do catálogo:
     // não é invenção só porque os materiais não falam disso.
-    !factsBackedBy(output.reply, fixedSources(config, args.themeId, args.toolCalls));
+    !factsBackedBy(output.reply, backing);
   // O modelo já transfere: o que importa é a explicação que sai antes do
   // aviso. Fato sem material nela ("o prazo é de 5 dias; vou te passar…")
   // não vai — fica só o aviso configurado.
   if (output.handoff) {
     if (!invented) return { applied: false, handoff: false };
-    output.reply = config.handoff.message;
-    output.reason = [output.reason, "explicação antes da transferência afirmava fatos sem material — só o aviso sai"].filter(Boolean).join(" · ");
-    return { applied: true, handoff: true, explanationDropped: true };
+    // Sai só a frase que afirma fato sem apoio; acolhimento, pedido ao
+    // cliente e a frase de passagem ficam. Sem nada que sobre, o aviso.
+    const keptBeforeHandoff = output.reply
+      .split(/\n+/)
+      .map((line) => line.split(/(?<=[.!?])\s+/).filter((sent) => sent.trim() && !(statesFacts(sent) && !mentionsClientData(sent, context) && !factsBackedBy(sent, backing))).join(" ").trim())
+      .filter(Boolean)
+      .join("\n")
+      .trim();
+    output.reply = keptBeforeHandoff || config.handoff.message;
+    output.reason = [output.reason, keptBeforeHandoff
+      ? "explicação antes da transferência afirmava fatos sem material — essa frase saiu"
+      : "explicação antes da transferência afirmava fatos sem material — só o aviso sai"].filter(Boolean).join(" · ");
+    return { applied: true, handoff: true, explanationDropped: !keptBeforeHandoff, trimmed: !!keptBeforeHandoff };
   }
   if (!legacy && !invented) return { applied: false, handoff: false };
   const noSourceMessage = noSourceReplyMessage(config);
@@ -335,7 +353,7 @@ export function applyNoSourceGuard(args: {
     // Sai só a frase que afirma fato sem apoio; o resto da resposta
     // (acolhimento, o que a regra manda dizer) fica, seguido da frase de
     // "sem fonte". Antes a resposta inteira virava só essa frase.
-    const fixed = fixedSources(config, args.themeId, args.toolCalls);
+    const fixed = backing;
     const kept = output.reply
       .split(/\n+/)
       .map((line) => line.split(/(?<=[.!?])\s+/).filter((sent) => sent.trim() && !(statesFacts(sent) && !mentionsClientData(sent, context) && !factsBackedBy(sent, fixed))).join(" ").trim())
