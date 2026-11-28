@@ -162,6 +162,13 @@ describe("executeV2Actions effect tools", () => {
     expect(prisma.product.findFirst).not.toHaveBeenCalled();
   });
 
+  it("send_product de produto de teste do catálogo (\"teste\") não sai", async () => {
+    (prisma.product.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue({ id: "t", name: "teste", price: 150, description: null, customValues: [] });
+    const res = await executeV2Actions([{ type: "send_product", productId: "t" }], ctx());
+    expect(res.results[0]).toMatchObject({ ok: false, error: expect.stringContaining("Produto de teste") });
+    expect(sendAgentMessage).not.toHaveBeenCalled();
+  });
+
   it("handoff delega para simpleHandoff com destino específico", async () => {
     const { simpleHandoff } = await import("../handoff");
     const action: V2Action = { type: "handoff", destination: { type: "user", id: "u-99" } };

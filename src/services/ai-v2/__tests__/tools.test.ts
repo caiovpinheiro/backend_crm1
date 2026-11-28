@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { prisma } from "@/lib/prisma";
 import {
   findV2ProductsNamedIn,
+  isPlaceholderProductName,
   searchV2Products,
   searchV2CrmRecords,
   searchV2Knowledge,
@@ -337,5 +338,24 @@ describe("findV2ProductsNamedIn — palavra comum não casa produto", () => {
     const rows = [{ id: "t", name: "teste", sku: null, type: "PRODUCT", unit: "un", price: 150, description: null, customValues: [], courseConfig: null }];
     (prisma.product.findMany as ReturnType<typeof vi.fn>).mockResolvedValue(rows);
     expect(await findV2ProductsNamedIn({ message: "segue meu [CPF de teste] e o formulário" })).toEqual([]);
+  });
+});
+
+describe("produto de teste no catálogo", () => {
+  beforeEach(() => vi.clearAllMocks());
+  const mk = (id: string, name: string) => ({ id, name, sku: null, type: "PRODUCT", unit: "un", price: 150, description: null, customValues: [], courseConfig: null });
+
+  it("nome só com palavra comum é produto de teste; nome de curso com a palavra no meio, não", () => {
+    expect(isPlaceholderProductName("teste")).toBe(true);
+    expect(isPlaceholderProductName("Produto Teste")).toBe(true);
+    expect(isPlaceholderProductName("Exemplo")).toBe(true);
+    expect(isPlaceholderProductName("Teste Vocacional Online")).toBe(false);
+    expect(isPlaceholderProductName("Administração")).toBe(false);
+  });
+
+  it("a busca do modelo por \"teste\" não devolve o produto \"teste\"", async () => {
+    (prisma.product.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([mk("t", "teste"), mk("v", "Teste Vocacional Online")]);
+    const r = await searchV2Products({ query: "teste" });
+    expect(r.products.map((p) => p.id)).toEqual(["v"]);
   });
 });

@@ -746,6 +746,9 @@ async function executeSendProduct(action: V2Action, ctx: V2ActionContext): Promi
     const orgId = getOrgIdOrNull() ?? ctx.organizationId;
     const card = await buildV2ProductCard({ organizationId: orgId, productId, priceChannel: ctx.config.productPolicy?.priceChannel });
     if (!card) return { action, ok: false, error: "Product not found" };
+    // Produto de teste/rascunho ("teste", "Produto teste") não vira cartão.
+    const { isPlaceholderProductName } = await import("./tools");
+    if (typeof isPlaceholderProductName === "function" && isPlaceholderProductName(card.name)) return { action, ok: false, productId, error: "Produto de teste no catálogo: não enviado." };
     const text = card.text;
 
     let imageSent = false;

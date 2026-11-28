@@ -70,6 +70,17 @@ const COMMON_NOISE_WORDS = new Set([
   "preco", "pagamento", "matricula", "inscricao", "documento", "contato", "cadastro", "formulario", "mensagem",
 ]);
 
+/**
+ * Produto de teste/rascunho no catálogo: o nome é só palavra comum ("teste",
+ * "Produto teste", "Exemplo"). Não é item de venda — não aparece na busca do
+ * modelo, não casa pelo nome e não vira cartão. Com "teste" na mensagem, o
+ * modelo buscava "teste" e mandava o cartão do produto "teste" (R$ 150).
+ */
+export function isPlaceholderProductName(name: string | null | undefined): boolean {
+  const words = normalizeSearch(name).split(" ").filter((w) => w.length >= 3);
+  return words.length > 0 && words.every((w) => COMMON_NOISE_WORDS.has(w));
+}
+
 const GENERIC_PRODUCT_WORDS = new Set([
   "curso", "cursos", "bacharelado", "licenciatura", "tecnologo", "tecnologico", "graduacao", "superior",
   "semipresencial", "presencial", "digital", "online", "semestres", "semestre", "plano", "planos",
@@ -102,7 +113,7 @@ export async function findV2ProductsNamedIn(args: {
   const distinctive = (name: string) => [...new Set(normalizeSearch(name).split(" ").filter((w) => w.length >= 5 && !GENERIC_PRODUCT_WORDS.has(w)))];
   const scored = rows
     .map((r) => ({ r, d: distinctive(r.name) }))
-    .filter(({ d }) => d.length > 0 && d.every((w) => words.has(w)) && !d.every((w) => COMMON_NOISE_WORDS.has(w)));
+    .filter(({ r, d }) => d.length > 0 && d.every((w) => words.has(w)) && !d.every((w) => COMMON_NOISE_WORDS.has(w)) && !isPlaceholderProductName(r.name));
   // Um nome contido em outro também citado ("Gestão" e "Gestão Comercial"): fica o mais específico.
   const matched = scored
     .filter(({ d }) => !scored.some((o) => o.d.length > d.length && d.every((w) => o.d.includes(w))))
@@ -188,6 +199,7 @@ export async function searchV2Products(args: {
   });
 
   const scored = candidates
+    .filter((p) => !isPlaceholderProductName(p.name))
     .map((p) => {
       const cfText = p.customValues
         .map((v) => `${v.customField.name} ${v.customField.label} ${v.value}`)
